@@ -213,8 +213,8 @@ let transformExpression : ASTTransform<SynExpr> = fun expr context ->
 We welcome contributions! Areas of particular interest:
 
 - **F# Language Features**: Help expand F# construct support
-- **Platform Support**: Add Linux/macOS platform implementations  
-- **MLIR Dialects**: Create greater XParsec combinator coverage for MLIR dialects of interest
+- **Platform Support**: Add platform extensions around OS APIs (Alloy)
+- **MLIR Dialects**: Increase XParsec combinator coverage for MLIR dialects (Dabbit)
 - **Binding Generators**: Extend Farscape for more C/C++ scenarios
 - **Optimization**: MLIR pass development and tuning
 
