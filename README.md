@@ -2,7 +2,7 @@
 
 > **Bringing F#'s elegance to systems programming through MLIR and LLVM**
 
-Firefly is a revolutionary F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies. Built as a .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly leverages the [F# Compiler Services](https://fsharp.github.io/fsharp-compiler-docs/fcs/) and [XParsec](https://github.com/roboz0r/XParsec) to transform functional code and memory into MLIR. That pipeline then takes over to produce LLVM and generates efficient native executables while preserving F#'s type safety, pattern matching, and functional composition.
+Firefly is a revolutionary F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies. Built as a .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly uses [Fantomas](https://fsprojects.github.io/fantomas/) which leans into [F# Compiler Services](https://fsharp.github.io/fsharp-compiler-docs/fcs/) along with our own tranforms using [XParsec](https://github.com/roboz0r/XParsec) to bring functional code and memory into MLIR. That pipeline then takes over to produce LLVM and generates efficient native executables while preserving F#'s type safety, pattern matching, and functional composition.
 
 ## 🎯 Vision
 
@@ -14,9 +14,9 @@ Firefly transforms F# from a managed runtime language into a true systems progra
 
 ```
 F# Source Code
-    ↓ (Firefly parses & type-checks)
+    ↓ (F# Compiler Services parses & type-checks)
 F# AST  
-    ↓ (Dabbit transforms with XParsec combinators)
+    ↓ (Firefly transforms "Oak AST" into MLIR)
 MLIR Operations
     ↓ (MLIR progressive lowering - monitored by Firefly)
 LLVM IR
@@ -38,10 +38,10 @@ Native Executable
 
 ```bash
 # Install as global .NET tool
-dotnet tool install -g Firefly.Compiler
+dotnet tool install -g Firefly
 
 # Or build from source
-git clone https://github.com/yourusername/firefly.git
+git clone https://github.com/speakez-llc/firefly.git
 cd firefly
 dotnet build
 ```
@@ -57,13 +57,16 @@ let hello() =
     let name = stdin.ReadLine()
     printfn "Hello, %s!" name
 
-hello()
+[<EntryPoint>]
+let main argv =
+    hello()
+    0 
 ```
 
 Compile to native:
 ```bash
-firefly compile hello.fs --output hello --target native
-./hello
+firefly compile hello.fs --output hello(.exe) --target desktop
+./hello(.exe)
 ```
 
 ### Time Loop Example
@@ -73,9 +76,7 @@ module Examples.TimeLoop
 
 open Alloy
 
-let displayTime() =
-    Alloy.Time.Platform.registerImplementation(Alloy.Time.Windows.createImplementation())
-    
+let displayTime() =  
     let mutable counter = 0
     
     while counter < 5 do
@@ -85,27 +86,6 @@ let displayTime() =
         counter <- counter + 1
 
 displayTime()
-```
-
-## 🔧 Development Workflow
-
-### 1. Development Phase (Fast Iteration)
-```bash
-# Use dynamic binding for rapid development
-firefly compile src/ --profile development --output build/
-```
-
-### 2. Release Phase (Optimized)
-```bash
-# Apply configured binding strategies for production
-firefly compile src/ --profile release --output dist/ --optimize
-```
-
-### 3. Monitoring MLIR/LLVM Pipeline
-```bash
-# Monitor the compilation pipeline
-firefly compile src/ --verbose --keep-intermediates
-# Outputs: app.mlir, app.ll, app.o, app.exe
 ```
 
 ## 📚 Project Structure
@@ -128,40 +108,27 @@ firefly/
 │   │   ├── MLIR/                 # MLIR operation builders
 │   │   └── Binding/              # Library binding strategy handling
 │   │
-│   ├── Alloy/                    # Base libraries for native F#
-│   │   ├── Core.fs               # Core operations and collections
-│   │   ├── Numerics.fs           # Zero-dependency math operations
-│   │   ├── Time/                 # Platform-specific time implementations
-│   │   └── Memory/               # Memory management utilities
-│   │
-│   └── Examples/                 # Example F# programs
-│       ├── HelloWorld.fs         # Basic I/O example
-│       ├── TimeLoop.fs           # Time and platform API example
-│       └── Advanced/             # More complex examples
-│
+│   └── Alloy/                    # Base libraries for native F#
+│       ├── Core.fs               # Core operations and collections
+│       ├── Numerics.fs           # Zero-dependency math operations
+│       ├── Time/                 # Platform-specific time implementations
+│       └── Memory/               # Memory management utilities
+│     
 ├── tests/                        # Test suite
 │   ├── Unit/                     # Unit tests for components
 │   ├── Integration/              # End-to-end compilation tests
 │   └── Examples/                 # Compiled example validation
 │
-├── docs/                         # Documentation
-│   ├── architecture/             # Architectural documentation
-│   ├── language-support/         # F# feature support matrix
-│   └── binding-strategies/       # Library binding guide
-│
-├── tools/                        # Development tools
-│   ├── mlir-analysis/           # MLIR inspection utilities
-│   └── benchmarks/              # Performance benchmarking
-│
-└── artifacts/                    # Build outputs and intermediates
-    ├── mlir/                    # Generated MLIR files
-    ├── llvm/                    # Generated LLVM IR files
-    └── native/                  # Final native executables
+└── docs/                         # Documentation
+    ├── architecture/             # Architectural documentation
+    ├── language-support/         # F# feature support matrix
+    └── binding-strategies/       # Library binding guide
+
 ```
 
 ## 🎛️ Configuration
 
-Firefly uses TOML configuration for build settings and binding strategies:
+Fidelity framework projects use TOML configuration for build settings and binding strategies:
 
 ```toml
 [package]
@@ -188,6 +155,8 @@ binding.default = "dynamic"
 binding.overrides = { crypto_lib = "static" }
 optimize = true
 ```
+
+The project file extension is ".fidproj" to distinguish itself from ".fsproj" .NET/XML based project structure.
 
 ## 🧬 Hybrid Binding Architecture
 
@@ -257,6 +226,7 @@ let transformExpression : ASTTransform<SynExpr> = fun expr context ->
 - Record types
 - More pattern matching scenarios
 - Exception handling
+- Initial memory mapping
 
 ### 📋 Planned
 - Computation expressions
@@ -264,11 +234,12 @@ let transformExpression : ASTTransform<SynExpr> = fun expr context ->
 - Advanced pattern matching
 - Module system
 - Async workflows (native, no Task/async)
+- BAREWire memory pre-optimization and schema publishing
 
 ## 🏁 Performance Goals
 
 - **Startup time**: Sub-millisecond for small programs
-- **Memory usage**: No garbage collector overhead
+- **Memory usage**: Initially - *no* garbage collector overhead
 - **Binary size**: Competitive with C/C++ for equivalent functionality
 - **Compile time**: Fast incremental compilation via MLIR caching
 
@@ -278,11 +249,9 @@ We welcome contributions! Areas of particular interest:
 
 - **F# Language Features**: Help expand F# construct support
 - **Platform Support**: Add Linux/macOS platform implementations  
-- **MLIR Dialects**: Create specialized dialects for F# constructs
+- **MLIR Dialects**: Create greater XParsec combinator coverage for MLIR dialects of interest
 - **Binding Generators**: Extend Farscape for more C/C++ scenarios
 - **Optimization**: MLIR pass development and tuning
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 ## 📄 License
 
@@ -290,11 +259,13 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## 🙏 Acknowledgments
 
-- **F# Team**: For creating an elegant functional language
-- **MLIR/LLVM Teams**: For providing the compilation infrastructure  
+- **Don Syme and F# Language Contributors**: For creating an elegant functional language
+- **.NET Engineering**: For creating the foundation that Fable and Fidelity departs from
+- **Mono and Xamarin**: For extending the vision of .NET to support MacOS and Linux platforms
 - **Fable Project**: For demonstrating F# compilation to other targets
+- **MLIR/LLVM Contributors**: For providing the compilation infrastructure  
 - **Mojo Language**: For pioneering the "frontend to MLIR" approach
 
 ---
 
-**Firefly: Where functional programming meets systems programming** 🔥
+**Firefly: Where functional programming honors the true power and performance of systems programming** 🔥
