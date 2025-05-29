@@ -227,7 +227,7 @@ Apache 2.0 License - see [LICENSE](LICENSE) for details.
 - **Don Syme and F# Language Contributors**: For creating an highly capable functional language
 - **.NET Engineering**: For creating a robust enterprise-grade runtime platform that gave rise to F#
 - **[Mono Project](https://www.mono-project.com/)**: For its original vision to support iOS, Android, MacOS and Linux platforms in .NET
-- **Fable Project**: For demonstrating F# compilation to other targets beyond the limits of .NET
+- **Fable Project**: For demonstrating F# compilation to targets beyond the .NET runtime
 - **MLIR/LLVM Ecosystem**: For establishing powerful compiler foundations with a huge contributor base  
 - **Mojo Language**: For pioneering the "frontend to MLIR" approach
 
