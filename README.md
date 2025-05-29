@@ -239,4 +239,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 
-**Firefly: Where functional programming honors the true power and performance of systems programming** 🔥
+**Firefly: Bringing the power and precision of functional programming to bare metal** 🔥
