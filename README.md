@@ -13,7 +13,7 @@ Firefly is a novel F# compiler that brings the expressiveness and safety of func
 
 ## 🎯 Vision
 
-Firefly will transform F# from a managed runtime language into a true systems programming language, enabling developers to write everything from embedded firmware to high-performance servers using the same elegant functional paradigms.
+Firefly will transform F# from a managed runtime language into a true systems programming language, enabling developers to write everything from embedded firmware to high-performance distributed workloads across standard and accelerated hardware. The goal is to preserve, as much as possible, the ergonomics that have made F# renowned as an elegant and powerful language.
 
 **Key Innovation:** Hybrid library binding architecture that allows per-library decisions between static and dynamic linking, all while maintaining a consistent F# development experience.
 
