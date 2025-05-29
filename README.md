@@ -165,35 +165,6 @@ optimize = true
 
 The project file extension is ".fidproj" to distinguish itself from ".fsproj" .NET/XML based project structure.
 
-## 🧬 Hybrid Binding Architecture
-
-Firefly's revolutionary approach allows fine-grained control over library integration:
-
-### Consistent F# API
-```fsharp
-// Same code works with any binding strategy
-open CryptoLibrary
-let hash = Crypto.computeHash(data)
-```
-
-### Flexible Binding Configuration
-```toml
-# Per-library binding decisions
-crypto_lib = { binding = "static" }   # Security-critical
-ui_framework = { binding = "dynamic" } # Large, shared component  
-```
-
-### MLIR Output Adapts Automatically
-```mlir
-// Static binding - direct function reference
-func.func private @crypto_computeHash(%arg0: !llvm.ptr<i8>) -> !llvm.ptr<i8>
-    attributes { llvm.linkage = #llvm.linkage<external> }
-
-// Dynamic binding - P/Invoke preserved  
-func.func private @ui_createWindow(%arg0: !llvm.ptr<i8>) -> !llvm.ptr<i8>
-    attributes { fidelity.dll_import = "ui_framework" }
-```
-
 ## 🔬 XParsec-Style Transforms
 
 Dabbit uses compositional transforms for clean F# to MLIR conversion:
@@ -243,13 +214,6 @@ let transformExpression : ASTTransform<SynExpr> = fun expr context ->
 - Async workflows (native, no Task/async)
 - BAREWire memory pre-optimization and schema publishing
 
-## 🏁 Performance Goals
-
-- **Startup time**: Sub-millisecond for small programs
-- **Memory usage**: Initially - *no* garbage collector overhead
-- **Binary size**: Competitive with C/C++ for equivalent functionality
-- **Compile time**: Fast incremental compilation via MLIR caching
-
 ## 🤝 Contributing
 
 We welcome contributions! Areas of particular interest:
@@ -267,10 +231,10 @@ MIT License - see [LICENSE](LICENSE) for details.
 ## 🙏 Acknowledgments
 
 - **Don Syme and F# Language Contributors**: For creating an elegant functional language
-- **.NET Engineering**: For creating the foundation that Fable and Fidelity departs from
+- **.NET Engineering**: For creating a robust enterprise platform that gave rise to F#
 - **Mono and Xamarin**: For extending the vision of .NET to support MacOS and Linux platforms
 - **Fable Project**: For demonstrating F# compilation to other targets
-- **MLIR/LLVM Contributors**: For providing the compilation infrastructure  
+- **MLIR/LLVM Ecosystem**: For establishing powerful foundations with a huge contributor base  
 - **Mojo Language**: For pioneering the "frontend to MLIR" approach
 
 ---
