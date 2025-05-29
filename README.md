@@ -233,4 +233,4 @@ Apache 2.0 License - see [LICENSE](LICENSE) for details.
 
 ---
 
-**Firefly: Bringing the power and precision of functional programming to bare metal** 🔥
+**Firefly: Bringing the power of full-precision functional programming to modern systems** 🔥
