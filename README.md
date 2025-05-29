@@ -142,24 +142,22 @@ Fidelity framework projects use TOML configuration for build settings and bindin
 name = "my_application"
 version = "1.0.0"
 
-[dependencies]
-# Static binding for security-critical components
-crypto_lib = { version = "1.2.0", binding = "static" } 
+[dependencies.crypto_lib]
+version = "0.2.0"
+binding = "static"
 
-# Dynamic binding for system components
-system_ui = { version = "2.1.0", binding = "dynamic" }
+[dependencies.Alloy]
+version = "0.1.0"
+binding = "dynamic"
 
 [binding]
 default = "dynamic"
 
 [profiles.development]
-binding.default = "dynamic"
 optimize = false
 keep_intermediates = true
 
-[profiles.release]  
-binding.default = "dynamic"
-binding.overrides = { crypto_lib = "static" }
+[profiles.release]
 optimize = true
 ```
 
