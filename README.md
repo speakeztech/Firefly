@@ -205,8 +205,8 @@ let transformExpression : ASTTransform<SynExpr> = fun expr context ->
 - Generic types and functions
 - Advanced pattern matching
 - Module system
-- Async workflows (native, no Task/async)
-- BAREWire memory pre-optimization and schema publishing
+- Async workflows
+- BAREWire memory pre-optimization
 
 ## 🤝 Contributing
 
