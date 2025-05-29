@@ -2,7 +2,7 @@
 
 > **Bringing F#'s elegance to systems programming through MLIR and LLVM**
 
-Firefly is a revolutionary F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies. Built as a .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly leverages MLIR and LLVM to generate efficient native executables while preserving F#'s type safety, pattern matching, and functional composition.
+Firefly is a revolutionary F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies. Built as a .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly leverages the [F# Compiler Services](https://fsharp.github.io/fsharp-compiler-docs/fcs/) and [XParsec](https://github.com/roboz0r/XParsec) to transform functional code and memory into MLIR. That pipeline then takes over to produce LLVM and generates efficient native executables while preserving F#'s type safety, pattern matching, and functional composition.
 
 ## 🎯 Vision
 
