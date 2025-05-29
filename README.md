@@ -146,10 +146,6 @@ version = "1.0.0"
 version = "0.2.0"
 binding = "static"
 
-[dependencies.Alloy]
-version = "0.1.0"
-binding = "dynamic"
-
 [binding]
 default = "dynamic"
 
