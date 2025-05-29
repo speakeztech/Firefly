@@ -9,13 +9,11 @@
   </tr>
 </table>
 
-> **Bringing F#'s elegance to systems programming through MLIR and LLVM**
-
-Firefly is a revolutionary F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies. Built as a .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly uses [Fantomas](https://fsprojects.github.io/fantomas/) which leans into [F# Compiler Services](https://fsharp.github.io/fsharp-compiler-docs/fcs/) along with our own tranforms using [XParsec](https://github.com/roboz0r/XParsec) to bring functional code and memory into MLIR. That pipeline then takes over to produce LLVM and generates efficient native executables while preserving F#'s type safety, pattern matching, and functional composition.
+Firefly is a novel F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies. Built as a .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly leverages [Fantomas](https://fsprojects.github.io/fantomas/) and [F# Compiler Services](https://fsharp.github.io/fsharp-compiler-docs/fcs/) alongside custom transformations using [XParsec](https://github.com/roboz0r/XParsec) to compile functional code into MLIR. The MLIR pipeline then generates LLVM IR and produces efficient native executables while preserving F#'s type safety guarantees. This approach delivers the performance of systems programming with the elegance and correctness of functional programming.
 
 ## 🎯 Vision
 
-Firefly transforms F# from a managed runtime language into a true systems programming language, enabling developers to write everything from embedded firmware to high-performance servers using the same elegant functional paradigms.
+Firefly will transform F# from a managed runtime language into a true systems programming language, enabling developers to write everything from embedded firmware to high-performance servers using the same elegant functional paradigms.
 
 **Key Innovation:** Hybrid library binding architecture that allows per-library decisions between static and dynamic linking, all while maintaining a consistent F# development experience.
 
