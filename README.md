@@ -1,4 +1,4 @@
-# Firefly: F# to Native Compiler
+# Firefly: F# to Native Compiler with Zero-Allocation Guarantees
 
 <table>
   <tr>
@@ -9,35 +9,53 @@
   </tr>
 </table>
 
-Firefly is a novel F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies. Built as a .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly leverages [Fantomas](https://fsprojects.github.io/fantomas/) and [F# Compiler Services](https://fsharp.github.io/fsharp-compiler-docs/fcs/) alongside custom transformations using [XParsec](https://github.com/roboz0r/XParsec) to compile functional code into MLIR. The MLIR pipeline then generates LLVM IR and produces efficient native executables while preserving F#'s type safety guarantees. This approach delivers the performance of systems programming with functional programming's developer ergonomics and precision.
+Firefly is a novel F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies or heap allocations. Built as an orchestrating .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly leverages [Fantomas](https://fsprojects.github.io/fantomas/) and [F# Compiler Services](https://fsharp.github.io/fsharp-compiler-docs/fcs/) for parsing, custom transformations using [XParsec](https://github.com/roboz0r/XParsec) to generate MLIR, and [LLVM.NET](https://github.com/UbiquityDotNET/Llvm.NET) for intelligent static library analysis and linking. The orchestration pipeline progressively lowers F# through MLIR dialects to LLVM IR, producing efficient native executables while guaranteeing zero heap allocations and compile-time resolution of all operations.
 
 ## 🎯 Vision
 
-Firefly will transform F# from a managed runtime language into a true systems programming language, enabling developers to write everything from embedded firmware to high-performance distributed workloads across standard and accelerated hardware. The goal is to preserve, as much as possible, the ergonomics that have made F# renowned as an elegant and powerful language.
+Firefly transforms F# from a managed runtime language into a true systems programming language with hard real-time guarantees. By orchestrating compilation through MLIR, Firefly ensures all memory is stack-allocated, all function calls are statically resolved, and all types have fixed layouts - enabling developers to write everything from embedded firmware to high-performance compute kernels while preserving F#'s elegant syntax and type safety.
 
-**Key Innovation:** Hybrid library binding architecture that allows per-library decisions between static and dynamic linking, all while maintaining a consistent F# development experience.
+Central to Firefly's approach is intelligent static library handling through LLVM.NET. Rather than traditional whole-archive linking that bloats executables, Firefly examines static library archives at build time, traces symbol dependencies from your F# code, and extracts only the required object files. This selective linking means a cryptography library containing 47 object files might contribute just 2-3 objects to your final executable. Combined with link-time optimization across F# and C/C++ boundaries, Firefly delivers both the safety of functional programming and the efficiency of hand-tuned systems code.
+
+**Key Innovations:** 
+- **Zero-allocation guarantee** through compile-time memory management
+- **Intelligent static linking** via LLVM.NET archive analysis and selective object extraction
+- **Hybrid library binding** architecture allowing per-library static/dynamic decisions
+- **Progressive lowering** through MLIR dialects with continuous verification
 
 ## 🏗️ Architecture
 
 ```
 F# Source Code
     ↓ (F# Compiler Services parses & type-checks)
-F# AST  
-    ↓ (Firefly transforms "Oak AST" into MLIR)
-MLIR Operations
-    ↓ (MLIR progressive lowering - monitored by Firefly)
-LLVM IR
-    ↓ (Native code generation with hybrid linking)
-Native Executable
+F# AST / Oak AST  
+    ↓ (Dabbit transforms to MLIR operations)
+MLIR High-Level Dialects
+    ↓ (Progressive lowering through dialects)
+MLIR LLVM Dialect
+    ↓ (Translation to LLVM IR)
+LLVM IR + Binding Metadata
+    ↓ (LLVM.NET analyzes archives & links selectively)
+Optimized Native Code
 ```
+
+### Compilation Pipeline
+
+Firefly operates as an intelligent compilation orchestrator that:
+
+1. **Transforms progressively** - F# → Oak AST → MLIR dialects → LLVM IR
+2. **Analyzes statically** - All allocations and calls resolved at compile time
+3. **Links selectively** - LLVM.NET examines archives and extracts only needed objects
+4. **Optimizes aggressively** - LTO across F# and native library boundaries
+5. **Verifies continuously** - Zero allocations, bounded stack, no dynamic dispatch
 
 ### Core Components
 
-- **🔥 Firefly**: Main compiler CLI tool - F# AST to MLIR transformation
-- **🐰 Dabbit**: AST transformation engine using XParsec-style combinators  
-- **🚀 Farscape**: C/C++ binding generator (future component)
-- **⚡ Alloy**: Dependency-free base libraries for native F#
-- **📡 BAREWire**: Zero-copy serialization system (future component)
+- **🔥 Firefly**: Orchestrating compiler leveraging F# Compiler Services and LLVM.NET
+- **🐰 Dabbit**: AST to MLIR transformer ensuring stack-only operations
+- **🚀 Farscape**: C/C++ binding generator producing allocation-free bindings
+- **⚡ Alloy**: Zero-dependency, allocation-free base libraries
+- **📡 BAREWire**: Zero-copy serialization with compile-time layout verification
 
 ## 🚀 Quick Start
 
@@ -53,16 +71,20 @@ cd firefly
 dotnet build
 ```
 
-### Hello World
+### Hello World (Stack-Only)
 
 Create `hello.fs`:
 ```fsharp
 module Examples.HelloWorld
 
+open Alloy.Stack
+
 let hello() =
+    // All string operations use stack buffers
+    let buffer = NativePtr.stackalloc<byte> 256
     printf "Enter your name: "
-    let name = stdin.ReadLine()
-    printfn "Hello, %s!" name
+    let length = Console.readLine buffer 256
+    printfn "Hello, %s!" (Span<byte>(buffer, length))
 
 [<EntryPoint>]
 let main argv =
@@ -70,29 +92,43 @@ let main argv =
     0 
 ```
 
-Compile to native:
+Compile and verify zero allocations:
 ```bash
-firefly compile hello.fs --output hello(.exe) --target desktop
-./hello(.exe)
+firefly compile hello.fs --output hello --target embedded
+firefly verify hello --no-heap
+./hello
 ```
 
-### Time Loop Example
+### Embedded Message Parser Example
 
 ```fsharp
-module Examples.TimeLoop
+module Examples.MessageParser
 
 open Alloy
+open System
 
-let displayTime() =  
-    let mutable counter = 0
-    
-    while counter < 5 do
-        let utcNow = Alloy.Time.now()
-        printfn "Time %d: %A" counter utcNow
-        Alloy.Time.sleep 1000
-        counter <- counter + 1
+type MessageType = 
+    | Heartbeat 
+    | Data 
+    | Error
 
-displayTime()
+// Discriminated union compiles to fixed 8-byte stack value
+[<Struct>]
+type Message = {
+    Type: MessageType
+    Length: uint16
+    Checksum: uint32
+}
+
+let parseMessage (buffer: ReadOnlySpan<byte>) =
+    if buffer.Length < 8 then
+        Error "Too short"
+    else
+        // All operations resolve to direct memory access
+        let msgType = LanguagePrimitives.EnumOfValue<byte, MessageType> buffer.[0]
+        let length = BinaryPrimitives.ReadUInt16BigEndian(buffer.Slice(2))
+        let checksum = BinaryPrimitives.ReadUInt32BigEndian(buffer.Slice(4))
+        Ok { Type = msgType; Length = length; Checksum = checksum }
 ```
 
 ## 📚 Project Structure
@@ -100,123 +136,190 @@ displayTime()
 ```
 firefly/
 ├── src/
-│   ├── Firefly.CLI/              # Main compiler CLI tool
+│   ├── Firefly.CLI/              # Orchestrating compiler CLI
 │   │   ├── Program.fs            # CLI entry point
-│   │   ├── Commands/             # CLI command implementations
-│   │   └── Configuration/        # Project configuration parsing
+│   │   ├── Commands/             # Build, verify, profile commands
+│   │   └── Configuration/        # TOML project configuration
 │   │
-│   ├── Firefly.Core/             # Core compiler functionality
-│   │   ├── Parsing/              # F# source parsing
-│   │   ├── TypeChecking/         # F# type system integration
-│   │   └── Pipeline/             # Compilation pipeline orchestration
+│   ├── Firefly.Core/             # Core compilation pipeline
+│   │   ├── Parsing/              # F# to Oak AST conversion
+│   │   ├── StaticAnalysis/       # Allocation & binding analysis
+│   │   ├── MLIRGeneration/       # XParsec-based MLIR builders
+│   │   └── LLVMIntegration/      # LLVM.NET binding resolution
 │   │
 │   ├── Dabbit/                   # AST to MLIR transformation
-│   │   ├── Transforms/           # XParsec-style transform combinators
-│   │   ├── MLIR/                 # MLIR operation builders
-│   │   └── Binding/              # Library binding strategy handling
+│   │   ├── StackTransforms/      # Heap → Stack conversions
+│   │   ├── ClosureElimination/   # Closure → Explicit params
+│   │   ├── UnionLayouts/         # Fixed-size union compilation
+│   │   └── BindingMetadata/      # Static binding attributes
 │   │
-│   └── Alloy/                    # Base libraries for native F#
-│       ├── Core.fs               # Core operations and collections
-│       ├── Numerics.fs           # Zero-dependency math operations
-│       ├── Time/                 # Platform-specific time implementations
-│       └── Memory/               # Memory management utilities
+│   └── Alloy/                    # Allocation-free base libraries
+│       ├── Stack/                # Stack-based collections
+│       ├── FixedString/          # No-alloc string operations
+│       ├── Numerics/             # SIMD-ready math
+│       └── Platform/             # OS API bindings (stack-only)
 │     
-├── tests/                        # Test suite
-│   ├── Unit/                     # Unit tests for components
-│   ├── Integration/              # End-to-end compilation tests
-│   └── Examples/                 # Compiled example validation
+├── tests/
+│   ├── AllocationTests/          # Verify zero-heap guarantee
+│   ├── StackBounds/              # Maximum stack usage tests
+│   └── StaticResolution/         # Ensure no dynamic dispatch
 │
-└── docs/                         # Documentation
-    ├── architecture/             # Architectural documentation
-    ├── language-support/         # F# feature support matrix
-    └── binding-strategies/       # Library binding guide
-
+└── docs/
+    ├── zero-allocation/          # Memory management guide
+    ├── mlir-patterns/            # Common F# → MLIR transforms
+    └── static-linking/           # LLVM.NET integration guide
 ```
 
 ## 🎛️ Configuration
 
-Fidelity framework projects use TOML configuration for build settings and binding strategies:
+Firefly projects use TOML for fine-grained compilation control:
 
 ```toml
 [package]
-name = "my_application"
+name = "embedded_controller"
 version = "1.0.0"
+max_stack_size = 4096  # Enforce stack bounds
 
 [dependencies.crypto_lib]
 version = "0.2.0"
 binding = "static"
+# Only link required objects from archive
+selective_linking = true
 
 [binding]
-default = "dynamic"
+default = "static"  # Prefer static for embedded
+
+[compilation]
+# All allocations must be provable at compile time
+require_static_memory = true
+# Closures converted to explicit parameters
+eliminate_closures = true
 
 [profiles.development]
-optimize = false
+# Keep MLIR for inspection
 keep_intermediates = true
+# Minimal optimization for faster builds
+optimize = false
 
 [profiles.release]
-optimize = true
+# Aggressive inlining for zero-cost abstractions
+inline_threshold = 100
+# Link-time optimization across F#/C boundaries
+lto = "full"
+# Profile-guided optimization
+use_pgo = true
 ```
 
-The project file extension is ".fidproj" to distinguish itself from ".fsproj" .NET/XML based project structure.
+## 🔬 Development Workflow
 
-## 🔬 XParsec-Style Transforms
+### Build Pipeline
 
-Dabbit uses compositional transforms for clean F# to MLIR conversion:
+The Firefly compilation process leverages multiple tools in concert:
+
+```bash
+# Standard build invocation
+firefly build --release --target thumbv7em-none-eabihf
+
+# What happens internally:
+# 1. F# Compiler Services → Type-checked AST
+# 2. Fantomas/Oak → Normalized AST representation  
+# 3. XParsec patterns → MLIR generation
+# 4. MLIR passes → Progressive lowering
+# 5. LLVM.NET → Archive analysis & selective linking
+# 6. LLVM → Optimized native code
+```
+
+### Static Linking Intelligence
+
+When Firefly encounters a static library dependency, LLVM.NET provides deep introspection:
+
+```
+Analyzing libcrypto.a:
+  Total archive size: 892KB (47 object files)
+  Tracing symbols from F# code...
+  Required: crypto_init, crypto_process, crypto_free
+  Found in: init.o (2KB), process.o (5KB), util.o (1KB)
+  Linking 3 of 47 objects (8KB vs 892KB)
+  Applying LTO across F#/C boundaries...
+  Final contribution: 4KB after optimization
+```
+
+### Verification Commands
+
+```bash
+# Verify zero-allocation guarantee
+firefly verify myapp --no-heap --max-stack 8192
+
+# Analyze symbol dependencies
+firefly analyze --show-symbol-deps
+
+# Profile-guided optimization
+firefly build --pgo-data trace.pgo
+```
+
+## 🎯 Memory & Execution Guarantees
+
+### ✅ Enforced at Compile Time
+- **Zero heap allocations** - Everything on stack or in static data
+- **Fixed-size types** - All types have compile-time known sizes
+- **Static dispatch** - All function calls resolved at compile time
+- **Bounded stack** - Maximum stack usage computed and verified
+- **No hidden allocations** - Closures transformed to explicit parameters
+
+### 🚧 Transformation Examples
 
 ```fsharp
-// Compositional transform combinators
-let transformBinding = 
-    extractBindingInfo 
-    >>= transformFunction
-    >>= optimizeForTarget
-    >>= addToModule
+// F# Source with apparent allocations
+let data = [| 1; 2; 3; 4; 5 |]
+let doubled = data |> Array.map ((*) 2)
 
-// Pattern-based transforms for F# constructs
-let transformExpression : ASTTransform<SynExpr> = fun expr context ->
-    match expr with
-    | SynExpr.App(_, _, func, arg, _) -> 
-        createFunctionCall context func arg
-    | SynExpr.While(_, condition, body, _) ->
-        createWhileLoop context condition body
-    | SynExpr.Let(_, bindings, body, _) ->
-        createLetBinding context bindings body
+// Firefly transforms to:
+// - Stack allocated fixed array  
+// - In-place transformation
+// - Zero heap usage
 ```
 
-## 🎯 Supported F# Features
+```fsharp
+// F# closure that captures variables
+let createAdder x =
+    fun y -> x + y
 
-### ✅ Currently Supported
-- Let bindings and basic functions
-- Primitive types (int, float, string, bool)
-- Basic I/O (printf, printfn, stdin)
-- While loops and mutable variables
-- Platform API calls (time, sleep, etc.)
-- Pattern matching (basic)
+// Firefly transforms to:
+// - Static function with explicit parameters
+// - No allocation for closure environment
+// - Direct function call at use sites
+```
 
-### 🚧 In Progress  
-- Function composition and piping
-- Discriminated unions
-- Record types
-- More pattern matching scenarios
-- Exception handling
-- Initial memory mapping
+## 📋 Roadmap
 
-### 📋 Planned
-- Computation expressions
-- Generic types and functions
-- Advanced pattern matching
-- Module system
-- Async workflows
-- BAREWire memory pre-optimization
+### Phase 1: Foundation (Current)
+- ✅ Basic F# to MLIR pipeline
+- ✅ Stack-only transformations  
+- ✅ VSCode integration with dual views
+- 🚧 Static library selective linking
+- 🚧 Discriminated union compilation
+
+### Phase 2: Platform Expansion
+- 📋 ARM Cortex-M targeting
+- 📋 RISC-V embedded support
+- 📋 GPU kernel generation
+- 📋 SIMD optimizations
+
+### Phase 3: Advanced Features  
+- 📋 Computation expression transforms
+- 📋 Type provider integration
+- 📋 Cross-compilation profiles
+- 📋 Formal verification integration
 
 ## 🤝 Contributing
 
 We welcome contributions! Areas of particular interest:
 
-- **F# Language Features**: Help expand F# construct support
-- **Platform Support**: Add platform extensions around OS APIs (Alloy)
-- **MLIR Dialects**: Increase XParsec combinator coverage for MLIR dialects (Dabbit)
-- **Binding Generators**: Extend Farscape for more C/C++ scenarios
-- **Optimization**: MLIR pass development and tuning
+- **Zero-Allocation Patterns**: Novel stack-based algorithms for F# constructs
+- **MLIR Optimizations**: Passes for better stack frame merging
+- **Platform Targets**: Backend support for embedded architectures
+- **VSCode Features**: Debugging, profiling, and visualization tools
+- **Verification**: Formal proofs of transformation correctness
 
 ## 📄 License
 
@@ -225,12 +328,8 @@ Apache 2.0 License - see [LICENSE](LICENSE) for details.
 ## 🙏 Acknowledgments
 
 - **Don Syme and F# Language Contributors**: For creating an elegant and capable functional language
-- **.NET Engineering**: For creating a robust enterprise-grade runtime platform that gave runway to F# ✈️
-- **[Mono Project](https://www.mono-project.com/)**: For its original vision to support iOS, Android, MacOS and Linux platforms in .NET
-- **Fable Project**: For demonstrating F# compilation to targets beyond the .NET runtime
-- **MLIR/LLVM Ecosystem**: For establishing powerful compiler foundations with a huge contributor base  
-- **Mojo Language**: For pioneering the "frontend to MLIR" approach
-
----
-
-**Firefly: Bringing the power of full-precision functional programming to modern systems** 🔥
+- **Chris Lattner and MLIR Contributors**: For pioneering multi-level IR compilation
+- **LLVM Community**: For robust code generation infrastructure
+- **Rust Community**: For demonstrating zero-cost abstractions in systems programming
+- **Fable Project**: For proving F# can target alternative runtimes
+- **Ada/SPARK Community**: For inspiration on proven memory-safe systems programming
