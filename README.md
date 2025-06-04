@@ -331,5 +331,5 @@ Apache 2.0 License - see [LICENSE](LICENSE) for details.
 - **Chris Lattner and MLIR Contributors**: For pioneering multi-level IR compilation
 - **LLVM Community**: For robust code generation infrastructure
 - **Rust Community**: For demonstrating zero-cost abstractions in systems programming
-- **Fable Project**: For proving F# can target alternative runtimes
+- **Fable Project**: For clearly showing how F# can target alternative runtimes
 - **Ada/SPARK Community**: For inspiration on proven memory-safe systems programming
