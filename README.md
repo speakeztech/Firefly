@@ -49,12 +49,6 @@ Firefly operates as an intelligent compilation orchestrator that:
 4. **Optimizes aggressively** - LTO across F# and native library boundaries
 5. **Verifies continuously** - Zero allocations, bounded stack, no dynamic dispatch
 
-### Core Components
-
-- **🔥 Firefly**: Orchestrating compiler leveraging F# Compiler Services and LLVM.NET
-- **🐰 Dabbit**: AST to MLIR transformer ensuring stack-only operations
-- **🔭 Farscape**: C/C++ binding generator producing allocation-free bindings
-
 ## 🚀 Quick Start
 
 ### Installation
