@@ -151,7 +151,7 @@ firefly/
 │   └── StaticResolution/         # Ensure no dynamic dispatch
 │
 └── docs/
-    ├── zero-allocation/          # Memory management guide
+    ├── memory-mgmt/              # Memory management guide
     ├── mlir-patterns/            # Common F# → MLIR transforms
     └── static-linking/           # LLVM.NET integration guide
 ```
@@ -281,7 +281,6 @@ let createAdder x =
 ### Phase 1: Foundation (Current)
 - ✅ Basic F# to MLIR pipeline
 - ✅ Stack-only transformations  
-- ✅ VSCode integration with dual views
 - 🚧 Static library selective linking
 - 🚧 Discriminated union compilation
 
@@ -290,12 +289,14 @@ let createAdder x =
 - 📋 RISC-V embedded support
 - 📋 GPU kernel generation
 - 📋 SIMD optimizations
+- 📋 UI Framework (WPF + LVGL)
 
 ### Phase 3: Advanced Features  
 - 📋 Computation expression transforms
 - 📋 Type provider integration
 - 📋 Cross-compilation profiles
 - 📋 Formal verification integration
+- 📋 VSCode integration with dual views
 
 ## 🤝 Contributing
 
