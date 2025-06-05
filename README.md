@@ -53,7 +53,7 @@ Firefly operates as an intelligent compilation orchestrator that:
 
 - **🔥 Firefly**: Orchestrating compiler leveraging F# Compiler Services and LLVM.NET
 - **🐰 Dabbit**: AST to MLIR transformer ensuring stack-only operations
-- **🚀 Farscape**: C/C++ binding generator producing allocation-free bindings
+- **🔭 Farscape**: C/C++ binding generator producing allocation-free bindings
 
 ## 🚀 Quick Start
 
