@@ -140,8 +140,7 @@ firefly/
 │   │   └── LLVMIntegration/      # LLVM.NET binding resolution
 │   │
 │   └── Dabbit/                   # AST to MLIR transformation
-│       ├── StackTransforms/      # Heap → Stack conversions
-│       ├── ClosureElimination/   # Closure → Explicit params
+│       ├── Closures/              # Closure → Explicit params
 │       ├── UnionLayouts/         # Fixed-size union compilation
 │       └── BindingMetadata/      # Static binding attributes
 │     
