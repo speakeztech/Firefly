@@ -287,15 +287,14 @@ let createAdder x =
 ### Phase 2: Platform Expansion
 - 📋 ARM Cortex-M targeting
 - 📋 RISC-V embedded support
-- 📋 GPU kernel generation
 - 📋 SIMD optimizations
 - 📋 UI Framework (WPF + LVGL)
+- 📋 Formal verification integration
 
 ### Phase 3: Advanced Features  
 - 📋 Computation expression transforms
-- 📋 Type provider integration
 - 📋 Cross-compilation profiles
-- 📋 Formal verification integration
+- 📋 GPU kernel generation
 - 📋 VSCode integration with dual views
 
 ## 🤝 Contributing
