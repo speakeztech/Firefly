@@ -54,8 +54,6 @@ Firefly operates as an intelligent compilation orchestrator that:
 - **🔥 Firefly**: Orchestrating compiler leveraging F# Compiler Services and LLVM.NET
 - **🐰 Dabbit**: AST to MLIR transformer ensuring stack-only operations
 - **🚀 Farscape**: C/C++ binding generator producing allocation-free bindings
-- **⚡ Alloy**: Zero-dependency, allocation-free base libraries
-- **📡 BAREWire**: Zero-copy serialization with compile-time layout verification
 
 ## 🚀 Quick Start
 
@@ -77,7 +75,7 @@ Create `hello.fs`:
 ```fsharp
 module Examples.HelloWorld
 
-open Alloy.Stack
+open Alloy
 
 let hello() =
     // All string operations use stack buffers
@@ -147,17 +145,11 @@ firefly/
 │   │   ├── MLIRGeneration/       # XParsec-based MLIR builders
 │   │   └── LLVMIntegration/      # LLVM.NET binding resolution
 │   │
-│   ├── Dabbit/                   # AST to MLIR transformation
-│   │   ├── StackTransforms/      # Heap → Stack conversions
-│   │   ├── ClosureElimination/   # Closure → Explicit params
-│   │   ├── UnionLayouts/         # Fixed-size union compilation
-│   │   └── BindingMetadata/      # Static binding attributes
-│   │
-│   └── Alloy/                    # Allocation-free base libraries
-│       ├── Stack/                # Stack-based collections
-│       ├── FixedString/          # No-alloc string operations
-│       ├── Numerics/             # SIMD-ready math
-│       └── Platform/             # OS API bindings (stack-only)
+│   └── Dabbit/                   # AST to MLIR transformation
+│       ├── StackTransforms/      # Heap → Stack conversions
+│       ├── ClosureElimination/   # Closure → Explicit params
+│       ├── UnionLayouts/         # Fixed-size union compilation
+│       └── BindingMetadata/      # Static binding attributes
 │     
 ├── tests/
 │   ├── AllocationTests/          # Verify zero-heap guarantee
