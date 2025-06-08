@@ -7,8 +7,8 @@ open CLI.Commands.VerifyCommand
 
 /// Command line arguments for Firefly CLI
 type FireflyArgs =
-    | Compile of ParseResults<CompileArgs>
-    | Verify of ParseResults<VerifyArgs>
+    | Compile of compile_args: string list
+    | Verify of verify_args: string list
     | Version
 with
     interface IArgParserTemplate with
@@ -20,7 +20,7 @@ with
 
 /// Display version information
 let showVersion() =
-    let version = "0.1.0-alpha"
+    let version = "1.0.0"
     printfn "Firefly %s - F# to Native Compiler with Zero-Allocation Guarantees" version
     printfn "Copyright (c) 2025 Speakez LLC"
     0
@@ -32,11 +32,17 @@ let main argv =
 
     try
         match parser.ParseCommandLine(argv) with
-        | p when p.Contains Version -> showVersion()
-        | p when p.TryGetSubCommand().IsSome ->
-            match p.GetSubCommand() with
-            | Compile args -> compile args
-            | Verify args -> verify args
+        | results when results.Contains Version -> showVersion()
+        | results when results.TryGetSubCommand().IsSome ->
+            match results.GetSubCommand() with
+            | Compile args ->
+                let compileParser = ArgumentParser.Create<CompileArgs>(programName = "firefly compile", errorHandler = errorHandler)
+                let compileResults = compileParser.ParseCommandLine(Array.ofList args)
+                compile compileResults
+            | Verify args ->
+                let verifyParser = ArgumentParser.Create<VerifyArgs>(programName = "firefly verify", errorHandler = errorHandler)
+                let verifyResults = verifyParser.ParseCommandLine(Array.ofList args)
+                verify verifyResults
             | _ -> failwith "Unexpected subcommand"
         | _ -> 
             printfn "%s" (parser.PrintUsage())
