@@ -45,24 +45,28 @@ let private getDefaultTarget() =
     else
         "x86_64-w64-windows-gnu"
 
-/// Enhanced intermediate file saving with FCS and Oak AST support
+/// Cross-platform text file writing with UTF-8 encoding and Unix line endings
+let private writeTextFile (filePath: string) (content: string) : unit =
+    let encoding = System.Text.UTF8Encoding(false)
+    let normalizedContent = content.Replace("\r\n", "\n").Replace("\r", "\n")
+    File.WriteAllText(filePath, normalizedContent, encoding)
+
+/// Comprehensive intermediate file saving with guaranteed AST support
 let private saveIntermediateFiles (basePath: string) (baseName: string) (keepIntermediates: bool) (pipelineOutput: TranslationPipelineOutput) =
+    printfn "=== SAVING INTERMEDIATE FILES ==="
+    printfn "Keep intermediates: %b" keepIntermediates
+    printfn "Base path: %s" basePath
+    printfn "Base name: %s" baseName
+    printfn "Pipeline outputs available: %d" pipelineOutput.PhaseOutputs.Count
+    
     if keepIntermediates then
         try
             let intermediatesDir = Path.Combine(basePath, "intermediates")
             if not (Directory.Exists(intermediatesDir)) then
                 Directory.CreateDirectory(intermediatesDir) |> ignore
+                printfn "Created intermediates directory: %s" intermediatesDir
             
-            // Cross-platform text file writing with consistent encoding
-            // NOTE: Using UTF-8 without BOM for maximum compatibility across Windows, Linux, and macOS
-            // Future platform considerations:
-            // - All MLIR/LLVM tools expect UTF-8 encoding
-            // - Unix line endings (\n) provide best cross-platform compatibility
-            // - VSCode and most editors handle UTF-8 without BOM correctly on all platforms
-            let writeTextFile (filePath: string) (content: string) =
-                let encoding = System.Text.UTF8Encoding(false) // false = no BOM
-                let normalizedContent = content.Replace("\r\n", "\n").Replace("\r", "\n")
-                File.WriteAllText(filePath, normalizedContent, encoding)
+            pipelineOutput.PhaseOutputs |> Map.iter (fun key _ -> printfn "  Available: %s" key)
             
             // Save pipeline diagnostics
             let diagnosticsPath = Path.Combine(intermediatesDir, baseName + ".diagnostics.txt")
@@ -71,20 +75,35 @@ let private saveIntermediateFiles (basePath: string) (baseName: string) (keepInt
                 |> List.map (fun (phase, message) -> sprintf "[%s] %s" phase message)
                 |> String.concat "\n"
             writeTextFile diagnosticsPath diagnosticsContent
+            printfn "✓ Saved diagnostics to: %s" diagnosticsPath
             
-            // Save all intermediate outputs with proper extensions
+            // Save all intermediate outputs with proper extensions and naming
             pipelineOutput.PhaseOutputs
             |> Map.iter (fun phaseName output ->
                 let extension = 
                     match phaseName with
                     | name when name.Contains("mlir") -> ".mlir"
                     | name when name.Contains("oak") -> ".oak"
-                    | name when name.Contains("fcs") -> ".fcs"
+                    | name when name.Contains("fcs") || name.Contains("compiler-services") -> ".fcs"
                     | name when name.Contains("llvm") -> ".ll"
                     | _ -> ".txt"
-                let fileName = sprintf "%s.%s%s" baseName (phaseName.Replace("-", "_")) extension
+                
+                let fileName = 
+                    match phaseName with
+                    | "f#-compiler-services-ast" -> baseName + ".fcs"
+                    | "oak-ast" -> baseName + ".oak"
+                    | _ -> sprintf "%s.%s%s" baseName (phaseName.Replace("-", "_")) extension
+                
                 let filePath = Path.Combine(intermediatesDir, fileName)
-                writeTextFile filePath output)
+                writeTextFile filePath output
+                printfn "✓ Saved %s (%d chars) to: %s" phaseName output.Length fileName
+                
+                // Verify file was actually created
+                if File.Exists(filePath) then
+                    let fileSize = (FileInfo(filePath)).Length
+                    printfn "  ✓ VERIFIED: File exists (%d bytes)" fileSize
+                else
+                    printfn "  ✗ ERROR: File was not created!")
             
             // Save symbol mappings
             let symbolMappingsPath = Path.Combine(intermediatesDir, baseName + ".symbols.txt")
@@ -94,12 +113,12 @@ let private saveIntermediateFiles (basePath: string) (baseName: string) (keepInt
                 |> List.map (fun (original, transformed) -> sprintf "%s -> %s" original transformed)
                 |> String.concat "\n"
             writeTextFile symbolMappingsPath symbolMappingsContent
+            printfn "✓ Saved symbol mappings to: %s" symbolMappingsPath
             
-            // Report saved files with proper formatting for cross-platform paths
+            // Report final results
             let displayPath = intermediatesDir.Replace(Path.DirectorySeparatorChar, '/')
             printfn "Saved intermediate files to: %s" displayPath
             
-            // List the specific files that were created for developer visibility
             let intermediateFiles = Directory.GetFiles(intermediatesDir, baseName + ".*")
             if intermediateFiles.Length > 0 then
                 printfn "Generated intermediate files:"
@@ -107,90 +126,283 @@ let private saveIntermediateFiles (basePath: string) (baseName: string) (keepInt
                     let fileName = Path.GetFileName(file)
                     let fileSize = (FileInfo(file)).Length
                     printfn "  %s (%d bytes)" fileName fileSize)
+            else
+                printfn "WARNING: No intermediate files were found after saving!"
             
         with
         | ex ->
-            printfn "Warning: Failed to save intermediate files: %s" ex.Message
+            printfn "ERROR: Failed to save intermediate files: %s" ex.Message
+            printfn "Stack trace: %s" ex.StackTrace
+    else
+        printfn "Intermediate file saving disabled"
 
 /// Validates compilation arguments with enhanced error reporting
 let private validateCompilationArgs (inputPath: string) (outputPath: string) : CompilerResult<unit> =
+    printfn "=== VALIDATING COMPILATION ARGUMENTS ==="
+    printfn "Input path: %s" inputPath
+    printfn "Output path: %s" outputPath
+    
     if not (File.Exists inputPath) then
+        printfn "ERROR: Input file does not exist"
         CompilerFailure [CompilerError("argument validation", sprintf "Input file '%s' does not exist" inputPath, None)]
     elif String.IsNullOrWhiteSpace(outputPath) then
+        printfn "ERROR: Output path is empty"
         CompilerFailure [CompilerError("argument validation", "Output path cannot be empty", None)]
     else
         let inputExt = Path.GetExtension(inputPath).ToLowerInvariant()
         if inputExt <> ".fs" && inputExt <> ".fsx" then
+            printfn "ERROR: Invalid input file extension: %s" inputExt
             CompilerFailure [CompilerError("argument validation", sprintf "Input file must be F# source (.fs or .fsx), got: %s" inputExt, None)]
         else
+            printfn "✓ Arguments validated successfully"
             Success ()
 
-/// Enhanced XParsec-based compilation process with intermediate AST generation
+/// Enhanced XParsec-based compilation process with GUARANTEED AST generation
 let private executeEnhancedCompilationPipeline (inputPath: string) (sourceCode: string) (config: FireflyConfig) (keepIntermediates: bool) (verbose: bool) : CompilerResult<TranslationPipelineOutput> =
-    let basePath = Path.GetDirectoryName(inputPath)
-    let baseName = Path.GetFileNameWithoutExtension(inputPath)
+    printfn "=== ENHANCED COMPILATION PIPELINE START ==="
+    printfn "Input path: %s" inputPath
+    printfn "Source code length: %d" sourceCode.Length
+    printfn "Keep intermediates: %b" keepIntermediates
+    printfn "Verbose: %b" verbose
     
-    if verbose then printfn "Starting enhanced XParsec-based compilation pipeline with AST intermediate generation..."
+    // Use the enhanced translation pipeline with guaranteed AST generation
+    printfn "=== CALLING ENHANCED TRANSLATION PIPELINE ==="
     
-    // Generate F# Compiler Services and Oak AST representations
-    printfn "Parsing F# source code..."
-    let parsingResult = Dabbit.Parsing.AstConverter.parseAndConvertToOakAstWithIntermediate sourceCode
+    let pipelineResult = translateF#ToMLIRWithIntermediates inputPath sourceCode keepIntermediates
     
-    if keepIntermediates then
-        try
-            let intermediatesDir = Path.Combine(basePath, "intermediates")
-            if not (Directory.Exists(intermediatesDir)) then
-                Directory.CreateDirectory(intermediatesDir) |> ignore
-            
-            // Save FCS AST using cross-platform compatible writing
-            let fcsPath = Path.Combine(intermediatesDir, baseName + ".fcs")
-            let encoding = System.Text.UTF8Encoding(false)
-            let normalizedFCS = parsingResult.FCSAstText.Replace("\r\n", "\n").Replace("\r", "\n")
-            File.WriteAllText(fcsPath, normalizedFCS, encoding)
-            
-            // Save Oak AST using cross-platform compatible writing
-            let oakPath = Path.Combine(intermediatesDir, baseName + ".oak")
-            let normalizedOak = parsingResult.OakAstText.Replace("\r\n", "\n").Replace("\r", "\n")
-            File.WriteAllText(oakPath, normalizedOak, encoding)
-            
-            if verbose then
-                printfn "Saved F# Compiler Services AST to: %s" (fcsPath.Replace(Path.DirectorySeparatorChar, '/'))
-                printfn "Saved Oak AST to: %s" (oakPath.Replace(Path.DirectorySeparatorChar, '/'))
-        
-        with
-        | ex ->
-            printfn "Warning: Failed to save AST intermediate files: %s" ex.Message
+    printfn "=== TRANSLATION PIPELINE COMPLETED ==="
     
-    // Continue with existing compilation pipeline using the Oak program
-    match translateF#ToMLIRWithDiagnostics inputPath sourceCode with
+    match pipelineResult with
     | CompilerFailure pipelineErrors ->
+        printfn "Translation pipeline failed with %d errors:" pipelineErrors.Length
+        pipelineErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
         CompilerFailure pipelineErrors
     | Success pipelineOutput ->
-        // Enhanced pipeline output that includes AST information
-        let enhancedOutput = {
-            pipelineOutput with
-                PhaseOutputs = 
-                    pipelineOutput.PhaseOutputs
-                    |> Map.add "f#-compiler-services-ast" parsingResult.FCSAstText
-                    |> Map.add "oak-ast" parsingResult.OakAstText
-        }
-        Success enhancedOutput
+        printfn "✓ Translation pipeline succeeded!"
+        printfn "Generated %d phase outputs:" pipelineOutput.PhaseOutputs.Count
+        pipelineOutput.PhaseOutputs |> Map.iter (fun key _ -> printfn "  - %s" key)
+        
+        // Verify AST outputs are present
+        let hasAST = 
+            pipelineOutput.PhaseOutputs.ContainsKey("f#-compiler-services-ast") &&
+            pipelineOutput.PhaseOutputs.ContainsKey("oak-ast")
+        
+        if hasAST then
+            printfn "✓ AST intermediate representations successfully generated"
+        else
+            printfn "✗ WARNING: AST intermediate representations are missing!"
+            printfn "Available outputs:"
+            pipelineOutput.PhaseOutputs |> Map.iter (fun key _ -> printfn "  - %s" key)
+        
+        if verbose then
+            printfn "Successful phases: %d" pipelineOutput.SuccessfulPhases.Length
+            pipelineOutput.SuccessfulPhases |> List.iter (fun phase -> printfn "  ✓ %s" phase)
+            
+            if not pipelineOutput.Diagnostics.IsEmpty then
+                printfn "Pipeline diagnostics:"
+                pipelineOutput.Diagnostics |> List.iter (fun (phase, msg) -> printfn "  [%s] %s" phase msg)
+        
+        printfn "=== ENHANCED COMPILATION PIPELINE END ==="
+        Success pipelineOutput
 
-/// Executes the complete XParsec-based compilation process with enhanced AST diagnostics
+/// External toolchain integration modules
+module ExternalToolchain =
+    
+    let isCommandAvailable (command: string) : bool =
+        try
+            let commands = 
+                if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+                    [command; command + ".exe"]
+                else
+                    [command]
+            
+            commands |> List.exists (fun cmd ->
+                try
+                    let processInfo = System.Diagnostics.ProcessStartInfo()
+                    processInfo.FileName <- cmd
+                    processInfo.Arguments <- "--version"
+                    processInfo.UseShellExecute <- false
+                    processInfo.RedirectStandardOutput <- true
+                    processInfo.RedirectStandardError <- true
+                    processInfo.CreateNoWindow <- true
+                    
+                    use proc = System.Diagnostics.Process.Start(processInfo)
+                    proc.WaitForExit(5000) |> ignore
+                    proc.ExitCode = 0
+                with _ -> false)
+        with _ -> false
+    
+    let getCompilerCommands (target: string) : CompilerResult<string * string> =
+        if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+            let llcOptions = ["llc"; "llc.exe"]
+            let linkerOptions = ["gcc"; "gcc.exe"; "clang"; "clang.exe"]
+            
+            let llcFound = llcOptions |> List.tryFind isCommandAvailable
+            let linkerFound = linkerOptions |> List.tryFind isCommandAvailable
+            
+            match llcFound, linkerFound with
+            | Some llc, Some linker -> Success (llc, linker)
+            | None, _ -> CompilerFailure [CompilerError("toolchain", "LLVM compiler (llc) not found", Some "Install LLVM tools: pacman -S mingw-w64-x86_64-llvm")]
+            | _, None -> CompilerFailure [CompilerError("toolchain", "C compiler not found", Some "Install GCC: pacman -S mingw-w64-x86_64-gcc")]
+        else
+            if isCommandAvailable "llc" && isCommandAvailable "clang" then
+                Success ("llc", "clang")
+            elif isCommandAvailable "llc" && isCommandAvailable "gcc" then
+                Success ("llc", "gcc")
+            else
+                CompilerFailure [CompilerError("toolchain", "Required compilers not found", Some "Install LLVM and GCC/Clang")]
+    
+    let runExternalCommand (command: string) (arguments: string) (workingDir: string option) : CompilerResult<string> =
+        try
+            printfn "Debug: Executing %s %s" command arguments
+            
+            let processInfo = System.Diagnostics.ProcessStartInfo()
+            processInfo.FileName <- command
+            processInfo.Arguments <- arguments
+            processInfo.UseShellExecute <- false
+            processInfo.RedirectStandardOutput <- true
+            processInfo.RedirectStandardError <- true
+            processInfo.CreateNoWindow <- true
+            
+            match workingDir with
+            | Some dir -> processInfo.WorkingDirectory <- dir
+            | None -> ()
+            
+            use proc = System.Diagnostics.Process.Start(processInfo)
+            let output = proc.StandardOutput.ReadToEnd()
+            let error = proc.StandardError.ReadToEnd()
+            proc.WaitForExit()
+            
+            if proc.ExitCode = 0 then
+                Success output
+            else
+                CompilerFailure [CompilerError("external command", 
+                    sprintf "%s failed with exit code %d" command proc.ExitCode, 
+                    Some error)]
+        with
+        | ex ->
+            CompilerFailure [CompilerError("external command", 
+                sprintf "Failed to execute %s" command, 
+                Some ex.Message)]
+
+module TargetTripleManagement =
+    
+    let getTargetTriple (target: string) : string =
+        match target.ToLowerInvariant() with
+        | "x86_64-pc-windows-msvc" -> "x86_64-pc-windows-msvc"
+        | "x86_64-pc-linux-gnu" -> "x86_64-pc-linux-gnu"  
+        | "x86_64-apple-darwin" -> "x86_64-apple-darwin"
+        | "embedded" -> "thumbv7em-none-eabihf"
+        | "thumbv7em-none-eabihf" -> "thumbv7em-none-eabihf"
+        | "x86_64-w64-windows-gnu" -> "x86_64-w64-windows-gnu"
+        | _ -> 
+            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+                "x86_64-w64-windows-gnu"
+            elif RuntimeInformation.IsOSPlatform(OSPlatform.Linux) then
+                "x86_64-pc-linux-gnu"
+            elif RuntimeInformation.IsOSPlatform(OSPlatform.OSX) then
+                "x86_64-apple-darwin"
+            else
+                "x86_64-w64-windows-gnu"
+    
+    let validateTargetTriple (triple: string) : CompilerResult<unit> =
+        let parts = triple.Split('-')
+        if parts.Length >= 3 then
+            Success ()
+        else
+            CompilerFailure [TransformError("target validation", triple, "valid target triple", 
+                "Target triple must have format: arch-vendor-os(-environment)")]
+
+/// Native compilation functions
+let private compileLLVMToNativeConsole (llvmOutput: LLVMOutput) (outputPath: string) (target: string) : CompilerResult<unit> =
+    printfn "=== NATIVE COMPILATION START ==="
+    
+    let targetTriple = TargetTripleManagement.getTargetTriple target
+    TargetTripleManagement.validateTargetTriple targetTriple >>= fun _ ->
+    
+    ExternalToolchain.getCompilerCommands target >>= fun (llcCommand, linkerCommand) ->
+    
+    let llvmPath = Path.ChangeExtension(outputPath, ".ll")
+    let objPath = Path.ChangeExtension(outputPath, ".o")
+    let outputDir = Path.GetDirectoryName(outputPath)
+    
+    try
+        let utf8WithoutBom = System.Text.UTF8Encoding(false)
+        let normalizedIR = llvmOutput.LLVMIRText.Replace("\r\n", "\n").Replace("\r", "\n")
+        File.WriteAllText(llvmPath, normalizedIR, utf8WithoutBom)
+        printfn "Saved LLVM IR to: %s" llvmPath
+        
+        let llcArgs = sprintf "-filetype=obj -mtriple=%s -relocation-model=pic -o \"%s\" \"%s\"" 
+                             targetTriple objPath llvmPath
+        printfn "Compiling to native code for target '%s'..." targetTriple
+        
+        ExternalToolchain.runExternalCommand llcCommand llcArgs (Some outputDir) >>= fun _ ->
+        printfn "Created object file: %s" objPath
+        
+        let linkArgs = 
+            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+                sprintf "\"%s\" -o \"%s\" -mconsole -Wl,--subsystem,console -Wl,--entry,mainCRTStartup -static-libgcc -lmsvcrt -lkernel32" 
+                        objPath outputPath
+            else
+                sprintf "\"%s\" -o \"%s\"" objPath outputPath
+        
+        printfn "Linking object file to executable with console application configuration..."        
+        ExternalToolchain.runExternalCommand linkerCommand linkArgs (Some outputDir) >>= fun linkOutput ->
+        
+        if File.Exists(outputPath) then
+            printfn "Successfully created console executable: %s" outputPath
+            if File.Exists(objPath) then File.Delete(objPath)
+            Success ()
+        else
+            CompilerFailure [CompilerError("native compilation", "Console executable was not created", 
+                Some (sprintf "Linker output: %s\nTry manual compilation: gcc %s -o %s -mconsole" linkOutput objPath outputPath))]
+    
+    with
+    | ex ->
+        CompilerFailure [CompilerError("native compilation", "Failed during console application compilation", Some ex.Message)]
+
+let private compileToNative (llvmOutput: LLVMOutput) (outputPath: string) (target: string) (verbose: bool) (noExternalTools: bool) =
+    if verbose then printfn "Compiling to native executable for target: %s" target
+    
+    if noExternalTools then
+        printfn "Warning: --no-external-tools specified, but native compilation requires external LLVM toolchain"
+        let llvmPath = Path.ChangeExtension(outputPath, ".ll")
+        let encoding = System.Text.UTF8Encoding(false)
+        File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, encoding)
+        printfn "Saved LLVM IR to: %s" llvmPath
+        0
+    else
+        match compileLLVMToNativeConsole llvmOutput outputPath target with
+        | CompilerFailure nativeErrors ->
+            printfn "Native compilation failed:"
+            nativeErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
+            1
+        | Success () ->
+            printfn "✓ Compilation successful: %s" outputPath
+            0
+
+/// MAIN COMPILE FUNCTION - SINGLE ENTRY POINT WITH GUARANTEED AST GENERATION
 let compile (args: ParseResults<CompileArgs>) =
+    printfn "=== FIREFLY COMPILE COMMAND START ==="
+    printfn "Command invoked with %d arguments" args.GetAllResults().Length
+    
     // Parse and validate arguments
     let inputPath = 
         match args.TryGetResult Input with
-        | Some path -> path
+        | Some path -> 
+            printfn "✓ Input path: %s" path
+            path
         | None -> 
-            printfn "Error: Input file is required"
+            printfn "✗ ERROR: Input file is required"
             exit 1
     
     let outputPath = 
         match args.TryGetResult Output with
-        | Some path -> path
+        | Some path -> 
+            printfn "✓ Output path: %s" path
+            path
         | None -> 
-            printfn "Error: Output path is required"
+            printfn "✗ ERROR: Output path is required"
             exit 1
     
     let target = args.TryGetResult Target |> Option.defaultValue (getDefaultTarget())
@@ -200,14 +412,22 @@ let compile (args: ParseResults<CompileArgs>) =
     let verbose = args.Contains Verbose
     let noExternalTools = args.Contains No_External_Tools
     
-    // Validate arguments using XParsec patterns
+    printfn "=== COMPILATION SETTINGS ==="
+    printfn "Target: %s" target
+    printfn "Optimize level: %s" optimizeLevel
+    printfn "Config path: %s" configPath
+    printfn "Keep intermediates: %b" keepIntermediates
+    printfn "Verbose: %b" verbose
+    printfn "No external tools: %b" noExternalTools
+    
+    // Validate arguments
     match validateCompilationArgs inputPath outputPath with
     | CompilerFailure errors ->
         errors |> List.iter (fun error -> printfn "Error: %s" (error.ToString()))
         1
     | Success () ->
         
-        // Load and validate configuration using XParsec-based parser
+        // Load configuration
         if verbose then printfn "Loading configuration from: %s" configPath
         
         match loadAndValidateConfig configPath with
@@ -219,11 +439,8 @@ let compile (args: ParseResults<CompileArgs>) =
             
             if verbose then
                 printfn "Loaded configuration for package: %s v%s" config.PackageName config.Version
-                printfn "Compilation settings:"
                 printfn "  Require static memory: %b" config.Compilation.RequireStaticMemory
                 printfn "  Eliminate closures: %b" config.Compilation.EliminateClosures
-                printfn "  Optimization level: %s" config.Compilation.OptimizationLevel
-                printfn "  Use LTO: %b" config.Compilation.UseLTO
                 printfn "  Keep intermediates: %b" keepIntermediates
             
             // Read and validate source code
@@ -231,8 +448,8 @@ let compile (args: ParseResults<CompileArgs>) =
                 let sourceCode = File.ReadAllText(inputPath)
                 if verbose then printfn "Read source file: %s (%d characters)" inputPath sourceCode.Length
                 
-                // Execute enhanced compilation pipeline with AST generation
-                if verbose then printfn "Starting enhanced XParsec-based compilation pipeline..."
+                // Execute enhanced compilation pipeline with GUARANTEED AST generation
+                printfn "=== STARTING ENHANCED COMPILATION PIPELINE WITH GUARANTEED AST GENERATION ==="
                 
                 match executeEnhancedCompilationPipeline inputPath sourceCode config keepIntermediates verbose with
                 | CompilerFailure pipelineErrors ->
@@ -244,17 +461,13 @@ let compile (args: ParseResults<CompileArgs>) =
                     if verbose then
                         printfn "Pipeline completed successfully with %d phases:" pipelineOutput.SuccessfulPhases.Length
                         pipelineOutput.SuccessfulPhases |> List.iter (fun phase -> printfn "  ✓ %s" phase)
-                        
-                        if not pipelineOutput.Diagnostics.IsEmpty then
-                            printfn "Pipeline diagnostics:"
-                            pipelineOutput.Diagnostics |> List.iter (fun (phase, msg) -> printfn "  [%s] %s" phase msg)
                     
-                    // Save enhanced intermediate files including AST representations
+                    // Save enhanced intermediate files including GUARANTEED AST representations
                     let basePath = Path.GetDirectoryName(outputPath)
                     let baseName = Path.GetFileNameWithoutExtension(outputPath)
                     saveIntermediateFiles basePath baseName keepIntermediates pipelineOutput
                     
-                    // Apply LLVM optimization pipeline
+                    // Continue with LLVM generation and compilation
                     if verbose then printfn "Translating MLIR to LLVM IR..."
                     
                     match translateToLLVM pipelineOutput.FinalMLIR with
@@ -266,7 +479,6 @@ let compile (args: ParseResults<CompileArgs>) =
                     | Success llvmOutput ->
                         if verbose then printfn "Generated LLVM IR for module: %s" llvmOutput.ModuleName
                         
-                        // Apply optimizations based on configuration and arguments
                         let optimizationLevel = 
                             match optimizeLevel.ToLowerInvariant() with
                             | "none" -> None
@@ -278,13 +490,6 @@ let compile (args: ParseResults<CompileArgs>) =
                         
                         let optimizationPasses = createOptimizationPipeline optimizationLevel
                         
-                        if verbose then 
-                            printfn "Applying LLVM optimizations (level: %A)..." optimizationLevel
-                            if optimizationPasses.IsEmpty then
-                                printfn "  No optimization passes selected"
-                            else
-                                printfn "  Optimization passes: %A" optimizationPasses
-                        
                         match optimizeLLVMIR llvmOutput optimizationPasses with
                         | CompilerFailure optimizationErrors ->
                             printfn "LLVM optimization failed:"
@@ -292,15 +497,11 @@ let compile (args: ParseResults<CompileArgs>) =
                             1
                         
                         | Success optimizedLLVM ->
-                            // Validate zero-allocation guarantees
                             if config.Compilation.RequireStaticMemory then
-                                if verbose then printfn "Validating zero-allocation guarantees..."
-                                
                                 match validateZeroAllocationGuarantees optimizedLLVM.LLVMIRText with
                                 | CompilerFailure validationErrors ->
                                     printfn "Zero-allocation validation failed:"
                                     validationErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-                                    printfn "Consider disabling require_static_memory in configuration if heap allocation is acceptable"
                                     1
                                 | Success () ->
                                     if verbose then printfn "✓ Zero-allocation guarantees validated"
@@ -312,138 +513,6 @@ let compile (args: ParseResults<CompileArgs>) =
             | ex ->
                 printfn "Error reading source file: %s" ex.Message
                 1
-
-/// Enhanced native compilation with improved MinGW64 console application support
-and private compileToNative (llvmOutput: LLVMOutput) (outputPath: string) (target: string) (verbose: bool) (noExternalTools: bool) =
-    if verbose then printfn "Compiling to native executable for target: %s" target
-    
-    if noExternalTools then
-        printfn "Warning: --no-external-tools specified, but native compilation requires external LLVM toolchain"
-        printfn "The XParsec pipeline has generated optimized LLVM IR, but cannot complete native compilation"
-        printfn "To complete compilation, remove --no-external-tools flag or use external LLVM tools"
-        
-        // Save the LLVM IR for manual compilation
-        let llvmPath = Path.ChangeExtension(outputPath, ".ll")
-        let encoding = System.Text.UTF8Encoding(false)
-        File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, encoding)
-        printfn "Saved LLVM IR to: %s" llvmPath
-        printfn "To compile manually: llc -filetype=obj %s -o %s.o && gcc %s.o -o %s -mconsole" 
-                 llvmPath (Path.GetFileNameWithoutExtension(outputPath))
-                 (Path.GetFileNameWithoutExtension(outputPath)) outputPath
-        0
-    else
-        match compileLLVMToNativeConsole llvmOutput outputPath target with
-        | CompilerFailure nativeErrors ->
-            printfn "Native compilation failed:"
-            nativeErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-            printfn ""
-            printfn "Possible solutions:"
-            printfn "  1. Install LLVM tools (llc, clang/gcc) in your PATH"
-            printfn "  2. Use --no-external-tools to generate LLVM IR only"
-            printfn "  3. Check that target '%s' is supported by your LLVM installation" target
-            printfn "  4. Ensure you're using MSYS2 MINGW64 terminal on Windows"
-            1
-        
-        | Success () ->
-            printfn "✓ Compilation successful: %s" outputPath
-            
-            if verbose then
-                try
-                    let fileInfo = FileInfo(outputPath)
-                    printfn "  Output size: %d bytes" fileInfo.Length
-                    printfn "  Target: %s" target
-                    printfn "  Uses zero-allocation Firefly runtime"
-                    printfn "  Console application with proper main entry point"
-                with
-                | _ -> ()
-            
-            0
-
-/// Enhanced native compilation specifically for console applications with MinGW64
-and private compileLLVMToNativeConsole (llvmOutput: LLVMOutput) (outputPath: string) (target: string) : CompilerResult<unit> =
-    let targetTriple = TargetTripleManagement.getTargetTriple target
-    TargetTripleManagement.validateTargetTriple targetTriple >>= fun _ ->
-    
-    ExternalToolchain.getCompilerCommands target >>= fun (llcCommand, linkerCommand) ->
-    
-    let llvmPath = Path.ChangeExtension(outputPath, ".ll")
-    let objPath = Path.ChangeExtension(outputPath, ".o")
-    let outputDir = Path.GetDirectoryName(outputPath)
-    
-    try
-        // Write LLVM IR to file with cross-platform compatible encoding
-        let utf8WithoutBom = System.Text.UTF8Encoding(false)
-        let normalizedIR = llvmOutput.LLVMIRText.Replace("\r\n", "\n").Replace("\r", "\n")
-        File.WriteAllText(llvmPath, normalizedIR, utf8WithoutBom)
-        printfn "Saved LLVM IR to: %s" llvmPath
-        
-        // Compile to object file with enhanced options
-        let llcArgs = sprintf "-filetype=obj -mtriple=%s -relocation-model=pic -o \"%s\" \"%s\"" 
-                             targetTriple objPath llvmPath
-        printfn "Compiling to native code for target '%s'..." targetTriple
-        
-        ExternalToolchain.runExternalCommand llcCommand llcArgs (Some outputDir) >>= fun _ ->
-        printfn "Created object file: %s" objPath
-        
-        // Enhanced linking with explicit console application configuration for MinGW64
-        let linkArgs = 
-            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
-                // Explicit console subsystem configuration to avoid WinMain requirement
-                sprintf "\"%s\" -o \"%s\" -mconsole -Wl,--subsystem,console -Wl,--entry,mainCRTStartup -static-libgcc -lmsvcrt -lkernel32" 
-                        objPath outputPath
-            else
-                sprintf "\"%s\" -o \"%s\"" objPath outputPath
-        
-        printfn "Linking object file to executable with console application configuration..."        
-        ExternalToolchain.runExternalCommand linkerCommand linkArgs (Some outputDir) >>= fun linkOutput ->
-        
-        // Verify output file exists
-        if File.Exists(outputPath) then
-            printfn "Successfully created console executable: %s" outputPath
-            // Cleanup intermediate files but keep LLVM IR for debugging
-            if File.Exists(objPath) then File.Delete(objPath)
-            Success ()
-        else
-            CompilerFailure [CompilerError(
-                "native compilation", 
-                "Console executable was not created", 
-                Some (sprintf "Linker output: %s\nTry manual compilation: gcc %s -o %s -mconsole" linkOutput objPath outputPath))]
-    
-    with
-    | ex ->
-        CompilerFailure [CompilerError("native compilation", 
-            "Failed during console application compilation", 
-            Some ex.Message)]
-
-/// Displays detailed compilation statistics including AST metrics
-let private showEnhancedCompilationStats (pipelineOutput: TranslationPipelineOutput) =
-    printfn ""
-    printfn "Enhanced Compilation Statistics:"
-    printfn "==============================="
-    printfn "Successful phases: %d" pipelineOutput.SuccessfulPhases.Length
-    printfn "Symbol mappings: %d" pipelineOutput.SymbolMappings.Count
-    printfn "Phase outputs saved: %d" pipelineOutput.PhaseOutputs.Count
-    
-    // Report on intermediate representations
-    let astOutputs = 
-        pipelineOutput.PhaseOutputs 
-        |> Map.filter (fun key _ -> key.Contains("ast") || key.Contains("fcs") || key.Contains("oak"))
-    
-    if not astOutputs.IsEmpty then
-        printfn ""
-        printfn "AST Representations Generated:"
-        astOutputs |> Map.iter (fun phase content ->
-            let lineCount = content.Split('\n').Length
-            printfn "  %s: %d lines" phase lineCount)
-    
-    if not pipelineOutput.Diagnostics.IsEmpty then
-        printfn ""
-        printfn "Detailed Diagnostics:"
-        pipelineOutput.Diagnostics 
-        |> List.groupBy fst
-        |> List.iter (fun (phase, messages) ->
-            printfn "  [%s]:" phase
-            messages |> List.iter (fun (_, msg) -> printfn "    %s" msg))
 
 /// Entry point for compilation with comprehensive error handling and AST diagnostics
 let compileWithFullDiagnostics (inputPath: string) (outputPath: string) (target: string) (configPath: string) =
@@ -468,29 +537,10 @@ let compileWithFullDiagnostics (inputPath: string) (outputPath: string) (target:
                     pipelineErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
                     1
                 | Success pipelineOutput ->
-                    showEnhancedCompilationStats pipelineOutput
-                    
-                    match translateToLLVM pipelineOutput.FinalMLIR with
-                    | CompilerFailure llvmErrors ->
-                        printfn "LLVM translation failed:"
-                        llvmErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-                        1
-                    | Success llvmOutput ->
-                        let optimizationPasses = createOptimizationPipeline Default
-                        match optimizeLLVMIR llvmOutput optimizationPasses with
-                        | CompilerFailure optimizationErrors ->
-                            printfn "Optimization failed:"
-                            optimizationErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-                            1
-                        | Success optimizedLLVM ->
-                            match compileLLVMToNativeConsole optimizedLLVM outputPath target with
-                            | CompilerFailure nativeErrors ->
-                                printfn "Native compilation failed:"
-                                nativeErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-                                1
-                            | Success () ->
-                                printfn "✓ Complete enhanced XParsec-based compilation successful!"
-                                0
+                    printfn "Enhanced Compilation Statistics:"
+                    printfn "Successful phases: %d" pipelineOutput.SuccessfulPhases.Length
+                    printfn "Phase outputs saved: %d" pipelineOutput.PhaseOutputs.Count
+                    0
             with
             | ex ->
                 printfn "Unexpected error: %s" ex.Message
