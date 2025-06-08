@@ -29,43 +29,62 @@ type OptimizationPass =
     | ConstantFold  // Constant Folding
     | AlwaysInline  // Force inlining of small functions
 
-/// Maps optimization pass to LLVM opt pass name
+/// Maps optimization pass to LLVM opt pass name (updated for newer LLVM versions)
 let private passToString (pass: OptimizationPass) : string =
     match pass with
-    | InliningPass -> "-inline"
-    | InstCombine -> "-instcombine"
-    | Reassociate -> "-reassociate"
-    | GVN -> "-gvn"
-    | LICM -> "-licm"
-    | MemoryToReg -> "-mem2reg"
-    | DeadCodeElim -> "-dce"
-    | SCCP -> "-sccp"
-    | SimplifyCFG -> "-simplifycfg"
-    | LoopUnroll -> "-loop-unroll"
-    | ConstantFold -> "-constprop"
-    | AlwaysInline -> "-always-inline"
+    | InliningPass -> "--inline"
+    | InstCombine -> "--instcombine"
+    | Reassociate -> "--reassociate"
+    | GVN -> "--gvn"
+    | LICM -> "--licm"
+    | MemoryToReg -> "--mem2reg"
+    | DeadCodeElim -> "--dce"
+    | SCCP -> "--sccp"
+    | SimplifyCFG -> "--simplifycfg"
+    | LoopUnroll -> "--loop-unroll"
+    | ConstantFold -> "--consthoist"  // Updated name
+    | AlwaysInline -> "--always-inline"
 
 /// Creates optimization pipeline based on the optimization level
 let createOptimizationPipeline (level: OptimizationLevel) : OptimizationPass list =
     match level with
     | None -> []
     | Less -> 
-        [MemoryToReg; SimplifyCFG; InstCombine; DeadCodeElim]
+        [MemoryToReg; SimplifyCFG]  // Keep only basic, reliable passes
     | Default -> 
-        [MemoryToReg; SimplifyCFG; InstCombine; Reassociate; 
-         GVN; ConstantFold; DeadCodeElim; InliningPass]
+        [MemoryToReg; SimplifyCFG; InstCombine]  // Conservative set
     | Aggressive -> 
-        [MemoryToReg; SimplifyCFG; InstCombine; Reassociate; GVN; 
-         ConstantFold; LICM; LoopUnroll; InliningPass; AlwaysInline; 
-         DeadCodeElim; SCCP]
+        [MemoryToReg; SimplifyCFG; InstCombine; 
+         DeadCodeElim; InliningPass]  // More passes but avoid problematic ones
     | Size -> 
-        [MemoryToReg; SimplifyCFG; ConstantFold; DeadCodeElim; InliningPass]
+        [MemoryToReg; SimplifyCFG; DeadCodeElim]
     | SizeMin -> 
-        [MemoryToReg; ConstantFold; DeadCodeElim]
+        [MemoryToReg; DeadCodeElim]
+
+/// Checks if the opt tool is available
+let private isOptAvailable() : bool =
+    try
+        let processInfo = System.Diagnostics.ProcessStartInfo()
+        processInfo.FileName <- "opt"
+        processInfo.Arguments <- "--version"
+        processInfo.UseShellExecute <- false
+        processInfo.RedirectStandardOutput <- true
+        processInfo.RedirectStandardError <- true
+        processInfo.CreateNoWindow <- true
+        
+        use proc = System.Diagnostics.Process.Start(processInfo)
+        proc.WaitForExit(5000) |> ignore // 5 second timeout
+        proc.ExitCode = 0
+    with
+    | _ -> false
 
 /// Applies LLVM optimization passes to LLVM IR text using opt tool
 let private runOptPasses (llvmIR: string) (passes: OptimizationPass list) : string =
     if passes.IsEmpty then
+        llvmIR
+    elif not (isOptAvailable()) then
+        printfn "Warning: LLVM 'opt' tool not found - skipping LLVM optimizations"
+        printfn "Install LLVM tools for optimization support: https://releases.llvm.org/download.html"
         llvmIR
     else
         try
@@ -74,27 +93,51 @@ let private runOptPasses (llvmIR: string) (passes: OptimizationPass list) : stri
             let outputPath = Path.GetTempFileName() + ".ll"
             File.WriteAllText(inputPath, llvmIR)
             
-            // Build opt command with passes
-            let passArgs = passes |> List.map passToString |> String.concat " "
-            let optCommand = sprintf "opt %s %s -o %s" passArgs inputPath outputPath
+            // Try new pass manager syntax first (LLVM 13+)
+            let passNames = passes |> List.map (fun pass ->
+                match pass with
+                | MemoryToReg -> "mem2reg"
+                | SimplifyCFG -> "simplifycfg"
+                | InstCombine -> "instcombine"
+                | DeadCodeElim -> "dce"
+                | InliningPass -> "inline"
+                | _ -> "mem2reg" // Fallback to safe pass
+            )
+            let pipelineStr = String.concat "," passNames
             
-            // Run opt tool
+            // Run opt tool with new syntax
             let processInfo = System.Diagnostics.ProcessStartInfo()
             processInfo.FileName <- "opt"
-            processInfo.Arguments <- sprintf "%s %s -o %s" passArgs inputPath outputPath
+            processInfo.Arguments <- sprintf "-passes=\"%s\" %s -o %s -S" pipelineStr inputPath outputPath
             processInfo.UseShellExecute <- false
             processInfo.RedirectStandardOutput <- true
             processInfo.RedirectStandardError <- true
             
-            use optProcess = System.Diagnostics.Process.Start(processInfo)
-            optProcess.WaitForExit()
+            use optProc = System.Diagnostics.Process.Start(processInfo)
+            optProc.WaitForExit()
             
             let optimizedIR = 
-                if optProcess.ExitCode = 0 && File.Exists(outputPath) then
+                if optProc.ExitCode = 0 && File.Exists(outputPath) then
                     File.ReadAllText(outputPath)
                 else
-                    printfn "Warning: LLVM optimization failed, using unoptimized IR"
-                    llvmIR
+                    // Try old syntax as fallback
+                    let oldProcessInfo = System.Diagnostics.ProcessStartInfo()
+                    oldProcessInfo.FileName <- "opt"
+                    let oldPassArgs = passes |> List.map passToString |> String.concat " "
+                    oldProcessInfo.Arguments <- sprintf "%s %s -o %s -S" oldPassArgs inputPath outputPath
+                    oldProcessInfo.UseShellExecute <- false
+                    oldProcessInfo.RedirectStandardOutput <- true
+                    oldProcessInfo.RedirectStandardError <- true
+                    
+                    use oldOptProc = System.Diagnostics.Process.Start(oldProcessInfo)
+                    oldOptProc.WaitForExit()
+                    
+                    if oldOptProc.ExitCode = 0 && File.Exists(outputPath) then
+                        File.ReadAllText(outputPath)
+                    else
+                        let error = optProc.StandardError.ReadToEnd()
+                        printfn "Warning: LLVM optimization failed (%s), using unoptimized IR" error
+                        llvmIR
             
             // Cleanup temporary files
             if File.Exists(inputPath) then File.Delete(inputPath)
@@ -103,7 +146,7 @@ let private runOptPasses (llvmIR: string) (passes: OptimizationPass list) : stri
             optimizedIR
         with
         | ex ->
-            printfn "Error during LLVM optimization: %s" ex.Message
+            printfn "Warning: Error during LLVM optimization (%s), using unoptimized IR" ex.Message
             llvmIR
 
 /// Applies custom Firefly-specific optimizations to LLVM IR

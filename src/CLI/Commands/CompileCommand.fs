@@ -2,6 +2,7 @@
 
 open System
 open System.IO
+open System.Runtime.InteropServices
 open Argu
 open Dabbit.Parsing
 open Dabbit.Closures
@@ -24,10 +25,21 @@ with
             match this with
             | Input _ -> "Input F# source file (required)"
             | Output _ -> "Output binary path (required)"
-            | Target _ -> "Target platform (e.g. x86_64-pc-linux-gnu, embedded)"
+            | Target _ -> "Target platform (e.g. x86_64-pc-windows-msvc, x86_64-pc-linux-gnu, embedded)"
             | Optimize _ -> "Optimization level (none, less, default, aggressive, size)"
             | Config _ -> "Path to configuration file (firefly.toml)"
             | Keep_Intermediates -> "Keep intermediate files (MLIR, LLVM IR)"
+
+/// Gets the default target for the current platform
+let private getDefaultTarget() =
+    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+        "x86_64-w64-windows-gnu"  // Use GNU to match LLVM default
+    elif RuntimeInformation.IsOSPlatform(OSPlatform.Linux) then
+        "x86_64-pc-linux-gnu"
+    elif RuntimeInformation.IsOSPlatform(OSPlatform.OSX) then
+        "x86_64-apple-darwin"
+    else
+        "x86_64-w64-windows-gnu"  // Default fallback
 
 /// Executes the compilation process
 let compile (args: ParseResults<CompileArgs>) =
@@ -46,7 +58,7 @@ let compile (args: ParseResults<CompileArgs>) =
             printfn "Error: Output path is required"
             exit 1
     
-    let target = args.TryGetResult Target |> Option.defaultValue "x86_64-pc-linux-gnu"
+    let target = args.TryGetResult Target |> Option.defaultValue (getDefaultTarget())
     let optimizeLevel = args.TryGetResult Optimize |> Option.defaultValue "default"
     let configPath = args.TryGetResult Config |> Option.defaultValue "firefly.toml"
     let keepIntermediates = args.Contains Keep_Intermediates
@@ -105,8 +117,8 @@ let compile (args: ParseResults<CompileArgs>) =
             let mlirPath = Path.Combine(basePath, baseName + ".mlir")
             let llvmPath = Path.Combine(basePath, baseName + ".ll")
 
-            File.WriteAllText(mlirPath, mlirText)
-            File.WriteAllText(llvmPath, optimizedLLVM.LLVMIRText)
+            File.WriteAllText(mlirPath, mlirText, System.Text.Encoding.UTF8)
+            File.WriteAllText(llvmPath, optimizedLLVM.LLVMIRText, System.Text.Encoding.UTF8)
 
             printfn "Saved intermediate files:"
             printfn "  MLIR: %s" mlirPath
@@ -114,7 +126,7 @@ let compile (args: ParseResults<CompileArgs>) =
 
         // Compile LLVM IR to native code
         printfn "Compiling to native code for target '%s'..." target
-        let success = LLVMTranslator.compileLLVMToNative optimizedLLVM outputPath
+        let success = LLVMTranslator.compileLLVMToNative optimizedLLVM outputPath target
 
         if success then
             printfn "Compilation successful: %s" outputPath
