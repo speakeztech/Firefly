@@ -12,7 +12,7 @@ type MLIRType =
     | Struct of elements: MLIRType list
 
 /// Maps Oak AST types to corresponding MLIR types
-let mapOakTypeToMLIR (oakType: OakType) : MLIRType =
+let rec mapOakTypeToMLIR (oakType: OakType) : MLIRType =
     match oakType with
     | IntType -> Integer 32
     | FloatType -> Float 32
@@ -33,7 +33,7 @@ let mapOakTypeToMLIR (oakType: OakType) : MLIRType =
         Struct [Integer 8; Integer 64] // Placeholder size
 
 /// Converts MLIR type to string representation
-let mlirTypeToString (mlirType: MLIRType) : string =
+and mlirTypeToString (mlirType: MLIRType) : string =
     match mlirType with
     | Integer width -> sprintf "i%d" width
     | Float width -> sprintf "f%d" width
@@ -54,7 +54,7 @@ let mlirTypeToString (mlirType: MLIRType) : string =
         sprintf "!llvm.struct<(%s)>" elementStrs
 
 /// Gets the size in bytes of an MLIR type (for layout calculations)
-let getTypeSize (mlirType: MLIRType) : int =
+and getTypeSize (mlirType: MLIRType) : int =
     match mlirType with
     | Integer 1 -> 1  // i1 (bool)
     | Integer 8 -> 1  // i8
@@ -71,7 +71,7 @@ let getTypeSize (mlirType: MLIRType) : int =
     | Struct elements -> elements |> List.sumBy getTypeSize
 
 /// Checks if a type requires heap allocation
-let requiresHeapAllocation (mlirType: MLIRType) : bool =
+and requiresHeapAllocation (mlirType: MLIRType) : bool =
     match mlirType with
     | Integer _ | Float _ | Void -> false
     | MemRef(_, shape) -> shape.IsEmpty // Dynamic arrays need heap
@@ -79,7 +79,7 @@ let requiresHeapAllocation (mlirType: MLIRType) : bool =
     | Struct elements -> elements |> List.exists requiresHeapAllocation
 
 /// Gets the alignment requirement for a type
-let getTypeAlignment (mlirType: MLIRType) : int =
+and getTypeAlignment (mlirType: MLIRType) : int =
     match mlirType with
     | Integer 1 -> 1
     | Integer width when width <= 8 -> 1
@@ -97,7 +97,7 @@ let getTypeAlignment (mlirType: MLIRType) : int =
         else elements |> List.map getTypeAlignment |> List.max
 
 /// Determines if two MLIR types are compatible for assignment/comparison
-let areTypesCompatible (type1: MLIRType) (type2: MLIRType) : bool =
+and areTypesCompatible (type1: MLIRType) (type2: MLIRType) : bool =
     match type1, type2 with
     | Integer w1, Integer w2 -> w1 = w2
     | Float w1, Float w2 -> w1 = w2

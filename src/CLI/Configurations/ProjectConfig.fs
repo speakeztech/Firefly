@@ -46,6 +46,48 @@ let defaultConfig = {
     }
 }
 
+/// Helper function to safely get a string value from a TOML table
+let private getStringValue (table: TomlTable) (key: string) (defaultValue: string) : string =
+    if table.ContainsKey(key) then
+        match table.[key] with
+        | :? string as str -> str
+        | obj -> obj.ToString()
+    else
+        defaultValue
+
+/// Helper function to safely get a boolean value from a TOML table
+let private getBoolValue (table: TomlTable) (key: string) (defaultValue: bool) : bool =
+    if table.ContainsKey(key) then
+        match table.[key] with
+        | :? bool as b -> b
+        | :? string as str -> String.Equals(str, "true", StringComparison.OrdinalIgnoreCase)
+        | _ -> defaultValue
+    else
+        defaultValue
+
+/// Helper function to safely get an integer value from a TOML table
+let private getIntValue (table: TomlTable) (key: string) (defaultValue: int option) : int option =
+    if table.ContainsKey(key) then
+        match table.[key] with
+        | :? int as i -> Some i
+        | :? int64 as i64 -> Some (int i64)
+        | :? string as str -> 
+            match Int32.TryParse(str) with
+            | (true, value) -> Some value
+            | _ -> defaultValue
+        | _ -> defaultValue
+    else
+        defaultValue
+
+/// Helper function to safely get a nested table from a TOML table
+let private getTable (rootTable: TomlTable) (key: string) : TomlTable option =
+    if rootTable.ContainsKey(key) then
+        match rootTable.[key] with
+        | :? TomlTable as table -> Some table
+        | _ -> None
+    else
+        None
+
 /// Parses a TOML configuration file
 let parseConfigFile (filePath: string) : FireflyConfig =
     if not (File.Exists(filePath)) then
@@ -56,59 +98,35 @@ let parseConfigFile (filePath: string) : FireflyConfig =
             let model = Toml.ToModel(tomlString)
 
             // Parse package section
-            let packageTable = model.GetTable("package")
+            let packageTable = getTable model "package"
             let packageName = 
-                if packageTable <> null && packageTable.ContainsKey("name") then
-                    packageTable.["name"].ToString()
-                else
-                    defaultConfig.PackageName
+                match packageTable with
+                | Some table -> getStringValue table "name" defaultConfig.PackageName
+                | None -> defaultConfig.PackageName
 
             let version =
-                if packageTable <> null && packageTable.ContainsKey("version") then
-                    packageTable.["version"].ToString()
-                else
-                    defaultConfig.Version
+                match packageTable with
+                | Some table -> getStringValue table "version" defaultConfig.Version
+                | None -> defaultConfig.Version
 
             // Parse compilation section
-            let compilationTable = model.GetTable("compilation")
+            let compilationTable = getTable model "compilation"
             let compilation = 
-                if compilationTable = null then
-                    defaultConfig.Compilation
-                else
+                match compilationTable with
+                | None -> defaultConfig.Compilation
+                | Some table ->
                     {
-                        RequireStaticMemory = 
-                            if compilationTable.ContainsKey("require_static_memory") then
-                                compilationTable.["require_static_memory"] :?> bool
-                            else 
-                                defaultConfig.Compilation.RequireStaticMemory
-                        EliminateClosures = 
-                            if compilationTable.ContainsKey("eliminate_closures") then
-                                compilationTable.["eliminate_closures"] :?> bool
-                            else 
-                                defaultConfig.Compilation.EliminateClosures
-                        OptimizationLevel = 
-                            if compilationTable.ContainsKey("optimize") then
-                                compilationTable.["optimize"].ToString()
-                            else 
-                                defaultConfig.Compilation.OptimizationLevel
-                        StackLimit = 
-                            if compilationTable.ContainsKey("max_stack_size") then
-                                Some(Convert.ToInt32(compilationTable.["max_stack_size"]))
-                            else 
-                                defaultConfig.Compilation.StackLimit
-                        KeepIntermediates = 
-                            if compilationTable.ContainsKey("keep_intermediates") then
-                                compilationTable.["keep_intermediates"] :?> bool
-                            else 
-                                defaultConfig.Compilation.KeepIntermediates
+                        RequireStaticMemory = getBoolValue table "require_static_memory" defaultConfig.Compilation.RequireStaticMemory
+                        EliminateClosures = getBoolValue table "eliminate_closures" defaultConfig.Compilation.EliminateClosures
+                        OptimizationLevel = getStringValue table "optimize" defaultConfig.Compilation.OptimizationLevel
+                        StackLimit = getIntValue table "max_stack_size" defaultConfig.Compilation.StackLimit
+                        KeepIntermediates = getBoolValue table "keep_intermediates" defaultConfig.Compilation.KeepIntermediates
                         UseLTO = 
-                            if compilationTable.ContainsKey("lto") then
-                                compilationTable.["lto"].ToString().ToLowerInvariant() = "full"
-                            else 
-                                defaultConfig.Compilation.UseLTO
+                            let ltoValue = getStringValue table "lto" "false"
+                            ltoValue.ToLowerInvariant() = "full"
                     }
 
-            // Parse dependencies
+            // Parse dependencies (placeholder for now)
             let dependencies = []
 
             { 

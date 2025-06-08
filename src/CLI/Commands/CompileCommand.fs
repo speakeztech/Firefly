@@ -12,8 +12,8 @@ open CLI.Configurations
 
 /// Command line arguments for the compile command
 type CompileArgs =
-    | [<Mandatory>] Input of string
-    | [<Mandatory>] Output of string
+    | Input of string
+    | Output of string
     | Target of string
     | Optimize of string
     | Config of string
@@ -22,8 +22,8 @@ with
     interface IArgParserTemplate with
         member this.Usage =
             match this with
-            | Input _ -> "Input F# source file"
-            | Output _ -> "Output binary path"
+            | Input _ -> "Input F# source file (required)"
+            | Output _ -> "Output binary path (required)"
             | Target _ -> "Target platform (e.g. x86_64-pc-linux-gnu, embedded)"
             | Optimize _ -> "Optimization level (none, less, default, aggressive, size)"
             | Config _ -> "Path to configuration file (firefly.toml)"
@@ -32,8 +32,20 @@ with
 /// Executes the compilation process
 let compile (args: ParseResults<CompileArgs>) =
     // Parse arguments
-    let inputPath = args.GetResult Input
-    let outputPath = args.GetResult Output
+    let inputPath = 
+        match args.TryGetResult Input with
+        | Some path -> path
+        | None -> 
+            printfn "Error: Input file is required"
+            exit 1
+    
+    let outputPath = 
+        match args.TryGetResult Output with
+        | Some path -> path
+        | None -> 
+            printfn "Error: Output path is required"
+            exit 1
+    
     let target = args.TryGetResult Target |> Option.defaultValue "x86_64-pc-linux-gnu"
     let optimizeLevel = args.TryGetResult Optimize |> Option.defaultValue "default"
     let configPath = args.TryGetResult Config |> Option.defaultValue "firefly.toml"

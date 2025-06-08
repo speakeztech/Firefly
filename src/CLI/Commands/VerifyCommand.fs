@@ -5,7 +5,7 @@ open Argu
 
 /// Command line arguments for the verify command
 type VerifyArgs =
-    | [<Mandatory>] Binary of string
+    | Binary of string
     | No_Heap
     | Max_Stack of int
     | Show_Symbol_Deps
@@ -13,7 +13,7 @@ with
     interface IArgParserTemplate with
         member this.Usage =
             match this with
-            | Binary _ -> "Path to binary to verify"
+            | Binary _ -> "Path to binary to verify (required)"
             | No_Heap -> "Verify the binary uses zero heap allocations"
             | Max_Stack n -> "Verify the binary's maximum stack usage is below limit"
             | Show_Symbol_Deps -> "Show all external symbol dependencies"
@@ -21,7 +21,13 @@ with
 /// Verifies a compiled binary meets the specified constraints
 let verify (args: ParseResults<VerifyArgs>) =
     // Parse arguments
-    let binaryPath = args.GetResult Binary
+    let binaryPath = 
+        match args.TryGetResult Binary with
+        | Some path -> path
+        | None -> 
+            printfn "Error: Binary path is required"
+            exit 1
+    
     let verifyNoHeap = args.Contains No_Heap
     let maxStackLimit = args.TryGetResult Max_Stack
     let showSymbolDeps = args.Contains Show_Symbol_Deps

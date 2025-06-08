@@ -18,8 +18,8 @@
     <Compile Include="Dabbit/BindingMetadata/BindingAttributes.fs" />
 
     <!-- MLIR Generation components -->
-    <Compile Include="Core/MLIRGeneration/MLIRContext.fs" />
     <Compile Include="Core/MLIRGeneration/Dialect.fs" />
+    <Compile Include="Core/MLIRGeneration/MLIRContext.fs" />
     <Compile Include="Core/MLIRGeneration/TypeSystem.fs" />
     <Compile Include="Core/MLIRGeneration/Operations.fs" />
     <Compile Include="Core/MLIRGeneration/XParsecMLIRGenerator.fs" />
@@ -38,6 +38,7 @@
 
   <ItemGroup>
     <!-- Core F# dependencies -->
+    <PackageReference Update="FSharp.Core" Version="[9.0.300]" />
     <PackageReference Include="Argu" Version="6.1.1" />
     <PackageReference Include="FSharp.Compiler.Service" Version="43.9.300" />
     <PackageReference Include="Fantomas.Core" Version="6.2.3" />

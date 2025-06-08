@@ -2,12 +2,13 @@
 
 open System
 open Argu
-open CLI.Commands
+open CLI.Commands.CompileCommand
+open CLI.Commands.VerifyCommand
 
 /// Command line arguments for Firefly CLI
 type FireflyArgs =
-    | [<CliPrefix(CliPrefix.None)>] Compile of ParseResults<CompileArgs>
-    | [<CliPrefix(CliPrefix.None)>] Verify of ParseResults<VerifyArgs>
+    | Compile of ParseResults<CompileArgs>
+    | Verify of ParseResults<VerifyArgs>
     | Version
 with
     interface IArgParserTemplate with
@@ -34,8 +35,8 @@ let main argv =
         | p when p.Contains Version -> showVersion()
         | p when p.TryGetSubCommand().IsSome ->
             match p.GetSubCommand() with
-            | Compile args -> CompileCommand.compile args
-            | Verify args -> VerifyCommand.verify args
+            | Compile args -> compile args
+            | Verify args -> verify args
             | _ -> failwith "Unexpected subcommand"
         | _ -> 
             printfn "%s" (parser.PrintUsage())

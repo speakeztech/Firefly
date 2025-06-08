@@ -20,7 +20,7 @@ let private resetVarCounter() =
     varCounter <- 0
 
 /// Converts Oak type to MLIR type string
-let private oakTypeToMLIRString (oakType: OakType) : string =
+let rec private oakTypeToMLIRString (oakType: OakType) : string =
     match oakType with
     | IntType -> "i32"
     | FloatType -> "f32"
