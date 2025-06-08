@@ -128,12 +128,12 @@ let parseMessage (buffer: ReadOnlySpan<byte>) =
 ```
 firefly/
 ├── src/
-│   ├── Firefly.CLI/              # Orchestrating compiler CLI
+│   ├── CLI/              # Orchestrating compiler CLI
 │   │   ├── Program.fs            # CLI entry point
 │   │   ├── Commands/             # Build, verify, profile commands
 │   │   └── Configuration/        # TOML project configuration
 │   │
-│   ├── Firefly.Core/             # Core compilation pipeline
+│   ├── Core/             # Core compilation pipeline
 │   │   ├── Parsing/              # F# to Oak AST conversion
 │   │   ├── StaticAnalysis/       # Allocation & binding analysis
 │   │   ├── MLIRGeneration/       # XParsec-based MLIR builders

@@ -1,0 +1,52 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>firefly</ToolCommandName>
+    <PackageOutputPath>./nupkg</PackageOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Dabbit namespace modules -->  
+    <Compile Include="Dabbit/Parsing/OakAst.fs" />
+    <Compile Include="Dabbit/Parsing/AstConverter.fs" />
+    <Compile Include="Dabbit/Parsing/Translator.fs" />
+    <Compile Include="Dabbit/Closures/ClosureTransformer.fs" />
+    <Compile Include="Dabbit/UnionLayouts/FixedLayoutCompiler.fs" />
+    <Compile Include="Dabbit/BindingMetadata/BindingAttributes.fs" />
+
+    <!-- MLIR Generation components -->
+    <Compile Include="Core/MLIRGeneration/MLIRContext.fs" />
+    <Compile Include="Core/MLIRGeneration/Dialect.fs" />
+    <Compile Include="Core/MLIRGeneration/TypeSystem.fs" />
+    <Compile Include="Core/MLIRGeneration/Operations.fs" />
+    <Compile Include="Core/MLIRGeneration/XParsecMLIRGenerator.fs" />
+
+    <!-- MLIR/LLVM Conversion components -->
+    <Compile Include="Core/Conversion/LoweringPipeline.fs" />
+    <Compile Include="Core/Conversion/LLVMTranslator.fs" />
+    <Compile Include="Core/Conversion/OptimizationPipeline.fs" />
+
+    <!-- CLI Tool components -->
+    <Compile Include="CLI/Configurations/ProjectConfig.fs" />
+    <Compile Include="CLI/Commands/CompileCommand.fs" />
+    <Compile Include="CLI/Commands/VerifyCommand.fs" />
+    <Compile Include="CLI/Program.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Core F# dependencies -->
+    <PackageReference Include="Argu" Version="6.1.1" />
+    <PackageReference Include="FSharp.Compiler.Service" Version="43.9.300" />
+    <PackageReference Include="Fantomas.Core" Version="6.2.3" />
+    <PackageReference Include="Fantomas.FCS" Version="6.2.3" />
+    <PackageReference Include="XParsec" Version="0.1.0" />
+    <PackageReference Include="Tomlyn" Version="0.16.2" />
+
+    <!-- LLVM/MLIR bindings -->
+    <PackageReference Include="Llvm.NET" Version="8.0.1" />
+  </ItemGroup>
+
+</Project>
