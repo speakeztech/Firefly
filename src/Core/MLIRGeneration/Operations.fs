@@ -25,14 +25,30 @@ let buildArithmeticOp (op: string) (lhs: string) (rhs: string) (resultType: MLIR
 
 /// Creates function definition operation
 let buildFuncOp (name: string) (args: (string * MLIRType) list) (returnType: MLIRType) =
+    let argTypeStrs = args |> List.map (fun (_, argType) -> 
+        match argType with
+        | Integer width -> sprintf "i%d" width
+        | Float width -> sprintf "f%d" width
+        | Void -> "()"
+        | _ -> "i32")
+    
+    let returnTypeStr = 
+        match returnType with
+        | Integer width -> sprintf "i%d" width
+        | Float width -> sprintf "f%d" width
+        | Void -> "()"
+        | _ -> "i32"
+    
+    let functionTypeStr = sprintf "(%s) -> %s" (String.concat ", " argTypeStrs) returnTypeStr
+    
     {
-        Name = "func"
+        Name = "func.func"
         Operands = []
         Results = []
         Attributes = 
             Map.ofList [
                 "sym_name", sprintf "\"%s\"" name
-                "function_type", "()"
+                "function_type", functionTypeStr
             ]
         ResultTypes = []
     }
@@ -57,176 +73,67 @@ let buildReturnOp (values: string list) =
         Attributes = Map.empty
         ResultTypes = []
     }
-open Dabbit.Parsing.OakAst
-open Firefly.Core.MLIRGeneration.TypeSystem
 
-/// Represents an MLIR operation with its attributes and results
-type MLIROperation = {
-    Name: string
-    Operands: string list
-    Results: string list
-    Attributes: Map<string, string>
-    ResultTypes: MLIRType list
-}
-
-/// Builds MLIR operations for different Oak AST expressions
-let buildArithmeticOp (op: string) (lhs: string) (rhs: string) (resultType: MLIRType) =
-    let resultId = "%result"
+/// Creates constant operation
+let buildConstantOp (value: string) (mlirType: MLIRType) =
+    let resultId = "%const"
+    let typeStr = 
+        match mlirType with
+        | Integer width -> sprintf "i%d" width
+        | Float width -> sprintf "f%d" width
+        | _ -> "i32"
+    
     {
-        Name = sprintf "arith.%s" op
-        Operands = [lhs; rhs]
+        Name = "arith.constant"
+        Operands = []
+        Results = [resultId]
+        Attributes = Map.ofList ["value", value]
+        ResultTypes = [mlirType]
+    }
+
+/// Creates load operation
+let buildLoadOp (memref: string) (resultType: MLIRType) =
+    let resultId = "%loaded"
+    {
+        Name = "memref.load"
+        Operands = [memref]
         Results = [resultId]
         Attributes = Map.empty
         ResultTypes = [resultType]
     }
 
-/// Creates function definition operation
-let buildFuncOp (name: string) (args: (string * MLIRType) list) (returnType: MLIRType) =
+/// Creates store operation
+let buildStoreOp (value: string) (memref: string) =
     {
-        Name = "func"
-        Operands = []
+        Name = "memref.store"
+        Operands = [value; memref]
         Results = []
-        Attributes = 
-            Map.ofList [
-                "sym_name", sprintf "\"%s\"" name
-                "function_type", "()"
-            ]
+        Attributes = Map.empty
         ResultTypes = []
     }
-module Core.MLIRGeneration.Operations
-module Core.MLIRGeneration.Operations
 
-open Dabbit.Parsing.OakAst
-open Core.MLIRGeneration.TypeSystem
-
-/// Represents an MLIR operation with its attributes and results
-type MLIROperation = {
-    Name: string
-    Operands: string list
-    Results: string list
-    Attributes: Map<string, string>
-    ResultTypes: MLIRType list
-}
-
-/// Builds MLIR operations for different Oak AST expressions
-let buildArithmeticOp (op: string) (lhs: string) (rhs: string) (resultType: MLIRType) =
-    let resultId = "%result"
+/// Creates alloca operation for stack allocation
+let buildAllocaOp (elementType: MLIRType) (size: int option) =
+    let resultId = "%alloca"
+    let sizeStr = match size with Some s -> sprintf "%d x " s | None -> ""
+    let typeStr = match elementType with
+                  | Integer width -> sprintf "i%d" width
+                  | Float width -> sprintf "f%d" width
+                  | _ -> "i32"
+    
     {
-        Name = sprintf "arith.%s" op
-        Operands = [lhs; rhs]
+        Name = "memref.alloca"
+        Operands = []
         Results = [resultId]
-        Attributes = Map.empty
-        ResultTypes = [resultType]
+        Attributes = Map.ofList ["element_type", sprintf "%s%s" sizeStr typeStr]
+        ResultTypes = [MemRef(elementType, [])]
     }
 
-/// Creates function definition operation
-let buildFuncOp (name: string) (args: (string * MLIRType) list) (returnType: MLIRType) =
-    {
-        Name = "func"
-        Operands = []
-        Results = []
-        Attributes = 
-            Map.ofList [
-                "sym_name", sprintf "\"%s\"" name
-                "function_type", "()"
-            ]
-        ResultTypes = []
-    }
-
-/// Creates call operation
-let buildCallOp (funcName: string) (args: string list) (resultTypes: MLIRType list) =
-    let results = if resultTypes.IsEmpty then [] else ["%result"]
-    {
-        Name = "func.call"
-        Operands = args
-        Results = results
-        Attributes = Map.ofList ["callee", sprintf "\"%s\"" funcName]
-        ResultTypes = resultTypes
-    }
-
-/// Creates return operation
-let buildReturnOp (values: string list) =
-    {
-        Name = "func.return"
-        Operands = values
-        Results = []
-        Attributes = Map.empty
-        ResultTypes = []
-    }
-open Dabbit.Parsing.OakAst
-open Core.MLIRGeneration.TypeSystem
-
-/// Represents an MLIR operation with its attributes and results
-type MLIROperation = {
-    Name: string
-    Operands: string list
-    Results: string list
-    Attributes: Map<string, string>
-    ResultTypes: MLIRType list
-}
-
-/// Builds MLIR operations for different Oak AST expressions
-let buildArithmeticOp (op: string) (lhs: string) (rhs: string) (resultType: MLIRType) =
-    let resultId = "%result"
-    {
-        Name = sprintf "arith.%s" op
-        Operands = [lhs; rhs]
-        Results = [resultId]
-        Attributes = Map.empty
-        ResultTypes = [resultType]
-    }
-
-/// Creates function definition operation
-let buildFuncOp (name: string) (args: (string * MLIRType) list) (returnType: MLIRType) =
-    {
-        Name = "func"
-        Operands = []
-        Results = []
-        Attributes = 
-            Map.ofList [
-                "sym_name", sprintf "\"%s\"" name
-                "function_type", "()"
-            ]
-        ResultTypes = []
-    }
-
-/// Creates call operation
-let buildCallOp (funcName: string) (args: string list) (resultTypes: MLIRType list) =
-    let results = if resultTypes.IsEmpty then [] else ["%result"]
-    {
-        Name = "func.call"
-        Operands = args
-        Results = results
-        Attributes = Map.ofList ["callee", sprintf "\"%s\"" funcName]
-        ResultTypes = resultTypes
-    }
-
-/// Creates return operation
-let buildReturnOp (values: string list) =
-    {
-        Name = "func.return"
-        Operands = values
-        Results = []
-        Attributes = Map.empty
-        ResultTypes = []
-    }
-/// Creates call operation
-let buildCallOp (funcName: string) (args: string list) (resultTypes: MLIRType list) =
-    let results = if resultTypes.IsEmpty then [] else ["%result"]
-    {
-        Name = "func.call"
-        Operands = args
-        Results = results
-        Attributes = Map.ofList ["callee", sprintf "\"%s\"" funcName]
-        ResultTypes = resultTypes
-    }
-
-/// Creates return operation
-let buildReturnOp (values: string list) =
-    {
-        Name = "func.return"
-        Operands = values
-        Results = []
-        Attributes = Map.empty
-        ResultTypes = []
-    }
+/// Converts MLIROperation to string representation
+let operationToString (op: MLIROperation) : string =
+    let resultStr = if op.Results.IsEmpty then "" else sprintf "%s = " (String.concat ", " op.Results)
+    let operandStr = if op.Operands.IsEmpty then "" else sprintf "(%s)" (String.concat ", " op.Operands)
+    let attrPairs = op.Attributes |> Map.toList |> List.map (fun (k, v) -> sprintf "%s = %s" k v)
+    let attrStr = if attrPairs.IsEmpty then "" else sprintf " {%s}" (String.concat ", " attrPairs)
+    
+    sprintf "%s%s%s%s" resultStr op.Name operandStr attrStr

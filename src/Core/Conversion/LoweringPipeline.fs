@@ -1,7 +1,8 @@
 ﻿module Core.Conversion.LoweringPipeline
 
+open System
+open System.Text.RegularExpressions
 open Core.MLIRGeneration.Dialect
-open Dabbit.Parsing.Translator
 
 /// Represents a lowering pass in the MLIR pipeline
 type LoweringPass = {
@@ -19,110 +20,68 @@ let createStandardLoweringPipeline() : LoweringPass list = [
     { Name = "reconcile-unrealized-casts"; SourceDialect = Standard; TargetDialect = Standard; PassOptions = Map.empty }
 ]
 
-/// Applies the lowering pipeline to MLIR text
-let applyLoweringPipeline (mlirModule: string) : string =
-    // In a real implementation, this would invoke the MLIR optimizer with
-    // the specified passes. For now, we'll simulate the output.
-
-    // Replace high-level operations with LLVM dialect operations
-    let llvmDialectModule = mlirModule
+/// Converts function dialect operations to LLVM dialect
+let private convertFuncToLLVM (mlirText: string) : string =
+    mlirText
         .Replace("func.func", "llvm.func")
-        .Replace("arith.constant", "llvm.constant")
         .Replace("func.return", "llvm.return")
-module Core.Conversion.LoweringPipeline
-module Core.Conversion.LoweringPipeline
+        .Replace("func.call", "llvm.call")
 
-open Core.MLIRGeneration.Dialect
-open Dabbit.Parsing.Translator
+/// Converts arithmetic dialect operations to LLVM dialect  
+let private convertArithToLLVM (mlirText: string) : string =
+    let patterns = [
+        (@"arith\.addi\s+(%\w+),\s*(%\w+)\s*:\s*(\w+)", "llvm.add $1, $2 : $3")
+        (@"arith\.subi\s+(%\w+),\s*(%\w+)\s*:\s*(\w+)", "llvm.sub $1, $2 : $3")
+        (@"arith\.muli\s+(%\w+),\s*(%\w+)\s*:\s*(\w+)", "llvm.mul $1, $2 : $3")
+        (@"arith\.divsi\s+(%\w+),\s*(%\w+)\s*:\s*(\w+)", "llvm.sdiv $1, $2 : $3")
+        (@"arith\.constant\s+(\d+)\s*:\s*(\w+)", "llvm.mlir.constant($1) : $2")
+    ]
+    
+    patterns
+    |> List.fold (fun text (pattern, replacement) ->
+        Regex.Replace(text, pattern, replacement)
+    ) mlirText
 
-/// Represents a lowering pass in the MLIR pipeline
-type LoweringPass = {
-    Name: string
-    SourceDialect: MLIRDialect
-    TargetDialect: MLIRDialect
-    PassOptions: Map<string, string>
-}
+/// Converts standard dialect operations to LLVM dialect
+let private convertStdToLLVM (mlirText: string) : string =
+    mlirText
+        .Replace("std.alloc", "llvm.alloca")
+        .Replace("std.load", "llvm.load")
+        .Replace("std.store", "llvm.store")
 
-/// Creates the standard lowering pipeline from high-level to LLVM dialect
-let createStandardLoweringPipeline() : LoweringPass list = [
-    { Name = "convert-std-to-llvm"; SourceDialect = Standard; TargetDialect = LLVM; PassOptions = Map.empty }
-    { Name = "convert-arith-to-llvm"; SourceDialect = Arith; TargetDialect = LLVM; PassOptions = Map.empty }
-    { Name = "convert-func-to-llvm"; SourceDialect = Func; TargetDialect = LLVM; PassOptions = Map.empty }
-    { Name = "reconcile-unrealized-casts"; SourceDialect = Standard; TargetDialect = Standard; PassOptions = Map.empty }
-]
+/// Reconciles unrealized cast operations
+let private reconcileUnrealizedCasts (mlirText: string) : string =
+    let castPattern = @"builtin\.unrealized_conversion_cast\s+(%\w+)\s*:\s*([^}]+)\s+to\s+([^}]+)"
+    Regex.Replace(mlirText, castPattern, "$1")
 
-/// Applies the lowering pipeline to MLIR text
+/// Applies a single lowering pass to MLIR text
+let private applyLoweringPass (pass: LoweringPass) (mlirText: string) : string =
+    match pass.Name with
+    | "convert-func-to-llvm" -> convertFuncToLLVM mlirText
+    | "convert-arith-to-llvm" -> convertArithToLLVM mlirText
+    | "convert-std-to-llvm" -> convertStdToLLVM mlirText
+    | "reconcile-unrealized-casts" -> reconcileUnrealizedCasts mlirText
+    | _ -> mlirText
+
+/// Applies the complete lowering pipeline to MLIR text
 let applyLoweringPipeline (mlirModule: string) : string =
-    // In a real implementation, this would invoke the MLIR optimizer with
-    // the specified passes. For now, we'll simulate the output.
+    let passes = createStandardLoweringPipeline()
+    
+    passes
+    |> List.fold (fun currentText pass ->
+        applyLoweringPass pass currentText
+    ) mlirModule
 
-    // Replace high-level operations with LLVM dialect operations
-    let llvmDialectModule = mlirModule
-        .Replace("func.func", "llvm.func")
-        .Replace("arith.constant", "llvm.constant")
-        .Replace("func.return", "llvm.return")
-
-    llvmDialectModule
-open Core.MLIRGeneration.Dialect
-open Dabbit.Parsing.Translator
-
-/// Represents a lowering pass in the MLIR pipeline
-type LoweringPass = {
-    Name: string
-    SourceDialect: MLIRDialect
-    TargetDialect: MLIRDialect
-    PassOptions: Map<string, string>
-}
-
-/// Creates the standard lowering pipeline from high-level to LLVM dialect
-let createStandardLoweringPipeline() : LoweringPass list = [
-    { Name = "convert-std-to-llvm"; SourceDialect = Standard; TargetDialect = LLVM; PassOptions = Map.empty }
-    { Name = "convert-arith-to-llvm"; SourceDialect = Arith; TargetDialect = LLVM; PassOptions = Map.empty }
-    { Name = "convert-func-to-llvm"; SourceDialect = Func; TargetDialect = LLVM; PassOptions = Map.empty }
-    { Name = "reconcile-unrealized-casts"; SourceDialect = Standard; TargetDialect = Standard; PassOptions = Map.empty }
-]
-
-/// Applies the lowering pipeline to MLIR text
-let applyLoweringPipeline (mlirModule: string) : string =
-    // In a real implementation, this would invoke the MLIR optimizer with
-    // the specified passes. For now, we'll simulate the output.
-
-    // Replace high-level operations with LLVM dialect operations
-    let llvmDialectModule = mlirModule
-        .Replace("func.func", "llvm.func")
-        .Replace("arith.constant", "llvm.constant")
-        .Replace("func.return", "llvm.return")
-
-    llvmDialectModule
-    llvmDialectModule
-open Firefly.Core.MLIRGeneration.Dialect
-open Dabbit.Parsing.Translator
-
-/// Represents a lowering pass in the MLIR pipeline
-type LoweringPass = {
-    Name: string
-    SourceDialect: MLIRDialect
-    TargetDialect: MLIRDialect
-    PassOptions: Map<string, string>
-}
-
-/// Creates the standard lowering pipeline from high-level to LLVM dialect
-let createStandardLoweringPipeline() : LoweringPass list = [
-    { Name = "convert-std-to-llvm"; SourceDialect = Standard; TargetDialect = LLVM; PassOptions = Map.empty }
-    { Name = "convert-arith-to-llvm"; SourceDialect = Arith; TargetDialect = LLVM; PassOptions = Map.empty }
-    { Name = "convert-func-to-llvm"; SourceDialect = Func; TargetDialect = LLVM; PassOptions = Map.empty }
-    { Name = "reconcile-unrealized-casts"; SourceDialect = Standard; TargetDialect = Standard; PassOptions = Map.empty }
-]
-
-/// Applies the lowering pipeline to MLIR text
-let applyLoweringPipeline (mlirModule: string) : string =
-    // In a real implementation, this would invoke the MLIR optimizer with
-    // the specified passes. For now, we'll simulate the output.
-
-    // Replace high-level operations with LLVM dialect operations
-    let llvmDialectModule = mlirModule
-        .Replace("func.func", "llvm.func")
-        .Replace("arith.constant", "llvm.constant")
-        .Replace("func.return", "llvm.return")
-
-    llvmDialectModule
+/// Validates that the lowered MLIR is in pure LLVM dialect
+let validateLLVMDialect (llvmDialectModule: string) : bool =
+    let invalidPatterns = [
+        @"func\." 
+        @"arith\."
+        @"std\."
+        @"builtin\.unrealized_conversion_cast"
+    ]
+    
+    invalidPatterns
+    |> List.forall (fun pattern ->
+        not (Regex.IsMatch(llvmDialectModule, pattern))
+    )

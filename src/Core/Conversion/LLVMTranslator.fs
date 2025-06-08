@@ -1,262 +1,157 @@
 ﻿module Core.Conversion.LLVMTranslator
 
 open System
-open System.Runtime.InteropServices
+open System.IO
+open System.Text.RegularExpressions
+open Llvm.NET
+open Llvm.NET.Values
+open Llvm.NET.Types
 open Core.MLIRGeneration.Dialect
 
 /// Represents LLVM IR output from the translation process
 type LLVMOutput = {
     ModuleName: string
+    Module: Module
     LLVMIRText: string
-    SymbolTable: Map<string, string>
+    SymbolTable: Map<string, GlobalValue>
 }
+
+/// Extracts module name from MLIR text
+let private extractModuleName (mlirText: string) : string =
+    let modulePattern = @"module\s+@?(\w+)"
+    let match' = Regex.Match(mlirText, modulePattern)
+    if match'.Success then
+        match'.Groups.[1].Value
+    else
+        "main"
+
+/// Parses MLIR function declarations and creates LLVM functions
+let private createLLVMFunctions (context: Context) (module': Module) (mlirText: string) : Map<string, Function> =
+    let funcPattern = @"func\.func\s+@(\w+)\s*\([^)]*\)\s*->\s*([^{]+)"
+    let matches = Regex.Matches(mlirText, funcPattern)
+    
+    matches
+    |> Seq.cast<Match>
+    |> Seq.fold (fun acc match' ->
+        let funcName = match'.Groups.[1].Value
+        let returnTypeStr = match'.Groups.[2].Value.Trim()
+        
+        let returnType = 
+            match returnTypeStr with
+            | "i32" -> context.Int32Type :> ITypeRef
+            | "i64" -> context.Int64Type :> ITypeRef
+            | "f32" -> context.FloatType :> ITypeRef
+            | "f64" -> context.DoubleType :> ITypeRef
+            | "()" | "void" -> context.VoidType :> ITypeRef
+            | _ -> context.Int32Type :> ITypeRef
+        
+        let funcType = context.GetFunctionType(returnType, [||])
+        let func = module'.AddFunction(funcName, funcType)
+        
+        Map.add funcName func acc
+    ) Map.empty
+
+/// Translates MLIR basic blocks to LLVM basic blocks
+let private translateBasicBlocks (context: Context) (builder: IRBuilder) (func: Function) (mlirText: string) =
+    let entryBlock = func.AppendBasicBlock("entry")
+    builder.PositionAtEnd(entryBlock)
+    
+    // Parse constants
+    let constantPattern = @"%(\w+)\s*=\s*arith\.constant\s+(\d+)\s*:\s*(\w+)"
+    let constants = 
+        Regex.Matches(mlirText, constantPattern)
+        |> Seq.cast<Match>
+        |> Seq.fold (fun acc match' ->
+            let varName = match'.Groups.[1].Value
+            let value = Int32.Parse(match'.Groups.[2].Value)
+            let llvmValue = context.CreateConstant(value)
+            Map.add varName llvmValue acc
+        ) Map.empty
+    
+    // Handle return statements
+    let returnPattern = @"func\.return\s*([^:\n]*)"
+    let returnMatch = Regex.Match(mlirText, returnPattern)
+    
+    if returnMatch.Success then
+        let returnValue = returnMatch.Groups.[1].Value.Trim()
+        if String.IsNullOrEmpty(returnValue) then
+            builder.Return() |> ignore
+        else
+            match constants.TryFind(returnValue.TrimStart('%')) with
+            | Some value -> builder.Return(value) |> ignore
+            | None -> 
+                let zeroValue = context.CreateConstant(0)
+                builder.Return(zeroValue) |> ignore
 
 /// Translates MLIR (in LLVM dialect) to LLVM IR
 let translateToLLVM (mlirText: string) : LLVMOutput =
-    // In a real implementation, this would use MLIR's translation pass
-    // to convert MLIR in LLVM dialect to actual LLVM IR.
-    // For demonstration, we'll generate simple LLVM IR manually.
-
-    let moduleName = 
-        if mlirText.Contains("module ") then
-            let startIndex = mlirText.IndexOf("module ") + 7
-            let endIndex = mlirText.IndexOf(" {", startIndex)
-            if endIndex > startIndex then
-                mlirText.Substring(startIndex, endIndex - startIndex)
-            else
-                "unknown"
-        else
-            "unknown"
-
-    // Simple hand-translation of the expected MLIR to LLVM IR
-    let llvmIR = 
-        if mlirText.Contains("@main") then
-            sprintf "; ModuleID = '%s'\ndefine i32 @main() {\nentry:\n  ret i32 0\n}" moduleName
-        else
-            sprintf "; ModuleID = '%s'" moduleName
-
+    use context = new Context()
+    let moduleName = extractModuleName mlirText
+    let module' = context.CreateModule(moduleName)
+    
+    let functions = createLLVMFunctions context module' mlirText
+    let builder = new IRBuilder(context)
+    
+    // Process each function
+    functions
+    |> Map.iter (fun name func ->
+        let funcPattern = sprintf @"func\.func\s+@%s[^}]+}" name
+        let funcMatch = Regex.Match(mlirText, funcPattern, RegexOptions.Singleline)
+        if funcMatch.Success then
+            translateBasicBlocks context builder func funcMatch.Value
+    )
+    
+    let llvmIR = module'.WriteToString()
+    let symbolTable = 
+        functions
+        |> Map.map (fun _ func -> func :> GlobalValue)
+    
     { 
         ModuleName = moduleName
+        Module = module'
         LLVMIRText = llvmIR
-        SymbolTable = Map.ofList [("main", "i32 ()")]
+        SymbolTable = symbolTable
     }
 
-/// Invokes the LLVM compiler to generate native code
+/// Compiles LLVM IR to native code using LLVM backend
 let compileLLVMToNative (llvmOutput: LLVMOutput) (outputPath: string) : bool =
-    // In a real implementation, this would invoke LLVM tools to compile
-    // the LLVM IR to native code. For demonstration, we'll just simulate success.
-
-    // Write LLVM IR to a temporary file
-    let tempFile = System.IO.Path.GetTempFileName() + ".ll"
-    System.IO.File.WriteAllText(tempFile, llvmOutput.LLVMIRText)
-
-    // In real implementation: Invoke LLVM tools to compile the IR
-    // For now, just log what would happen
-    printfn "[LLVM] Compiling %s to native code at %s" tempFile outputPath
-
-    // Cleanup
-    try System.IO.File.Delete(tempFile) with _ -> ()
-
-    // Return success
-    true
-open System
-open System.Runtime.InteropServices
-open Firefly.Core.MLIRGeneration.Dialect
-
-/// Represents LLVM IR output from the translation process
-type LLVMOutput = {
-    ModuleName: string
-    LLVMIRText: string
-    SymbolTable: Map<string, string>
-}
-
-/// Translates MLIR (in LLVM dialect) to LLVM IR
-let translateToLLVM (mlirText: string) : LLVMOutput =
-    // In a real implementation, this would use MLIR's translation pass
-    // to convert MLIR in LLVM dialect to actual LLVM IR.
-    // For demonstration, we'll generate simple LLVM IR manually.
-
-    let moduleName = 
-        if mlirText.Contains("module ") then
-            let startIndex = mlirText.IndexOf("module ") + 7
-            let endIndex = mlirText.IndexOf(" {", startIndex)
-            if endIndex > startIndex then
-                mlirText.Substring(startIndex, endIndex - startIndex)
-            else
-                "unknown"
-        else
-            "unknown"
-
-    // Simple hand-translation of the expected MLIR to LLVM IR
-    let llvmIR = 
-        if mlirText.Contains("@main") then
-            "; ModuleID = '" + moduleName + "'
-" +
-            "define i32 @main() {
-" +
-            "entry:
-" +
-            "  ret i32 0
-" +
-            "}"
-        else
-            "; ModuleID = '" + moduleName + "'
-"
-
-    { 
-        ModuleName = moduleName
-        LLVMIRText = llvmIR
-        SymbolTable = Map.ofList [("main", "i32 ()")]
-    }
-
-/// Invokes the LLVM compiler to generate native code
-let compileLLVMToNative (llvmOutput: LLVMOutput) (outputPath: string) : bool =
-    // In a real implementation, this would invoke LLVM tools to compile
-    // the LLVM IR to native code. For demonstration, we'll just simulate success.
-
-    // Write LLVM IR to a temporary file
-    let tempFile = System.IO.Path.GetTempFileName() + ".ll"
-    System.IO.File.WriteAllText(tempFile, llvmOutput.LLVMIRText)
-
-    // In real implementation: Invoke LLVM tools to compile the IR
-    // For now, just log what would happen
-    printfn "[LLVM] Compiling %s to native code at %s" tempFile outputPath
-module Core.Conversion.LLVMTranslator
-
-open System
-open System.Runtime.InteropServices
-open Core.MLIRGeneration.Dialect
-
-/// Represents LLVM IR output from the translation process
-type LLVMOutput = {
-    ModuleName: string
-    LLVMIRText: string
-    SymbolTable: Map<string, string>
-}
-
-/// Translates MLIR (in LLVM dialect) to LLVM IR
-let translateToLLVM (mlirText: string) : LLVMOutput =
-    // In a real implementation, this would use MLIR's translation pass
-    // to convert MLIR in LLVM dialect to actual LLVM IR.
-    // For demonstration, we'll generate simple LLVM IR manually.
-
-    let moduleName = 
-        if mlirText.Contains("module ") then
-            let startIndex = mlirText.IndexOf("module ") + 7
-            let endIndex = mlirText.IndexOf(" {", startIndex)
-            if endIndex > startIndex then
-                mlirText.Substring(startIndex, endIndex - startIndex)
-            else
-                "unknown"
-        else
-            "unknown"
-
-    // Simple hand-translation of the expected MLIR to LLVM IR
-    let llvmIR = 
-        if mlirText.Contains("@main") then
-            "; ModuleID = '" + moduleName + "'
-" +
-            "define i32 @main() {
-" +
-            "entry:
-" +
-            "  ret i32 0
-" +
-            "}"
-        else
-            "; ModuleID = '" + moduleName + "'
-"
-
-    { 
-        ModuleName = moduleName
-        LLVMIRText = llvmIR
-        SymbolTable = Map.ofList [("main", "i32 ()")]
-    }
-
-/// Invokes the LLVM compiler to generate native code
-let compileLLVMToNative (llvmOutput: LLVMOutput) (outputPath: string) : bool =
-    // In a real implementation, this would invoke LLVM tools to compile
-    // the LLVM IR to native code. For demonstration, we'll just simulate success.
-
-    // Write LLVM IR to a temporary file
-    let tempFile = System.IO.Path.GetTempFileName() + ".ll"
-    System.IO.File.WriteAllText(tempFile, llvmOutput.LLVMIRText)
-
-    // In real implementation: Invoke LLVM tools to compile the IR
-    // For now, just log what would happen
-    printfn "[LLVM] Compiling %s to native code at %s" tempFile outputPath
-module Core.Conversion.LLVMTranslator
-
-open System
-open System.Runtime.InteropServices
-open Core.MLIRGeneration.Dialect
-
-/// Represents LLVM IR output from the translation process
-type LLVMOutput = {
-    ModuleName: string
-    LLVMIRText: string
-    SymbolTable: Map<string, string>
-}
-
-/// Translates MLIR (in LLVM dialect) to LLVM IR
-let translateToLLVM (mlirText: string) : LLVMOutput =
-    // In a real implementation, this would use MLIR's translation pass
-    // to convert MLIR in LLVM dialect to actual LLVM IR.
-    // For demonstration, we'll generate simple LLVM IR manually.
-
-    let moduleName = 
-        if mlirText.Contains("module ") then
-            let startIndex = mlirText.IndexOf("module ") + 7
-            let endIndex = mlirText.IndexOf(" {", startIndex)
-            if endIndex > startIndex then
-                mlirText.Substring(startIndex, endIndex - startIndex)
-            else
-                "unknown"
-        else
-            "unknown"
-
-    // Simple hand-translation of the expected MLIR to LLVM IR
-    let llvmIR = 
-        if mlirText.Contains("@main") then
-            sprintf "; ModuleID = '%s'
-define i32 @main() {
-entry:
-  ret i32 0
-}" moduleName
-        else
-            sprintf "; ModuleID = '%s'" moduleName
-
-    { 
-        ModuleName = moduleName
-        LLVMIRText = llvmIR
-        SymbolTable = Map.ofList [("main", "i32 ()")]
-    }
-
-/// Invokes the LLVM compiler to generate native code
-let compileLLVMToNative (llvmOutput: LLVMOutput) (outputPath: string) : bool =
-    // In a real implementation, this would invoke LLVM tools to compile
-    // the LLVM IR to native code. For demonstration, we'll just simulate success.
-
-    // Write LLVM IR to a temporary file
-    let tempFile = System.IO.Path.GetTempFileName() + ".ll"
-    System.IO.File.WriteAllText(tempFile, llvmOutput.LLVMIRText)
-
-    // In real implementation: Invoke LLVM tools to compile the IR
-    // For now, just log what would happen
-    printfn "[LLVM] Compiling %s to native code at %s" tempFile outputPath
-
-    // Cleanup
-    try System.IO.File.Delete(tempFile) with _ -> ()
-
-    // Return success
-    true
-    // Cleanup
-    try System.IO.File.Delete(tempFile) with _ -> ()
-
-    // Return success
-    true
-    // Cleanup
-    try System.IO.File.Delete(tempFile) with _ -> ()
-
-    // Return success
-    true
+    try
+        use targetMachine = Target.DefaultTarget.CreateTargetMachine(
+            Triple.HostTriple,
+            Target.DefaultTarget.HostCPU,
+            "",
+            CodeGenOpt.Default,
+            Reloc.Default,
+            CodeModel.Default
+        )
+        
+        // Write object file
+        let objPath = Path.ChangeExtension(outputPath, ".o")
+        targetMachine.EmitToFile(llvmOutput.Module, objPath, CodeGenFileType.ObjectFile)
+        
+        // Link to create executable
+        let linkerArgs = [|
+            objPath
+            "-o"
+            outputPath
+        |]
+        
+        let processInfo = System.Diagnostics.ProcessStartInfo()
+        processInfo.FileName <- "clang"
+        processInfo.Arguments <- String.Join(" ", linkerArgs)
+        processInfo.UseShellExecute <- false
+        processInfo.RedirectStandardOutput <- true
+        processInfo.RedirectStandardError <- true
+        
+        use linker = System.Diagnostics.Process.Start(processInfo)
+        linker.WaitForExit()
+        
+        // Clean up object file
+        if File.Exists(objPath) then
+            File.Delete(objPath)
+        
+        linker.ExitCode = 0
+    with
+    | ex ->
+        printfn "Error during compilation: %s" ex.Message
+        false
