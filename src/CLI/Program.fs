@@ -48,6 +48,7 @@ let showUsage() =
 
 [<EntryPoint>]
 let main argv =
+    printfn "=== FIREFLY DEBUG: Version 0.1.3-alpha starting with %d arguments ===" argv.Length
     let errorHandler = ProcessExiter(colorizer = function ErrorCode.HelpText -> None | _ -> Some ConsoleColor.Red)
 
     try

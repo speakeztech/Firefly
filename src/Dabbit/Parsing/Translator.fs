@@ -34,6 +34,7 @@ module PhaseExecution =
     
     let enterPhase (phaseName: string) : Parser<unit, TranslationPipelineState> =
         fun state ->
+            printfn "[PHASE-DEBUG] Entering phase: %s" phaseName
             let newState = { 
                 state with 
                     CurrentPhase = phaseName
@@ -43,6 +44,7 @@ module PhaseExecution =
     
     let recordDiagnostic (message: string) : Parser<unit, TranslationPipelineState> =
         fun state ->
+            printfn "[DIAG-DEBUG] %s: %s" state.CurrentPhase message
             let diagnostic = (state.CurrentPhase, message)
             let newState = { 
                 state with 
@@ -52,10 +54,12 @@ module PhaseExecution =
     
     let saveIntermediateResult (key: string) (result: string) : Parser<unit, TranslationPipelineState> =
         fun state ->
+            printfn "[INTERMEDIATE-DEBUG] Saving result for key '%s' (%d characters)" key result.Length
             let newState = { 
                 state with 
                     IntermediateResults = Map.add key result state.IntermediateResults
             }
+            printfn "[INTERMEDIATE-DEBUG] Pipeline state now contains keys: %A" (Map.keys newState.IntermediateResults |> Seq.toList)
             Reply(Ok (), newState)
 
 /// F# source to Oak AST transformation
@@ -68,16 +72,45 @@ module ASTPhase =
             
             fun state ->
                 try
+                    printfn "[AST-DEBUG] Starting AST generation for %d characters of source code" sourceCode.Length
+                    printfn "[AST-DEBUG] Current pipeline state has %d intermediate results" state.IntermediateResults.Count
+                    
                     let parsingResult = Dabbit.Parsing.AstConverter.parseAndConvertToOakAstWithIntermediate sourceCode
                     
-                    // Save both AST representations to the pipeline state
+                    printfn "[AST-DEBUG] AST conversion completed successfully"
+                    printfn "[AST-DEBUG] FCS AST text length: %d characters" parsingResult.FCSAstText.Length
+                    printfn "[AST-DEBUG] Oak AST text length: %d characters" parsingResult.OakAstText.Length
+                    
+                    if String.IsNullOrWhiteSpace(parsingResult.FCSAstText) then
+                        printfn "[AST-DEBUG] WARNING: FCS AST text is null or whitespace!"
+                    else
+                        printfn "[AST-DEBUG] FCS AST preview: %s" (parsingResult.FCSAstText.Substring(0, min 100 parsingResult.FCSAstText.Length))
+                    
+                    if String.IsNullOrWhiteSpace(parsingResult.OakAstText) then
+                        printfn "[AST-DEBUG] WARNING: Oak AST text is null or whitespace!"
+                    else
+                        printfn "[AST-DEBUG] Oak AST preview: %s" (parsingResult.OakAstText.Substring(0, min 100 parsingResult.OakAstText.Length))
+                    
+                    // Save FCS AST to pipeline state
+                    printfn "[AST-DEBUG] Storing FCS AST with key 'f#-compiler-services-ast'"
                     let stateWithFCS = { state with IntermediateResults = Map.add "f#-compiler-services-ast" parsingResult.FCSAstText state.IntermediateResults }
+                    printfn "[AST-DEBUG] Pipeline state after FCS AST: %A" (Map.keys stateWithFCS.IntermediateResults |> Seq.toList)
+                    
+                    // Save Oak AST to pipeline state
+                    printfn "[AST-DEBUG] Storing Oak AST with key 'oak-ast'"
                     let finalState = { stateWithFCS with IntermediateResults = Map.add "oak-ast" parsingResult.OakAstText stateWithFCS.IntermediateResults }
+                    printfn "[AST-DEBUG] Pipeline state after Oak AST: %A" (Map.keys finalState.IntermediateResults |> Seq.toList)
+                    
+                    printfn "[AST-DEBUG] Final pipeline state contains %d intermediate results" finalState.IntermediateResults.Count
+                    printfn "[AST-DEBUG] AST phase completed successfully"
                     
                     Reply(Ok parsingResult.OakProgram, finalState)
                 
                 with
                 | ex ->
+                    printfn "[AST-DEBUG] EXCEPTION in AST generation: %s" ex.Message
+                    printfn "[AST-DEBUG] Exception type: %s" (ex.GetType().Name)
+                    printfn "[AST-DEBUG] Stack trace: %s" ex.StackTrace
                     Reply(Error, sprintf "AST generation failed: %s" ex.Message)
 
 /// Oak transformation phases
@@ -137,7 +170,6 @@ module MLIRLoweringPhase =
             match Core.Conversion.LoweringPipeline.applyLoweringPipeline mlirText with
             | Success loweredMLIR ->
                 recordDiagnostic "Successfully lowered MLIR to LLVM dialect" >>= fun _ ->
-                // Note: We don't save this as a separate intermediate - the final MLIR is what matters
                 succeed loweredMLIR
             | CompilerFailure errors ->
                 let errorMsg = errors |> List.map (fun e -> e.ToString()) |> String.concat "; "
@@ -159,6 +191,9 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) (keepIn
     else
         let basePath = Path.GetDirectoryName(sourceFile)
         let baseName = Path.GetFileNameWithoutExtension(sourceFile)
+        
+        printfn "[PIPELINE-DEBUG] Starting translation pipeline for file: %s" sourceFile
+        printfn "[PIPELINE-DEBUG] Keep intermediates: %b" keepIntermediates
         
         let initialState = {
             SourceFile = sourceFile
@@ -198,6 +233,11 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) (keepIn
         printfn "Parsing F# source code..."
         match pipelineExecution initialState with
         | Reply(Ok finalMLIR, finalState) ->
+            printfn "[PIPELINE-DEBUG] Pipeline completed successfully"
+            printfn "[PIPELINE-DEBUG] Final state contains %d intermediate results: %A" 
+                    finalState.IntermediateResults.Count 
+                    (Map.keys finalState.IntermediateResults |> Seq.toList)
+            
             Success {
                 FinalMLIR = finalMLIR
                 PhaseOutputs = finalState.IntermediateResults
@@ -207,17 +247,18 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) (keepIn
             }
         
         | Reply(Error, errorMsg) ->
+            printfn "[PIPELINE-DEBUG] Pipeline failed with error: %s" errorMsg
             CompilerFailure [TransformError("pipeline execution", "F# source", "MLIR", errorMsg)]
 
 /// Entry point functions
-let translateF#ToMLIR (sourceFile: string) (sourceCode: string) : CompilerResult<string> =
+let translateFSharpToMLIR (sourceFile: string) (sourceCode: string) : CompilerResult<string> =
     executeTranslationPipeline sourceFile sourceCode false >>= fun pipelineOutput ->
     Success pipelineOutput.FinalMLIR
 
-let translateF#ToMLIRWithDiagnostics (sourceFile: string) (sourceCode: string) : CompilerResult<TranslationPipelineOutput> =
+let translateFSharpToMLIRWithDiagnostics (sourceFile: string) (sourceCode: string) : CompilerResult<TranslationPipelineOutput> =
     executeTranslationPipeline sourceFile sourceCode true
 
-let translateF#ToMLIRWithIntermediates (sourceFile: string) (sourceCode: string) (keepIntermediates: bool) : CompilerResult<TranslationPipelineOutput> =
+let translateFSharpToMLIRWithIntermediates (sourceFile: string) (sourceCode: string) (keepIntermediates: bool) : CompilerResult<TranslationPipelineOutput> =
     executeTranslationPipeline sourceFile sourceCode keepIntermediates
 
 /// Validation functions

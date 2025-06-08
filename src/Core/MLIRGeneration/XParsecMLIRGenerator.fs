@@ -113,9 +113,12 @@ module OperationEmission =
                 Reply(Ok (), state)  // Already declared
             else
                 let declaration = sprintf "func.func private @%s%s" funcName signature
-                recordExternalDeclaration funcName state >>= fun newState ->
-                let finalState = { newState with GeneratedOperations = declaration :: newState.GeneratedOperations }
-                Reply(Ok (), finalState)
+                match recordExternalDeclaration funcName state with
+                | Reply(Ok (), newState) ->
+                    let finalState = { newState with GeneratedOperations = declaration :: newState.GeneratedOperations }
+                    Reply(Ok (), finalState)
+                | Reply(Error, error) ->
+                    Reply(Error, error)
     
     /// Registers a string constant and returns its global name
     let registerStringConstant (value: string) : Parser<string, MLIRGenerationState> =
@@ -344,9 +347,9 @@ module EnhancedExpressionConversion =
             convertFunctionApplication func args
             |> withErrorContext "function application"
         
-        | Lambda(params', body) ->
+        | Lambda(parameters, body) ->
             printfn "Debug: Converting lambda expression (should have been eliminated)"
-            convertLambdaExpression params' body
+            convertLambdaExpression parameters body
             |> withErrorContext "lambda expression"
         
         | Let(name, value, body) ->
@@ -401,7 +404,7 @@ module EnhancedExpressionConversion =
                 "MLIR", 
                 "Only simple function names supported for function calls"))
     
-    and convertLambdaExpression (params': (string * OakType) list) (body: OakExpression) : Parser<string, MLIRGenerationState> =
+    and convertLambdaExpression (parameters: (string * OakType) list) (body: OakExpression) : Parser<string, MLIRGenerationState> =
         compilerFail (TransformError(
             "lambda conversion", 
             "lambda expression", 
@@ -454,35 +457,35 @@ module EnhancedExpressionConversion =
 module EnhancedDeclarationConversion =
     
     /// Converts function declaration to MLIR function
-    let convertFunctionDeclaration (name: string) (params': (string * OakType) list) (returnType: OakType) (body: OakExpression) : Parser<unit, MLIRGenerationState> =
+    let convertFunctionDeclaration (name: string) (parameters: (string * OakType) list) (returnType: OakType) (body: OakExpression) : Parser<unit, MLIRGenerationState> =
         printfn "Debug: Converting function declaration: %s" name
         
-        let paramTypes = params' |> List.map (snd >> mapOakTypeToMLIR)
+        let paramTypes = parameters |> List.map (snd >> mapOakTypeToMLIR)
         let returnMLIRType = mapOakTypeToMLIR returnType
         
         // Emit function signature
         let paramTypeStrs = 
-            if params'.IsEmpty then []
+            if parameters.IsEmpty then []
             else paramTypes |> List.map mlirTypeToString
         let returnTypeStr = mlirTypeToString returnMLIRType
         let paramList = 
-            if params'.IsEmpty then ""
+            if parameters.IsEmpty then ""
             else 
-                params' 
+                parameters 
                 |> List.mapi (fun i (paramName, t) -> sprintf "%%arg%d: %s" i (mlirTypeToString (mapOakTypeToMLIR t)))
                 |> String.concat ", "
                 |> sprintf "(%s)"
         
         let funcSig = sprintf "func.func @%s%s -> %s {" 
                              name 
-                             (if params'.IsEmpty then "()" else paramList)
+                             (if parameters.IsEmpty then "()" else paramList)
                              returnTypeStr
         
         emitOperation funcSig >>= fun _ ->
         pushScope >>= fun _ ->
         
         // Bind parameters to entry block arguments
-        params' 
+        parameters 
         |> List.mapi (fun i (paramName, _) -> 
             let argSSA = sprintf "%%arg%d" i
             bindVariable paramName argSSA)
@@ -553,8 +556,8 @@ module EnhancedDeclarationConversion =
     /// Converts any declaration
     let convertDeclaration (decl: OakDeclaration) : Parser<unit, MLIRGenerationState> =
         match decl with
-        | FunctionDecl(name, params', returnType, body) ->
-            convertFunctionDeclaration name params' returnType body
+        | FunctionDecl(name, parameters, returnType, body) ->
+            convertFunctionDeclaration name parameters returnType body
         | EntryPoint(expr) ->
             convertEntryPoint expr
         | TypeDecl(name, oakType) ->

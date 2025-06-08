@@ -56,34 +56,102 @@ let private saveIntermediateFiles (outputPath: string) (pipelineOutput: Translat
     let baseName = Path.GetFileNameWithoutExtension(outputPath)
     let dir = Path.GetDirectoryName(outputPath)
     
+    printfn "[SAVE-DEBUG] Starting intermediate file save process"
+    printfn "[SAVE-DEBUG] Output path: %s" outputPath
+    printfn "[SAVE-DEBUG] Base name: %s" baseName
+    printfn "[SAVE-DEBUG] Directory: %s" dir
+    printfn "[SAVE-DEBUG] Pipeline output phase count: %d" pipelineOutput.PhaseOutputs.Count
+    printfn "[SAVE-DEBUG] Available phase output keys: %A" (Map.keys pipelineOutput.PhaseOutputs |> Seq.toList)
+    
+    // Check each specific key in detail
+    match pipelineOutput.PhaseOutputs.TryFind "f#-compiler-services-ast" with
+    | Some content -> 
+        printfn "[SAVE-DEBUG] Found FCS AST content: %d characters" content.Length
+        if String.IsNullOrWhiteSpace(content) then
+            printfn "[SAVE-DEBUG] WARNING: FCS AST content is null or whitespace"
+        else
+            printfn "[SAVE-DEBUG] FCS AST content preview: %s" (content.Substring(0, min 50 content.Length))
+    | None -> 
+        printfn "[SAVE-DEBUG] FCS AST content NOT FOUND in pipeline outputs"
+    
+    match pipelineOutput.PhaseOutputs.TryFind "oak-ast" with
+    | Some content -> 
+        printfn "[SAVE-DEBUG] Found Oak AST content: %d characters" content.Length
+        if String.IsNullOrWhiteSpace(content) then
+            printfn "[SAVE-DEBUG] WARNING: Oak AST content is null or whitespace"
+        else
+            printfn "[SAVE-DEBUG] Oak AST content preview: %s" (content.Substring(0, min 50 content.Length))
+    | None -> 
+        printfn "[SAVE-DEBUG] Oak AST content NOT FOUND in pipeline outputs"
+    
+    match pipelineOutput.PhaseOutputs.TryFind "mlir" with
+    | Some content -> 
+        printfn "[SAVE-DEBUG] Found MLIR content: %d characters" content.Length
+    | None -> 
+        printfn "[SAVE-DEBUG] MLIR content NOT FOUND in pipeline outputs"
+    
     let filesToSave = [
         // AST files
         match pipelineOutput.PhaseOutputs.TryFind "f#-compiler-services-ast" with
-        | Some content -> Some ("FCS AST", Path.Combine(dir, baseName + ".fcs"), content)
-        | None -> None
+        | Some content when not (String.IsNullOrWhiteSpace(content)) -> 
+            printfn "[SAVE-DEBUG] Adding FCS AST file to save list"
+            Some ("FCS AST", Path.Combine(dir, baseName + ".fcs"), content)
+        | Some content -> 
+            printfn "[SAVE-DEBUG] FCS AST content is empty, skipping file creation"
+            None
+        | None -> 
+            printfn "[SAVE-DEBUG] No FCS AST content available"
+            None
         
         match pipelineOutput.PhaseOutputs.TryFind "oak-ast" with
-        | Some content -> Some ("Oak AST", Path.Combine(dir, baseName + ".oak"), content)
-        | None -> None
+        | Some content when not (String.IsNullOrWhiteSpace(content)) -> 
+            printfn "[SAVE-DEBUG] Adding Oak AST file to save list"
+            Some ("Oak AST", Path.Combine(dir, baseName + ".oak"), content)
+        | Some content -> 
+            printfn "[SAVE-DEBUG] Oak AST content is empty, skipping file creation"
+            None
+        | None -> 
+            printfn "[SAVE-DEBUG] No Oak AST content available"
+            None
         
         // MLIR file
         match pipelineOutput.PhaseOutputs.TryFind "mlir" with
-        | Some content -> Some ("MLIR", Path.Combine(dir, baseName + ".mlir"), content)
-        | None -> None
+        | Some content when not (String.IsNullOrWhiteSpace(content)) -> 
+            printfn "[SAVE-DEBUG] Adding MLIR file to save list"
+            Some ("MLIR", Path.Combine(dir, baseName + ".mlir"), content)
+        | Some content -> 
+            printfn "[SAVE-DEBUG] MLIR content is empty, skipping file creation"
+            None
+        | None -> 
+            printfn "[SAVE-DEBUG] No MLIR content available"
+            None
         
         // LLVM IR file (if provided)
         match llvmIR with
-        | Some content -> Some ("LLVM IR", Path.Combine(dir, baseName + ".ll"), content)
-        | None -> None
+        | Some content when not (String.IsNullOrWhiteSpace(content)) -> 
+            printfn "[SAVE-DEBUG] Adding LLVM IR file to save list"
+            Some ("LLVM IR", Path.Combine(dir, baseName + ".ll"), content)
+        | Some content -> 
+            printfn "[SAVE-DEBUG] LLVM IR content is empty, skipping file creation"
+            None
+        | None -> 
+            printfn "[SAVE-DEBUG] No LLVM IR content provided"
+            None
     ]
     |> List.choose id
+    
+    printfn "[SAVE-DEBUG] Total files to save: %d" filesToSave.Length
+    printfn "[SAVE-DEBUG] Files to save: %A" (filesToSave |> List.map (fun (desc, path, _) -> sprintf "%s -> %s" desc (Path.GetFileName(path))))
     
     // Save all files
     filesToSave |> List.iter (fun (desc, path, content) ->
         try
+            printfn "[SAVE-DEBUG] Attempting to save %s to %s (%d chars)" desc path content.Length
             writeTextFile path content
+            printfn "[SAVE-DEBUG] Successfully saved %s" desc
         with
         | ex ->
+            printfn "[SAVE-DEBUG] ERROR saving %s: %s" desc ex.Message
             printfn "Warning: Failed to save %s: %s" desc ex.Message
     )
     
@@ -93,6 +161,8 @@ let private saveIntermediateFiles (outputPath: string) (pipelineOutput: Translat
         filesToSave |> List.iter (fun (desc, path, _) ->
             printfn "  %s: %s" desc (Path.GetFileName(path))
         )
+    else
+        printfn "[SAVE-DEBUG] WARNING: No intermediate files were saved!"
 
 /// Validates compilation arguments
 let private validateCompilationArgs (inputPath: string) (outputPath: string) : CompilerResult<unit> =
@@ -286,6 +356,8 @@ let compile (args: ParseResults<CompileArgs>) =
     let verbose = args.Contains Verbose
     let noExternalTools = args.Contains No_External_Tools
     
+    printfn "[COMPILE-DEBUG] Starting compilation with keep intermediates: %b" keepIntermediates
+    
     // Validate arguments
     match validateCompilationArgs inputPath outputPath with
     | CompilerFailure errors ->
@@ -312,13 +384,16 @@ let compile (args: ParseResults<CompileArgs>) =
                 if verbose then printfn "Read source file: %s (%d characters)" inputPath sourceCode.Length
                 
                 // Execute compilation pipeline
-                match translateF#ToMLIRWithIntermediates inputPath sourceCode keepIntermediates with
+                printfn "[COMPILE-DEBUG] Calling translateFSharpToMLIRWithIntermediates with keepIntermediates: %b" keepIntermediates
+                match translateFSharpToMLIRWithIntermediates inputPath sourceCode keepIntermediates with
                 | CompilerFailure pipelineErrors ->
                     printfn "Error: Compilation failed"
                     pipelineErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
                     1
                 
                 | Success pipelineOutput ->
+                    printfn "[COMPILE-DEBUG] Pipeline completed, phase outputs count: %d" pipelineOutput.PhaseOutputs.Count
+                    
                     // Continue with LLVM generation
                     printfn "Translating to LLVM IR..."
                     match translateToLLVM pipelineOutput.FinalMLIR with
@@ -352,7 +427,10 @@ let compile (args: ParseResults<CompileArgs>) =
                         | Success optimizedLLVM ->
                             // Save all intermediate files if requested
                             if keepIntermediates then
+                                printfn "[COMPILE-DEBUG] Saving intermediate files..."
                                 saveIntermediateFiles outputPath pipelineOutput (Some optimizedLLVM.LLVMIRText)
+                            else
+                                printfn "[COMPILE-DEBUG] Skipping intermediate file save (keepIntermediates = false)"
                             
                             // Validate zero-allocation if required
                             if config.Compilation.RequireStaticMemory then

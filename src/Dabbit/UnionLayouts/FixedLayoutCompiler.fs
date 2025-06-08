@@ -126,7 +126,7 @@ module LayoutStrategyAnalysis =
             |> withErrorContext "general union analysis"
     
     /// Analyzes a general union for layout strategy
-    and analyzeGeneralUnion (name: string) (cases: (string * OakType option) list) : Parser<UnionLayoutStrategy, LayoutAnalysisState> =
+    let analyzeGeneralUnion (name: string) (cases: (string * OakType option) list) : Parser<UnionLayoutStrategy, LayoutAnalysisState> =
         // Check if all cases are nullary (enum-like)
         let allNullary = cases |> List.forall (fun (_, optType) -> optType.IsNone)
         
@@ -348,9 +348,9 @@ module ExpressionLayoutTransformation =
             >>= fun transformedArgs ->
             succeed (MethodCall(transformedTarget, methodName, List.rev transformedArgs))
         
-        | Lambda(params', body) ->
+        | Lambda(parameters, body) ->
             transformExpressionWithLayouts body >>= fun transformedBody ->
-            succeed (Lambda(params', transformedBody))
+            succeed (Lambda(parameters, transformedBody))
         
         | Literal _ ->
             succeed expr
@@ -361,9 +361,9 @@ module DeclarationLayoutTransformation =
     /// Transforms a declaration to use fixed layouts
     let transformDeclarationWithLayouts (decl: OakDeclaration) : Parser<OakDeclaration, LayoutAnalysisState> =
         match decl with
-        | FunctionDecl(name, params', returnType, body) ->
+        | FunctionDecl(name, parameters, returnType, body) ->
             transformExpressionWithLayouts body >>= fun transformedBody ->
-            succeed (FunctionDecl(name, params', returnType, transformedBody))
+            succeed (FunctionDecl(name, parameters, returnType, transformedBody))
         
         | EntryPoint(expr) ->
             transformExpressionWithLayouts expr >>= fun transformedExpr ->
@@ -377,7 +377,9 @@ module DeclarationLayoutTransformation =
                 succeed (TypeDecl(name, transformedType))
             | _ ->
                 succeed decl
-        |> withErrorContext (sprintf "declaration transformation with layouts '%s'" (match decl with FunctionDecl(n,_,_,_) -> n | TypeDecl(n,_) -> n | EntryPoint(_) -> "__entry__"))
+        | ExternalDecl(_, _, _, _) ->
+            succeed decl
+        |> withErrorContext (sprintf "declaration transformation with layouts '%s'" (match decl with FunctionDecl(n,_,_,_) -> n | TypeDecl(n,_) -> n | EntryPoint(_) -> "__entry__" | ExternalDecl(n,_,_,_) -> n))
 
 /// Layout validation using XParsec patterns
 module LayoutValidation =

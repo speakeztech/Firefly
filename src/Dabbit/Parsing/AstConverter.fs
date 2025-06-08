@@ -148,7 +148,7 @@ let private recognizeIOOperation (funcExpr: SynExpr) (args: SynExpr list) : OakE
         None
 
 /// Enhanced expression conversion with comprehensive I/O support
-and synExprToOakExpr (synExpr: SynExpr) : OakExpression =
+let rec synExprToOakExpr (synExpr: SynExpr) : OakExpression =
     match synExpr with
     | SynExpr.Const(synConst, _) -> 
         Literal(synConstToOakLiteral synConst)
@@ -569,15 +569,8 @@ let private formatOakAst (program: OakProgram) : string =
     sb.ToString()
 
 /// Cross-platform text file writing with UTF-8 encoding and Unix line endings
-/// NOTE: For future Linux/macOS support, ensure consistent line endings across platforms
-/// Currently using UTF-8 without BOM for maximum compatibility with MLIR/LLVM toolchain
 let private writeTextFile (filePath: string) (content: string) : unit =
-    // Use UTF-8 encoding without BOM for compatibility with MLIR/LLVM tools
-    // Future platform considerations:
-    // - Linux: UTF-8 encoding is standard and well-supported
-    // - macOS: UTF-8 encoding is standard and well-supported  
-    // - All platforms: Unix line endings (\n) provide best toolchain compatibility
-    let encoding = UTF8Encoding(false) // false = no BOM
+    let encoding = UTF8Encoding(false)
     let normalizedContent = content.Replace("\r\n", "\n").Replace("\r", "\n")
     File.WriteAllText(filePath, normalizedContent, encoding)
 

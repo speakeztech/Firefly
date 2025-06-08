@@ -5,13 +5,13 @@ open System.IO
 open System.Runtime.InteropServices
 open Core.XParsec.Foundation
 
-/// Represents the status of a toolchain component
+/// Represents the status of a toolchain element
 type ComponentStatus =
     | Found of version: string
     | Missing of hint: string
     | Error of message: string
 
-/// Represents a required toolchain component
+/// Represents a required toolchain element
 type ToolchainComponent = {
     Name: string
     Description: string
@@ -263,7 +263,7 @@ module PlatformRequirements =
             }
         ]
 
-/// Component checking with enhanced error reporting
+/// element checking with enhanced error reporting
 module ComponentChecking =
     
     /// Checks if required files exist with detailed reporting
@@ -281,19 +281,19 @@ module ComponentChecking =
                 let existingList = String.concat ", " existing
                 Missing (sprintf "Missing files: %s (found: %s)" missingList existingList)
     
-    /// Enhanced component checking with fallback strategies
-    let checkComponent (component: ToolchainComponent) : ComponentStatus =
-        match component.CheckCommand with
+    /// Enhanced element checking with fallback strategies
+    let checkComponent (element: ToolchainComponent) : ComponentStatus =
+        match element.CheckCommand with
         | Some cmd ->
             let parts = cmd.Split(' ', 2)
             let executable = parts.[0]
             let args = if parts.Length > 1 then parts.[1] else ""
             CommandDetection.checkCommandAvailability executable args
         | None ->
-            if component.CheckFiles.IsEmpty then
+            if element.CheckFiles.IsEmpty then
                 Error "No check method specified"
             else
-                checkFiles component.CheckFiles
+                checkFiles element.CheckFiles
     
     /// Special check for MSYS2 environment
     let checkMSYS2Environment() : ComponentStatus =
@@ -346,40 +346,40 @@ let verifyToolchain (verbose: bool) : CompilerResult<unit> =
         else
             []
     
-    // Check each component with enhanced reporting
+    // Check each element with enhanced reporting
     let results = 
         requirements 
-        |> List.map (fun component ->
-            let status = ComponentChecking.checkComponent component
-            (component, status))
+        |> List.map (fun element ->
+            let status = ComponentChecking.checkComponent element
+            (element, status))
     
     // Display results with detailed information
     let mutable hasErrors = false
     let mutable hasWarnings = false
     
-    results |> List.iter (fun (component, status) ->
+    results |> List.iter (fun (element, status) ->
         let statusSymbol, statusText, isError, isWarning = 
             match status with
             | Found version -> 
                 ("✓", version, false, false)
             | Missing hint -> 
-                ("✗", sprintf "Missing - %s" hint, component.Required, not component.Required)
+                ("✗", sprintf "Missing - %s" hint, element.Required, not element.Required)
             | Error msg -> 
-                ("!", sprintf "Error - %s" msg, component.Required, not component.Required)
+                ("!", sprintf "Error - %s" msg, element.Required, not element.Required)
         
         if isError then hasErrors <- true
         if isWarning then hasWarnings <- true
         
-        printfn "%s %s: %s" statusSymbol component.Name statusText
+        printfn "%s %s: %s" statusSymbol element.Name statusText
         
         if verbose || isError || isWarning then
-            printfn "  %s" component.Description
+            printfn "  %s" element.Description
             
         if isError then
-            printfn "  Installation: %s" component.InstallHint
+            printfn "  Installation: %s" element.InstallHint
             printfn ""
         elif isWarning then
-            printfn "  Optional: %s" component.InstallHint
+            printfn "  Optional: %s" element.InstallHint
             printfn ""
     )
     
