@@ -2,10 +2,18 @@
 
 open System
 open System.IO
+open System.Text
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 open Dabbit.Parsing.OakAst
+
+/// Represents the parsing result with intermediate representations
+type ParsingResult = {
+    OakProgram: OakProgram
+    FCSAstText: string
+    OakAstText: string
+}
 
 /// Creates a checker instance for parsing F# code
 let private createChecker() =
@@ -43,51 +51,103 @@ let private synConstToOakLiteral (synConst: SynConst) : OakLiteral =
     | SynConst.Unit -> UnitLiteral
     | _ -> UnitLiteral
 
-/// Extracts the innermost function name from a potentially complex expression
+/// Enhanced function name extraction with debugging
 let rec private extractFunctionName (expr: SynExpr) : string option =
     match expr with
-    | SynExpr.Ident(ident) -> Some ident.idText
+    | SynExpr.Ident(ident) -> 
+        let name = ident.idText
+        printfn "Debug: Extracted function name: %s" name
+        Some name
     | SynExpr.LongIdent(_, SynLongIdent(ids, _, _), _, _) ->
-        // For qualified names like Printf.printf, take the last part
-        ids |> List.tryLast |> Option.map (fun id -> id.idText)
+        let qualifiedName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+        let name = ids |> List.tryLast |> Option.map (fun id -> id.idText)
+        printfn "Debug: Extracted qualified function name: %s -> %s" qualifiedName (name |> Option.defaultValue "None")
+        name
     | SynExpr.TypeApp(funcExpr, _, _, _, _, _, _) ->
-        // Handle generic function calls
+        printfn "Debug: Processing type application for function name"
         extractFunctionName funcExpr
     | SynExpr.App(_, _, funcExpr, _, _) ->
-        // Recursively extract from nested applications
+        printfn "Debug: Processing application for function name"
         extractFunctionName funcExpr
-    | _ -> None
+    | _ -> 
+        printfn "Debug: Could not extract function name from expression type: %s" (expr.GetType().Name)
+        None
 
-/// Collects all arguments from a curried function application
+/// Enhanced application argument collection with debugging
 let rec private collectApplicationArgs (expr: SynExpr) : (SynExpr * SynExpr list) =
     match expr with
     | SynExpr.App(_, _, funcExpr, argExpr, _) ->
         let (baseFunc, existingArgs) = collectApplicationArgs funcExpr
+        printfn "Debug: Collected argument in application chain"
         (baseFunc, existingArgs @ [argExpr])
-    | _ -> (expr, [])
+    | _ -> 
+        printfn "Debug: Found base function expression"
+        (expr, [])
 
-/// Recognizes F# I/O operations and converts to Oak I/O operations
+/// Enhanced I/O operation recognition with comprehensive pattern matching
 let private recognizeIOOperation (funcExpr: SynExpr) (args: SynExpr list) : OakExpression option =
     let funcNameOpt = extractFunctionName funcExpr
     
+    printfn "Debug: Attempting to recognize I/O operation for function: %s with %d args" 
+            (funcNameOpt |> Option.defaultValue "None") args.Length
+    
     match funcNameOpt with
     | Some "printf" ->
+        printfn "Debug: Recognized printf function call"
         match args with
         | SynExpr.Const(SynConst.String(format, _, _), _) :: valueExprs ->
+            printfn "Debug: Printf with string literal format: %s" format
             let oakArgs = valueExprs |> List.map synExprToOakExpr
             Some (IOOperation(Printf(format), oakArgs))
-        | _ -> None
+        | formatExpr :: valueExprs ->
+            printfn "Debug: Printf with dynamic format string"
+            // For dynamic format strings, convert the format expression and use a generic format
+            let formatArg = synExprToOakExpr formatExpr
+            let oakArgs = formatArg :: (valueExprs |> List.map synExprToOakExpr)
+            Some (IOOperation(Printf("%s"), oakArgs))
+        | [] ->
+            printfn "Debug: Printf with no arguments - invalid"
+            None
+        | _ -> 
+            printfn "Debug: Printf pattern not matched"
+            None
     
     | Some "printfn" ->
+        printfn "Debug: Recognized printfn function call"
+        match args with
+        | SynExpr.Const(SynConst.String(format, _, _), _) :: valueExprs ->
+            printfn "Debug: Printfn with string literal format: %s" format
+            let oakArgs = valueExprs |> List.map synExprToOakExpr
+            Some (IOOperation(Printfn(format), oakArgs))
+        | formatExpr :: valueExprs ->
+            printfn "Debug: Printfn with dynamic format string"
+            let formatArg = synExprToOakExpr formatExpr
+            let oakArgs = formatArg :: (valueExprs |> List.map synExprToOakExpr)
+            Some (IOOperation(Printfn("%s"), oakArgs))
+        | [] ->
+            printfn "Debug: Printfn with no arguments - invalid"
+            None
+        | _ ->
+            printfn "Debug: Printfn pattern not matched"
+            None
+    
+    | Some "scanf" ->
+        printfn "Debug: Recognized scanf function call"
         match args with
         | SynExpr.Const(SynConst.String(format, _, _), _) :: valueExprs ->
             let oakArgs = valueExprs |> List.map synExprToOakExpr
-            Some (IOOperation(Printfn(format), oakArgs))
+            Some (IOOperation(Scanf(format), oakArgs))
         | _ -> None
     
-    | _ -> None
+    | Some name ->
+        printfn "Debug: Function '%s' not recognized as I/O operation" name
+        None
+    
+    | None ->
+        printfn "Debug: Could not extract function name for I/O recognition"
+        None
 
-/// Converts F# Compiler Services SynExpr to Oak expression
+/// Enhanced expression conversion with comprehensive I/O support
 and synExprToOakExpr (synExpr: SynExpr) : OakExpression =
     match synExpr with
     | SynExpr.Const(synConst, _) -> 
@@ -101,14 +161,18 @@ and synExprToOakExpr (synExpr: SynExpr) : OakExpression =
         Variable(name)
     
     | SynExpr.App(_, _, _, _, _) ->
-        // Collect all arguments for curried applications
+        printfn "Debug: Processing function application"
         let (baseFunc, allArgs) = collectApplicationArgs synExpr
         
-        // First check if this is an I/O operation
+        printfn "Debug: Function application with %d arguments" allArgs.Length
+        
+        // Enhanced I/O operation detection
         match recognizeIOOperation baseFunc allArgs with
-        | Some ioOp -> ioOp
+        | Some ioOp -> 
+            printfn "Debug: Converted to I/O operation: %A" ioOp
+            ioOp
         | None ->
-            // Handle as regular function application
+            printfn "Debug: Processing as regular function application"
             let func = synExprToOakExpr baseFunc
             let args = allArgs |> List.map synExprToOakExpr
             if args.IsEmpty then func
@@ -129,7 +193,6 @@ and synExprToOakExpr (synExpr: SynExpr) : OakExpression =
         Lambda(parameters, body)
     
     | SynExpr.LetOrUse(_, _, bindings, bodyExpr, _, _) ->
-        // Handle let bindings
         let rec buildLetChain bindings body =
             match bindings with
             | [] -> synExprToOakExpr body
@@ -142,7 +205,6 @@ and synExprToOakExpr (synExpr: SynExpr) : OakExpression =
                         let innerBody = buildLetChain rest body
                         Let(ident.idText, value, innerBody)
                     | SynPat.Wild(_) ->
-                        // Handle wildcard pattern (let _ = expr)
                         let value = synExprToOakExpr rhsExpr
                         let innerBody = buildLetChain rest body
                         Sequential(value, innerBody)
@@ -160,7 +222,6 @@ and synExprToOakExpr (synExpr: SynExpr) : OakExpression =
         IfThenElse(cond, thenBranch, elseBranch)
     
     | SynExpr.Sequential(_, _, expr1, expr2, _) ->
-        // Properly handle sequential expressions
         let rec flattenSequential expr acc =
             match expr with
             | SynExpr.Sequential(_, _, e1, e2, _) ->
@@ -169,7 +230,6 @@ and synExprToOakExpr (synExpr: SynExpr) : OakExpression =
         
         let expressions = flattenSequential synExpr []
         
-        // Build right-associative Sequential chain
         let rec buildSequential exprs =
             match exprs with
             | [] -> Literal(UnitLiteral)
@@ -179,9 +239,13 @@ and synExprToOakExpr (synExpr: SynExpr) : OakExpression =
         buildSequential expressions
     
     | SynExpr.DotGet(targetExpr, _, SynLongIdent(id, _, _), _) ->
+        printfn "Debug: Processing property/method access: %A" id
         match targetExpr, id with
         | SynExpr.Ident(obj), [method] when obj.idText = "stdin" && method.idText = "ReadLine" ->
-            // Special case for stdin.ReadLine()
+            printfn "Debug: Recognized stdin.ReadLine() as I/O operation"
+            IOOperation(ReadLine, [])
+        | SynExpr.Ident(obj), [method] when obj.idText = "Console" && method.idText = "ReadLine" ->
+            printfn "Debug: Recognized Console.ReadLine() as I/O operation"
             IOOperation(ReadLine, [])
         | _ ->
             let target = synExprToOakExpr targetExpr
@@ -201,32 +265,53 @@ and synExprToOakExpr (synExpr: SynExpr) : OakExpression =
         synExprToOakExpr innerExpr
     
     | SynExpr.TypeApp(expr, _, _, _, _, _, _) ->
-        // Handle type applications by processing the inner expression
         synExprToOakExpr expr
     
+    | SynExpr.Match(_, clauses, _) ->
+        // Handle pattern matching - simplified conversion
+        // For now, convert to nested if-then-else
+        match clauses with
+        | [] -> Literal(UnitLiteral)
+        | [clause] ->
+            match clause with
+            | SynMatchClause(_, _, _, resultExpr, _, _, _) -> synExprToOakExpr resultExpr
+        | _ ->
+            // Multiple clauses - would need more sophisticated handling
+            Literal(UnitLiteral)
+    
     | _ -> 
-        // For unsupported expressions, create a placeholder
+        printfn "Debug: Unsupported expression type: %s, creating unit literal" (synExpr.GetType().Name)
         Literal(UnitLiteral)
 
-/// Converts function arguments pattern to parameters
+/// Enhanced function parameter extraction with debugging
 let private extractFunctionParameters (argPats: SynArgPats) : (string * OakType) list =
     match argPats with
     | SynArgPats.Pats(patterns) ->
+        printfn "Debug: Extracting parameters from %d patterns" patterns.Length
         patterns |> List.choose (function
             | SynPat.Named(SynIdent(ident, _), _, _, _) -> 
+                printfn "Debug: Found parameter: %s" ident.idText
                 Some (ident.idText, UnitType)
             | SynPat.Typed(SynPat.Named(SynIdent(ident, _), _, _, _), synType, _) -> 
-                Some (ident.idText, synTypeToOakType synType)
+                let oakType = synTypeToOakType synType
+                printfn "Debug: Found typed parameter: %s : %A" ident.idText oakType
+                Some (ident.idText, oakType)
             | SynPat.Paren(SynPat.Typed(SynPat.Named(SynIdent(ident, _), _, _, _), synType, _), _) ->
-                Some (ident.idText, synTypeToOakType synType)
-            | _ -> None)
-    | _ -> []
+                let oakType = synTypeToOakType synType
+                printfn "Debug: Found parenthesized typed parameter: %s : %A" ident.idText oakType
+                Some (ident.idText, oakType)
+            | _ -> 
+                printfn "Debug: Unsupported parameter pattern"
+                None)
+    | _ -> 
+        printfn "Debug: No patterns found in function arguments"
+        []
 
-/// Converts F# Compiler Services SynBinding to Oak declaration
+/// Enhanced binding conversion with comprehensive entry point detection
 let private synBindingToOakDecl (binding: SynBinding) : OakDeclaration option =
     match binding with
     | SynBinding(_, _, _, _, attrs, _, _, pat, returnInfo, rhsExpr, _, _, _) ->
-        // Check if this is an entry point
+        // Enhanced entry point detection
         let isEntryPoint = 
             attrs |> List.exists (fun attr ->
                 match attr with
@@ -234,44 +319,53 @@ let private synBindingToOakDecl (binding: SynBinding) : OakDeclaration option =
                     ids |> List.exists (fun id -> id.idText = "EntryPoint")
             )
         
+        printfn "Debug: Processing binding, isEntryPoint: %b" isEntryPoint
+        
         match pat with
         | SynPat.LongIdent(SynLongIdent(id, _, _), _, _, argPats, _, _) ->
             let name = id |> List.map (fun i -> i.idText) |> String.concat "."
+            printfn "Debug: Processing function declaration: %s" name
             
             if isEntryPoint then
-                // Handle entry point - convert the body but wrap it properly
+                printfn "Debug: Converting entry point function to EntryPoint declaration"
                 let body = synExprToOakExpr rhsExpr
                 Some (EntryPoint(body))
             else
-                // Regular function declaration
                 let parameters = extractFunctionParameters argPats
                 let returnType = 
                     match returnInfo with
                     | Some (SynBindingReturnInfo(synType, _, _, _)) -> synTypeToOakType synType
-                    | None -> UnitType
+                    | None -> IntType  // Default to int for functions
                 
+                printfn "Debug: Function %s has %d parameters, return type: %A" name parameters.Length returnType
                 let body = synExprToOakExpr rhsExpr
                 Some (FunctionDecl(name, parameters, returnType, body))
         
         | SynPat.Named(SynIdent(ident, _), _, _, _) ->
-            // Simple binding (no parameters)
             let name = ident.idText
+            printfn "Debug: Processing simple binding: %s" name
             let body = synExprToOakExpr rhsExpr
             
             if isEntryPoint then
+                printfn "Debug: Converting simple entry point to EntryPoint declaration"
                 Some (EntryPoint(body))
             else
+                printfn "Debug: Converting simple binding to function declaration"
                 Some (FunctionDecl(name, [], UnitType, body))
         
-        | _ -> None
+        | _ -> 
+            printfn "Debug: Unsupported pattern in binding"
+            None
 
-/// Converts F# Compiler Services SynModuleDecl to Oak declarations
+/// Enhanced module declaration conversion
 let private synModuleDeclToOakDecls (moduleDecl: SynModuleDecl) : OakDeclaration list =
     match moduleDecl with
     | SynModuleDecl.Let(_, bindings, _) ->
+        printfn "Debug: Processing %d let bindings" bindings.Length
         bindings |> List.choose synBindingToOakDecl
     
     | SynModuleDecl.Types(typeDefns, _) ->
+        printfn "Debug: Processing %d type definitions" typeDefns.Length
         typeDefns |> List.choose (function
             | SynTypeDefn(SynComponentInfo(_, _, _, [ident], _, _, _, _), synTypeDefnRepr, _, _, _, _) ->
                 let name = ident.idText
@@ -292,12 +386,14 @@ let private synModuleDeclToOakDecls (moduleDecl: SynModuleDecl) : OakDeclaration
             | _ -> None)
     
     | SynModuleDecl.Expr(expr, _) ->
-        // Top-level expression - could be part of script
+        printfn "Debug: Processing top-level expression"
         []
     
-    | _ -> []
+    | _ -> 
+        printfn "Debug: Unsupported module declaration type"
+        []
 
-/// Checks if an expression contains I/O operations
+/// Enhanced I/O operation detection in expressions
 let rec private containsIOOperations (expr: OakExpression) : bool =
     match expr with
     | IOOperation(_, _) -> true
@@ -311,7 +407,7 @@ let rec private containsIOOperations (expr: OakExpression) : bool =
     | Lambda(_, body) -> containsIOOperations body
     | _ -> false
 
-/// Adds external declarations for standard I/O functions
+/// Enhanced external declaration generation for I/O operations
 let private addStandardIODeclarations (declarations: OakDeclaration list) : OakDeclaration list =
     let hasIO = 
         declarations 
@@ -320,8 +416,9 @@ let private addStandardIODeclarations (declarations: OakDeclaration list) : OakD
             | EntryPoint(expr) -> containsIOOperations expr
             | _ -> false)
     
+    printfn "Debug: Module contains I/O operations: %b" hasIO
+    
     if hasIO then
-        // For Windows command-line linking, we need the correct signatures
         let externalDecls = [
             ExternalDecl("printf", [StringType], IntType, "msvcrt")
             ExternalDecl("scanf", [StringType], IntType, "msvcrt")
@@ -329,13 +426,167 @@ let private addStandardIODeclarations (declarations: OakDeclaration list) : OakD
             ExternalDecl("puts", [StringType], IntType, "msvcrt")
             ExternalDecl("getchar", [], IntType, "msvcrt")
         ]
+        printfn "Debug: Added %d external I/O declarations" externalDecls.Length
         externalDecls @ declarations
     else
         declarations
 
-/// Parses F# source code using F# Compiler Services and converts to Oak AST
-let parseAndConvertToOakAst (sourceCode: string) : OakProgram =
+/// Formats F# Compiler Services AST as readable text
+let private formatFCSAst (parseTree: ParsedInput) : string =
+    let sb = StringBuilder()
+    
+    let rec formatSynExpr (expr: SynExpr) (indent: int) =
+        let indentStr = String.replicate indent "  "
+        match expr with
+        | SynExpr.Const(constant, _) ->
+            sb.AppendLine(sprintf "%sSynExpr.Const(%A)" indentStr constant) |> ignore
+        | SynExpr.Ident(ident) ->
+            sb.AppendLine(sprintf "%sSynExpr.Ident(%s)" indentStr ident.idText) |> ignore
+        | SynExpr.LongIdent(_, longIdent, _, _) ->
+            let ids = match longIdent with SynLongIdent(ids, _, _) -> ids |> List.map (fun i -> i.idText) |> String.concat "."
+            sb.AppendLine(sprintf "%sSynExpr.LongIdent(%s)" indentStr ids) |> ignore
+        | SynExpr.App(_, _, func, arg, _) ->
+            sb.AppendLine(sprintf "%sSynExpr.App(" indentStr) |> ignore
+            formatSynExpr func (indent + 1)
+            formatSynExpr arg (indent + 1)
+            sb.AppendLine(sprintf "%s)" indentStr) |> ignore
+        | SynExpr.LetOrUse(_, _, bindings, body, _, _) ->
+            sb.AppendLine(sprintf "%sSynExpr.LetOrUse(" indentStr) |> ignore
+            bindings |> List.iter (fun binding -> 
+                sb.AppendLine(sprintf "%s  Binding(...)" indentStr) |> ignore)
+            formatSynExpr body (indent + 1)
+            sb.AppendLine(sprintf "%s)" indentStr) |> ignore
+        | SynExpr.Sequential(_, _, expr1, expr2, _) ->
+            sb.AppendLine(sprintf "%sSynExpr.Sequential(" indentStr) |> ignore
+            formatSynExpr expr1 (indent + 1)
+            formatSynExpr expr2 (indent + 1)
+            sb.AppendLine(sprintf "%s)" indentStr) |> ignore
+        | _ ->
+            sb.AppendLine(sprintf "%sSynExpr.%s(...)" indentStr (expr.GetType().Name.Replace("SynExpr", ""))) |> ignore
+    
+    let rec formatDeclaration (decl: SynModuleDecl) (indent: int) =
+        let indentStr = String.replicate indent "  "
+        match decl with
+        | SynModuleDecl.Let(_, bindings, _) ->
+            sb.AppendLine(sprintf "%sSynModuleDecl.Let(" indentStr) |> ignore
+            bindings |> List.iter (fun binding ->
+                match binding with
+                | SynBinding(_, _, _, _, _, _, _, pat, _, rhsExpr, _, _, _) ->
+                    sb.AppendLine(sprintf "%s  Binding:" indentStr) |> ignore
+                    formatSynExpr rhsExpr (indent + 2))
+            sb.AppendLine(sprintf "%s)" indentStr) |> ignore
+        | SynModuleDecl.Types(typeDefns, _) ->
+            sb.AppendLine(sprintf "%sSynModuleDecl.Types(%d type definitions)" indentStr typeDefns.Length) |> ignore
+        | SynModuleDecl.Expr(expr, _) ->
+            sb.AppendLine(sprintf "%sSynModuleDecl.Expr(" indentStr) |> ignore
+            formatSynExpr expr (indent + 1)
+            sb.AppendLine(sprintf "%s)" indentStr) |> ignore
+        | _ ->
+            sb.AppendLine(sprintf "%s%s" indentStr (decl.GetType().Name)) |> ignore
+    
+    match parseTree with
+    | ParsedInput.ImplFile(ParsedImplFileInput(fileName, isScript, qualifiedNameOfFile, scopedPragmas, hashDirectives, modules, _)) ->
+        sb.AppendLine("F# Compiler Services AST:") |> ignore
+        sb.AppendLine("========================") |> ignore
+        sb.AppendLine(sprintf "File: %s" fileName) |> ignore
+        sb.AppendLine(sprintf "Is Script: %b" isScript) |> ignore
+        sb.AppendLine("") |> ignore
+        
+        modules |> List.iteri (fun i moduleOrNamespace ->
+            match moduleOrNamespace with
+            | SynModuleOrNamespace(longId, _, _, moduleDecls, _, _, _, _, _) ->
+                let moduleName = 
+                    if longId.IsEmpty then sprintf "Module%d" i
+                    else longId |> List.map (fun i -> i.idText) |> String.concat "."
+                sb.AppendLine(sprintf "Module: %s" moduleName) |> ignore
+                sb.AppendLine("Declarations:") |> ignore
+                moduleDecls |> List.iter (fun decl -> formatDeclaration decl 1))
+    
+    | ParsedInput.SigFile(_) ->
+        sb.AppendLine("F# Signature File (not detailed)") |> ignore
+    
+    sb.ToString()
+
+/// Formats Oak AST as readable text
+let private formatOakAst (program: OakProgram) : string =
+    let sb = StringBuilder()
+    
+    let rec formatOakExpr (expr: OakExpression) (indent: int) =
+        let indentStr = String.replicate indent "  "
+        match expr with
+        | Literal lit ->
+            sb.AppendLine(sprintf "%sLiteral(%A)" indentStr lit) |> ignore
+        | Variable name ->
+            sb.AppendLine(sprintf "%sVariable(%s)" indentStr name) |> ignore
+        | Application(func, args) ->
+            sb.AppendLine(sprintf "%sApplication(" indentStr) |> ignore
+            formatOakExpr func (indent + 1)
+            args |> List.iter (fun arg -> formatOakExpr arg (indent + 1))
+            sb.AppendLine(sprintf "%s)" indentStr) |> ignore
+        | Let(name, value, body) ->
+            sb.AppendLine(sprintf "%sLet(%s," indentStr name) |> ignore
+            formatOakExpr value (indent + 1)
+            formatOakExpr body (indent + 1)
+            sb.AppendLine(sprintf "%s)" indentStr) |> ignore
+        | Sequential(first, second) ->
+            sb.AppendLine(sprintf "%sSequential(" indentStr) |> ignore
+            formatOakExpr first (indent + 1)
+            formatOakExpr second (indent + 1)
+            sb.AppendLine(sprintf "%s)" indentStr) |> ignore
+        | IOOperation(ioType, args) ->
+            sb.AppendLine(sprintf "%sIOOperation(%A," indentStr ioType) |> ignore
+            args |> List.iter (fun arg -> formatOakExpr arg (indent + 1))
+            sb.AppendLine(sprintf "%s)" indentStr) |> ignore
+        | _ ->
+            sb.AppendLine(sprintf "%s%s(...)" indentStr (expr.GetType().Name)) |> ignore
+    
+    let formatDeclaration (decl: OakDeclaration) (indent: int) =
+        let indentStr = String.replicate indent "  "
+        match decl with
+        | FunctionDecl(name, params', returnType, body) ->
+            sb.AppendLine(sprintf "%sFunctionDecl(%s, %A, %A," indentStr name params' returnType) |> ignore
+            formatOakExpr body (indent + 1)
+            sb.AppendLine(sprintf "%s)" indentStr) |> ignore
+        | EntryPoint(expr) ->
+            sb.AppendLine(sprintf "%sEntryPoint(" indentStr) |> ignore
+            formatOakExpr expr (indent + 1)
+            sb.AppendLine(sprintf "%s)" indentStr) |> ignore
+        | TypeDecl(name, oakType) ->
+            sb.AppendLine(sprintf "%sTypeDecl(%s, %A)" indentStr name oakType) |> ignore
+        | ExternalDecl(name, paramTypes, returnType, libraryName) ->
+            sb.AppendLine(sprintf "%sExternalDecl(%s, %A, %A, %s)" indentStr name paramTypes returnType libraryName) |> ignore
+    
+    sb.AppendLine("Oak AST:") |> ignore
+    sb.AppendLine("========") |> ignore
+    sb.AppendLine("") |> ignore
+    
+    program.Modules |> List.iter (fun module' ->
+        sb.AppendLine(sprintf "Module: %s" module'.Name) |> ignore
+        sb.AppendLine("Declarations:") |> ignore
+        module'.Declarations |> List.iter (fun decl -> formatDeclaration decl 1)
+        sb.AppendLine("") |> ignore)
+    
+    sb.ToString()
+
+/// Cross-platform text file writing with UTF-8 encoding and Unix line endings
+/// NOTE: For future Linux/macOS support, ensure consistent line endings across platforms
+/// Currently using UTF-8 without BOM for maximum compatibility with MLIR/LLVM toolchain
+let private writeTextFile (filePath: string) (content: string) : unit =
+    // Use UTF-8 encoding without BOM for compatibility with MLIR/LLVM tools
+    // Future platform considerations:
+    // - Linux: UTF-8 encoding is standard and well-supported
+    // - macOS: UTF-8 encoding is standard and well-supported  
+    // - All platforms: Unix line endings (\n) provide best toolchain compatibility
+    let encoding = UTF8Encoding(false) // false = no BOM
+    let normalizedContent = content.Replace("\r\n", "\n").Replace("\r", "\n")
+    File.WriteAllText(filePath, normalizedContent, encoding)
+
+/// Enhanced F# source parsing with comprehensive error handling and intermediate output
+let parseAndConvertToOakAstWithIntermediate (sourceCode: string) : ParsingResult =
     try
+        printfn "Debug: Starting F# source code parsing with intermediate output generation"
+        printfn "Debug: Source code length: %d characters" sourceCode.Length
+        
         let checker = createChecker()
         let fileName = "input.fs"
         let sourceText = SourceText.ofString sourceCode
@@ -345,30 +596,113 @@ let parseAndConvertToOakAst (sourceCode: string) : OakProgram =
             checker.ParseFile(fileName, sourceText, FSharpParsingOptions.Default)
             |> Async.RunSynchronously
         
-        match parseFileResults.ParseTree with
-        | ParsedInput.ImplFile(ParsedImplFileInput(fileName, isScript, qualifiedNameOfFile, scopedPragmas, hashDirectives, modules, _)) ->
-            let oakModules = 
-                modules |> List.map (function
-                    | SynModuleOrNamespace(longId, _, _, moduleDecls, _, _, _, _, _) ->
-                        let moduleName = 
-                            if longId.IsEmpty then "Main" 
-                            else longId |> List.map (fun i -> i.idText) |> String.concat "."
-                        
-                        let declarations = moduleDecls |> List.collect synModuleDeclToOakDecls
-                        
-                        // Add external declarations if needed
-                        let declarationsWithExternals = addStandardIODeclarations declarations
-                        
-                        { Name = moduleName; Declarations = declarationsWithExternals })
-            
-            { Modules = oakModules }
+        printfn "Debug: F# parsing completed, has errors: %b" (parseFileResults.Diagnostics.Length > 0)
         
-        | ParsedInput.SigFile(_) ->
-            // Signature files not supported yet
-            { Modules = [{ Name = "Main"; Declarations = [EntryPoint(Literal(IntLiteral(0)))] }] }
+        if parseFileResults.Diagnostics.Length > 0 then
+            printfn "Debug: Parse diagnostics:"
+            parseFileResults.Diagnostics |> Array.iter (fun diag ->
+                printfn "  %s" (diag.ToString()))
+        
+        // Generate FCS AST text representation
+        let fcsAstText = 
+            match parseFileResults.ParseTree with
+            | Some parseTree -> formatFCSAst parseTree
+            | None -> "No parse tree available (parsing failed)"
+        
+        match parseFileResults.ParseTree with
+        | Some parseTree ->
+            match parseTree with
+            | ParsedInput.ImplFile(ParsedImplFileInput(fileName, isScript, qualifiedNameOfFile, scopedPragmas, hashDirectives, modules, _)) ->
+                printfn "Debug: Successfully parsed implementation file with %d modules" modules.Length
+                
+                let oakModules = 
+                    modules |> List.mapi (fun i module' ->
+                        match module' with
+                        | SynModuleOrNamespace(longId, _, _, moduleDecls, _, _, _, _, _) ->
+                            let moduleName = 
+                                if longId.IsEmpty then 
+                                    sprintf "Module%d" i
+                                else 
+                                    longId |> List.map (fun i -> i.idText) |> String.concat "."
+                            
+                            printfn "Debug: Processing module: %s with %d declarations" moduleName moduleDecls.Length
+                            
+                            let declarations = moduleDecls |> List.collect synModuleDeclToOakDecls
+                            printfn "Debug: Module %s converted to %d Oak declarations" moduleName declarations.Length
+                            
+                            // Add external declarations if needed
+                            let declarationsWithExternals = addStandardIODeclarations declarations
+                            printfn "Debug: Module %s final declaration count: %d" moduleName declarationsWithExternals.Length
+                            
+                            { Name = moduleName; Declarations = declarationsWithExternals })
+                
+                let program = { Modules = oakModules }
+                let oakAstText = formatOakAst program
+                
+                printfn "Debug: Created Oak program with %d modules" program.Modules.Length
+                
+                {
+                    OakProgram = program
+                    FCSAstText = fcsAstText
+                    OakAstText = oakAstText
+                }
+            
+            | ParsedInput.SigFile(_) ->
+                printfn "Debug: Signature file not supported, creating default program"
+                let defaultProgram = { Modules = [{ Name = "Main"; Declarations = [EntryPoint(Literal(IntLiteral(0)))] }] }
+                {
+                    OakProgram = defaultProgram
+                    FCSAstText = fcsAstText
+                    OakAstText = formatOakAst defaultProgram
+                }
+        
+        | None ->
+            printfn "Debug: No parse tree available, creating fallback program"
+            let fallbackProgram = { Modules = [{ Name = "Main"; Declarations = [EntryPoint(Literal(IntLiteral(0)))] }] }
+            {
+                OakProgram = fallbackProgram
+                FCSAstText = fcsAstText
+                OakAstText = formatOakAst fallbackProgram
+            }
     
     with
     | ex ->
-        // On parse error, create a minimal program
-        printfn "Parse error: %s" ex.Message
-        { Modules = [{ Name = "Main"; Declarations = [EntryPoint(Literal(IntLiteral(0)))] }] }
+        printfn "Debug: Parse error: %s" ex.Message
+        printfn "Debug: Creating minimal fallback program"
+        let minimalProgram = { Modules = [{ Name = "Main"; Declarations = [EntryPoint(Literal(IntLiteral(0)))] }] }
+        {
+            OakProgram = minimalProgram
+            FCSAstText = sprintf "Parse error: %s" ex.Message
+            OakAstText = formatOakAst minimalProgram
+        }
+
+/// Enhanced parsing function that saves intermediate files
+let parseAndConvertToOakAstWithFiles (sourceCode: string) (basePath: string) (baseName: string) (keepIntermediates: bool) : OakProgram =
+    let result = parseAndConvertToOakAstWithIntermediate sourceCode
+    
+    if keepIntermediates then
+        try
+            let intermediatesDir = Path.Combine(basePath, "intermediates")
+            if not (Directory.Exists(intermediatesDir)) then
+                Directory.CreateDirectory(intermediatesDir) |> ignore
+            
+            // Save FCS AST file
+            let fcsPath = Path.Combine(intermediatesDir, baseName + ".fcs")
+            writeTextFile fcsPath result.FCSAstText
+            printfn "Saved F# Compiler Services AST to: %s" fcsPath
+            
+            // Save Oak AST file  
+            let oakPath = Path.Combine(intermediatesDir, baseName + ".oak")
+            writeTextFile oakPath result.OakAstText
+            printfn "Saved Oak AST to: %s" oakPath
+            
+        with
+        | ex ->
+            printfn "Warning: Failed to save intermediate AST files: %s" ex.Message
+    
+    result.OakProgram
+
+/// Backward compatibility function - maintains existing interface
+let parseAndConvertToOakAst (sourceCode: string) : OakProgram =
+    let result = parseAndConvertToOakAstWithIntermediate sourceCode
+    result.OakProgram

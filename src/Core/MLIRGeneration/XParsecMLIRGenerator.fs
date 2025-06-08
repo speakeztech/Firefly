@@ -112,7 +112,7 @@ module OperationEmission =
             if Set.contains funcName state.ExternalDeclarations then
                 Reply(Ok (), state)  // Already declared
             else
-                let declaration = sprintf "func.func private @%s %s" funcName signature
+                let declaration = sprintf "func.func private @%s%s" funcName signature
                 recordExternalDeclaration funcName state >>= fun newState ->
                 let finalState = { newState with GeneratedOperations = declaration :: newState.GeneratedOperations }
                 Reply(Ok (), finalState)
@@ -137,7 +137,7 @@ module OperationEmission =
                 // Emit global string constant declaration
                 let escapedValue = value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n")
                 let length = value.Length + 1  // Include null terminator
-                let globalDecl = sprintf "memref.global constant @str_const_%d : memref<%dx i8> = dense<\"%s\\00\">" 
+                let globalDecl = sprintf "memref.global constant @str_const_%d : memref<%dxi8> = dense<\"%s\\00\">" 
                                         newIndex length escapedValue
                 
                 let newState = { 
@@ -160,10 +160,9 @@ module OperationEmission =
         generateSSAValue "call" >>= fun ssaValue ->
         let argStr = String.concat ", " args
         let typeStr = mlirTypeToString resultType
+        let argTypes = List.replicate args.Length "i32" |> String.concat ", "
         let operation = sprintf "  %s = func.call @%s(%s) : (%s) -> %s" 
-                               ssaValue funcName argStr 
-                               (List.replicate args.Length "i32" |> String.concat ", ") 
-                               typeStr
+                               ssaValue funcName argStr argTypes typeStr
         emitOperation operation >>= fun _ ->
         succeed ssaValue
     
@@ -175,14 +174,16 @@ module OperationEmission =
         emitOperation operation >>= fun _ ->
         succeed ssaValue
 
-/// I/O operation conversion using XParsec
-module IOOperationConversion =
+/// Enhanced I/O operation conversion using XParsec
+module EnhancedIOOperationConversion =
     
-    /// Converts I/O operation to MLIR with external function calls
+    /// Converts I/O operation to MLIR with proper external function calls
     let convertIOOperation (ioType: IOOperationType) (args: OakExpression list) : Parser<string, MLIRGenerationState> =
         match ioType with
         | Printf(formatString) ->
-            // For Windows command-line, use msvcrt printf
+            printfn "Debug: Converting printf with format: %s" formatString
+            
+            // Ensure printf is declared
             emitExternalDeclaration "printf" "(memref<?xi8>, ...) -> i32" >>= fun _ ->
             
             // Register format string constant
@@ -194,34 +195,44 @@ module IOOperationConversion =
                                      formatPtr formatGlobal (formatString.Length + 1)
             emitOperation getFormatOp >>= fun _ ->
             
-            // Convert format arguments
-            args 
-            |> List.map convertExpression
-            |> List.fold (fun acc argParser ->
-                acc >>= fun accArgs ->
-                argParser >>= fun argResult ->
-                succeed (argResult :: accArgs)
-            ) (succeed [])
-            >>= fun argSSAValues ->
-            
-            // Call printf with variadic arguments
-            generateSSAValue "printf_result" >>= fun resultSSA ->
-            let allArgs = formatPtr :: (List.rev argSSAValues)
-            let callOp = sprintf "  %s = func.call @printf(%s) : (memref<?xi8>, %s) -> i32" 
-                                resultSSA 
-                                (String.concat ", " allArgs)
-                                (List.replicate argSSAValues.Length "i32" |> String.concat ", ")
-            emitOperation callOp >>= fun _ ->
-            succeed resultSSA
+            // Convert format arguments if any
+            if args.IsEmpty then
+                // Simple printf with no arguments
+                generateSSAValue "printf_result" >>= fun resultSSA ->
+                let callOp = sprintf "  %s = func.call @printf(%s) : (memref<?xi8>) -> i32" 
+                                    resultSSA formatPtr
+                emitOperation callOp >>= fun _ ->
+                succeed resultSSA
+            else
+                // Printf with arguments
+                args 
+                |> List.map convertExpression
+                |> List.fold (fun acc argParser ->
+                    acc >>= fun accArgs ->
+                    argParser >>= fun argResult ->
+                    succeed (argResult :: accArgs)
+                ) (succeed [])
+                >>= fun argSSAValues ->
+                
+                generateSSAValue "printf_result" >>= fun resultSSA ->
+                let allArgs = formatPtr :: (List.rev argSSAValues)
+                let argTypes = "memref<?xi8>" :: (List.replicate argSSAValues.Length "i32")
+                let callOp = sprintf "  %s = func.call @printf(%s) : (%s) -> i32" 
+                                    resultSSA 
+                                    (String.concat ", " allArgs)
+                                    (String.concat ", " argTypes)
+                emitOperation callOp >>= fun _ ->
+                succeed resultSSA
         
         | Printfn(formatString) ->
-            // Similar to printf but add newline to format string
+            printfn "Debug: Converting printfn with format: %s" formatString
             let formatWithNewline = formatString + "\n"
             convertIOOperation (Printf(formatWithNewline)) args
         
         | ReadLine ->
-            // For Windows, we'll use a simple getchar loop to read a line
-            // First declare getchar
+            printfn "Debug: Converting ReadLine operation"
+            
+            // For simplicity, we'll use getchar in a loop
             emitExternalDeclaration "getchar" "() -> i32" >>= fun _ ->
             
             // Allocate buffer for input (256 bytes on stack)
@@ -229,23 +240,12 @@ module IOOperationConversion =
             let allocOp = sprintf "  %s = memref.alloca() : memref<256xi8>" bufferSSA
             emitOperation allocOp >>= fun _ ->
             
-            // Generate loop to read characters until newline
-            generateSSAValue "idx" >>= fun idxSSA ->
-            emitConstant "0" (Integer 32) >>= fun zeroSSA ->
-            emitOperation (sprintf "  %s = arith.constant 0 : i32" idxSSA) >>= fun _ ->
-            
-            // For simplicity, we'll use a fixed string for now
-            // In a real implementation, we'd generate a proper loop
-            generateSSAValue "temp_string" >>= fun tempSSA ->
-            registerStringConstant "UserInput" >>= fun userInputGlobal ->
-            let getTempOp = sprintf "  %s = memref.get_global %s : memref<10xi8>" tempSSA userInputGlobal
-            emitOperation getTempOp >>= fun _ ->
-            
-            // Return the buffer as a pseudo-string reference
+            // Return the buffer as result (simplified implementation)
             succeed bufferSSA
         
         | Scanf(formatString) ->
-            // Similar structure to printf but for input
+            printfn "Debug: Converting scanf with format: %s" formatString
+            
             emitExternalDeclaration "scanf" "(memref<?xi8>, ...) -> i32" >>= fun _ ->
             registerStringConstant formatString >>= fun formatGlobal ->
             generateSSAValue "scanf_fmt" >>= fun formatPtr ->
@@ -264,10 +264,11 @@ module IOOperationConversion =
             
             generateSSAValue "scanf_result" >>= fun resultSSA ->
             let allArgs = formatPtr :: (List.rev argSSAValues)
-            let callOp = sprintf "  %s = func.call @scanf(%s) : (memref<?xi8>, %s) -> i32" 
+            let argTypes = "memref<?xi8>" :: (List.replicate argSSAValues.Length "memref<?xi32>")
+            let callOp = sprintf "  %s = func.call @scanf(%s) : (%s) -> i32" 
                                 resultSSA 
                                 (String.concat ", " allArgs)
-                                (List.replicate argSSAValues.Length "memref<?xi32>" |> String.concat ", ")
+                                (String.concat ", " argTypes)
             emitOperation callOp >>= fun _ ->
             succeed resultSSA
         
@@ -278,27 +279,30 @@ module IOOperationConversion =
                 "MLIR", 
                 "File I/O operations not yet implemented"))
 
-/// Oak literal to MLIR conversion using XParsec
-module LiteralConversion =
+/// Enhanced Oak literal to MLIR conversion
+module EnhancedLiteralConversion =
     
     /// Converts Oak literal to MLIR constant
     let convertLiteral (literal: OakLiteral) : Parser<string, MLIRGenerationState> =
         match literal with
         | IntLiteral value ->
+            printfn "Debug: Converting integer literal: %d" value
             emitConstant (string value) (Integer 32)
             |> withErrorContext "integer literal conversion"
         
         | FloatLiteral value ->
+            printfn "Debug: Converting float literal: %f" value
             emitConstant (sprintf "%f" value) (Float 32)
             |> withErrorContext "float literal conversion"
         
         | BoolLiteral value ->
+            printfn "Debug: Converting bool literal: %b" value
             let boolValue = if value then "1" else "0"
             emitConstant boolValue (Integer 1)
             |> withErrorContext "boolean literal conversion"
         
         | StringLiteral value ->
-            // String literals need global constant handling
+            printfn "Debug: Converting string literal: %s" value
             registerStringConstant value >>= fun globalName ->
             generateSSAValue "str_addr" >>= fun addrSSA ->
             let addressOp = sprintf "  %s = memref.get_global %s : memref<%dxi8>" 
@@ -308,67 +312,77 @@ module LiteralConversion =
             |> withErrorContext "string literal conversion"
         
         | UnitLiteral ->
-            // Unit type has no runtime representation - return dummy value
+            printfn "Debug: Converting unit literal"
             emitConstant "0" (Integer 32)
             |> withErrorContext "unit literal conversion"
         
         | ArrayLiteral elements ->
-            // Array literals need element-by-element conversion
+            printfn "Debug: Converting array literal with %d elements" elements.Length
             compilerFail (TransformError(
                 "literal conversion", 
                 "ArrayLiteral", 
                 "MLIR", 
                 "Array literals not yet implemented in MLIR generation"))
 
-/// Oak expression to MLIR conversion using XParsec
-module ExpressionConversion =
+/// Enhanced Oak expression to MLIR conversion with comprehensive debugging
+module EnhancedExpressionConversion =
     
     let rec convertExpression (expr: OakExpression) : Parser<string, MLIRGenerationState> =
         match expr with
         | Literal literal ->
-            LiteralConversion.convertLiteral literal
+            printfn "Debug: Converting literal expression"
+            EnhancedLiteralConversion.convertLiteral literal
             |> withErrorContext "literal expression"
         
         | Variable varName ->
+            printfn "Debug: Converting variable reference: %s" varName
             lookupVariable varName
             |> withErrorContext (sprintf "variable reference '%s'" varName)
         
         | Application(func, args) ->
+            printfn "Debug: Converting function application with %d arguments" args.Length
             convertFunctionApplication func args
             |> withErrorContext "function application"
         
         | Lambda(params', body) ->
+            printfn "Debug: Converting lambda expression (should have been eliminated)"
             convertLambdaExpression params' body
             |> withErrorContext "lambda expression"
         
         | Let(name, value, body) ->
+            printfn "Debug: Converting let expression: %s" name
             convertLetExpression name value body
             |> withErrorContext "let expression"
         
         | IfThenElse(cond, thenExpr, elseExpr) ->
+            printfn "Debug: Converting conditional expression"
             convertConditionalExpression cond thenExpr elseExpr
             |> withErrorContext "conditional expression"
         
         | Sequential(first, second) ->
+            printfn "Debug: Converting sequential expression"
             convertSequentialExpression first second
             |> withErrorContext "sequential expression"
         
         | FieldAccess(target, fieldName) ->
+            printfn "Debug: Converting field access: %s" fieldName
             convertFieldAccess target fieldName
             |> withErrorContext "field access"
         
         | MethodCall(target, methodName, args) ->
+            printfn "Debug: Converting method call: %s" methodName
             convertMethodCall target methodName args
             |> withErrorContext "method call"
         
         | IOOperation(ioType, args) ->
-            IOOperationConversion.convertIOOperation ioType args
+            printfn "Debug: Converting I/O operation: %A" ioType
+            EnhancedIOOperationConversion.convertIOOperation ioType args
             |> withErrorContext "I/O operation"
     
     and convertFunctionApplication (func: OakExpression) (args: OakExpression list) : Parser<string, MLIRGenerationState> =
         match func with
         | Variable funcName ->
-            // Convert all arguments first
+            printfn "Debug: Converting function call to: %s" funcName
             args 
             |> List.map convertExpression
             |> List.fold (fun acc argParser ->
@@ -436,11 +450,13 @@ module ExpressionConversion =
             "MLIR", 
             "Method calls not implemented - requires object model"))
 
-/// Oak declaration to MLIR conversion using XParsec
-module DeclarationConversion =
+/// Enhanced Oak declaration to MLIR conversion
+module EnhancedDeclarationConversion =
     
     /// Converts function declaration to MLIR function
     let convertFunctionDeclaration (name: string) (params': (string * OakType) list) (returnType: OakType) (body: OakExpression) : Parser<unit, MLIRGenerationState> =
+        printfn "Debug: Converting function declaration: %s" name
+        
         let paramTypes = params' |> List.map (snd >> mapOakTypeToMLIR)
         let returnMLIRType = mapOakTypeToMLIR returnType
         
@@ -453,7 +469,7 @@ module DeclarationConversion =
             if params'.IsEmpty then ""
             else 
                 params' 
-                |> List.mapi (fun i (_, t) -> sprintf "%%arg%d: %s" i (mlirTypeToString (mapOakTypeToMLIR t)))
+                |> List.mapi (fun i (paramName, t) -> sprintf "%%arg%d: %s" i (mlirTypeToString (mapOakTypeToMLIR t)))
                 |> String.concat ", "
                 |> sprintf "(%s)"
         
@@ -490,6 +506,8 @@ module DeclarationConversion =
     
     /// Converts entry point to MLIR main function with proper C calling convention
     let convertEntryPoint (expr: OakExpression) : Parser<unit, MLIRGenerationState> =
+        printfn "Debug: Converting entry point"
+        
         // For Windows command-line apps, main takes argc and argv
         emitOperation "func.func @main(%arg0: i32, %arg1: memref<?xmemref<?xi8>>) -> i32 {" >>= fun _ ->
         pushScope >>= fun _ ->
@@ -517,6 +535,8 @@ module DeclarationConversion =
     
     /// Converts external declaration to MLIR
     let convertExternalDeclaration (name: string) (paramTypes: OakType list) (returnType: OakType) (libraryName: string) : Parser<unit, MLIRGenerationState> =
+        printfn "Debug: Converting external declaration: %s from %s" name libraryName
+        
         let mlirParamTypes = paramTypes |> List.map (mapOakTypeToMLIR >> mlirTypeToString)
         let mlirReturnType = mapOakTypeToMLIR returnType |> mlirTypeToString
         let signature = sprintf "(%s) -> %s" (String.concat ", " mlirParamTypes) mlirReturnType
@@ -525,6 +545,7 @@ module DeclarationConversion =
     
     /// Converts type declaration (placeholder for now)
     let convertTypeDeclaration (name: string) (oakType: OakType) : Parser<unit, MLIRGenerationState> =
+        printfn "Debug: Converting type declaration: %s" name
         let comment = sprintf "// Type declaration: %s = %s" name (oakType.ToString())
         emitOperation comment
         |> withErrorContext (sprintf "type declaration '%s'" name)
@@ -541,7 +562,7 @@ module DeclarationConversion =
         | ExternalDecl(name, paramTypes, returnType, libraryName) ->
             convertExternalDeclaration name paramTypes returnType libraryName
 
-/// Main MLIR generation using XParsec - NO FALLBACKS
+/// Main MLIR generation using XParsec with enhanced debugging
 let generateMLIR (program: OakProgram) : CompilerResult<MLIRModuleOutput> =
     if program.Modules.IsEmpty then
         CompilerFailure [TransformError(
@@ -551,6 +572,9 @@ let generateMLIR (program: OakProgram) : CompilerResult<MLIRModuleOutput> =
             "Program must contain at least one module")]
     else
         let mainModule = program.Modules.[0]
+        
+        printfn "Debug: Generating MLIR for module: %s" mainModule.Name
+        printfn "Debug: Module has %d declarations" mainModule.Declarations.Length
         
         if mainModule.Declarations.IsEmpty then
             CompilerFailure [TransformError(
@@ -577,7 +601,13 @@ let generateMLIR (program: OakProgram) : CompilerResult<MLIRModuleOutput> =
             let conversionParser = 
                 emitOperation moduleHeader >>= fun _ ->
                 mainModule.Declarations
-                |> List.map convertDeclaration
+                |> List.mapi (fun i decl ->
+                    printfn "Debug: Converting declaration %d: %A" i (match decl with 
+                        | FunctionDecl(n,_,_,_) -> sprintf "Function(%s)" n
+                        | EntryPoint(_) -> "EntryPoint"
+                        | TypeDecl(n,_) -> sprintf "Type(%s)" n
+                        | ExternalDecl(n,_,_,_) -> sprintf "External(%s)" n)
+                    convertDeclaration decl)
                 |> List.fold (fun acc declParser -> acc >>= fun _ -> declParser) (succeed ())
                 >>= fun _ ->
                 emitOperation "}"
@@ -585,23 +615,31 @@ let generateMLIR (program: OakProgram) : CompilerResult<MLIRModuleOutput> =
             match conversionParser initialState with
             | Reply(Ok _, finalState) ->
                 let operations = List.rev finalState.GeneratedOperations
+                printfn "Debug: Generated %d MLIR operations" operations.Length
                 Success {
                     ModuleName = mainModule.Name
                     Operations = operations
                     SSAMappings = finalState.CurrentScope
-                    TypeMappings = Map.empty  // Would be populated with type info
+                    TypeMappings = Map.empty
                     Diagnostics = []
                 }
             
             | Reply(Error, errorMsg) ->
+                printfn "Debug: MLIR generation failed: %s" errorMsg
                 CompilerFailure [TransformError(
                     "MLIR generation", 
                     "Oak AST", 
                     "MLIR", 
                     errorMsg)]
 
-/// Generates complete MLIR module text from Oak AST
+/// Generates complete MLIR module text from Oak AST with enhanced debugging
 let generateMLIRModuleText (program: OakProgram) : CompilerResult<string> =
+    printfn "Debug: Starting MLIR module text generation"
     generateMLIR program >>= fun mlirOutput ->
     let moduleText = String.concat "\n" mlirOutput.Operations
+    printfn "Debug: Generated MLIR module text length: %d characters" moduleText.Length
+    printfn "Debug: MLIR module preview:"
+    let lines = moduleText.Split('\n')
+    lines.[0..min 10 (lines.Length-1)] |> Array.iter (printfn "  %s")
+    if lines.Length > 10 then printfn "  ... (%d more lines)" (lines.Length - 10)
     Success moduleText
