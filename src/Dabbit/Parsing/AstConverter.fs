@@ -43,8 +43,41 @@ let private synConstToOakLiteral (synConst: SynConst) : OakLiteral =
     | SynConst.Unit -> UnitLiteral
     | _ -> UnitLiteral
 
+/// Recognizes F# I/O operations and converts to Oak I/O operations
+let private recognizeIOOperation (funcExpr: SynExpr) (args: SynExpr list) : OakExpression option =
+    match funcExpr with
+    | SynExpr.Ident(ident) when ident.idText = "printf" ->
+        match args with
+        | [SynExpr.Const(SynConst.String(format, _, _), _)] ->
+            Some (IOOperation(Printf(format), []))
+        | formatExpr :: valueExprs ->
+            let format = match formatExpr with
+                        | SynExpr.Const(SynConst.String(f, _, _), _) -> f
+                        | _ -> "%s"
+            let oakArgs = valueExprs |> List.map synExprToOakExpr
+            Some (IOOperation(Printf(format), oakArgs))
+        | [] -> Some (IOOperation(Printf(""), []))
+    
+    | SynExpr.Ident(ident) when ident.idText = "printfn" ->
+        match args with
+        | [SynExpr.Const(SynConst.String(format, _, _), _)] ->
+            Some (IOOperation(Printfn(format), []))
+        | formatExpr :: valueExprs ->
+            let format = match formatExpr with
+                        | SynExpr.Const(SynConst.String(f, _, _), _) -> f
+                        | _ -> "%s"
+            let oakArgs = valueExprs |> List.map synExprToOakExpr
+            Some (IOOperation(Printfn(format), oakArgs))
+        | [] -> Some (IOOperation(Printfn(""), []))
+    
+    | SynExpr.DotGet(SynExpr.Ident(obj), _, SynLongIdent([method], _, _), _) 
+        when obj.idText = "stdin" && method.idText = "ReadLine" ->
+        Some (IOOperation(ReadLine, []))
+    
+    | _ -> None
+
 /// Converts F# Compiler Services SynExpr to Oak expression
-let rec private synExprToOakExpr (synExpr: SynExpr) : OakExpression =
+and private synExprToOakExpr (synExpr: SynExpr) : OakExpression =
     match synExpr with
     | SynExpr.Const(synConst, _) -> 
         Literal(synConstToOakLiteral synConst)
@@ -57,9 +90,15 @@ let rec private synExprToOakExpr (synExpr: SynExpr) : OakExpression =
         Variable(name)
     
     | SynExpr.App(_, _, funcExpr, argExpr, _) ->
-        let func = synExprToOakExpr funcExpr
-        let arg = synExprToOakExpr argExpr
-        Application(func, [arg])
+        // First check if this is an I/O operation
+        let args = [argExpr]
+        match recognizeIOOperation funcExpr args with
+        | Some ioOp -> ioOp
+        | None ->
+            // Handle as regular function application
+            let func = synExprToOakExpr funcExpr
+            let arg = synExprToOakExpr argExpr
+            Application(func, [arg])
     
     | SynExpr.Lambda(_, _, args, bodyExpr, _, _, _) ->
         let parameters = 
@@ -107,7 +146,13 @@ let rec private synExprToOakExpr (synExpr: SynExpr) : OakExpression =
     | SynExpr.DotGet(targetExpr, _, SynLongIdent(id, _, _), _) ->
         let target = synExprToOakExpr targetExpr
         let fieldName = id |> List.map (fun i -> i.idText) |> String.concat "."
-        FieldAccess(target, fieldName)
+        
+        // Check for stdin.ReadLine() pattern
+        match targetExpr, id with
+        | SynExpr.Ident(obj), [method] when obj.idText = "stdin" && method.idText = "ReadLine" ->
+            IOOperation(ReadLine, [])
+        | _ ->
+            FieldAccess(target, fieldName)
     
     | SynExpr.DotIndexedGet(targetExpr, indexExprs, _, _) ->
         let target = synExprToOakExpr targetExpr
@@ -216,6 +261,40 @@ let private synModuleDeclToOakDecls (moduleDecl: SynModuleDecl) : OakDeclaration
     
     | _ -> []
 
+/// Adds external declarations for standard I/O functions
+let private addStandardIODeclarations (declarations: OakDeclaration list) : OakDeclaration list =
+    let hasIO = 
+        declarations 
+        |> List.exists (function
+            | FunctionDecl(_, _, _, body) -> containsIOOperations body
+            | EntryPoint(expr) -> containsIOOperations expr
+            | _ -> false)
+    
+    if hasIO then
+        let externalDecls = [
+            ExternalDecl("printf", [StringType], IntType, "libc")
+            ExternalDecl("scanf", [StringType], IntType, "libc")
+            ExternalDecl("fgets", [StringType; IntType; StringType], StringType, "libc")
+            ExternalDecl("puts", [StringType], IntType, "libc")
+        ]
+        externalDecls @ declarations
+    else
+        declarations
+
+/// Checks if an expression contains I/O operations
+and private containsIOOperations (expr: OakExpression) : bool =
+    match expr with
+    | IOOperation(_, _) -> true
+    | Application(func, args) -> containsIOOperations func || List.exists containsIOOperations args
+    | Let(_, value, body) -> containsIOOperations value || containsIOOperations body
+    | IfThenElse(cond, thenExpr, elseExpr) -> 
+        containsIOOperations cond || containsIOOperations thenExpr || containsIOOperations elseExpr
+    | Sequential(first, second) -> containsIOOperations first || containsIOOperations second
+    | FieldAccess(target, _) -> containsIOOperations target
+    | MethodCall(target, _, args) -> containsIOOperations target || List.exists containsIOOperations args
+    | Lambda(_, body) -> containsIOOperations body
+    | _ -> false
+
 /// Parses F# source code using F# Compiler Services and converts to Oak AST
 let parseAndConvertToOakAst (sourceCode: string) : OakProgram =
     try
@@ -239,26 +318,27 @@ let parseAndConvertToOakAst (sourceCode: string) : OakProgram =
                         
                         let declarations = moduleDecls |> List.collect synModuleDeclToOakDecls
                         
-                        // If we have declarations but no explicit entry point, and there's a function call at module level,
-                        // create an entry point that calls the first function
+                        // Add external declarations if needed and ensure entry point exists
+                        let declarationsWithExternals = addStandardIODeclarations declarations
+                        
                         let finalDeclarations = 
-                            if declarations |> List.exists (function | EntryPoint(_) -> true | _ -> false) then
-                                declarations
+                            if declarationsWithExternals |> List.exists (function | EntryPoint(_) -> true | _ -> false) then
+                                declarationsWithExternals
                             else
                                 // Look for functions and create a simple entry point
                                 let functionNames = 
-                                    declarations |> List.choose (function 
+                                    declarationsWithExternals |> List.choose (function 
                                         | FunctionDecl(name, [], _, _) when name <> "main" -> Some name 
                                         | _ -> None)
                                 
                                 match functionNames with
                                 | firstFunc :: _ ->
-                                    declarations @ [EntryPoint(Application(Variable(firstFunc), []))]
+                                    declarationsWithExternals @ [EntryPoint(Application(Variable(firstFunc), []))]
                                 | [] ->
-                                    if declarations.IsEmpty then
+                                    if declarationsWithExternals.IsEmpty then
                                         [EntryPoint(Literal(IntLiteral(0)))]
                                     else
-                                        declarations
+                                        declarationsWithExternals
                         
                         { Name = moduleName; Declarations = finalDeclarations })
             

@@ -89,14 +89,14 @@ module SourceToOakPhase =
             enterPhase "f#-source-parsing" >>= fun _ ->
             recordDiagnostic "Starting F# source code parsing" >>= fun _ ->
             
-            // Use the XParsec-based AST converter
-            match Dabbit.Parsing.AstConverter.parseF#SourceWithXParsec "input.fs" sourceCode with
-            | Success program ->
+            // Use the correct AST converter function
+            try
+                let program = Dabbit.Parsing.AstConverter.parseAndConvertToOakAst sourceCode
                 recordDiagnostic (sprintf "Successfully parsed %d modules" program.Modules.Length) >>= fun _ ->
                 succeed program
-            | CompilerFailure errors ->
-                let errorMsg = errors |> List.map (fun e -> e.ToString()) |> String.concat "; "
-                compilerFail (TransformError("f#-source-parsing", "source code", "Oak AST", errorMsg))
+            with
+            | ex ->
+                compilerFail (TransformError("f#-source-parsing", "source code", "Oak AST", ex.Message))
         
         Validate = fun program ->
             if program.Modules.IsEmpty then
@@ -120,13 +120,13 @@ module OakTransformationPhases =
             enterPhase "closure-elimination" >>= fun _ ->
             recordDiagnostic "Starting closure elimination transformation" >>= fun _ ->
             
-            try
-                let transformedProgram = Dabbit.Closures.ClosureTransformer.eliminateClosures program
+            match Dabbit.Closures.ClosureTransformer.eliminateClosures program with
+            | Success transformedProgram ->
                 recordDiagnostic "Successfully eliminated closures" >>= fun _ ->
                 succeed transformedProgram
-            with
-            | ex ->
-                compilerFail (TransformError("closure-elimination", "Oak AST with closures", "Oak AST without closures", ex.Message))
+            | CompilerFailure errors ->
+                let errorMsg = errors |> List.map (fun e -> e.ToString()) |> String.concat "; "
+                compilerFail (TransformError("closure-elimination", "Oak AST with closures", "Oak AST without closures", errorMsg))
         
         Validate = fun program ->
             // Would validate that no closure expressions remain
@@ -143,19 +143,19 @@ module OakTransformationPhases =
             enterPhase "union-layout-compilation" >>= fun _ ->
             recordDiagnostic "Starting union layout compilation" >>= fun _ ->
             
-            try
-                let transformedProgram = Dabbit.UnionLayouts.FixedLayoutCompiler.compileFixedLayouts program
+            match Dabbit.UnionLayouts.FixedLayoutCompiler.compileFixedLayouts program with
+            | Success transformedProgram ->
                 recordDiagnostic "Successfully compiled union layouts" >>= fun _ ->
                 succeed transformedProgram
-            with
-            | ex ->
-                compilerFail (TransformError("union-layout-compilation", "Oak AST with unions", "Oak AST with fixed layouts", ex.Message))
+            | CompilerFailure errors ->
+                let errorMsg = errors |> List.map (fun e -> e.ToString()) |> String.concat "; "
+                compilerFail (TransformError("union-layout-compilation", "Oak AST with unions", "Oak AST with fixed layouts", errorMsg))
         
         Validate = fun program ->
-            if Dabbit.UnionLayouts.FixedLayoutCompiler.validateZeroAllocationLayouts program then
-                Success ()
-            else
-                CompilerFailure [TransformError("union validation", "compiled unions", "zero-allocation layouts", "Some union layouts may cause heap allocations")]
+            match Dabbit.UnionLayouts.FixedLayoutCompiler.validateZeroAllocationLayouts program with
+            | Success true -> Success ()
+            | Success false -> CompilerFailure [TransformError("union validation", "compiled unions", "zero-allocation layouts", "Some union layouts may cause heap allocations")]
+            | CompilerFailure errors -> CompilerFailure errors
         
         SaveIntermediate = true
     }
@@ -335,12 +335,6 @@ let executeCompleteTranslationPipeline (sourceFile: string) (sourceCode: string)
         
         | Reply(Error, errorMsg) ->
             CompilerFailure [TransformError("pipeline execution", "F# source", "MLIR", errorMsg)]
-
-/// Generates complete MLIR module text from F# source - HARD FAILURE ON ANY ISSUES
-let generateMLIRModuleText (program: OakProgram) : CompilerResult<string> =
-    match generateMLIRModuleText program with
-    | Success mlirText -> Success mlirText
-    | CompilerFailure errors -> CompilerFailure errors
 
 /// Entry point for translation with comprehensive error reporting
 let translateF#ToMLIR (sourceFile: string) (sourceCode: string) : CompilerResult<string> =

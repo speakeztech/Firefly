@@ -13,6 +13,15 @@ type OakType =
     | StructType of fields: (string * OakType) list
     | UnionType of cases: (string * OakType option) list
 
+/// Represents I/O operation types for external function calls
+type IOOperationType =
+    | Printf of formatString: string
+    | Printfn of formatString: string
+    | ReadLine
+    | Scanf of formatString: string
+    | WriteFile of path: string
+    | ReadFile of path: string
+
 /// Represents literal values in the AST
 type OakLiteral =
     | IntLiteral of int
@@ -32,11 +41,13 @@ and OakExpression =
     | Sequential of first: OakExpression * second: OakExpression
     | FieldAccess of target: OakExpression * fieldName: string
     | MethodCall of target: OakExpression * methodName: string * args: OakExpression list
+    | IOOperation of ioType: IOOperationType * args: OakExpression list
 
 type OakDeclaration =
     | FunctionDecl of name: string * params': (string * OakType) list * returnType: OakType * body: OakExpression
     | TypeDecl of name: string * oakType: OakType
     | EntryPoint of OakExpression
+    | ExternalDecl of name: string * params': OakType list * returnType: OakType * libraryName: string
 
 type OakModule = {
     Name: string

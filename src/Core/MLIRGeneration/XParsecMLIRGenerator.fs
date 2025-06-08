@@ -16,6 +16,8 @@ type MLIRGenerationState = {
     ScopeStack: Map<string, string> list
     GeneratedOperations: string list
     CurrentFunction: string option
+    ExternalDeclarations: Set<string>
+    StringConstants: Map<string, int>
     ErrorContext: string list
 }
 
@@ -98,12 +100,52 @@ module OperationEmission =
             let newState = { state with GeneratedOperations = newOps }
             Reply(Ok (), newState)
     
-    /// Emits multiple MLIR operations
-    let emitOperations (operations: string list) : Parser<unit, MLIRGenerationState> =
-        operations
-        |> List.map emitOperation
-        |> List.fold (>>=) (succeed ())
-        |> fun combined -> combined |>> ignore
+    /// Records an external declaration to avoid duplicates
+    let recordExternalDeclaration (funcName: string) : Parser<unit, MLIRGenerationState> =
+        fun state ->
+            let newState = { state with ExternalDeclarations = Set.add funcName state.ExternalDeclarations }
+            Reply(Ok (), newState)
+    
+    /// Emits an external function declaration
+    let emitExternalDeclaration (funcName: string) (paramTypes: string list) (returnType: string) : Parser<unit, MLIRGenerationState> =
+        fun state ->
+            if Set.contains funcName state.ExternalDeclarations then
+                Reply(Ok (), state)  // Already declared
+            else
+                let paramStr = String.concat ", " paramTypes
+                let declaration = sprintf "func.func private @%s(%s) -> %s" funcName paramStr returnType
+                recordExternalDeclaration funcName state >>= fun newState ->
+                let finalState = { newState with GeneratedOperations = declaration :: newState.GeneratedOperations }
+                Reply(Ok (), finalState)
+    
+    /// Registers a string constant and returns its global name
+    let registerStringConstant (value: string) : Parser<string, MLIRGenerationState> =
+        fun state ->
+            let existingConst = 
+                state.StringConstants 
+                |> Map.tryFindKey (fun k _ -> k = value)
+            
+            match existingConst with
+            | Some _ ->
+                let constIndex = state.StringConstants.[value]
+                let globalName = sprintf "@str_const_%d" constIndex
+                Reply(Ok globalName, state)
+            | None ->
+                let newIndex = state.StringConstants.Count
+                let globalName = sprintf "@str_const_%d" newIndex
+                let newConstants = Map.add value newIndex state.StringConstants
+                
+                // Emit global string constant declaration
+                let escapedValue = value.Replace("\\", "\\\\").Replace("\"", "\\\"")
+                let globalDecl = sprintf "llvm.mlir.global constant @str_const_%d(\"%s\\00\" : !llvm.array<%d x i8>) : !llvm.array<%d x i8>" 
+                                        newIndex escapedValue (value.Length + 1) (value.Length + 1)
+                
+                let newState = { 
+                    state with 
+                        StringConstants = newConstants
+                        GeneratedOperations = globalDecl :: state.GeneratedOperations
+                }
+                Reply(Ok globalName, newState)
     
     /// Emits an MLIR constant operation
     let emitConstant (value: string) (mlirType: MLIRType) : Parser<string, MLIRGenerationState> =
@@ -118,9 +160,10 @@ module OperationEmission =
         generateSSAValue "call" >>= fun ssaValue ->
         let argStr = String.concat ", " args
         let typeStr = mlirTypeToString resultType
+        let argTypes = List.replicate args.Length "i32"  // Simplified type handling
         let operation = sprintf "  %s = func.call @%s(%s) : (%s) -> %s" 
                                ssaValue funcName argStr 
-                               (String.concat ", " (List.replicate args.Length "i32")) 
+                               (String.concat ", " argTypes) 
                                typeStr
         emitOperation operation >>= fun _ ->
         succeed ssaValue
@@ -132,6 +175,131 @@ module OperationEmission =
         let operation = sprintf "  %s = arith.%s %s, %s : %s" ssaValue opName lhs rhs typeStr
         emitOperation operation >>= fun _ ->
         succeed ssaValue
+
+/// I/O operation conversion using XParsec
+module IOOperationConversion =
+    
+    /// Converts I/O operation to MLIR with external function calls
+    let convertIOOperation (ioType: IOOperationType) (args: OakExpression list) : Parser<string, MLIRGenerationState> =
+        match ioType with
+        | Printf(formatString) ->
+            // Emit external declaration for printf
+            emitExternalDeclaration "printf" ["!llvm.ptr<i8>"] "i32" >>= fun _ ->
+            
+            // Register format string constant
+            registerStringConstant formatString >>= fun formatGlobal ->
+            
+            // Get address of format string
+            generateSSAValue "fmt_ptr" >>= fun formatPtr ->
+            let getFormatOp = sprintf "  %s = llvm.mlir.addressof %s : !llvm.ptr<!llvm.array<%d x i8>>" 
+                                     formatPtr formatGlobal (formatString.Length + 1)
+            emitOperation getFormatOp >>= fun _ ->
+            
+            // Cast to i8*
+            generateSSAValue "fmt_cast" >>= fun castPtr ->
+            let castOp = sprintf "  %s = llvm.bitcast %s : !llvm.ptr<!llvm.array<%d x i8>> to !llvm.ptr<i8>" 
+                                castPtr formatPtr (formatString.Length + 1)
+            emitOperation castOp >>= fun _ ->
+            
+            // Convert arguments
+            args 
+            |> List.map convertExpression
+            |> List.fold (fun acc argParser ->
+                acc >>= fun accArgs ->
+                argParser >>= fun argResult ->
+                succeed (argResult :: accArgs)
+            ) (succeed [])
+            >>= fun argSSAValues ->
+            
+            // Call printf
+            generateSSAValue "printf_result" >>= fun resultSSA ->
+            let allArgs = castPtr :: (List.rev argSSAValues)
+            let argTypes = "!llvm.ptr<i8>" :: (List.replicate argSSAValues.Length "i32")
+            let callOp = sprintf "  %s = func.call @printf(%s) : (%s) -> i32" 
+                                resultSSA 
+                                (String.concat ", " allArgs)
+                                (String.concat ", " argTypes)
+            emitOperation callOp >>= fun _ ->
+            succeed resultSSA
+        
+        | Printfn(formatString) ->
+            // Similar to printf but add newline to format string
+            let formatWithNewline = formatString + "\\0A"
+            convertIOOperation (Printf(formatWithNewline)) args
+        
+        | ReadLine ->
+            // Emit external declarations for stdin operations
+            emitExternalDeclaration "fgets" ["!llvm.ptr<i8>"; "i32"; "!llvm.ptr<i8>"] "!llvm.ptr<i8>" >>= fun _ ->
+            emitExternalDeclaration "__stdin" [] "!llvm.ptr<i8>" >>= fun _ ->
+            
+            // Allocate buffer for input (256 bytes)
+            generateSSAValue "input_buf" >>= fun bufferSSA ->
+            let allocOp = sprintf "  %s = llvm.alloca %%c256 x i8 : (i32) -> !llvm.ptr<i8>" bufferSSA
+            emitOperation allocOp >>= fun _ ->
+            
+            // Get stdin handle
+            generateSSAValue "stdin_handle" >>= fun stdinSSA ->
+            let stdinOp = sprintf "  %s = func.call @__stdin() : () -> !llvm.ptr<i8>" stdinSSA
+            emitOperation stdinOp >>= fun _ ->
+            
+            // Call fgets
+            generateSSAValue "fgets_result" >>= fun resultSSA ->
+            let sizeConstant = "256"
+            generateSSAValue "size_const" >>= fun sizeSSA ->
+            let sizeOp = sprintf "  %s = arith.constant %s : i32" sizeSSA sizeConstant
+            emitOperation sizeOp >>= fun _ ->
+            
+            let fgetsOp = sprintf "  %s = func.call @fgets(%s, %s, %s) : (!llvm.ptr<i8>, i32, !llvm.ptr<i8>) -> !llvm.ptr<i8>" 
+                                 resultSSA bufferSSA sizeSSA stdinSSA
+            emitOperation fgetsOp >>= fun _ ->
+            succeed resultSSA
+        
+        | Scanf(formatString) ->
+            // Emit external declaration for scanf
+            emitExternalDeclaration "scanf" ["!llvm.ptr<i8>"] "i32" >>= fun _ ->
+            
+            // Register format string constant
+            registerStringConstant formatString >>= fun formatGlobal ->
+            
+            // Get address of format string
+            generateSSAValue "scanf_fmt" >>= fun formatPtr ->
+            let getFormatOp = sprintf "  %s = llvm.mlir.addressof %s : !llvm.ptr<!llvm.array<%d x i8>>" 
+                                     formatPtr formatGlobal (formatString.Length + 1)
+            emitOperation getFormatOp >>= fun _ ->
+            
+            // Cast to i8*
+            generateSSAValue "scanf_cast" >>= fun castPtr ->
+            let castOp = sprintf "  %s = llvm.bitcast %s : !llvm.ptr<!llvm.array<%d x i8>> to !llvm.ptr<i8>" 
+                                castPtr formatPtr (formatString.Length + 1)
+            emitOperation castOp >>= fun _ ->
+            
+            // Convert arguments (typically addresses for scanf)
+            args 
+            |> List.map convertExpression
+            |> List.fold (fun acc argParser ->
+                acc >>= fun accArgs ->
+                argParser >>= fun argResult ->
+                succeed (argResult :: accArgs)
+            ) (succeed [])
+            >>= fun argSSAValues ->
+            
+            // Call scanf
+            generateSSAValue "scanf_result" >>= fun resultSSA ->
+            let allArgs = castPtr :: (List.rev argSSAValues)
+            let argTypes = "!llvm.ptr<i8>" :: (List.replicate argSSAValues.Length "!llvm.ptr<i32>")
+            let callOp = sprintf "  %s = func.call @scanf(%s) : (%s) -> i32" 
+                                resultSSA 
+                                (String.concat ", " allArgs)
+                                (String.concat ", " argTypes)
+            emitOperation callOp >>= fun _ ->
+            succeed resultSSA
+        
+        | WriteFile(_) | ReadFile(_) ->
+            compilerFail (TransformError(
+                "I/O operation conversion", 
+                "file I/O operation", 
+                "MLIR", 
+                "File I/O operations not yet implemented"))
 
 /// Oak literal to MLIR conversion using XParsec
 module LiteralConversion =
@@ -153,18 +321,24 @@ module LiteralConversion =
             |> withErrorContext "boolean literal conversion"
         
         | StringLiteral value ->
-            // String literals require more complex handling in MLIR
-            let escapedValue = value.Replace("\"", "\\\"")
-            generateSSAValue "str" >>= fun ssaValue ->
-            let operation = sprintf "  %s = llvm.mlir.addressof @str_const_%d : !llvm.ptr<i8>" 
-                                   ssaValue (abs (value.GetHashCode()))
-            emitOperation operation >>= fun _ ->
-            succeed ssaValue
+            // String literals need global constant handling
+            registerStringConstant value >>= fun globalName ->
+            generateSSAValue "str_addr" >>= fun addrSSA ->
+            let addressOp = sprintf "  %s = llvm.mlir.addressof %s : !llvm.ptr<!llvm.array<%d x i8>>" 
+                                   addrSSA globalName (value.Length + 1)
+            emitOperation addressOp >>= fun _ ->
+            
+            // Cast to i8*
+            generateSSAValue "str_cast" >>= fun castSSA ->
+            let castOp = sprintf "  %s = llvm.bitcast %s : !llvm.ptr<!llvm.array<%d x i8>> to !llvm.ptr<i8>" 
+                                castSSA addrSSA (value.Length + 1)
+            emitOperation castOp >>= fun _ ->
+            succeed castSSA
             |> withErrorContext "string literal conversion"
         
         | UnitLiteral ->
-            // Unit type has no runtime representation
-            succeed ""
+            // Unit type has no runtime representation - return dummy value
+            emitConstant "0" (Integer 32)
             |> withErrorContext "unit literal conversion"
         
         | ArrayLiteral elements ->
@@ -215,6 +389,10 @@ module ExpressionConversion =
         | MethodCall(target, methodName, args) ->
             convertMethodCall target methodName args
             |> withErrorContext "method call"
+        
+        | IOOperation(ioType, args) ->
+            IOOperationConversion.convertIOOperation ioType args
+            |> withErrorContext "I/O operation"
     
     and convertFunctionApplication (func: OakExpression) (args: OakExpression list) : Parser<string, MLIRGenerationState> =
         match func with
@@ -329,9 +507,9 @@ module DeclarationConversion =
         popScope
         |> withErrorContext (sprintf "function declaration '%s'" name)
     
-    /// Converts entry point to MLIR main function
+    /// Converts entry point to MLIR main function with proper C calling convention
     let convertEntryPoint (expr: OakExpression) : Parser<unit, MLIRGenerationState> =
-        emitOperation "func.func @main() -> i32 {" >>= fun _ ->
+        emitOperation "func.func @main(%arg0: i32, %arg1: !llvm.ptr<!llvm.ptr<i8>>) -> i32 {" >>= fun _ ->
         pushScope >>= fun _ ->
         convertExpression expr >>= fun exprSSA ->
         
@@ -349,6 +527,13 @@ module DeclarationConversion =
         popScope
         |> withErrorContext "entry point conversion"
     
+    /// Converts external declaration to MLIR
+    let convertExternalDeclaration (name: string) (paramTypes: OakType list) (returnType: OakType) (libraryName: string) : Parser<unit, MLIRGenerationState> =
+        let mlirParamTypes = paramTypes |> List.map (mapOakTypeToMLIR >> mlirTypeToString)
+        let mlirReturnType = mapOakTypeToMLIR returnType |> mlirTypeToString
+        emitExternalDeclaration name mlirParamTypes mlirReturnType
+        |> withErrorContext (sprintf "external declaration '%s'" name)
+    
     /// Converts type declaration (placeholder for now)
     let convertTypeDeclaration (name: string) (oakType: OakType) : Parser<unit, MLIRGenerationState> =
         let comment = sprintf "// Type declaration: %s = %s" name (oakType.ToString())
@@ -364,6 +549,8 @@ module DeclarationConversion =
             convertEntryPoint expr
         | TypeDecl(name, oakType) ->
             convertTypeDeclaration name oakType
+        | ExternalDecl(name, paramTypes, returnType, libraryName) ->
+            convertExternalDeclaration name paramTypes returnType libraryName
 
 /// Main MLIR generation using XParsec - NO FALLBACKS
 let generateMLIR (program: OakProgram) : CompilerResult<MLIRModuleOutput> =
@@ -389,6 +576,8 @@ let generateMLIR (program: OakProgram) : CompilerResult<MLIRModuleOutput> =
                 ScopeStack = []
                 GeneratedOperations = []
                 CurrentFunction = None
+                ExternalDeclarations = Set.empty
+                StringConstants = Map.empty
                 ErrorContext = []
             }
             
