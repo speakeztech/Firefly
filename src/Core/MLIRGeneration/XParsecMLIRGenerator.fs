@@ -209,7 +209,7 @@ module EnhancedIOOperationConversion =
             else
                 // Printf with arguments
                 args 
-                |> List.map convertExpression
+                |> List.map (fun arg -> convertExpression arg)
                 |> List.fold (fun acc argParser ->
                     acc >>= fun accArgs ->
                     argParser >>= fun argResult ->
@@ -257,7 +257,7 @@ module EnhancedIOOperationConversion =
             emitOperation getFormatOp >>= fun _ ->
             
             args 
-            |> List.map convertExpression
+            |> List.map (fun arg -> convertExpression arg)
             |> List.fold (fun acc argParser ->
                 acc >>= fun accArgs ->
                 argParser >>= fun argResult ->
@@ -389,10 +389,10 @@ module EnhancedExpressionConversion =
             args 
             |> List.map convertExpression
             |> List.fold (fun acc argParser ->
-                acc >>= fun accResults ->
-                argParser >>= fun argResult ->
-                succeed (argResult :: accResults)
-            ) (succeed [])
+                          acc >>= fun accResults ->
+                          argParser >>= fun argResult ->
+                          succeed (argResult :: accResults)
+                         ) (succeed [])
             >>= fun argSSAValues ->
             let reversedArgs = List.rev argSSAValues
             emitFunctionCall funcName reversedArgs (Integer 32)
@@ -605,13 +605,15 @@ let generateMLIR (program: OakProgram) : CompilerResult<MLIRModuleOutput> =
                 emitOperation moduleHeader >>= fun _ ->
                 mainModule.Declarations
                 |> List.mapi (fun i decl ->
-                    printfn "Debug: Converting declaration %d: %A" i (match decl with 
-                        | FunctionDecl(n,_,_,_) -> sprintf "Function(%s)" n
-                        | EntryPoint(_) -> "EntryPoint"
-                        | TypeDecl(n,_) -> sprintf "Type(%s)" n
-                        | ExternalDecl(n,_,_,_) -> sprintf "External(%s)" n)
-                    convertDeclaration decl)
-                |> List.fold (fun acc declParser -> acc >>= fun _ -> declParser) (succeed ())
+                               printfn "Debug: Converting declaration %d: %A" i (match decl with 
+                                                                                | FunctionDecl(n,_,_,_) -> sprintf "Function(%s)" n
+                                                                                | EntryPoint(_) -> "EntryPoint"
+                                                                                | TypeDecl(n,_) -> sprintf "Type(%s)" n
+                                                                                | ExternalDecl(n,_,_,_) -> sprintf "External(%s)" n)
+                               convertDeclaration decl)
+                |> List.fold (fun acc declParser -> 
+                              acc >>= fun _ -> 
+                              declParser) (succeed ())
                 >>= fun _ ->
                 emitOperation "}"
             

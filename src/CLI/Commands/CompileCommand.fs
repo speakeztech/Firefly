@@ -56,113 +56,56 @@ let private saveIntermediateFiles (outputPath: string) (pipelineOutput: Translat
     let baseName = Path.GetFileNameWithoutExtension(outputPath)
     let dir = Path.GetDirectoryName(outputPath)
     
-    printfn "[SAVE-DEBUG] Starting intermediate file save process"
-    printfn "[SAVE-DEBUG] Output path: %s" outputPath
-    printfn "[SAVE-DEBUG] Base name: %s" baseName
-    printfn "[SAVE-DEBUG] Directory: %s" dir
-    printfn "[SAVE-DEBUG] Pipeline output phase count: %d" pipelineOutput.PhaseOutputs.Count
-    printfn "[SAVE-DEBUG] Available phase output keys: %A" (Map.keys pipelineOutput.PhaseOutputs |> Seq.toList)
+    printfn "[SAVE-DEBUG] Starting intermediate file save process for '%s'" baseName
     
-    // Check each specific key in detail
-    match pipelineOutput.PhaseOutputs.TryFind "f#-compiler-services-ast" with
-    | Some content -> 
-        printfn "[SAVE-DEBUG] Found FCS AST content: %d characters" content.Length
-        if String.IsNullOrWhiteSpace(content) then
-            printfn "[SAVE-DEBUG] WARNING: FCS AST content is null or whitespace"
-        else
-            printfn "[SAVE-DEBUG] FCS AST content preview: %s" (content.Substring(0, min 50 content.Length))
-    | None -> 
-        printfn "[SAVE-DEBUG] FCS AST content NOT FOUND in pipeline outputs"
-    
-    match pipelineOutput.PhaseOutputs.TryFind "oak-ast" with
-    | Some content -> 
-        printfn "[SAVE-DEBUG] Found Oak AST content: %d characters" content.Length
-        if String.IsNullOrWhiteSpace(content) then
-            printfn "[SAVE-DEBUG] WARNING: Oak AST content is null or whitespace"
-        else
-            printfn "[SAVE-DEBUG] Oak AST content preview: %s" (content.Substring(0, min 50 content.Length))
-    | None -> 
-        printfn "[SAVE-DEBUG] Oak AST content NOT FOUND in pipeline outputs"
-    
-    match pipelineOutput.PhaseOutputs.TryFind "mlir" with
-    | Some content -> 
-        printfn "[SAVE-DEBUG] Found MLIR content: %d characters" content.Length
-    | None -> 
-        printfn "[SAVE-DEBUG] MLIR content NOT FOUND in pipeline outputs"
-    
-    let filesToSave = [
-        // AST files
-        match pipelineOutput.PhaseOutputs.TryFind "f#-compiler-services-ast" with
-        | Some content when not (String.IsNullOrWhiteSpace(content)) -> 
-            printfn "[SAVE-DEBUG] Adding FCS AST file to save list"
-            Some ("FCS AST", Path.Combine(dir, baseName + ".fcs"), content)
-        | Some content -> 
-            printfn "[SAVE-DEBUG] FCS AST content is empty, skipping file creation"
-            None
-        | None -> 
-            printfn "[SAVE-DEBUG] No FCS AST content available"
-            None
-        
-        match pipelineOutput.PhaseOutputs.TryFind "oak-ast" with
-        | Some content when not (String.IsNullOrWhiteSpace(content)) -> 
-            printfn "[SAVE-DEBUG] Adding Oak AST file to save list"
-            Some ("Oak AST", Path.Combine(dir, baseName + ".oak"), content)
-        | Some content -> 
-            printfn "[SAVE-DEBUG] Oak AST content is empty, skipping file creation"
-            None
-        | None -> 
-            printfn "[SAVE-DEBUG] No Oak AST content available"
-            None
-        
-        // MLIR file
-        match pipelineOutput.PhaseOutputs.TryFind "mlir" with
-        | Some content when not (String.IsNullOrWhiteSpace(content)) -> 
-            printfn "[SAVE-DEBUG] Adding MLIR file to save list"
-            Some ("MLIR", Path.Combine(dir, baseName + ".mlir"), content)
-        | Some content -> 
-            printfn "[SAVE-DEBUG] MLIR content is empty, skipping file creation"
-            None
-        | None -> 
-            printfn "[SAVE-DEBUG] No MLIR content available"
-            None
-        
-        // LLVM IR file (if provided)
-        match llvmIR with
-        | Some content when not (String.IsNullOrWhiteSpace(content)) -> 
-            printfn "[SAVE-DEBUG] Adding LLVM IR file to save list"
-            Some ("LLVM IR", Path.Combine(dir, baseName + ".ll"), content)
-        | Some content -> 
-            printfn "[SAVE-DEBUG] LLVM IR content is empty, skipping file creation"
-            None
-        | None -> 
-            printfn "[SAVE-DEBUG] No LLVM IR content provided"
-            None
+    // Define file types to extract and save
+    let fileSpecs = [
+        ("f#-compiler-services-ast", "FCS AST", ".fcs")
+        ("oak-ast", "Oak AST", ".oak")
+        ("mlir", "MLIR", ".mlir")
     ]
-    |> List.choose id
     
-    printfn "[SAVE-DEBUG] Total files to save: %d" filesToSave.Length
-    printfn "[SAVE-DEBUG] Files to save: %A" (filesToSave |> List.map (fun (desc, path, _) -> sprintf "%s -> %s" desc (Path.GetFileName(path))))
+    // Create file entries from pipeline outputs
+    let pipelineFiles = 
+        fileSpecs
+        |> List.choose (fun (key, desc, ext) ->
+            match pipelineOutput.PhaseOutputs.TryFind key with
+            | Some content when not (String.IsNullOrWhiteSpace(content)) -> 
+                Some (desc, Path.Combine(dir, baseName + ext), content)
+            | _ -> None)
+    
+    // Add LLVM IR if available
+    let allFiles =
+        match llvmIR with
+        | Some content when not (String.IsNullOrWhiteSpace(content)) ->
+            (("LLVM IR", Path.Combine(dir, baseName + ".ll"), content) :: pipelineFiles)
+        | _ -> pipelineFiles
+    
+    printfn "[SAVE-DEBUG] Found %d files to save" allFiles.Length
     
     // Save all files
-    filesToSave |> List.iter (fun (desc, path, content) ->
-        try
-            printfn "[SAVE-DEBUG] Attempting to save %s to %s (%d chars)" desc path content.Length
-            writeTextFile path content
-            printfn "[SAVE-DEBUG] Successfully saved %s" desc
-        with
-        | ex ->
-            printfn "[SAVE-DEBUG] ERROR saving %s: %s" desc ex.Message
-            printfn "Warning: Failed to save %s: %s" desc ex.Message
-    )
+    let savedFiles =
+        allFiles
+        |> List.choose (fun (desc, path, content) ->
+            try
+                writeTextFile path content
+                printfn "[SAVE-DEBUG] Saved %s: %s" desc (Path.GetFileName(path))
+                Some (desc, path)
+            with ex ->
+                printfn "Warning: Failed to save %s: %s" desc ex.Message
+                None)
     
-    // Report what was saved
-    if not filesToSave.IsEmpty then
+    // Report results
+    match savedFiles with
+    | [] -> 
+        printfn "[SAVE-DEBUG] No intermediate files were saved"
+    | files ->
         printfn "Saved intermediate files:"
-        filesToSave |> List.iter (fun (desc, path, _) ->
+        files |> List.iter (fun (desc, path) ->
             printfn "  %s: %s" desc (Path.GetFileName(path))
         )
-    else
-        printfn "[SAVE-DEBUG] WARNING: No intermediate files were saved!"
+    
+    ()
 
 /// Validates compilation arguments
 let private validateCompilationArgs (inputPath: string) (outputPath: string) : CompilerResult<unit> =

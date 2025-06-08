@@ -96,9 +96,9 @@ module DialectTransformers =
                 let m = pattern.Match(trimmed)
                 if m.Success then
                     let name = m.Groups.[1].Value
-                    let params = m.Groups.[2].Value
+                    let parameters = m.Groups.[2].Value
                     let returnType = m.Groups.[3].Value
-                    sprintf "llvm.func @%s(%s) -> %s" name params returnType
+                    sprintf "llvm.func @%s(%s) -> %s" name parameters returnType
                 else
                     trimmed
             

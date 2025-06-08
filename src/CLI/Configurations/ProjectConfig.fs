@@ -69,18 +69,18 @@ module TOMLParsers =
     let tomlString : Parser<TOMLValue, TOMLParsingState> =
         let quotedString = 
             between (pchar '"') (pchar '"') (many (satisfy (fun c -> c <> '"'))) |>>
-            fun chars -> TOMLString(String(Array.ofList chars))
+            (fun chars -> TOMLString(String(Array.ofList chars)))
         
         let singleQuotedString =
             between (pchar '\'') (pchar '\'') (many (satisfy (fun c -> c <> '\''))) |>>
-            fun chars -> TOMLString(String(Array.ofList chars))
+            (fun chars -> TOMLString(String(Array.ofList chars)))
         
         quotedString <|> singleQuotedString
         |> withErrorContext "TOML string"
     
     /// Parses TOML integer literals
     let tomlInteger : Parser<TOMLValue, TOMLParsingState> =
-        let digits = many1 digit |>> fun chars -> String(Array.ofList chars)
+        let digits = many1 digit |>> (fun chars -> String(Array.ofList chars))
         let sign = opt (pchar '-')
         
         sign >>= fun signOpt ->
@@ -88,15 +88,17 @@ module TOMLParsers =
         let fullStr = match signOpt with Some _ -> "-" + numStr | None -> numStr
         match Int32.TryParse(fullStr) with
         | (true, value) -> succeed (TOMLInteger value)
-        | (false, _) -> compilerFail (ParseError(
-            { Line = 0; Column = 0; File = ""; Offset = 0 },
-            sprintf "Invalid integer: %s" fullStr,
-            ["TOML integer parsing"]))
+        | (false, _) -> 
+            let err = ParseError(
+                { Line = 0; Column = 0; File = ""; Offset = 0 },
+                sprintf "Invalid integer: %s" fullStr,
+                ["TOML integer parsing"])
+            compilerFail err
         |> withErrorContext "TOML integer"
     
     /// Parses TOML float literals
     let tomlFloat : Parser<TOMLValue, TOMLParsingState> =
-        let digits = many1 digit |>> fun chars -> String(Array.ofList chars)
+        let digits = many1 digit |>> (fun chars -> String(Array.ofList chars))
         let sign = opt (pchar '-')
         
         sign >>= fun signOpt ->
@@ -109,16 +111,18 @@ module TOMLParsers =
             | None -> sprintf "%s.%s" intPart fracPart
         match Double.TryParse(fullStr) with
         | (true, value) -> succeed (TOMLFloat value)
-        | (false, _) -> compilerFail (ParseError(
-            { Line = 0; Column = 0; File = ""; Offset = 0 },
-            sprintf "Invalid float: %s" fullStr,
-            ["TOML float parsing"]))
+        | (false, _) -> 
+            let err = ParseError(
+                { Line = 0; Column = 0; File = ""; Offset = 0 },
+                sprintf "Invalid float: %s" fullStr,
+                ["TOML float parsing"])
+            compilerFail err
         |> withErrorContext "TOML float"
     
     /// Parses TOML boolean literals
     let tomlBoolean : Parser<TOMLValue, TOMLParsingState> =
-        (pstring "true" |>> fun _ -> TOMLBoolean true) <|>
-        (pstring "false" |>> fun _ -> TOMLBoolean false)
+        (pstring "true" |>> (fun _ -> TOMLBoolean true)) <|>
+        (pstring "false" |>> (fun _ -> TOMLBoolean false))
         |> withErrorContext "TOML boolean"
     
     /// Parses TOML arrays
@@ -127,7 +131,7 @@ module TOMLParsers =
             tomlString <|> tomlFloat <|> tomlInteger <|> tomlBoolean <|> tomlArray
         
         between (pchar '[') (pchar ']') (sepBy (parseTomlValue()) (pchar ',')) |>>
-        TOMLArray
+        (fun values -> TOMLArray values)
         |> withErrorContext "TOML array"
     
     /// Parses any TOML value
@@ -137,8 +141,8 @@ module TOMLParsers =
     
     /// Parses TOML key names
     let tomlKey : Parser<string, TOMLParsingState> =
-        let bareKey = many1 (alphaNum <|> pchar '_' <|> pchar '-') |>> fun chars -> String(Array.ofList chars)
-        let quotedKey = between (pchar '"') (pchar '"') (many (satisfy (fun c -> c <> '"'))) |>> fun chars -> String(Array.ofList chars)
+        let bareKey = many1 (alphaNum <|> pchar '_' <|> pchar '-') |>> (fun chars -> String(Array.ofList chars))
+        let quotedKey = between (pchar '"') (pchar '"') (many (satisfy (fun c -> c <> '"'))) |>> (fun chars -> String(Array.ofList chars))
         
         bareKey <|> quotedKey
         |> withErrorContext "TOML key"
@@ -194,10 +198,11 @@ module ConfigExtraction =
             match Map.tryFind key sectionData with
             | Some (TOMLString value) -> Success value
             | Some other -> 
-                CompilerFailure [ParseError(
+                let err = ParseError(
                     { Line = 0; Column = 0; File = ""; Offset = 0 },
                     sprintf "Expected string for key '%s', got %A" key other,
-                    ["config extraction"])]
+                    ["config extraction"])
+                CompilerFailure [err]
             | None -> Success defaultValue
         | None -> Success defaultValue
     
@@ -210,10 +215,11 @@ module ConfigExtraction =
             | Some (TOMLString "true") -> Success true
             | Some (TOMLString "false") -> Success false
             | Some other ->
-                CompilerFailure [ParseError(
+                let err = ParseError(
                     { Line = 0; Column = 0; File = ""; Offset = 0 },
                     sprintf "Expected boolean for key '%s', got %A" key other,
-                    ["config extraction"])]
+                    ["config extraction"])
+                CompilerFailure [err]
             | None -> Success defaultValue
         | None -> Success defaultValue
     
@@ -227,15 +233,17 @@ module ConfigExtraction =
                 match Int32.TryParse(str) with
                 | (true, value) -> Success (Some value)
                 | (false, _) -> 
-                    CompilerFailure [ParseError(
+                    let err = ParseError(
                         { Line = 0; Column = 0; File = ""; Offset = 0 },
                         sprintf "Cannot convert '%s' to integer for key '%s'" str key,
-                        ["config extraction"])]
+                        ["config extraction"])
+                    CompilerFailure [err]
             | Some other ->
-                CompilerFailure [ParseError(
+                let err = ParseError(
                     { Line = 0; Column = 0; File = ""; Offset = 0 },
                     sprintf "Expected integer for key '%s', got %A" key other,
-                    ["config extraction"])]
+                    ["config extraction"])
+                CompilerFailure [err]
             | None -> Success defaultValue
         | None -> Success defaultValue
     
@@ -260,10 +268,11 @@ module ConfigExtraction =
                     SelectiveLinking = selectiveLinking
                 }
             else
-                CompilerFailure [ParseError(
+                let err = ParseError(
                     { Line = 0; Column = 0; File = ""; Offset = 0 },
                     "Invalid dependency section path",
-                    ["dependency extraction"])]
+                    ["dependency extraction"])
+                CompilerFailure [err]
         
         dependencySections
         |> List.map extractDependency
@@ -341,48 +350,47 @@ let parseConfigFile (filePath: string) : CompilerResult<FireflyConfig> =
                 }
             
             | Reply(Error, errorMsg) ->
-                CompilerFailure [ParseError(
+                let err = ParseError(
                     { Line = 0; Column = 0; File = filePath; Offset = 0 },
                     sprintf "TOML parsing failed: %s" errorMsg,
-                    ["configuration parsing"])]
+                    ["configuration parsing"])
+                CompilerFailure [err]
         
         with
         | ex ->
-            CompilerFailure [ParseError(
+            let err = ParseError(
                 { Line = 0; Column = 0; File = filePath; Offset = 0 },
                 sprintf "Error reading configuration file: %s" ex.Message,
-                ["file reading"])]
+                ["file reading"])
+            CompilerFailure [err]
 
 /// Validates configuration for consistency and correctness
 let validateConfig (config: FireflyConfig) : CompilerResult<FireflyConfig> =
-    // Validate package name
     if String.IsNullOrWhiteSpace(config.PackageName) then
-        CompilerFailure [ParseError(
+        let err = ParseError(
             { Line = 0; Column = 0; File = ""; Offset = 0 },
             "Package name cannot be empty",
-            ["config validation"])]
-    
-    // Validate version format (basic check)
+            ["config validation"])
+        CompilerFailure [err]
     elif not (config.Version.Contains(".")) then
-        CompilerFailure [ParseError(
+        let err = ParseError(
             { Line = 0; Column = 0; File = ""; Offset = 0 },
             "Version must contain at least one dot (e.g., '1.0.0')",
-            ["config validation"])]
-    
-    // Validate optimization level
-    elif not (["none"; "less"; "default"; "aggressive"; "size"; "sizemin"] |> List.contains config.Compilation.OptimizationLevel.ToLowerInvariant()) then
-        CompilerFailure [ParseError(
+            ["config validation"])
+        CompilerFailure [err]
+    elif not (List.contains (config.Compilation.OptimizationLevel.ToLowerInvariant()) 
+             ["none"; "less"; "default"; "aggressive"; "size"; "sizemin"]) then
+        let err = ParseError(
             { Line = 0; Column = 0; File = ""; Offset = 0 },
             sprintf "Invalid optimization level: %s" config.Compilation.OptimizationLevel,
-            ["config validation"])]
-    
-    // Validate stack limit
+            ["config validation"])
+        CompilerFailure [err]
     elif config.Compilation.StackLimit.IsSome && config.Compilation.StackLimit.Value <= 0 then
-        CompilerFailure [ParseError(
+        let err = ParseError(
             { Line = 0; Column = 0; File = ""; Offset = 0 },
             "Stack limit must be positive",
-            ["config validation"])]
-    
+            ["config validation"])
+        CompilerFailure [err]
     else
         Success config
 
@@ -417,7 +425,8 @@ lto = "false"
         Success ()
     with
     | ex ->
-        CompilerFailure [CompilerError(
+        let err = CompilerError(
             "config generation", 
             sprintf "Failed to write default config to %s" filePath,
-            Some ex.Message)]
+            Some ex.Message)
+        CompilerFailure [err]
