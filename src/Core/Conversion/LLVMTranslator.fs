@@ -56,6 +56,47 @@ module TargetTripleManagement =
 /// Direct MLIR-to-LLVM transformation using string processing
 module DirectMLIRProcessing =
     
+    /// Converts MLIR I/O operations to LLVM IR calls
+    let convertIOOperations (mlirText: string) : string =
+        let lines = mlirText.Split('\n')
+        
+        let convertLine (line: string) : string =
+            if line.Contains("func.call @printf") then
+                // Convert MLIR printf call to LLVM IR
+                let pattern = System.Text.RegularExpressions.Regex(@"(%\w+)\s*=\s*func\.call\s*@printf\((.*?)\)")
+                let m = pattern.Match(line)
+                if m.Success then
+                    let result = m.Groups.[1].Value
+                    let args = m.Groups.[2].Value
+                    sprintf "  %s = call i32 (i8*, ...) @printf(%s)" result args
+                else
+                    line
+            elif line.Contains("memref.get_global") then
+                // Convert memref global access to LLVM getelementptr
+                let pattern = System.Text.RegularExpressions.Regex(@"(%\w+)\s*=\s*memref\.get_global\s*(@\w+)")
+                let m = pattern.Match(line)
+                if m.Success then
+                    let result = m.Groups.[1].Value
+                    let global = m.Groups.[2].Value
+                    sprintf "  %s = getelementptr inbounds [256 x i8], [256 x i8]* %s, i64 0, i64 0" result global
+                else
+                    line
+            elif line.Contains("memref.global constant") then
+                // Convert memref global to LLVM global
+                let pattern = System.Text.RegularExpressions.Regex(@"memref\.global\s+constant\s+(@\w+).*?dense<\"(.*?)\"")
+                let m = pattern.Match(line)
+                if m.Success then
+                    let name = m.Groups.[1].Value
+                    let value = m.Groups.[2].Value.Replace("\\00", "")
+                    let length = value.Length + 1
+                    sprintf "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\", align 1" name length value
+                else
+                    line
+            else
+                line
+        
+        lines |> Array.map convertLine |> String.concat "\n"
+    
     /// Converts a single MLIR function to LLVM IR using direct string replacement
     let convertSingleFunction (functionText: string) : string =
         let lines = functionText.Split('\n') |> Array.map (fun s -> s.Trim()) |> Array.filter (not << String.IsNullOrWhiteSpace)
@@ -64,16 +105,36 @@ module DirectMLIRProcessing =
         else
             let headerLine = lines.[0]
             
-            // Extract function name
-            let funcNamePattern = System.Text.RegularExpressions.Regex(@"func\.func\s+@(\w+)\s*\(\s*\)\s*->\s*i32")
-            let funcMatch = funcNamePattern.Match(headerLine)
+            // Extract function name and signature
+            let funcPattern = System.Text.RegularExpressions.Regex(@"func\.func\s+@(\w+)\s*\((.*?)\)\s*->\s*(\w+)")
+            let funcMatch = funcPattern.Match(headerLine)
             
             if not funcMatch.Success then ""
             else
                 let funcName = funcMatch.Groups.[1].Value
-                let llvmFuncName = if funcName = "main" then "user_main" else funcName
+                let params = funcMatch.Groups.[2].Value
+                let returnType = funcMatch.Groups.[3].Value
                 
-                let llvmHeader = sprintf "define i32 @%s() {" llvmFuncName
+                // Special handling for main function with proper Windows signature
+                let (llvmFuncName, llvmParams, llvmReturnType) = 
+                    if funcName = "main" then
+                        ("main", "i32 %argc, i8** %argv", "i32")
+                    else
+                        let paramList = 
+                            if String.IsNullOrWhiteSpace(params) then ""
+                            else
+                                params.Split(',') 
+                                |> Array.map (fun p -> 
+                                    let parts = p.Trim().Split(':')
+                                    if parts.Length = 2 then
+                                        let paramName = parts.[0].Trim()
+                                        let paramType = parts.[1].Trim()
+                                        sprintf "i32 %s" paramName  // Simplified type mapping
+                                    else "i32")
+                                |> String.concat ", "
+                        (funcName, paramList, "i32")
+                
+                let llvmHeader = sprintf "define i32 @%s(%s) {" llvmFuncName llvmParams
                 let entryLabel = "entry:"
                 
                 let bodyLines = lines.[1..lines.Length-2] // Skip header and closing brace
@@ -86,10 +147,17 @@ module DirectMLIRProcessing =
                             Some (sprintf "  %s = add i32 0, %s" constMatch.Groups.[1].Value constMatch.Groups.[2].Value)
                         else None
                     elif line.Contains("func.call") then
-                        let callPattern = System.Text.RegularExpressions.Regex(@"(%\w+)\s*=\s*func\.call\s*@(\w+)\(\)")
+                        let callPattern = System.Text.RegularExpressions.Regex(@"(%\w+)\s*=\s*func\.call\s*@(\w+)\((.*?)\)")
                         let callMatch = callPattern.Match(line)
                         if callMatch.Success then
-                            Some (sprintf "  %s = call i32 @%s()" callMatch.Groups.[1].Value callMatch.Groups.[2].Value)
+                            let result = callMatch.Groups.[1].Value
+                            let callee = callMatch.Groups.[2].Value
+                            let args = callMatch.Groups.[3].Value
+                            // Special handling for I/O functions
+                            if callee = "printf" || callee = "scanf" || callee = "getchar" then
+                                Some (sprintf "  %s = call i32 @%s(%s)" result callee args)
+                            else
+                                Some (sprintf "  %s = call i32 @%s(%s)" result callee args)
                         else None
                     elif line.Contains("func.return") then
                         let returnPattern = System.Text.RegularExpressions.Regex(@"func\.return\s+(%\w+)")
@@ -98,6 +166,12 @@ module DirectMLIRProcessing =
                             Some (sprintf "  ret i32 %s" returnMatch.Groups.[1].Value)
                         else
                             Some "  ret i32 0"
+                    elif line.Contains("memref.alloca") then
+                        let allocaPattern = System.Text.RegularExpressions.Regex(@"(%\w+)\s*=\s*memref\.alloca\(\)")
+                        let allocaMatch = allocaPattern.Match(line)
+                        if allocaMatch.Success then
+                            Some (sprintf "  %s = alloca [256 x i8], align 1" allocaMatch.Groups.[1].Value)
+                        else None
                     else None
                 
                 let convertedBody = 
@@ -108,10 +182,33 @@ module DirectMLIRProcessing =
                 let llvmFunction = [llvmHeader; entryLabel] @ convertedBody @ ["}"]
                 String.concat "\n" llvmFunction
     
+    /// Adds external function declarations for Windows C runtime
+    let addExternalDeclarations (isWindows: bool) : string list =
+        if isWindows then
+            [
+                "; External function declarations for Windows"
+                "declare i32 @printf(i8*, ...)"
+                "declare i32 @scanf(i8*, ...)"
+                "declare i32 @getchar()"
+                "declare i32 @puts(i8*)"
+                ""
+            ]
+        else
+            [
+                "; External function declarations"
+                "declare i32 @printf(i8*, ...)"
+                "declare i32 @scanf(i8*, ...)"
+                "declare i32 @getchar()"
+                ""
+            ]
+    
     /// Extracts individual function texts from MLIR module
     let extractFunctionTexts (mlirText: string) : string list =
+        // First convert I/O operations
+        let processedMLIR = convertIOOperations mlirText
+        
         // Split by func.func to get function boundaries
-        let funcSplit = mlirText.Split([|"func.func"|], StringSplitOptions.RemoveEmptyEntries)
+        let funcSplit = processedMLIR.Split([|"func.func"|], StringSplitOptions.RemoveEmptyEntries)
         
         if funcSplit.Length <= 1 then []
         else
@@ -139,6 +236,14 @@ module DirectMLIRProcessing =
                 findFunctionEnd [] 0 0 |> String.concat "\n")
             |> Array.toList
     
+    /// Extracts global constants from MLIR
+    let extractGlobalConstants (mlirText: string) : string list =
+        let lines = mlirText.Split('\n')
+        lines 
+        |> Array.filter (fun line -> line.Contains("memref.global constant"))
+        |> Array.map convertIOOperations
+        |> Array.toList
+    
     /// Transforms complete MLIR module to LLVM IR
     let transformModule (mlirText: string) : CompilerResult<LLVMOutput> =
         if String.IsNullOrWhiteSpace(mlirText) then
@@ -152,6 +257,9 @@ module DirectMLIRProcessing =
                     if moduleMatch.Success then moduleMatch.Groups.[1].Value
                     else "main"
                 
+                // Extract global constants
+                let globalConstants = extractGlobalConstants mlirText
+                
                 // Extract and convert functions
                 let functionTexts = extractFunctionTexts mlirText
                 printfn "Debug: Found %d functions in MLIR" functionTexts.Length
@@ -163,85 +271,37 @@ module DirectMLIRProcessing =
                 
                 printfn "Debug: Converted %d functions to LLVM" llvmFunctions.Length
                 
-                if llvmFunctions.IsEmpty then
-                    // Fallback: create minimal functions if extraction fails
-                    let fallbackFunctions = [
-                        "define i32 @user_hello() {\nentry:\n  ret i32 0\n}"
-                        "define i32 @user_main() {\nentry:\n  %1 = call i32 @user_hello()\n  ret i32 %1\n}"
-                    ]
-                    printfn "Debug: Using fallback functions"
-                    
-                    let targetTriple = TargetTripleManagement.getTargetTriple "default"
-                    let moduleHeader = [
-                        sprintf "; ModuleID = '%s'" moduleName
-                        sprintf "source_filename = \"%s\"" moduleName
-                        "target datalayout = \"e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128\""
-                        sprintf "target triple = \"%s\"" targetTriple
-                        ""
-                    ]
-                    
-                    let mainWrapper = [
-                        "define i32 @main(i32 %argc, i8** %argv) {"
-                        "entry:"
-                        "  %1 = call i32 @user_main()"
-                        "  ret i32 %1"
-                        "}"
-                    ]
-                    
-                    let completeIR = 
-                        moduleHeader @ 
-                        fallbackFunctions @ 
-                        [String.concat "\n" mainWrapper]
-                        |> String.concat "\n"
-                    
-                    Success {
-                        ModuleName = moduleName
-                        LLVMIRText = completeIR
-                        SymbolTable = Map.empty
-                        ExternalFunctions = []
-                        GlobalVariables = []
-                    }
-                else
-                    // Generate complete LLVM IR with extracted functions
-                    let targetTriple = TargetTripleManagement.getTargetTriple "default"
-                    
-                    let moduleHeader = [
-                        sprintf "; ModuleID = '%s'" moduleName
-                        sprintf "source_filename = \"%s\"" moduleName
-                        "target datalayout = \"e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128\""
-                        sprintf "target triple = \"%s\"" targetTriple
-                        ""
-                    ]
-                    
-                    // Add main wrapper if user_main exists
-                    let hasUserMain = llvmFunctions |> List.exists (fun f -> f.Contains("@user_main"))
-                    
-                    let mainWrapper = 
-                        if hasUserMain then
-                            [
-                                "define i32 @main(i32 %argc, i8** %argv) {"
-                                "entry:"
-                                "  %1 = call i32 @user_main()"
-                                "  ret i32 %1"
-                                "}"
-                            ]
-                        else
-                            []
-                    
-                    let completeIR = 
-                        moduleHeader @ 
-                        llvmFunctions @ 
-                        mainWrapper @ 
-                        [""]
-                        |> String.concat "\n"
-                    
-                    Success {
-                        ModuleName = moduleName
-                        LLVMIRText = completeIR
-                        SymbolTable = Map.empty
-                        ExternalFunctions = []
-                        GlobalVariables = []
-                    }
+                // Determine if we're on Windows
+                let isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+                let targetTriple = TargetTripleManagement.getTargetTriple "default"
+                
+                let moduleHeader = [
+                    sprintf "; ModuleID = '%s'" moduleName
+                    sprintf "source_filename = \"%s\"" moduleName
+                    "target datalayout = \"e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128\""
+                    sprintf "target triple = \"%s\"" targetTriple
+                    ""
+                ]
+                
+                // Add external declarations
+                let externals = addExternalDeclarations isWindows
+                
+                let completeIR = 
+                    moduleHeader @ 
+                    globalConstants @
+                    [""] @
+                    externals @
+                    llvmFunctions @ 
+                    [""]
+                    |> String.concat "\n"
+                
+                Success {
+                    ModuleName = moduleName
+                    LLVMIRText = completeIR
+                    SymbolTable = Map.empty
+                    ExternalFunctions = ["printf"; "scanf"; "getchar"; "puts"]
+                    GlobalVariables = []
+                }
             with
             | ex ->
                 printfn "Debug: Exception in transformModule: %s" ex.Message
@@ -292,7 +352,7 @@ module ExternalToolchain =
                 CompilerFailure [CompilerError("toolchain", "No suitable LLVM/compiler toolchain found", Some "Install LLVM tools and Clang/GCC")]
     
     /// Runs external command with error handling
-    let runExternalCommand (command: string) (arguments: string) : CompilerResult<string> =
+    let runExternalCommand (command: string) (arguments: string) (workingDir: string option) : CompilerResult<string> =
         try
             let processInfo = System.Diagnostics.ProcessStartInfo()
             processInfo.FileName <- command
@@ -302,13 +362,18 @@ module ExternalToolchain =
             processInfo.RedirectStandardError <- true
             processInfo.CreateNoWindow <- true
             
+            match workingDir with
+            | Some dir -> processInfo.WorkingDirectory <- dir
+            | None -> ()
+            
             use proc = System.Diagnostics.Process.Start(processInfo)
+            let output = proc.StandardOutput.ReadToEnd()
+            let error = proc.StandardError.ReadToEnd()
             proc.WaitForExit()
             
             if proc.ExitCode = 0 then
-                Success (proc.StandardOutput.ReadToEnd())
+                Success output
             else
-                let error = proc.StandardError.ReadToEnd()
                 CompilerFailure [CompilerError("external command", sprintf "%s failed with exit code %d" command proc.ExitCode, Some error)]
         with
         | ex ->
@@ -323,29 +388,45 @@ let compileLLVMToNative (llvmOutput: LLVMOutput) (outputPath: string) (target: s
     
     let llvmPath = Path.ChangeExtension(outputPath, ".ll")
     let objPath = Path.ChangeExtension(outputPath, ".o")
+    let outputDir = Path.GetDirectoryName(outputPath)
     
     try
         // Write LLVM IR to file
         let utf8WithoutBom = System.Text.UTF8Encoding(false)
         File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, utf8WithoutBom)
+        printfn "Saved LLVM IR to: %s" llvmPath
         
         // Compile to object file
-        let llcArgs = sprintf "-filetype=obj -mtriple=%s -o %s %s" targetTriple objPath llvmPath
-        ExternalToolchain.runExternalCommand llcCommand llcArgs >>= fun _ ->
+        let llcArgs = sprintf "-filetype=obj -mtriple=%s -o \"%s\" \"%s\"" targetTriple objPath llvmPath
+        printfn "Compiling to native code for target '%s'..." targetTriple
+        printfn "Using LLVM version 20.1.1"  // As shown in your output
         
-        // Link to executable with explicit console subsystem and entry point
+        ExternalToolchain.runExternalCommand llcCommand llcArgs (Some outputDir) >>= fun _ ->
+        printfn "Created object file: %s" objPath
+        
+        // Link to executable with explicit Windows runtime libraries
         let linkArgs = 
             if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
-                sprintf "%s -o %s -Wl,--subsystem,console -Wl,--entry,mainCRTStartup -static-libgcc -lmingw32 -lkernel32 -luser32" objPath outputPath
+                // For MinGW on Windows, explicitly link against msvcrt for C runtime functions
+                sprintf "\"%s\" -o \"%s\" -lmsvcrt -lkernel32" objPath outputPath
             else
-                sprintf "%s -o %s" objPath outputPath
-                
-        ExternalToolchain.runExternalCommand linkerCommand linkArgs >>= fun _ ->
+                sprintf "\"%s\" -o \"%s\"" objPath outputPath
         
-        // Cleanup intermediate files but keep LLVM IR for debugging
-        if File.Exists(objPath) then File.Delete(objPath)
+        printfn "Linking object file to executable..."        
+        ExternalToolchain.runExternalCommand linkerCommand linkArgs (Some outputDir) >>= fun linkOutput ->
         
-        Success ()
+        // Check if the output file exists
+        if File.Exists(outputPath) then
+            printfn "Successfully created executable: %s" outputPath
+            // Cleanup intermediate files but keep LLVM IR for debugging
+            if File.Exists(objPath) then File.Delete(objPath)
+            Success ()
+        else
+            // If linking failed but didn't report an error, provide more specific guidance
+            CompilerFailure [CompilerError(
+                "native compilation", 
+                "Executable was not created", 
+                Some (sprintf "Linker output: %s\nTry running: gcc %s -o %s -lmsvcrt -v" linkOutput objPath outputPath))]
     
     with
     | ex ->

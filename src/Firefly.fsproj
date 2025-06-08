@@ -50,9 +50,13 @@
     <!-- XParsec-based Configuration System -->
     <Compile Include="CLI/Configurations/ProjectConfig.fs" />
 
+    <!-- System Diagnostics and Health Checks -->
+    <Compile Include="CLI/Diagnostics/ToolchainVerification.fs" />
+
     <!-- CLI Commands using XParsec Pipeline -->
     <Compile Include="CLI/Commands/CompileCommand.fs" />
     <Compile Include="CLI/Commands/VerifyCommand.fs" />
+    <Compile Include="CLI/Commands/DoctorCommand.fs" />
 
     <!-- Main CLI Entry Point -->
     <Compile Include="CLI/Program.fs" />

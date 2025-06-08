@@ -4,6 +4,7 @@ open System
 open Argu
 open CLI.Commands.CompileCommand
 open CLI.Commands.VerifyCommand
+open CLI.Commands.DoctorCommand
 
 /// Command line arguments for Firefly CLI - simplified approach
 type FireflyArgs =
