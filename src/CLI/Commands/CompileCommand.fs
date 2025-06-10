@@ -91,15 +91,68 @@ let private saveIntermediateFiles (basePath: string) (baseName: string) (keepInt
 /// Validates compilation arguments
 let private validateCompilationArgs (inputPath: string) (outputPath: string) : CompilerResult<unit> =
     if not (File.Exists inputPath) then
-        CompilerFailure [CompilerError("argument validation", sprintf "Input file '%s' does not exist" inputPath, None)]
+        CompilerFailure [InternalError("argument validation", sprintf "Input file '%s' does not exist" inputPath, Option.None)]
     elif String.IsNullOrWhiteSpace(outputPath) then
-        CompilerFailure [CompilerError("argument validation", "Output path cannot be empty", None)]
+        CompilerFailure [InternalError("argument validation", "Output path cannot be empty", Option.None)]
     else
         let inputExt = Path.GetExtension(inputPath).ToLowerInvariant()
         if inputExt <> ".fs" && inputExt <> ".fsx" then
-            CompilerFailure [CompilerError("argument validation", sprintf "Input file must be F# source (.fs or .fsx), got: %s" inputExt, None)]
+            CompilerFailure [InternalError("argument validation", sprintf "Input file must be F# source (.fs or .fsx), got: %s" inputExt, Option.None)]
         else
             Success ()
+
+/// Converts optimization level string to enum
+let private parseOptimizationLevel (optimizeStr: string) : OptimizationLevel =
+    match optimizeStr.ToLowerInvariant() with
+    | "none" -> OptimizationLevel.None
+    | "less" -> Less
+    | "aggressive" -> Aggressive
+    | "size" -> Size
+    | "sizemin" -> SizeMin
+    | _ -> Default
+
+/// Compiles LLVM IR to native executable
+let private compileToNativeExecutable (llvmOutput: LLVMOutput) (outputPath: string) (target: string) (verbose: bool) (noExternalTools: bool) =
+    if verbose then printfn "Compiling to native executable for target: %s" target
+    
+    if noExternalTools then
+        printfn "Warning: --no-external-tools specified, but native compilation requires external LLVM toolchain"
+        printfn "The XParsec pipeline has generated optimized LLVM IR, but cannot complete native compilation"
+        printfn "To complete compilation, remove --no-external-tools flag or use external LLVM tools"
+        
+        // Save the LLVM IR for manual compilation
+        let llvmPath = Path.ChangeExtension(outputPath, ".ll")
+        File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, System.Text.UTF8Encoding(false))
+        printfn "Saved LLVM IR to: %s" llvmPath
+        printfn "To compile manually: llc -filetype=obj %s -o %s.o && gcc %s.o -o %s" 
+                 llvmPath (Path.GetFileNameWithoutExtension(outputPath))
+                 (Path.GetFileNameWithoutExtension(outputPath)) outputPath
+        0
+    else
+        match compileLLVMToNative llvmOutput outputPath target with
+        | CompilerFailure nativeErrors ->
+            printfn "Native compilation failed:"
+            nativeErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
+            printfn ""
+            printfn "Possible solutions:"
+            printfn "  1. Install LLVM tools (llc, clang/gcc) in your PATH"
+            printfn "  2. Use --no-external-tools to generate LLVM IR only"
+            printfn "  3. Check that target '%s' is supported by your LLVM installation" target
+            1
+        
+        | Success () ->
+            printfn "✓ Compilation successful: %s" outputPath
+            
+            if verbose then
+                try
+                    let fileInfo = FileInfo(outputPath)
+                    printfn "  Output size: %d bytes" fileInfo.Length
+                    printfn "  Target: %s" target
+                    printfn "  Uses zero-allocation Firefly runtime"
+                with
+                | _ -> ()
+            
+            0
 
 /// Executes the complete XParsec-based compilation process
 let compile (args: ParseResults<CompileArgs>) =
@@ -107,32 +160,33 @@ let compile (args: ParseResults<CompileArgs>) =
     let inputPath = 
         match args.TryGetResult Input with
         | Some path -> path
-        | None -> 
+        | Option.None -> 
             printfn "Error: Input file is required"
             exit 1
     
     let outputPath = 
         match args.TryGetResult Output with
         | Some path -> path
-        | None -> 
+        | Option.None -> 
             printfn "Error: Output path is required"
             exit 1
     
     let target = args.TryGetResult Target |> Option.defaultValue (getDefaultTarget())
-    let optimizeLevel = args.TryGetResult Optimize |> Option.defaultValue "default"
+    let optimizeStr = args.TryGetResult Optimize |> Option.defaultValue "default"
+    let optimizeLevel = parseOptimizationLevel optimizeStr
     let configPath = args.TryGetResult Config |> Option.defaultValue "firefly.toml"
     let keepIntermediates = args.Contains Keep_Intermediates
     let verbose = args.Contains Verbose
     let noExternalTools = args.Contains No_External_Tools
     
-    // Validate arguments using XParsec patterns
+    // Validate arguments
     match validateCompilationArgs inputPath outputPath with
     | CompilerFailure errors ->
         errors |> List.iter (fun error -> printfn "Error: %s" (error.ToString()))
         1
     | Success () ->
         
-        // Load and validate configuration using XParsec-based parser
+        // Load and validate configuration
         if verbose then printfn "Loading configuration from: %s" configPath
         
         match loadAndValidateConfig configPath with
@@ -191,19 +245,10 @@ let compile (args: ParseResults<CompileArgs>) =
                         if verbose then printfn "Generated LLVM IR for module: %s" llvmOutput.ModuleName
                         
                         // Apply optimizations based on configuration and arguments
-                        let optimizationLevel = 
-                            match optimizeLevel.ToLowerInvariant() with
-                            | "none" -> None
-                            | "less" -> Less
-                            | "aggressive" -> Aggressive
-                            | "size" -> Size
-                            | "sizemin" -> SizeMin
-                            | _ -> Default
-                        
-                        let optimizationPasses = createOptimizationPipeline optimizationLevel
+                        let optimizationPasses = createOptimizationPipeline optimizeLevel
                         
                         if verbose then 
-                            printfn "Applying LLVM optimizations (level: %A)..." optimizationLevel
+                            printfn "Applying LLVM optimizations (level: %A)..." optimizeLevel
                             if optimizationPasses.IsEmpty then
                                 printfn "  No optimization passes selected"
                             else
@@ -228,57 +273,14 @@ let compile (args: ParseResults<CompileArgs>) =
                                     1
                                 | Success () ->
                                     if verbose then printfn "✓ Zero-allocation guarantees validated"
-                                    compileToNative optimizedLLVM outputPath target verbose noExternalTools
+                                    compileToNativeExecutable optimizedLLVM outputPath target verbose noExternalTools
                             else
-                                compileToNative optimizedLLVM outputPath target verbose noExternalTools
+                                compileToNativeExecutable optimizedLLVM outputPath target verbose noExternalTools
             
             with
             | ex ->
                 printfn "Error reading source file: %s" ex.Message
                 1
-
-/// Compiles LLVM IR to native executable
-let private compileToNative (llvmOutput: LLVMOutput) (outputPath: string) (target: string) (verbose: bool) (noExternalTools: bool) =
-    if verbose then printfn "Compiling to native executable for target: %s" target
-    
-    if noExternalTools then
-        printfn "Warning: --no-external-tools specified, but native compilation requires external LLVM toolchain"
-        printfn "The XParsec pipeline has generated optimized LLVM IR, but cannot complete native compilation"
-        printfn "To complete compilation, remove --no-external-tools flag or use external LLVM tools"
-        
-        // Save the LLVM IR for manual compilation
-        let llvmPath = Path.ChangeExtension(outputPath, ".ll")
-        File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, System.Text.UTF8Encoding(false))
-        printfn "Saved LLVM IR to: %s" llvmPath
-        printfn "To compile manually: llc -filetype=obj %s -o %s.o && gcc %s.o -o %s" 
-                 llvmPath (Path.GetFileNameWithoutExtension(outputPath))
-                 (Path.GetFileNameWithoutExtension(outputPath)) outputPath
-        0
-    else
-        match compileLLVMToNative llvmOutput outputPath target with
-        | CompilerFailure nativeErrors ->
-            printfn "Native compilation failed:"
-            nativeErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-            printfn ""
-            printfn "Possible solutions:"
-            printfn "  1. Install LLVM tools (llc, clang/gcc) in your PATH"
-            printfn "  2. Use --no-external-tools to generate LLVM IR only"
-            printfn "  3. Check that target '%s' is supported by your LLVM installation" target
-            1
-        
-        | Success () ->
-            printfn "✓ Compilation successful: %s" outputPath
-            
-            if verbose then
-                try
-                    let fileInfo = FileInfo(outputPath)
-                    printfn "  Output size: %d bytes" fileInfo.Length
-                    printfn "  Target: %s" target
-                    printfn "  Uses zero-allocation Firefly runtime"
-                with
-                | _ -> ()
-            
-            0
 
 /// Displays detailed compilation statistics
 let private showCompilationStats (pipelineOutput: TranslationPipelineOutput) =

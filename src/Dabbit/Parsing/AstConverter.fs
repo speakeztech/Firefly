@@ -163,8 +163,7 @@ module DeclarationMapping =
     
     let mapTypeDefinition (typeDefn: SynTypeDefn) : OakDeclaration option =
         let (SynTypeDefn(SynComponentInfo(_, _, _, longId, _, _, _, _), repr, _, _, _, _)) = typeDefn
-        let idents = AstHelpers.extractLongIdent longId
-        let typeName = AstHelpers.getQualifiedName idents
+        let typeName = AstHelpers.getQualifiedName longId
         
         match repr with
         | SynTypeDefnRepr.Simple(SynTypeDefnSimpleRepr.Union(_, cases, _), _) ->
@@ -228,7 +227,7 @@ let parseAndConvertToOakAst (sourceCode: string) : OakProgram =
         let parsingOptions = FSharp.Compiler.CodeAnalysis.FSharpParsingOptions.Default
         let parseResults = checker.ParseFile("input.fs", sourceText, parsingOptions) |> Async.RunSynchronously
         
-        let modules = ModuleMapping.extractModulesFromParseTree parseResults.ParseTree
+        let modules = ModuleMapping.extractModulesFromParseTree (Some parseResults.ParseTree)
         { Modules = modules }
     with _ ->
         { Modules = [] }
@@ -241,8 +240,12 @@ let parseAndConvertWithDiagnostics (sourceCode: string) : ASTConversionResult =
         let parseResults = checker.ParseFile("input.fs", sourceText, parsingOptions) |> Async.RunSynchronously
         
         let diagnostics = parseResults.Diagnostics |> Array.map (fun diag -> diag.Message) |> Array.toList
-        let modules = ModuleMapping.extractModulesFromParseTree parseResults.ParseTree
         
-        { OakProgram = { Modules = modules }; Diagnostics = diagnostics }
+        try
+            let modules = ModuleMapping.extractModulesFromParseTree (Some parseResults.ParseTree)
+            { OakProgram = { Modules = modules }; Diagnostics = diagnostics }
+        with moduleEx ->
+            { OakProgram = { Modules = [] }; 
+              Diagnostics = sprintf "Error during module extraction: %s" moduleEx.Message :: diagnostics }
     with ex ->
         { OakProgram = { Modules = [] }; Diagnostics = [sprintf "Exception: %s" ex.Message] }

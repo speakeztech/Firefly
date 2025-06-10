@@ -80,7 +80,7 @@ module Transformations =
             
             // Check for parse failures
             if result.OakProgram.Modules.IsEmpty && result.Diagnostics.Length > 0 then
-                CompilerFailure [ParseError(
+                CompilerFailure [SyntaxError(
                     { Line = 1; Column = 1; File = sourceFile; Offset = 0 },
                     sprintf "Failed to parse source: %s" (String.concat "; " result.Diagnostics),
                     ["parsing"])]
@@ -90,7 +90,7 @@ module Transformations =
                 
                 Success (result.OakProgram, oakAstText)
         with ex ->
-            CompilerFailure [ParseError(
+            CompilerFailure [SyntaxError(
                 { Line = 1; Column = 1; File = sourceFile; Offset = 0 },
                 sprintf "Exception during parsing: %s" ex.Message,
                 ["parsing"; ex.StackTrace])]
@@ -111,6 +111,21 @@ module Transformations =
     let lowerMLIR (mlirText: string) : CompilerResult<string> =
         Core.Conversion.LoweringPipeline.applyLoweringPipeline mlirText
 
+/// Helper function to combine multiple results safely
+let combineResults (results: CompilerResult<'T> list) : CompilerResult<'T list> =
+    let folder acc result =
+        match acc, result with
+        | Success accValues, Success value -> Success (value :: accValues)
+        | CompilerFailure errors, Success _ -> CompilerFailure errors
+        | Success _, CompilerFailure errors -> CompilerFailure errors
+        | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
+    
+    results
+    |> List.fold folder (Success [])
+    |> function
+       | Success values -> Success (List.rev values)
+       | CompilerFailure errors -> CompilerFailure errors
+
 /// Main translation pipeline without excessive parser combinators
 let executeTranslationPipeline (sourceFile: string) (sourceCode: string) : CompilerResult<TranslationPipelineOutput> =
     // Initialize pipeline state
@@ -119,50 +134,50 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) : Compi
     
     try
         // Step 1: Parse F# source to Oak AST
-        PipelineExecution.runPhase "parsing" 
+        match PipelineExecution.runPhase "parsing" 
             (Transformations.sourceToOak sourceFile) 
             sourceCode 
-            initialDiagnostics 
-        >>= fun (parseResult, diagnostics1) ->
+            initialDiagnostics with
+        | Success (parseResult, diagnostics1) ->
             
             let (oakProgram, oakAstText) = parseResult
             let phaseOutputs1 = PipelineExecution.savePhaseOutput "oak-ast" oakAstText id initialPhaseOutputs
             
             // Step 2: Apply closure elimination
-            PipelineExecution.runPhase "closure-elimination" 
+            match PipelineExecution.runPhase "closure-elimination" 
                 Transformations.applyClosure 
                 oakProgram 
-                diagnostics1
-            >>= fun (transformedProgram1, diagnostics2) ->
+                diagnostics1 with
+            | Success (transformedProgram1, diagnostics2) ->
                 
                 let closureTransformedText = sprintf "%A" transformedProgram1
                 let phaseOutputs2 = PipelineExecution.savePhaseOutput "closure-transformed" closureTransformedText id phaseOutputs1
                 
                 // Step 3: Apply union layout transformation
-                PipelineExecution.runPhase "union-layout" 
+                match PipelineExecution.runPhase "union-layout" 
                     Transformations.applyUnionLayout 
                     transformedProgram1 
-                    diagnostics2
-                >>= fun (transformedProgram2, diagnostics3) ->
+                    diagnostics2 with
+                | Success (transformedProgram2, diagnostics3) ->
                     
                     let layoutTransformedText = sprintf "%A" transformedProgram2
                     let phaseOutputs3 = PipelineExecution.savePhaseOutput "layout-transformed" layoutTransformedText id phaseOutputs2
                     
                     // Step 4: Generate MLIR
-                    PipelineExecution.runPhase "mlir-generation" 
+                    match PipelineExecution.runPhase "mlir-generation" 
                         Transformations.generateMLIR 
                         transformedProgram2 
-                        diagnostics3
-                    >>= fun (mlirText, diagnostics4) ->
+                        diagnostics3 with
+                    | Success (mlirText, diagnostics4) ->
                         
                         let phaseOutputs4 = PipelineExecution.savePhaseOutput "mlir" mlirText id phaseOutputs3
                         
                         // Step 5: Lower MLIR to LLVM dialect
-                        PipelineExecution.runPhase "mlir-lowering" 
+                        match PipelineExecution.runPhase "mlir-lowering" 
                             Transformations.lowerMLIR 
                             mlirText 
-                            diagnostics4
-                        >>= fun (loweredMlir, diagnostics5) ->
+                            diagnostics4 with
+                        | Success (loweredMlir, diagnostics5) ->
                             
                             let phaseOutputs5 = PipelineExecution.savePhaseOutput "lowered-mlir" loweredMlir id phaseOutputs4
                             
@@ -178,9 +193,14 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) : Compi
                                 Diagnostics = List.rev diagnostics5
                                 SuccessfulPhases = successfulPhases
                             }
+                        | CompilerFailure errors -> CompilerFailure errors
+                    | CompilerFailure errors -> CompilerFailure errors
+                | CompilerFailure errors -> CompilerFailure errors
+            | CompilerFailure errors -> CompilerFailure errors
+        | CompilerFailure errors -> CompilerFailure errors
     with ex ->
         // Handle unexpected exceptions
-        CompilerFailure [TransformError(
+        CompilerFailure [ConversionError(
             "pipeline-execution", 
             "translation pipeline", 
             "MLIR", 
@@ -188,8 +208,9 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) : Compi
 
 /// Simple entry point for translation
 let translateFsToMLIR (sourceFile: string) (sourceCode: string) : CompilerResult<string> =
-    executeTranslationPipeline sourceFile sourceCode >>= fun pipelineOutput ->
-    Success pipelineOutput.FinalMLIR
+    match executeTranslationPipeline sourceFile sourceCode with
+    | Success pipelineOutput -> Success pipelineOutput.FinalMLIR
+    | CompilerFailure errors -> CompilerFailure errors
 
 /// Entry point with full diagnostic information
 let translateFsToMLIRWithDiagnostics (sourceFile: string) (sourceCode: string) : CompilerResult<TranslationPipelineOutput> =

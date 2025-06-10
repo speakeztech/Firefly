@@ -218,7 +218,7 @@ let parseConfigFile (filePath: string) : CompilerResult<FireflyConfig> =
             
             Success config
     with ex ->
-        CompilerFailure [ParseError(
+        CompilerFailure [SyntaxError(
             { Line = 0; Column = 0; File = filePath; Offset = 0 },
             sprintf "Error reading configuration file: %s" ex.Message,
             ["config parsing"])]
@@ -228,7 +228,7 @@ let validateConfig (config: FireflyConfig) : CompilerResult<FireflyConfig> =
     // Validate package name
     if String.IsNullOrWhiteSpace(config.PackageName) then
         CompilerFailure [
-            ParseError(
+            SyntaxError(
                 { Line = 0; Column = 0; File = ""; Offset = 0 },
                 "Package name cannot be empty",
                 ["config validation"]
@@ -238,7 +238,7 @@ let validateConfig (config: FireflyConfig) : CompilerResult<FireflyConfig> =
     // Validate version format (basic check)
     elif not (config.Version.Contains(".")) then
         CompilerFailure [
-            ParseError(
+            SyntaxError(
                 { Line = 0; Column = 0; File = ""; Offset = 0 },
                 "Version must contain at least one dot (e.g., '1.0.0')",
                 ["config validation"]
@@ -250,7 +250,7 @@ let validateConfig (config: FireflyConfig) : CompilerResult<FireflyConfig> =
               |> List.contains (config.Compilation.OptimizationLevel.ToLowerInvariant())) then
         let errorMsg = sprintf "Invalid optimization level: %s" config.Compilation.OptimizationLevel
         CompilerFailure [
-            ParseError(
+            SyntaxError(
                 { Line = 0; Column = 0; File = ""; Offset = 0 },
                 errorMsg,
                 ["config validation"]
@@ -260,7 +260,7 @@ let validateConfig (config: FireflyConfig) : CompilerResult<FireflyConfig> =
     // Validate stack limit
     elif config.Compilation.StackLimit.IsSome && config.Compilation.StackLimit.Value <= 0 then
         CompilerFailure [
-            ParseError(
+            SyntaxError(
                 { Line = 0; Column = 0; File = ""; Offset = 0 },
                 "Stack limit must be positive",
                 ["config validation"]
@@ -272,7 +272,9 @@ let validateConfig (config: FireflyConfig) : CompilerResult<FireflyConfig> =
 
 /// Main entry point for loading and validating configuration
 let loadAndValidateConfig (filePath: string) : CompilerResult<FireflyConfig> =
-    parseConfigFile filePath >>= validateConfig
+    match parseConfigFile filePath with
+    | Success config -> validateConfig config
+    | CompilerFailure errors -> CompilerFailure errors
 
 /// Generates a default configuration file
 let generateDefaultConfigFile (filePath: string) : CompilerResult<unit> =
@@ -303,7 +305,7 @@ lto = "false"
     | ex ->
         let errorMsg = sprintf "Failed to write default config to %s" filePath
         CompilerFailure [
-            CompilerError(
+            InternalError(
                 "config generation", 
                 errorMsg,
                 Some ex.Message

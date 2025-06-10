@@ -334,23 +334,23 @@ let eliminateClosures (program: OakProgram) : CompilerResult<OakProgram> =
         CompilerFailure [ConversionError("closure-elimination", "empty program", "transformed program", "Program must contain at least one module")]
     else
         // Transform all modules
-        program.Modules
-        |> List.map ModuleTransformation.transformModule
-        |> ResultHelpers.combineResults
-        >>= fun transformedModules ->
+        let moduleResults = 
+            program.Modules
+            |> List.map ModuleTransformation.transformModule
         
-        let transformedProgram = { program with Modules = transformedModules }
-        
-        // Validate that no closures remain
-        let validationResults = 
-            transformedProgram.Modules
-            |> List.collect (fun m -> m.Declarations)
-            |> List.map ClosureValidation.validateDeclarationNoClosures
-        
-        let combinedValidation = ResultHelpers.combineResults validationResults
-        
-        match combinedValidation with
-        | Success _ -> Success transformedProgram
+        match ResultHelpers.combineResults moduleResults with
+        | Success transformedModules ->
+            let transformedProgram = { program with Modules = transformedModules }
+            
+            // Validate that no closures remain
+            let validationResults = 
+                transformedProgram.Modules
+                |> List.collect (fun m -> m.Declarations)
+                |> List.map ClosureValidation.validateDeclarationNoClosures
+            
+            match ResultHelpers.combineResults validationResults with
+            | Success _ -> Success transformedProgram
+            | CompilerFailure errors -> CompilerFailure errors
         | CompilerFailure errors -> CompilerFailure errors
 
 /// Analyzes closure usage in a program for diagnostics

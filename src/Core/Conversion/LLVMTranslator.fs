@@ -195,7 +195,7 @@ module MLIRExtraction =
 module TypeConversion =
     
     /// Converts an MLIR type to LLVM IR type
-    let mlirTypeToLLVM (mlirType: string) : string =
+    let rec mlirTypeToLLVM (mlirType: string) : string =
         match mlirType.Trim() with
         | t when t.StartsWith("i") || t.StartsWith("f") -> mlirType
         | "void" -> "void"
