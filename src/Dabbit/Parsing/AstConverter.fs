@@ -13,13 +13,24 @@ type ASTConversionResult = {
     Diagnostics: string list
 }
 
+/// Helper active patterns for handling F# AST
+module private AstPatterns = 
+    // Helper for extracting identifier text
+    let (|IdentText|) (ident: Ident) = ident.idText
+    
+    // Helper for handling long identifiers
+    let (|LongIdentText|) (lid: SynLongIdent) = 
+        String.concat "." [for id in lid.LongIdent -> id.idText]
+
 /// Core F# AST to Oak AST mapping functions
 module AstMapping =
+    open AstPatterns
+    
     /// Maps Fantomas/FCS type to Oak type with proper type system mapping
     let rec mapType (synType: SynType) : OakType =
         match synType with
-        | SynType.LongIdent(LongIdentWithDots(idents, _)) ->
-            let name = String.concat "." [for id in idents -> id.idText]
+        | SynType.LongIdent(id) ->
+            let name = id.ToString()
             match name.ToLowerInvariant() with
             | "int" | "int32" | "system.int32" -> IntType
             | "float" | "double" | "system.double" -> FloatType
@@ -32,8 +43,8 @@ module AstMapping =
         
         | SynType.App(typeName, _, typeArgs, _, _, _, _) ->
             match typeName with
-            | SynType.LongIdent(LongIdentWithDots(idents, _)) ->
-                let name = String.concat "." [for id in idents -> id.idText]
+            | SynType.LongIdent(id) ->
+                let name = id.ToString()
                 if name = "array" || name = "[]" || name = "list" then
                     match typeArgs with
                     | [elemType] -> ArrayType(mapType elemType)
@@ -85,11 +96,11 @@ module AstMapping =
         | SynExpr.Const(constant, _) ->
             Literal(mapLiteral constant)
         
-        | SynExpr.Ident(ident) ->
-            Variable(ident.idText)
+        | SynExpr.Ident(IdentText name) ->
+            Variable(name)
         
-        | SynExpr.LongIdent(_, LongIdentWithDots(idents, _), _, _) ->
-            Variable(String.concat "." [for id in idents -> id.idText])
+        | SynExpr.LongIdent(_, LongIdentText name, _, _) ->
+            Variable(name)
         
         | SynExpr.App(_, isInfix, funcExpr, argExpr, _) ->
             let func = mapExpression funcExpr
@@ -120,13 +131,13 @@ module AstMapping =
                     match func with
                     | Variable op when op = "op_Addition" -> 
                         // Detect common arithmetic operations
-                        Binary(Add, mapExpression funcExpr, arg)
+                        Application(Variable("+"), [mapExpression funcExpr; arg])
                     | Variable op when op = "op_Subtraction" -> 
-                        Binary(Subtract, mapExpression funcExpr, arg)
+                        Application(Variable("-"), [mapExpression funcExpr; arg])
                     | Variable op when op = "op_Multiply" -> 
-                        Binary(Multiply, mapExpression funcExpr, arg)
+                        Application(Variable("*"), [mapExpression funcExpr; arg])
                     | Variable op when op = "op_Division" -> 
-                        Binary(Divide, mapExpression funcExpr, arg)
+                        Application(Variable("/"), [mapExpression funcExpr; arg])
                     | _ -> 
                         Application(func, [arg])
                 else
@@ -140,11 +151,10 @@ module AstMapping =
                 | SynBinding(_, _, _, _, _, _, _, pat, returnTypeOpt, valExpr, _, _, _) ->
                     // Extract name from pattern
                     match pat with
-                    | SynPat.Named(_, ident, _, _, _) ->
-                        Let(ident.idText, mapExpression valExpr, bodyAcc)
-                    | SynPat.LongIdent(LongIdentWithDots(idents, _), _, _, _, _, _) ->
-                        Let(String.concat "." [for id in idents -> id.idText], 
-                            mapExpression valExpr, bodyAcc)
+                    | SynPat.Named(_, IdentText name, _, _, _) ->
+                        Let(name, mapExpression valExpr, bodyAcc)
+                    | SynPat.LongIdent(LongIdentText name, _, _, _, _, _) ->
+                        Let(name, mapExpression valExpr, bodyAcc)
                     | _ -> 
                         Let("_", mapExpression valExpr, bodyAcc)
             ) (mapExpression bodyExpr)
@@ -161,15 +171,15 @@ module AstMapping =
         | SynExpr.Sequential(_, _, first, second, _, _) ->
             Sequential(mapExpression first, mapExpression second)
         
-        | SynExpr.Lambda(_, _, pats, body, _, _) ->
+        | SynExpr.Lambda(_, _, pats, body, _, trivia) ->
             // Map lambda parameters - a key improvement over the original
             let parameters = 
                 pats 
                 |> List.choose (function
-                    | SynPat.Named(_, ident, _, _, _) -> 
-                        Some (ident.idText, UnitType)  // Type inference would improve this
-                    | SynPat.Typed(SynPat.Named(_, ident, _, _, _), synType, _) ->
-                        Some (ident.idText, mapType synType)
+                    | SynPat.Named(_, IdentText name, _, _, _) -> 
+                        Some (name, UnitType)  // Type inference would improve this
+                    | SynPat.Typed(SynPat.Named(_, IdentText name, _, _, _), synType, _) ->
+                        Some (name, mapType synType)
                     | _ -> None)
             
             Lambda(parameters, mapExpression body)
@@ -188,9 +198,9 @@ module AstMapping =
                         let condition = 
                             match pattern with
                             | SynPat.Const(constant, _) ->
-                                Binary(Equal, scrutinee, Literal(mapLiteral constant))
-                            | SynPat.Named(_, ident, _, _, _) ->
-                                Binary(Equal, scrutinee, Variable(ident.idText))
+                                Application(Variable("="), [scrutinee; Literal(mapLiteral constant)])
+                            | SynPat.Named(_, IdentText name, _, _, _) ->
+                                Application(Variable("="), [scrutinee; Variable(name)])
                             | SynPat.Wild(_) ->
                                 // Wildcard pattern always matches
                                 Literal(BoolLiteral(true))
@@ -201,7 +211,8 @@ module AstMapping =
                         // Add when clause if present
                         let finalCondition =
                             match whenExpr with
-                            | Some guard -> Binary(And, condition, mapExpression guard)
+                            | Some guard -> 
+                                Application(Variable("&&"), [condition; mapExpression guard])
                             | None -> condition
                             
                         IfThenElse(finalCondition, mapExpression result, elseExpr)
@@ -209,9 +220,8 @@ module AstMapping =
                 
             foldedMatch
             
-        | SynExpr.DotGet(expr, _, LongIdentWithDots(idents, _), _) ->
+        | SynExpr.DotGet(expr, _, LongIdentText fieldName, _) ->
             let target = mapExpression expr
-            let fieldName = idents |> List.map (fun id -> id.idText) |> String.concat "."
             FieldAccess(target, fieldName)
             
         | SynExpr.DotIndexedGet(expr, indexArgs, _, _) ->
@@ -222,7 +232,14 @@ module AstMapping =
                 |> List.collect (fun (SynIndexerArg(exprs, _, _)) -> 
                     exprs |> List.map mapExpression)
             
-            IndexedAccess(target, indices)
+            // Create a function application for indexed access
+            match indices with
+            | [index] -> 
+                // Common case: single index
+                Application(Variable("get_Item"), [target; index])
+            | _ -> 
+                // Multiple indices or none
+                Application(Variable("get_Item"), target :: indices)
             
         | SynExpr.ArrayOrList(_, elements, _) ->
             // Map arrays/lists to ArrayLiteral
@@ -236,7 +253,7 @@ module AstMapping =
     /// Maps F# binding to function declaration or value binding
     let mapBinding (binding: SynBinding) : OakDeclaration option =
         match binding with
-        | SynBinding(_, _, _, _, _, _, valData, SynPat.Named(SynPat.Wild(_), ident, _, _, _), returnTypeOpt, expr, _, _, _) ->
+        | SynBinding(_, _, _, _, _, _, valData, SynPat.Named(SynPat.Wild(_), IdentText name, _, _, _), returnTypeOpt, expr, _, _, _) ->
             // Check for EntryPoint attribute
             let isEntryPoint = 
                 valData.Attributes 
@@ -253,18 +270,18 @@ module AstMapping =
                     | Some t -> mapType t
                     | None -> UnitType
                     
-                Some(FunctionDecl(ident.idText, [], returnType, mapExpression expr))
+                Some(FunctionDecl(name, [], returnType, mapExpression expr))
                 
-        | SynBinding(_, _, _, _, _, _, _, SynPat.LongIdent(LongIdentWithDots(idents, _), _, _, args, _, _), returnTypeOpt, expr, _, _, _) ->
+        | SynBinding(_, _, _, _, _, _, _, SynPat.LongIdent(LongIdentText name, _, _, args, _, _), returnTypeOpt, expr, _, _, _) ->
             // Process function parameters with better type information
             let parameters = 
                 args 
                 |> List.choose (function
-                    | SynPat.Named(_, ident, _, _, _) ->
-                        Some (ident.idText, UnitType)
-                    | SynPat.Typed(SynPat.Named(_, ident, _, _, _), synType, _) ->
+                    | SynPat.Named(_, IdentText name, _, _, _) ->
+                        Some (name, UnitType)
+                    | SynPat.Typed(SynPat.Named(_, IdentText name, _, _, _), synType, _) ->
                         // Extract type information when available
-                        Some (ident.idText, mapType synType)
+                        Some (name, mapType synType)
                     | _ -> None)
                     
             let returnType = 
@@ -272,11 +289,7 @@ module AstMapping =
                 | Some t -> mapType t
                 | None -> UnitType
                     
-            Some(FunctionDecl(
-                String.concat "." [for id in idents -> id.idText], 
-                parameters, 
-                returnType, 
-                mapExpression expr))
+            Some(FunctionDecl(name, parameters, returnType, mapExpression expr))
             
         | _ -> None
     
@@ -291,8 +304,8 @@ module AstMapping =
             typeDefns
             |> List.collect (fun typeDef ->
                 match typeDef with
-                | SynTypeDefn(SynComponentInfo(_, _, _, idents, _, _, _, _), typeRepr, members, _, _) ->
-                    let typeName = String.concat "." [for id in idents -> id.idText]
+                | SynTypeDefn(componentInfo, typeRepr, members, _, _) ->
+                    let typeName = componentInfo.ToString()
                     
                     // Map type representation
                     let oakType =
@@ -358,11 +371,9 @@ module AstMapping =
     
     /// Maps module or namespace to Oak module
     let mapModule (mdl: SynModuleOrNamespace) : OakModule =
-        match mdl with
-        | SynModuleOrNamespace(idents, _, isModule, decls, _, _, _, _, _) ->
-            let moduleName = String.concat "." [for id in idents -> id.idText]
-            let declarations = decls |> List.collect mapModuleDecl
-            { Name = moduleName; Declarations = declarations }
+        let moduleName = mdl.ToString()
+        let declarations = mdl.Decls |> List.collect mapModuleDecl
+        { Name = moduleName; Declarations = declarations }
 
 /// Main entry point for F# to Oak AST conversion
 let parseAndConvertToOakAst (sourceCode: string) : OakProgram =
@@ -385,8 +396,8 @@ let parseAndConvertToOakAst (sourceCode: string) : OakProgram =
         | Some parsedInput ->
             // Convert parsed input to Oak AST
             match parsedInput with
-            | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
-                { Modules = modules |> List.map AstMapping.mapModule }
+            | ParsedInput.ImplFile(implFile) ->
+                { Modules = implFile.Modules |> List.map AstMapping.mapModule }
             | _ -> 
                 { Modules = [] }
         | None ->
@@ -422,8 +433,8 @@ let parseAndConvertWithDiagnostics (sourceCode: string) : ASTConversionResult =
         | Some parsedInput ->
             // Convert parsed input to Oak AST
             match parsedInput with
-            | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
-                let oakProgram = { Modules = modules |> List.map AstMapping.mapModule }
+            | ParsedInput.ImplFile(implFile) ->
+                let oakProgram = { Modules = implFile.Modules |> List.map AstMapping.mapModule }
                 { OakProgram = oakProgram; Diagnostics = diagnostics }
             | _ -> 
                 { OakProgram = { Modules = [] }; Diagnostics = "Unsupported input format" :: diagnostics }
