@@ -1,428 +1,322 @@
 ﻿module Dabbit.Closures.ClosureTransformer
 
 open System
-open XParsec
 open Core.XParsec.Foundation
-open Core.XParsec.Foundation.Combinators
-open Core.XParsec.Foundation.ErrorHandling
 open Dabbit.Parsing.OakAst
 
-/// Closure analysis state for tracking captured variables and transformations
-type ClosureAnalysisState = {
-    GlobalScope: Set<string>
-    CurrentScope: Set<string>
-    ScopeStack: Set<string> list
-    CapturedVariables: Map<string, CapturedVariable list>
-    LiftedFunctions: LiftedClosure list
-    TransformationMappings: Map<string, string>
-    ErrorContext: string list
-}
-
-/// Represents a captured variable in a closure with full type information
-type CapturedVariable = {
+/// Lifted closure function with minimal metadata
+type LiftedFunction = {
     Name: string
-    Type: OakType
-    OriginalName: string
-    CaptureContext: string
-    IsParameter: bool
-}
-
-/// Represents a lifted closure function with complete transformation metadata
-type LiftedClosure = {
-    Name: string
-    OriginalLambda: OakExpression
     Parameters: (string * OakType) list
-    CapturedVars: CapturedVariable list
     Body: OakExpression
     ReturnType: OakType
-    CallSites: string list
 }
 
-/// Closure transformation patterns using XParsec combinators
-module ClosureAnalysisParsers =
+/// Simplified closure analysis state
+type ClosureState = {
+    LiftedFunctions: LiftedFunction list
+    FunctionCounter: int
+    CurrentScope: Set<string>
+    GlobalFunctions: Set<string>
+}
+
+/// Creates initial closure transformation state
+let createInitialState (globalFunctions: Set<string>) : ClosureState = {
+    LiftedFunctions = []
+    FunctionCounter = 0
+    CurrentScope = globalFunctions
+    GlobalFunctions = globalFunctions
+}
+
+/// Core closure analysis functions
+module ClosureAnalysis =
     
-    /// Analyzes an expression for free variables using XParsec patterns
-    let rec analyzeFreeVariables (expr: OakExpression) : Parser<Set<string>, ClosureAnalysisState> =
+    /// Finds free variables in an expression
+    let rec findFreeVariables (scope: Set<string>) (expr: OakExpression) : Set<string> =
         match expr with
         | Variable name ->
-            fun state ->
-                if Set.contains name (Set.union state.GlobalScope state.CurrentScope) then
-                    Reply(Ok Set.empty, state)
-                else
-                    Reply(Ok (Set.singleton name), state)
+            if Set.contains name scope then Set.empty
+            else Set.singleton name
         
         | Application(func, args) ->
-            analyzeFreeVariables func >>= fun funcFree ->
-            args 
-            |> List.map analyzeFreeVariables
-            |> List.fold (fun acc argParser ->
-                acc >>= fun accSet ->
-                argParser >>= fun argSet ->
-                succeed (Set.union accSet argSet)
-            ) (succeed Set.empty)
-            >>= fun argsFree ->
-            succeed (Set.union funcFree argsFree)
+            let funcFree = findFreeVariables scope func
+            let argsFree = args |> List.map (findFreeVariables scope) |> Set.unionMany
+            Set.union funcFree argsFree
         
         | Lambda(params', body) ->
             let paramNames = params' |> List.map fst |> Set.ofList
-            pushScopeWithParams paramNames >>= fun _ ->
-            analyzeFreeVariables body >>= fun bodyFree ->
-            popScope >>= fun _ ->
-            succeed (Set.difference bodyFree paramNames)
+            let extendedScope = Set.union scope paramNames
+            findFreeVariables extendedScope body
         
         | Let(name, value, body) ->
-            analyzeFreeVariables value >>= fun valueFree ->
-            bindVariable name >>= fun _ ->
-            analyzeFreeVariables body >>= fun bodyFree ->
-            succeed (Set.union valueFree bodyFree)
+            let valueFree = findFreeVariables scope value
+            let extendedScope = Set.add name scope
+            let bodyFree = findFreeVariables extendedScope body
+            Set.union valueFree bodyFree
         
         | IfThenElse(cond, thenExpr, elseExpr) ->
-            analyzeFreeVariables cond >>= fun condFree ->
-            analyzeFreeVariables thenExpr >>= fun thenFree ->
-            analyzeFreeVariables elseExpr >>= fun elseFree ->
-            succeed (Set.unionMany [condFree; thenFree; elseFree])
+            [cond; thenExpr; elseExpr]
+            |> List.map (findFreeVariables scope)
+            |> Set.unionMany
         
         | Sequential(first, second) ->
-            analyzeFreeVariables first >>= fun firstFree ->
-            analyzeFreeVariables second >>= fun secondFree ->
-            succeed (Set.union firstFree secondFree)
+            Set.union (findFreeVariables scope first) (findFreeVariables scope second)
         
         | FieldAccess(target, _) ->
-            analyzeFreeVariables target
+            findFreeVariables scope target
         
         | MethodCall(target, _, args) ->
-            analyzeFreeVariables target >>= fun targetFree ->
-            args 
-            |> List.map analyzeFreeVariables
-            |> List.fold (fun acc argParser ->
-                acc >>= fun accSet ->
-                argParser >>= fun argSet ->
-                succeed (Set.union accSet argSet)
-            ) (succeed Set.empty)
-            >>= fun argsFree ->
-            succeed (Set.union targetFree argsFree)
+            let targetFree = findFreeVariables scope target
+            let argsFree = args |> List.map (findFreeVariables scope) |> Set.unionMany
+            Set.union targetFree argsFree
         
         | Literal _ ->
-            succeed Set.empty
+            Set.empty
+        
+        | IOOperation(_, args) ->
+            args |> List.map (findFreeVariables scope) |> Set.unionMany
     
-    /// Pushes a new scope with parameters
-    and pushScopeWithParams (parameters: Set<string>) : Parser<unit, ClosureAnalysisState> =
-        fun state ->
-            let newScopeStack = state.CurrentScope :: state.ScopeStack
-            let newCurrentScope = Set.union state.CurrentScope parameters
-            let newState = { 
-                state with 
-                    CurrentScope = newCurrentScope
-                    ScopeStack = newScopeStack 
-            }
-            Reply(Ok (), newState)
-    
-    /// Pops the current scope
-    and popScope : Parser<unit, ClosureAnalysisState> =
-        fun state ->
-            match state.ScopeStack with
-            | prevScope :: rest ->
-                let newState = { 
-                    state with 
-                        CurrentScope = prevScope
-                        ScopeStack = rest 
-                }
-                Reply(Ok (), newState)
-            | [] ->
-                Reply(Error, "Cannot pop scope - scope stack is empty")
-    
-    /// Binds a variable in the current scope
-    and bindVariable (varName: string) : Parser<unit, ClosureAnalysisState> =
-        fun state ->
-            let newCurrentScope = Set.add varName state.CurrentScope
-            let newState = { state with CurrentScope = newCurrentScope }
-            Reply(Ok (), newState)
+    /// Checks if an expression contains any closures
+    let rec hasClosures (expr: OakExpression) : bool =
+        match expr with
+        | Lambda(_, _) -> true
+        | Application(func, args) -> hasClosures func || List.exists hasClosures args
+        | Let(_, value, body) -> hasClosures value || hasClosures body
+        | IfThenElse(cond, thenExpr, elseExpr) -> hasClosures cond || hasClosures thenExpr || hasClosures elseExpr
+        | Sequential(first, second) -> hasClosures first || hasClosures second
+        | FieldAccess(target, _) -> hasClosures target
+        | MethodCall(target, _, args) -> hasClosures target || List.exists hasClosures args
+        | IOOperation(_, args) -> List.exists hasClosures args
+        | Variable _ | Literal _ -> false
 
-/// Closure lifting using XParsec combinators
-module ClosureLiftingParsers =
+/// Simple closure transformation without excessive XParsec
+module ClosureTransformation =
     
     /// Generates a unique closure function name
-    let generateClosureName : Parser<string, ClosureAnalysisState> =
-        fun state ->
-            let existingCount = state.LiftedFunctions.Length
-            let name = sprintf "_closure_%d" (existingCount + 1)
-            Reply(Ok name, state)
+    let generateClosureName (state: ClosureState) : string * ClosureState =
+        let name = sprintf "_closure_%d" (state.FunctionCounter + 1)
+        let newState = { state with FunctionCounter = state.FunctionCounter + 1 }
+        (name, newState)
     
-    /// Creates captured variable metadata
-    let createCapturedVariable (name: string) (originalContext: string) : Parser<CapturedVariable, ClosureAnalysisState> =
-        fun state ->
-            let capturedVar = {
-                Name = name
-                Type = UnitType  // Would need type inference in real implementation
-                OriginalName = name
-                CaptureContext = originalContext
-                IsParameter = false
-            }
-            Reply(Ok capturedVar, state)
-    
-    /// Records a lifted closure
-    let recordLiftedClosure (closure: LiftedClosure) : Parser<unit, ClosureAnalysisState> =
-        fun state ->
-            let newState = { 
-                state with 
-                    LiftedFunctions = closure :: state.LiftedFunctions 
-            }
-            Reply(Ok (), newState)
-    
-    /// Transforms a lambda expression to a lifted function call
-    let transformLambdaToCall (lambda: OakExpression) : Parser<(LiftedClosure * OakExpression), ClosureAnalysisState> =
+    /// Lifts a lambda to a top-level function
+    let liftLambda (lambda: OakExpression) (state: ClosureState) : (string * ClosureState) =
         match lambda with
         | Lambda(params', body) ->
-            generateClosureName >>= fun closureName ->
-            analyzeFreeVariables lambda >>= fun freeVars ->
+            let (closureName, state1) = generateClosureName state
+            let freeVars = ClosureAnalysis.findFreeVariables state.CurrentScope lambda |> Set.toList
+            let capturedParams = freeVars |> List.map (fun name -> (name, UnitType))
+            let allParams = capturedParams @ params'
             
-            // Create captured variables for all free variables
-            freeVars
-            |> Set.toList
-            |> List.map (fun varName -> createCapturedVariable varName "lambda-capture")
-            |> List.fold (fun acc varParser ->
-                acc >>= fun accVars ->
-                varParser >>= fun var ->
-                succeed (var :: accVars)
-            ) (succeed [])
-            >>= fun capturedVars ->
-            
-            // Create lifted closure
-            let capturedParams = capturedVars |> List.map (fun cv -> (cv.Name, cv.Type))
-            let allParams = params' @ capturedParams
-            let liftedClosure = {
+            let liftedFunction = {
                 Name = closureName
-                OriginalLambda = lambda
                 Parameters = allParams
-                CapturedVars = capturedVars
                 Body = body
-                ReturnType = UnitType  // Would need type inference
-                CallSites = []
+                ReturnType = UnitType
             }
             
-            recordLiftedClosure liftedClosure >>= fun _ ->
-            
-            // Create function call expression
-            let capturedArgs = capturedVars |> List.map (fun cv -> Variable(cv.OriginalName))
-            let functionCall = 
-                if capturedArgs.IsEmpty then
-                    Variable(closureName)
-                else
-                    Application(Variable(closureName), capturedArgs)
-            
-            succeed (liftedClosure, functionCall)
+            let state2 = { state1 with LiftedFunctions = liftedFunction :: state1.LiftedFunctions }
+            (closureName, state2)
         
-        | _ ->
-            compilerFail (TransformError("lambda transformation", "non-lambda expression", "lifted function", "Expected lambda expression"))
-
-/// Expression transformation using XParsec combinators
-module ExpressionTransformationParsers =
+        | _ -> failwith "Expected lambda expression"
     
     /// Transforms an expression by eliminating closures
-    let rec transformExpression (expr: OakExpression) : Parser<OakExpression, ClosureAnalysisState> =
+    let rec transformExpression (expr: OakExpression) (state: ClosureState) : (OakExpression * ClosureState) =
         match expr with
         | Lambda(params', body) ->
-            // Transform lambda to lifted function call
-            transformLambdaToCall expr >>= fun (_, callExpr) ->
-            succeed callExpr
-            |> withErrorContext "lambda expression transformation"
+            let (closureName, state1) = liftLambda expr state
+            let freeVars = ClosureAnalysis.findFreeVariables state.CurrentScope expr |> Set.toList
+            let capturedArgs = freeVars |> List.map Variable
+            
+            if capturedArgs.IsEmpty then
+                (Variable(closureName), state1)
+            else
+                (Application(Variable(closureName), capturedArgs), state1)
         
         | Application(func, args) ->
-            transformExpression func >>= fun transformedFunc ->
-            args 
-            |> List.map transformExpression
-            |> List.fold (fun acc argParser ->
-                acc >>= fun accArgs ->
-                argParser >>= fun transformedArg ->
-                succeed (transformedArg :: accArgs)
-            ) (succeed [])
-            >>= fun transformedArgs ->
-            succeed (Application(transformedFunc, List.rev transformedArgs))
-            |> withErrorContext "application expression transformation"
+            let (transformedFunc, state1) = transformExpression func state
+            let (transformedArgs, finalState) = 
+                List.fold (fun (accArgs, accState) arg ->
+                    let (transformedArg, newState) = transformExpression arg accState
+                    (transformedArg :: accArgs, newState)
+                ) ([], state1) args
+            (Application(transformedFunc, List.rev transformedArgs), finalState)
         
         | Let(name, value, body) ->
-            transformExpression value >>= fun transformedValue ->
-            bindVariable name >>= fun _ ->
-            transformExpression body >>= fun transformedBody ->
-            succeed (Let(name, transformedValue, transformedBody))
-            |> withErrorContext "let expression transformation"
+            let (transformedValue, state1) = transformExpression value state
+            let extendedScope = Set.add name state1.CurrentScope
+            let state2 = { state1 with CurrentScope = extendedScope }
+            let (transformedBody, state3) = transformExpression body state2
+            let state4 = { state3 with CurrentScope = state.CurrentScope }
+            (Let(name, transformedValue, transformedBody), state4)
         
         | IfThenElse(cond, thenExpr, elseExpr) ->
-            transformExpression cond >>= fun transformedCond ->
-            transformExpression thenExpr >>= fun transformedThen ->
-            transformExpression elseExpr >>= fun transformedElse ->
-            succeed (IfThenElse(transformedCond, transformedThen, transformedElse))
-            |> withErrorContext "conditional expression transformation"
+            let (transformedCond, state1) = transformExpression cond state
+            let (transformedThen, state2) = transformExpression thenExpr state1
+            let (transformedElse, state3) = transformExpression elseExpr state2
+            (IfThenElse(transformedCond, transformedThen, transformedElse), state3)
         
         | Sequential(first, second) ->
-            transformExpression first >>= fun transformedFirst ->
-            transformExpression second >>= fun transformedSecond ->
-            succeed (Sequential(transformedFirst, transformedSecond))
-            |> withErrorContext "sequential expression transformation"
+            let (transformedFirst, state1) = transformExpression first state
+            let (transformedSecond, state2) = transformExpression second state1
+            (Sequential(transformedFirst, transformedSecond), state2)
         
         | FieldAccess(target, fieldName) ->
-            transformExpression target >>= fun transformedTarget ->
-            succeed (FieldAccess(transformedTarget, fieldName))
-            |> withErrorContext "field access transformation"
+            let (transformedTarget, state1) = transformExpression target state
+            (FieldAccess(transformedTarget, fieldName), state1)
         
         | MethodCall(target, methodName, args) ->
-            transformExpression target >>= fun transformedTarget ->
-            args 
-            |> List.map transformExpression
-            |> List.fold (fun acc argParser ->
-                acc >>= fun accArgs ->
-                argParser >>= fun transformedArg ->
-                succeed (transformedArg :: accArgs)
-            ) (succeed [])
-            >>= fun transformedArgs ->
-            succeed (MethodCall(transformedTarget, methodName, List.rev transformedArgs))
-            |> withErrorContext "method call transformation"
+            let (transformedTarget, state1) = transformExpression target state
+            let (transformedArgs, finalState) = 
+                List.fold (fun (accArgs, accState) arg ->
+                    let (transformedArg, newState) = transformExpression arg accState
+                    (transformedArg :: accArgs, newState)
+                ) ([], state1) args
+            (MethodCall(transformedTarget, methodName, List.rev transformedArgs), finalState)
+        
+        | IOOperation(ioType, args) ->
+            let (transformedArgs, finalState) = 
+                List.fold (fun (accArgs, accState) arg ->
+                    let (transformedArg, newState) = transformExpression arg accState
+                    (transformedArg :: accArgs, newState)
+                ) ([], state) args
+            (IOOperation(ioType, List.rev transformedArgs), finalState)
         
         | Variable _ | Literal _ ->
-            succeed expr
+            (expr, state)
 
-/// Declaration transformation using XParsec combinators
-module DeclarationTransformationParsers =
+/// Declaration transformation
+module DeclarationTransformation =
     
-    /// Transforms a function declaration by eliminating closures
-    let transformFunctionDeclaration (name: string) (params': (string * OakType) list) (returnType: OakType) (body: OakExpression) : Parser<OakDeclaration list, ClosureAnalysisState> =
-        // Set up function scope
+    /// Transforms a function declaration
+    let transformFunctionDeclaration (name: string) (params': (string * OakType) list) (returnType: OakType) (body: OakExpression) (state: ClosureState) : (OakDeclaration list * ClosureState) =
         let paramNames = params' |> List.map fst |> Set.ofList
-        pushScopeWithParams paramNames >>= fun _ ->
+        let functionScope = Set.union state.CurrentScope paramNames
+        let state1 = { state with CurrentScope = functionScope }
         
-        // Transform function body
-        transformExpression body >>= fun transformedBody ->
-        
-        popScope >>= fun _ ->
-        
-        // Create main function declaration
+        let (transformedBody, state2) = ClosureTransformation.transformExpression body state1
         let mainFunction = FunctionDecl(name, params', returnType, transformedBody)
         
-        // Get lifted closures and create their declarations
-        fun state ->
-            let liftedDeclarations = 
-                state.LiftedFunctions 
-                |> List.map (fun lc -> FunctionDecl(lc.Name, lc.Parameters, lc.ReturnType, lc.Body))
-            
-            let allDeclarations = mainFunction :: liftedDeclarations
-            Reply(Ok allDeclarations, state)
-        |> withErrorContext (sprintf "function declaration transformation '%s'" name)
+        let liftedDeclarations = 
+            state2.LiftedFunctions 
+            |> List.map (fun lf -> FunctionDecl(lf.Name, lf.Parameters, lf.ReturnType, lf.Body))
+        
+        let allDeclarations = mainFunction :: liftedDeclarations
+        let clearedState = { state2 with LiftedFunctions = []; CurrentScope = state.CurrentScope }
+        
+        (allDeclarations, clearedState)
     
     /// Transforms an entry point declaration
-    let transformEntryPointDeclaration (expr: OakExpression) : Parser<OakDeclaration list, ClosureAnalysisState> =
-        transformExpression expr >>= fun transformedExpr ->
-        
+    let transformEntryPointDeclaration (expr: OakExpression) (state: ClosureState) : (OakDeclaration list * ClosureState) =
+        let (transformedExpr, state1) = ClosureTransformation.transformExpression expr state
         let mainEntry = EntryPoint(transformedExpr)
         
-        fun state ->
-            let liftedDeclarations = 
-                state.LiftedFunctions 
-                |> List.map (fun lc -> FunctionDecl(lc.Name, lc.Parameters, lc.ReturnType, lc.Body))
-            
-            let allDeclarations = mainEntry :: liftedDeclarations
-            Reply(Ok allDeclarations, state)
-        |> withErrorContext "entry point transformation"
+        let liftedDeclarations = 
+            state1.LiftedFunctions 
+            |> List.map (fun lf -> FunctionDecl(lf.Name, lf.Parameters, lf.ReturnType, lf.Body))
+        
+        let allDeclarations = mainEntry :: liftedDeclarations
+        let clearedState = { state1 with LiftedFunctions = [] }
+        
+        (allDeclarations, clearedState)
     
     /// Transforms any declaration
-    let transformDeclaration (decl: OakDeclaration) : Parser<OakDeclaration list, ClosureAnalysisState> =
+    let transformDeclaration (decl: OakDeclaration) (state: ClosureState) : (OakDeclaration list * ClosureState) =
         match decl with
         | FunctionDecl(name, params', returnType, body) ->
-            transformFunctionDeclaration name params' returnType body
+            transformFunctionDeclaration name params' returnType body state
         
         | EntryPoint(expr) ->
-            transformEntryPointDeclaration expr
+            transformEntryPointDeclaration expr state
         
-        | TypeDecl(_, _) ->
-            succeed [decl]  // Type declarations are unchanged
+        | TypeDecl(_, _) | ExternalDecl(_, _, _, _) ->
+            ([decl], state)
 
-/// Module transformation using XParsec combinators
-module ModuleTransformationParsers =
+/// Module transformation
+module ModuleTransformation =
     
     /// Builds global scope from function declarations
     let buildGlobalScope (declarations: OakDeclaration list) : Set<string> =
         declarations
         |> List.choose (function
             | FunctionDecl(name, _, _, _) -> Some name
+            | ExternalDecl(name, _, _, _) -> Some name
             | _ -> None)
         |> Set.ofList
     
     /// Transforms a complete module
-    let transformModule (module': OakModule) : Parser<OakModule, ClosureAnalysisState> =
+    let transformModule (module': OakModule) : CompilerResult<OakModule> =
         let globalScope = buildGlobalScope module'.Declarations
+        let initialState = createInitialState globalScope
         
-        fun state ->
-            let initialState = { 
-                state with 
-                    GlobalScope = globalScope
-                    CurrentScope = globalScope
-            }
+        try
+            let (transformedDeclarations, _) = 
+                module'.Declarations
+                |> List.fold (fun (accDecls, accState) decl ->
+                    let (newDecls, newState) = DeclarationTransformation.transformDeclaration decl accState
+                    (accDecls @ newDecls, newState)
+                ) ([], initialState)
             
-            // Transform all declarations
-            let transformAllDeclarations (declarations: OakDeclaration list) : Parser<OakDeclaration list, ClosureAnalysisState> =
-                declarations
-                |> List.map transformDeclaration
-                |> List.fold (fun acc declParser ->
-                    acc >>= fun accDecls ->
-                    declParser >>= fun newDecls ->
-                    succeed (accDecls @ newDecls)
-                ) (succeed [])
-            
-            match transformAllDeclarations module'.Declarations initialState with
-            | Reply(Ok transformedDeclarations, finalState) ->
-                let transformedModule = { module' with Declarations = transformedDeclarations }
-                Reply(Ok transformedModule, finalState)
-            | Reply(Error, error) ->
-                Reply(Error, error)
-        |> withErrorContext (sprintf "module transformation '%s'" module'.Name)
+            Success { module' with Declarations = transformedDeclarations }
+        
+        with ex ->
+            CompilerFailure [ConversionError("closure-elimination", module'.Name, "transformed module", ex.Message)]
 
-/// Closure elimination validation
+/// Validation functions
 module ClosureValidation =
     
     /// Validates that no closures remain in an expression
     let rec validateNoClosures (expr: OakExpression) : CompilerResult<unit> =
         match expr with
         | Lambda(_, _) ->
-            CompilerFailure [TransformError("closure validation", "lambda expression", "eliminated closure", "Lambda expression found after closure elimination")]
+            CompilerFailure [ConversionError("closure-validation", "lambda expression", "eliminated closure", "Lambda expression found after closure elimination")]
         
         | Application(func, args) ->
-            validateNoClosures func >>= fun _ ->
-            args 
-            |> List.map validateNoClosures
-            |> List.fold (fun acc result ->
-                match acc, result with
-                | Success (), Success () -> Success ()
-                | CompilerFailure errors, Success () -> CompilerFailure errors
-                | Success (), CompilerFailure errors -> CompilerFailure errors
-                | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-            ) (Success ())
+            match validateNoClosures func with
+            | Success () ->
+                let argResults = args |> List.map validateNoClosures
+                let combinedResult = ResultHelpers.combineResults argResults
+                match combinedResult with
+                | Success _ -> Success ()
+                | CompilerFailure errors -> CompilerFailure errors
+            | CompilerFailure errors -> CompilerFailure errors
         
         | Let(_, value, body) ->
-            validateNoClosures value >>= fun _ ->
-            validateNoClosures body
+            match validateNoClosures value with
+            | Success () -> validateNoClosures body
+            | CompilerFailure errors -> CompilerFailure errors
         
         | IfThenElse(cond, thenExpr, elseExpr) ->
-            validateNoClosures cond >>= fun _ ->
-            validateNoClosures thenExpr >>= fun _ ->
-            validateNoClosures elseExpr
+            match validateNoClosures cond with
+            | Success () ->
+                match validateNoClosures thenExpr with
+                | Success () -> validateNoClosures elseExpr
+                | CompilerFailure errors -> CompilerFailure errors
+            | CompilerFailure errors -> CompilerFailure errors
         
         | Sequential(first, second) ->
-            validateNoClosures first >>= fun _ ->
-            validateNoClosures second
+            match validateNoClosures first with
+            | Success () -> validateNoClosures second
+            | CompilerFailure errors -> CompilerFailure errors
         
         | FieldAccess(target, _) ->
             validateNoClosures target
         
         | MethodCall(target, _, args) ->
-            validateNoClosures target >>= fun _ ->
-            args 
-            |> List.map validateNoClosures
-            |> List.fold (fun acc result ->
-                match acc, result with
-                | Success (), Success () -> Success ()
-                | CompilerFailure errors, Success () -> CompilerFailure errors
-                | Success (), CompilerFailure errors -> CompilerFailure errors
-                | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-            ) (Success ())
+            match validateNoClosures target with
+            | Success () ->
+                let argResults = args |> List.map validateNoClosures
+                let combinedResult = ResultHelpers.combineResults argResults
+                match combinedResult with
+                | Success _ -> Success ()
+                | CompilerFailure errors -> CompilerFailure errors
+            | CompilerFailure errors -> CompilerFailure errors
+        
+        | IOOperation(_, args) ->
+            let argResults = args |> List.map validateNoClosures
+            let combinedResult = ResultHelpers.combineResults argResults
+            match combinedResult with
+            | Success _ -> Success ()
+            | CompilerFailure errors -> CompilerFailure errors
         
         | Variable _ | Literal _ ->
             Success ()
@@ -432,59 +326,32 @@ module ClosureValidation =
         match decl with
         | FunctionDecl(_, _, _, body) -> validateNoClosures body
         | EntryPoint(expr) -> validateNoClosures expr
-        | TypeDecl(_, _) -> Success ()
-    
-    /// Validates that a program contains no closures
-    let validateProgramNoClosures (program: OakProgram) : CompilerResult<unit> =
-        program.Modules
-        |> List.collect (fun m -> m.Declarations)
-        |> List.map validateDeclarationNoClosures
-        |> List.fold (fun acc result ->
-            match acc, result with
-            | Success (), Success () -> Success ()
-            | CompilerFailure errors, Success () -> CompilerFailure errors
-            | Success (), CompilerFailure errors -> CompilerFailure errors
-            | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-        ) (Success ())
+        | TypeDecl(_, _) | ExternalDecl(_, _, _, _) -> Success ()
 
-/// Main closure elimination entry point - NO FALLBACKS ALLOWED
+/// Main closure elimination entry point
 let eliminateClosures (program: OakProgram) : CompilerResult<OakProgram> =
     if program.Modules.IsEmpty then
-        CompilerFailure [TransformError("closure elimination", "empty program", "transformed program", "Program must contain at least one module")]
+        CompilerFailure [ConversionError("closure-elimination", "empty program", "transformed program", "Program must contain at least one module")]
     else
-        let initialState = {
-            GlobalScope = Set.empty
-            CurrentScope = Set.empty
-            ScopeStack = []
-            CapturedVariables = Map.empty
-            LiftedFunctions = []
-            TransformationMappings = Map.empty
-            ErrorContext = []
-        }
-        
         // Transform all modules
-        let transformAllModules (modules: OakModule list) : CompilerResult<OakModule list> =
-            modules
-            |> List.map (fun module' ->
-                match transformModule module' initialState with
-                | Reply(Ok transformedModule, _) -> Success transformedModule
-                | Reply(Error, error) -> CompilerFailure [TransformError("module transformation", module'.Name, "transformed module", error)])
-            |> List.fold (fun acc result ->
-                match acc, result with
-                | Success modules, Success module' -> Success (module' :: modules)
-                | CompilerFailure errors, Success _ -> CompilerFailure errors
-                | Success _, CompilerFailure errors -> CompilerFailure errors
-                | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-            ) (Success [])
-            |>> List.rev
+        program.Modules
+        |> List.map ModuleTransformation.transformModule
+        |> ResultHelpers.combineResults
+        >>= fun transformedModules ->
         
-        transformAllModules program.Modules >>= fun transformedModules ->
         let transformedProgram = { program with Modules = transformedModules }
         
         // Validate that no closures remain
-        ClosureValidation.validateProgramNoClosures transformedProgram >>= fun _ ->
+        let validationResults = 
+            transformedProgram.Modules
+            |> List.collect (fun m -> m.Declarations)
+            |> List.map ClosureValidation.validateDeclarationNoClosures
         
-        Success transformedProgram
+        let combinedValidation = ResultHelpers.combineResults validationResults
+        
+        match combinedValidation with
+        | Success _ -> Success transformedProgram
+        | CompilerFailure errors -> CompilerFailure errors
 
 /// Analyzes closure usage in a program for diagnostics
 let analyzeClosureUsage (program: OakProgram) : CompilerResult<Map<string, int>> =
@@ -497,18 +364,24 @@ let analyzeClosureUsage (program: OakProgram) : CompilerResult<Map<string, int>>
         | Sequential(first, second) -> countClosures first + countClosures second
         | FieldAccess(target, _) -> countClosures target
         | MethodCall(target, _, args) -> countClosures target + (args |> List.sumBy countClosures)
+        | IOOperation(_, args) -> args |> List.sumBy countClosures
         | Variable _ | Literal _ -> 0
     
     let countClosuresInDeclaration (decl: OakDeclaration) : (string * int) =
         match decl with
         | FunctionDecl(name, _, _, body) -> (name, countClosures body)
-        | EntryPoint(_) -> ("__entry__", 0)  // Entry points shouldn't have closures after parsing
+        | EntryPoint(_) -> ("__entry__", 0)
         | TypeDecl(name, _) -> (name, 0)
+        | ExternalDecl(name, _, _, _) -> (name, 0)
     
-    let closureCounts = 
-        program.Modules
-        |> List.collect (fun m -> m.Declarations)
-        |> List.map countClosuresInDeclaration
-        |> Map.ofList
+    try
+        let closureCounts = 
+            program.Modules
+            |> List.collect (fun m -> m.Declarations)
+            |> List.map countClosuresInDeclaration
+            |> Map.ofList
+        
+        Success closureCounts
     
-    Success closureCounts
+    with ex ->
+        CompilerFailure [ConversionError("closure-analysis", "program", "closure usage statistics", ex.Message)]
