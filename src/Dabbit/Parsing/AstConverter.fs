@@ -149,14 +149,18 @@ module AstMapping =
             |> List.fold (fun bodyAcc binding ->
                 match binding with
                 | SynBinding(_, _, _, _, _, _, _, pat, returnTypeOpt, valExpr, _, _, _) ->
-                    // Extract name from pattern
-                    match pat with
-                    | SynPat.Named(_, IdentText name, _, _, _) ->
-                        Let(name, mapExpression valExpr, bodyAcc)
-                    | SynPat.LongIdent(LongIdentText name, _, _, _, _, _) ->
-                        Let(name, mapExpression valExpr, bodyAcc)
-                    | _ -> 
-                        Let("_", mapExpression valExpr, bodyAcc)
+                    // Extract name from pattern using different approaches
+                    let name =
+                        match pat with
+                        | SynPat.Named(_, id, _, _, _) -> 
+                            // For Named pattern, just convert to string to avoid type issues
+                            id.ToString()
+                        | SynPat.LongIdent(lid, _, _, _, _, _) -> 
+                            // Using correct 6-arg pattern for LongIdent
+                            lid.ToString()
+                        | _ -> "_"
+                            
+                    Let(name, mapExpression valExpr, bodyAcc)
             ) (mapExpression bodyExpr)
         
         | SynExpr.IfThenElse(condExpr, thenExpr, elseExprOpt, _, _, _, _) ->

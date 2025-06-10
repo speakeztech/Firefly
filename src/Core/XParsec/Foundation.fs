@@ -2,246 +2,224 @@
 
 open System
 open XParsec
-
-/// <summary>
-/// Parser state for Firefly compiler, extending the standard XParsec state with compiler-specific fields.
-/// </summary>
-type FireflyParserState = {
-    /// <summary>Current position in the input string</summary>
-    Position: int
-    
-    /// <summary>The input being parsed</summary>
-    Input: string
-    
-    /// <summary>Current indentation level for layout-sensitive parsing</summary>
-    IndentLevel: int
-    
-    /// <summary>Stack of error messages providing context for error reporting</summary>
-    ErrorMessages: string list
-    
-    /// <summary>Metadata store for passing data between parser combinators</summary>
-    Metadata: Map<string, obj>
-}
-
-/// <summary>
-/// Creates an initial parser state with default values
-/// </summary>
-/// <param name="input">The input string to parse</param>
-/// <returns>A fresh parser state</returns>
-let createInitialState (input: string) : FireflyParserState =
-    {
-        Position = 0
-        Input = input
-        IndentLevel = 0
-        ErrorMessages = []
-        Metadata = Map.empty
-    }
-
-/// Core error types for the Firefly compiler
-type FireflyError =
-    | ParseError of position: Position * message: string * context: string list
-    | TransformError of phase: string * source: string * target: string * message: string
-    | SemanticError of construct: string * message: string * location: Position
-    | CompilerError of phase: string * message: string * details: string option
+open XParsec.Parsers
+open XParsec.Combinators
 
 /// Position information for error reporting
-and Position = {
+type SourcePosition = {
     Line: int
     Column: int
     File: string
     Offset: int
 }
 
-/// Result type for all compiler operations - no fallbacks allowed
+/// Core error types for the Firefly compiler
+type FireflyError =
+    | SyntaxError of position: SourcePosition * message: string * context: string list
+    | ConversionError of phase: string * source: string * target: string * message: string
+    | TypeCheckError of construct: string * message: string * location: SourcePosition
+    | InternalError of phase: string * message: string * details: string option
+
+/// Result type for compiler operations - no fallbacks allowed
 type CompilerResult<'T> =
     | Success of 'T
     | CompilerFailure of FireflyError list
 
-/// Parser state for tracking compilation context
-type FireflyParserState = {
+/// Compiler state for tracking translation context
+type FireflyState = {
     CurrentFile: string
     ImportedModules: string list
     TypeDefinitions: Map<string, string>
     ScopeStack: string list list
+    ErrorStack: string list
 }
 
-/// Core XParsec combinators specialized for Firefly compilation
-module Combinators =
+/// Core parsers specialized for Firefly compilation
+module Parsers =
+    /// Creates a parser that fails with a compiler error
+    let compilerFail (error: FireflyError) : Parser<'T, char, FireflyState, 'Input, 'InputSlice> =
+        let errorMsg = Message (error.ToString())
+        fun reader -> fail errorMsg reader
     
-    /// Creates a parser that always fails with a compiler error
-    let compilerFail<'T> (error: FireflyError) : Parser<'T, FireflyParserState> =
-        fun state -> Reply(Error, error.ToString())
+    /// Gets the current state
+    let getState : Parser<FireflyState, char, FireflyState, 'Input, 'InputSlice> =
+        fun reader -> preturn reader.State reader
     
-    /// Creates a parser that succeeds with a value
-    let succeed<'T> (value: 'T) : Parser<'T, FireflyParserState> =
-        fun state -> Reply(Ok value)
+    /// Updates the state
+    let updateState (f: FireflyState -> FireflyState) : Parser<unit, char, FireflyState, 'Input, 'InputSlice> =
+        fun reader ->
+            reader.State <- f reader.State
+            preturn () reader
     
-    /// Combines two parsers sequentially, requiring both to succeed
-    let (.>>.) (p1: Parser<'A, FireflyParserState>) (p2: Parser<'B, FireflyParserState>) : Parser<'A * 'B, FireflyParserState> =
-        fun state ->
-            match p1 state with
-            | Reply(Ok result1, state1) ->
-                match p2 state1 with
-                | Reply(Ok result2, state2) -> Reply(Ok (result1, result2), state2)
-                | Reply(Error, error) -> Reply(Error, error)
-            | Reply(Error, error) -> Reply(Error, error)
+    /// Adds error context to a parser
+    let withErrorContext (context: string) (p: Parser<'T, char, FireflyState, 'Input, 'InputSlice>) : Parser<'T, char, FireflyState, 'Input, 'InputSlice> =
+        fun reader ->
+            let oldState = reader.State
+            let newState = { oldState with ErrorStack = context :: oldState.ErrorStack }
+            reader.State <- newState
+            
+            match p reader with
+            | Ok result -> 
+                reader.State <- oldState  // Restore original state
+                Ok result
+            | Error err -> 
+                reader.State <- oldState  // Restore original state
+                ParseError.createNested (Message context) [err] reader.Position
     
-    /// Choice combinator - tries first parser, then second if first fails
-    let (<|>) (p1: Parser<'T, FireflyParserState>) (p2: Parser<'T, FireflyParserState>) : Parser<'T, FireflyParserState> =
-        fun state ->
-            match p1 state with
-            | Reply(Ok result, newState) -> Reply(Ok result, newState)
-            | Reply(Error, _) -> p2 state
-    
-    /// Maps a function over a parser result
-    let (|>>) (parser: Parser<'A, FireflyParserState>) (f: 'A -> 'B) : Parser<'B, FireflyParserState> =
-        fun state ->
-            match parser state with
-            | Reply(Ok result, newState) -> Reply(Ok (f result), newState)
-            | Reply(Error, error) -> Reply(Error, error)
-    
-    /// Monadic bind for composing parsers
-    let (>>=) (parser: Parser<'A, FireflyParserState>) (f: 'A -> Parser<'B, FireflyParserState>) : Parser<'B, FireflyParserState> =
-        fun state ->
-            match parser state with
-            | Reply(Ok result, newState) -> (f result) newState
-            | Reply(Error, error) -> Reply(Error, error)
-    
-    /// Parses many occurrences of a parser (zero or more)
-    let many (parser: Parser<'T, FireflyParserState>) : Parser<'T list, FireflyParserState> =
-        let rec parseMany acc state =
-            match parser state with
-            | Reply(Ok result, newState) -> parseMany (result :: acc) newState
-            | Reply(Error, _) -> Reply(Ok (List.rev acc), state)
-        parseMany []
-    
-    /// Parses one or more occurrences of a parser
-    let many1 (parser: Parser<'T, FireflyParserState>) : Parser<'T list, FireflyParserState> =
-        parser >>= fun first ->
-        many parser >>= fun rest ->
-        succeed (first :: rest)
-    
-    /// Parses items separated by a separator
-    let sepBy (itemParser: Parser<'T, FireflyParserState>) (sepParser: Parser<'Sep, FireflyParserState>) : Parser<'T list, FireflyParserState> =
-        let rec parseSeparated acc state =
-            match itemParser state with
-            | Reply(Ok item, state1) ->
-                match sepParser state1 with
-                | Reply(Ok _, state2) -> parseSeparated (item :: acc) state2
-                | Reply(Error, _) -> Reply(Ok (List.rev (item :: acc)), state1)
-            | Reply(Error, _) -> Reply(Ok (List.rev acc), state)
-        parseSeparated []
-    
-    /// Parses items between delimiters
-    let between (openParser: Parser<'Open, FireflyParserState>) 
-                (closeParser: Parser<'Close, FireflyParserState>) 
-                (contentParser: Parser<'T, FireflyParserState>) : Parser<'T, FireflyParserState> =
-        openParser >>= fun _ ->
-        contentParser >>= fun content ->
-        closeParser >>= fun _ ->
-        succeed content
-    
-    /// Optionally parses something
-    let opt (parser: Parser<'T, FireflyParserState>) : Parser<'T option, FireflyParserState> =
-        (parser |>> Some) <|> succeed None
+    /// Creates a parser that requires success or fails with a message
+    let required (msg: string) (p: Parser<'T, char, FireflyState, 'Input, 'InputSlice>) : Parser<'T, char, FireflyState, 'Input, 'InputSlice> =
+        fun reader ->
+            let pos = reader.Position
+            match p reader with
+            | Ok result -> Ok result
+            | Error _ -> 
+                reader.Position <- pos
+                fail (Message msg) reader
 
-/// Character-level parsers for F# syntax
-module CharParsers =
+/// State management for Firefly compiler
+module StateManagement =
+    open Parsers
     
-    /// Parses a specific character
-    let pchar (c: char) : Parser<char, FireflyParserState> =
-        fun state ->
-            // Implementation would use XParsec's actual character parsing
-            // This is a structural placeholder
-            if state.CurrentFile.Length > 0 then
-                Reply(Ok c, state)
-            else
-                Reply(Error, sprintf "Expected '%c'" c)
+    /// Creates a parser that adds a name to the current scope
+    let bindInScope (name: string) : Parser<unit, char, FireflyState, 'Input, 'InputSlice> =
+        updateState (fun state ->
+            match state.ScopeStack with
+            | currentScope :: rest ->
+                { state with ScopeStack = (name :: currentScope) :: rest }
+            | [] ->
+                { state with ScopeStack = [[name]] }
+        )
     
-    /// Parses any character in a set
-    let anyOf (chars: char list) : Parser<char, FireflyParserState> =
-        chars 
-        |> List.map pchar 
-        |> List.reduce (<|>)
+    /// Creates a parser that pushes a new scope
+    let pushScope : Parser<unit, char, FireflyState, 'Input, 'InputSlice> =
+        updateState (fun state ->
+            { state with ScopeStack = [] :: state.ScopeStack }
+        )
     
-    /// Parses a whitespace character
-    let whitespace : Parser<char, FireflyParserState> =
-        anyOf [' '; '\t'; '\n'; '\r']
+    /// Creates a parser that pops the current scope
+    let popScope : Parser<unit, char, FireflyState, 'Input, 'InputSlice> =
+        updateState (fun state ->
+            match state.ScopeStack with
+            | _ :: rest -> { state with ScopeStack = rest }
+            | [] -> state
+        )
     
-    /// Parses zero or more whitespace characters
-    let ws : Parser<unit, FireflyParserState> =
-        many whitespace |>> ignore
-    
-    /// Parses one or more whitespace characters
-    let ws1 : Parser<unit, FireflyParserState> =
-        many1 whitespace |>> ignore
-    
-    /// Parses a letter
-    let letter : Parser<char, FireflyParserState> =
-        fun state ->
-            // Would use XParsec's letter parser
-            Reply(Ok 'a', state)  // Placeholder
-    
-    /// Parses a digit
-    let digit : Parser<char, FireflyParserState> =
-        anyOf ['0'..'9']
-    
-    /// Parses an alphanumeric character
-    let alphaNum : Parser<char, FireflyParserState> =
-        letter <|> digit
+    /// Checks if a name exists in any scope
+    let isInScope (name: string) : Parser<bool, char, FireflyState, 'Input, 'InputSlice> =
+        getState |>> (fun state ->
+            state.ScopeStack |> List.exists (List.contains name)
+        )
 
-/// String-level parsers
+/// String level parsers
 module StringParsers =
+    /// Parse an identifier
+    let identifier : Parser<string, char, FireflyState, 'Input, 'InputSlice> =
+        let isIdFirst c = Char.IsLetter c || c = '_'
+        let isIdRest c = Char.IsLetterOrDigit c || c = '_'
+        
+        satisfyL isIdFirst "Expected identifier" >>= fun first ->
+        many (satisfyL isIdRest "Expected identifier character") >>= fun rest ->
+        let idChars = first :: rest
+        preturn (String(Array.ofList idChars))
     
-    /// Parses a specific string
-    let pstring (s: string) : Parser<string, FireflyParserState> =
-        s.ToCharArray()
-        |> Array.toList
-        |> List.map CharParsers.pchar
-        |> List.reduce (Combinators.(.>>.))
-        |> Combinators.(|>>) (fun chars -> String(Array.ofList (fst chars :: [])))
-    
-    /// Parses an identifier
-    let identifier : Parser<string, FireflyParserState> =
-        CharParsers.letter >>= fun first ->
-        Combinators.many (CharParsers.alphaNum <|> CharParsers.pchar '_') >>= fun rest ->
-        Combinators.succeed (String(Array.ofList (first :: rest)))
-    
-    /// Parses a qualified identifier (Module.Name)
-    let qualifiedIdentifier : Parser<string list, FireflyParserState> =
-        Combinators.sepBy identifier (CharParsers.pchar '.')
+    /// Parse a qualified identifier (Module.Name)
+    let qualifiedIdentifier : Parser<string list, char, FireflyState, 'Input, 'InputSlice> =
+        sepBy1 identifier (pchar '.')
 
-/// Error handling utilities
-module ErrorHandling =
+/// Result helpers for Firefly compiler
+module ResultHelpers =
+    /// Combines multiple compiler results
+    let combineResults (results: CompilerResult<'T> list) : CompilerResult<'T list> =
+        let folder acc result =
+            match acc, result with
+            | Success accValues, Success value -> Success (value :: accValues)
+            | CompilerFailure errors, Success _ -> CompilerFailure errors
+            | Success _, CompilerFailure errors -> CompilerFailure errors
+            | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
+        
+        results
+        |> List.fold folder (Success [])
+        |> function
+           | Success values -> Success (List.rev values)
+           | CompilerFailure errors -> CompilerFailure errors
     
-    /// Creates a parse error with position information
-    let createParseError (pos: Position) (message: string) (context: string list) : FireflyError =
-        ParseError(pos, message, context)
+    /// Monadic bind for CompilerResult
+    let bind (f: 'T -> CompilerResult<'U>) (result: CompilerResult<'T>) : CompilerResult<'U> =
+        match result with
+        | Success value -> f value
+        | CompilerFailure errors -> CompilerFailure errors
     
-    /// Creates a transformation error
-    let createTransformError (phase: string) (source: string) (target: string) (message: string) : FireflyError =
-        TransformError(phase, source, target, message)
-    
-    /// Lifts a parser to provide better error context
-    let withErrorContext (context: string) (parser: Parser<'T, FireflyParserState>) : Parser<'T, FireflyParserState> =
-        fun state ->
-            match parser state with
-            | Reply(Ok result, newState) -> Reply(Ok result, newState)
-            | Reply(Error, originalError) -> 
-                let enhancedError = sprintf "%s (in context: %s)" originalError context
-                Reply(Error, enhancedError)
-    
-    /// Requires a parser to succeed or fails with a specific error
-    let required (errorMsg: string) (parser: Parser<'T, FireflyParserState>) : Parser<'T, FireflyParserState> =
-        fun state ->
-            match parser state with
-            | Reply(Ok result, newState) -> Reply(Ok result, newState)
-            | Reply(Error, _) -> Reply(Error, errorMsg)
+    /// Maps a function over CompilerResult
+    let map (f: 'T -> 'U) (result: CompilerResult<'T>) : CompilerResult<'U> =
+        match result with
+        | Success value -> Success (f value)
+        | CompilerFailure errors -> CompilerFailure errors
 
-/// Initial parser state
-let initialState (fileName: string) : FireflyParserState = {
+/// Creates initial compiler state
+let initialState (fileName: string) : FireflyState = {
     CurrentFile = fileName
     ImportedModules = []
     TypeDefinitions = Map.empty
     ScopeStack = [[]]
+    ErrorStack = []
 }
+
+/// Runs a parser on input with state
+let runParser 
+    (p: Parser<'T, char, FireflyState, ReadableString, ReadableStringSlice>) 
+    (input: string) 
+    (state: FireflyState) : CompilerResult<'T> =
+    
+    let reader = Reader.ofString input state
+    
+    match p reader with
+    | Ok result -> Success result.Parsed
+    | Error err -> 
+        // Convert XParsec error to Firefly error
+        let pos = {
+            Line = 1  // Would need position tracking to get actual line/column
+            Column = int err.Position.Index + 1
+            File = state.CurrentFile
+            Offset = int err.Position.Index
+        }
+        
+        let errorContext = state.ErrorStack
+        let errorMsg = 
+            match err.Errors with
+            | Message msg -> msg
+            | _ -> err.Errors.ToString()
+            
+        CompilerFailure [SyntaxError(pos, errorMsg, errorContext)]
+
+/// Extension for easier parser composition with computation expressions
+type ParserBuilder() =
+    member inline _.Bind(p, f) = p >>= f
+    member inline _.Return(x) = preturn x
+    member inline _.ReturnFrom(p) = p
+    member inline _.Zero() = preturn ()
+    member inline _.Delay(f) = fun reader -> (f()) reader
+    
+    member inline _.Combine(p1, p2) = 
+        p1 >>. p2
+        
+    member inline _.TryWith(p, handler) =
+        fun reader ->
+            try
+                p reader
+            with e ->
+                (handler e) reader
+                
+    member inline _.TryFinally(p, compensation) =
+        fun reader ->
+            try
+                p reader
+            finally
+                compensation()
+    
+    member inline _.Using(resource, f) =
+        fun reader ->
+            use r = resource
+            (f r) reader
+
+/// Parser computation expression
+let parser = ParserBuilder()
