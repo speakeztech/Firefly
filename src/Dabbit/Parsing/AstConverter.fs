@@ -3,251 +3,436 @@
 open System
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
+open Fantomas.FCS
+open Fantomas.Core
 open Dabbit.Parsing.OakAst
 
-/// Result type containing the original ASTs and converted program
+/// Result type for F# to Oak AST conversion with diagnostics
 type ASTConversionResult = {
-    FCSAstText: string
-    OakAstText: string
     OakProgram: OakProgram
+    Diagnostics: string list
 }
 
-// Helper functions
-let getIdentPath (idents: Ident list) =
-    idents |> List.map (fun id -> id.idText) |> String.concat "."
-
-// Type conversion
-let rec synTypeToOakType (synType: SynType) : OakType =
-    match synType with
-    | SynType.LongIdent(lid) ->
-        let name = getIdentPath lid.LongIdent
-        match name.ToLowerInvariant() with
-        | "int" | "int32" | "system.int32" -> IntType
-        | "float" | "double" | "system.double" -> FloatType
-        | "bool" | "boolean" | "system.boolean" -> BoolType
-        | "string" | "system.string" -> StringType
-        | "unit" -> UnitType
-        | _ -> StructType([])
-    
-    | SynType.App(typeName, _, typeArgs, _, _, _, _) ->
-        match typeName with
-        | SynType.LongIdent(lid) when 
-            let name = getIdentPath lid.LongIdent
-            name = "array" || name = "[]" || name = "list" ->
-            match typeArgs with
-            | [elemType] -> ArrayType(synTypeToOakType elemType)
+/// Core F# AST to Oak AST mapping functions
+module AstMapping =
+    /// Maps Fantomas/FCS type to Oak type with proper type system mapping
+    let rec mapType (synType: SynType) : OakType =
+        match synType with
+        | SynType.LongIdent(LongIdentWithDots(idents, _)) ->
+            let name = String.concat "." [for id in idents -> id.idText]
+            match name.ToLowerInvariant() with
+            | "int" | "int32" | "system.int32" -> IntType
+            | "float" | "double" | "system.double" -> FloatType
+            | "bool" | "boolean" | "system.boolean" -> BoolType
+            | "string" | "system.string" -> StringType
+            | "unit" -> UnitType
+            | _ -> 
+                // This would be extended to handle custom types better
+                StructType([])
+        
+        | SynType.App(typeName, _, typeArgs, _, _, _, _) ->
+            match typeName with
+            | SynType.LongIdent(LongIdentWithDots(idents, _)) ->
+                let name = String.concat "." [for id in idents -> id.idText]
+                if name = "array" || name = "[]" || name = "list" then
+                    match typeArgs with
+                    | [elemType] -> ArrayType(mapType elemType)
+                    | _ -> UnitType  // Malformed generic
+                else 
+                    UnitType  // Unknown generic type
             | _ -> UnitType
+        
+        | SynType.Fun(paramType, returnType, _, _) ->
+            FunctionType([mapType paramType], mapType returnType)
+        
+        | SynType.Tuple(_, segments, _) ->
+            let fields = 
+                segments 
+                |> List.mapi (fun i segment -> 
+                    let fieldType = 
+                        match segment with
+                        | SynTupleTypeSegment.Type(t) -> mapType t
+                        | _ -> UnitType
+                    (sprintf "Item%d" (i+1), fieldType))
+            StructType(fields)
+        
+        | SynType.Array(_, elemType, _) ->
+            ArrayType(mapType elemType)
+        
         | _ -> UnitType
     
-    | SynType.Fun(paramType, returnType, _, _) ->
-        FunctionType([synTypeToOakType paramType], synTypeToOakType returnType)
+    /// Maps F# literal to Oak literal with proper value conversion
+    let mapLiteral (constant: SynConst) : OakLiteral =
+        match constant with
+        | SynConst.Int32(n) -> IntLiteral(n)
+        | SynConst.Double(f) -> FloatLiteral(f)
+        | SynConst.Bool(b) -> BoolLiteral(b)
+        | SynConst.String(s, _, _) -> StringLiteral(s)
+        | SynConst.Unit -> UnitLiteral
+        | SynConst.Char(c) -> StringLiteral(c.ToString())
+        | SynConst.Byte(b) -> IntLiteral(int b)
+        | SynConst.UInt16(u) -> IntLiteral(int u)
+        | SynConst.Int16(s) -> IntLiteral(int s)
+        | SynConst.UInt32(u) -> IntLiteral(int u)
+        | SynConst.UInt64(u) -> IntLiteral(int u)
+        | SynConst.Int64(i) -> IntLiteral(int i)
+        | SynConst.SByte(s) -> IntLiteral(int s)
+        | _ -> UnitLiteral
     
-    | SynType.Tuple(_, segments, _) ->
-        let fields = 
-            segments 
-            |> List.mapi (fun i segment -> 
-                let fieldType = 
-                    match segment with
-                    | SynTupleTypeSegment.Type(t) -> synTypeToOakType t
-                    | _ -> UnitType
-                (sprintf "Item%d" (i+1), fieldType))
-        StructType(fields)
-    
-    | SynType.Array(_, elemType, _) ->
-        ArrayType(synTypeToOakType elemType)
-    
-    | _ -> UnitType
-
-// Convert literals
-let rec synConstToOakLiteral (constant: SynConst) : OakLiteral =
-    match constant with
-    | SynConst.Int32(n) -> IntLiteral(n)
-    | SynConst.Double(f) -> FloatLiteral(f)
-    | SynConst.Bool(b) -> BoolLiteral(b)
-    | SynConst.String(s, _, _) -> StringLiteral(s)
-    | SynConst.Unit -> UnitLiteral
-    | _ -> UnitLiteral
-
-// Expression conversion
-let rec synExprToOakExpression (expr: SynExpr) : OakExpression =
-    match expr with
-    | SynExpr.Const(constant, _) ->
-        Literal(synConstToOakLiteral constant)
-    
-    | SynExpr.Ident(ident) ->
-        Variable(ident.idText)
-    
-    | SynExpr.LongIdent(_, lid, _, _) ->
-        Variable(getIdentPath lid.LongIdent)
-    
-    | SynExpr.App(_, _, funcExpr, argExpr, _) ->
-        let func = synExprToOakExpression funcExpr
-        let arg = synExprToOakExpression argExpr
+    /// Core recursive expression mapper using Fantomas's rich AST model
+    let rec mapExpression (expr: SynExpr) : OakExpression =
+        match expr with
+        | SynExpr.Const(constant, _) ->
+            Literal(mapLiteral constant)
         
-        // Special handling for printfn/printf
-        match func with
-        | Variable funcName when funcName = "printf" || funcName = "printfn" ->
-            match arg with
-            | Literal (StringLiteral formatStr) ->
-                // Simple case: printf "Hello, world!"
-                if funcName = "printf" then
-                    IOOperation(Printf(formatStr), [])
-                else
-                    IOOperation(Printfn(formatStr), [])
+        | SynExpr.Ident(ident) ->
+            Variable(ident.idText)
+        
+        | SynExpr.LongIdent(_, LongIdentWithDots(idents, _), _, _) ->
+            Variable(String.concat "." [for id in idents -> id.idText])
+        
+        | SynExpr.App(_, isInfix, funcExpr, argExpr, _) ->
+            let func = mapExpression funcExpr
+            let arg = mapExpression argExpr
+            
+            // Special handling for printfn/printf using pattern matching
+            match func with
+            | Variable funcName when funcName = "printf" || funcName = "printfn" ->
+                match arg with
+                | Literal (StringLiteral formatStr) ->
+                    // Simple case: printf "Hello, world!"
+                    if funcName = "printf" then
+                        IOOperation(Printf(formatStr), [])
+                    else
+                        IOOperation(Printfn(formatStr), [])
+                | Application(Literal(StringLiteral formatStr), args) ->
+                    // Handle printf "%d %s" arg1 arg2
+                    if funcName = "printf" then
+                        IOOperation(Printf(formatStr), args)
+                    else
+                        IOOperation(Printfn(formatStr), args)
+                | _ ->
+                    // Default fallback for complex cases
+                    Application(func, [arg])
             | _ ->
-                // Default fallback for more complex printf patterns
-                Application(func, [arg])
-        | _ ->
-            Application(func, [arg])
+                if isInfix then
+                    // Handle infix operators properly
+                    match func with
+                    | Variable op when op = "op_Addition" -> 
+                        // Detect common arithmetic operations
+                        Binary(Add, mapExpression funcExpr, arg)
+                    | Variable op when op = "op_Subtraction" -> 
+                        Binary(Subtract, mapExpression funcExpr, arg)
+                    | Variable op when op = "op_Multiply" -> 
+                        Binary(Multiply, mapExpression funcExpr, arg)
+                    | Variable op when op = "op_Division" -> 
+                        Binary(Divide, mapExpression funcExpr, arg)
+                    | _ -> 
+                        Application(func, [arg])
+                else
+                    Application(func, [arg])
+        
+        | SynExpr.LetOrUse(_, _, bindings, bodyExpr, _, _) ->
+            // Map let-bindings one by one
+            bindings 
+            |> List.fold (fun bodyAcc binding ->
+                match binding with
+                | SynBinding(_, _, _, _, _, _, _, pat, returnTypeOpt, valExpr, _, _, _) ->
+                    // Extract name from pattern
+                    match pat with
+                    | SynPat.Named(_, ident, _, _, _) ->
+                        Let(ident.idText, mapExpression valExpr, bodyAcc)
+                    | SynPat.LongIdent(LongIdentWithDots(idents, _), _, _, _, _, _) ->
+                        Let(String.concat "." [for id in idents -> id.idText], 
+                            mapExpression valExpr, bodyAcc)
+                    | _ -> 
+                        Let("_", mapExpression valExpr, bodyAcc)
+            ) (mapExpression bodyExpr)
+        
+        | SynExpr.IfThenElse(condExpr, thenExpr, elseExprOpt, _, _, _, _) ->
+            let cond = mapExpression condExpr
+            let thenBranch = mapExpression thenExpr
+            let elseBranch = 
+                match elseExprOpt with
+                | Some(elseExpr) -> mapExpression elseExpr
+                | None -> Literal(UnitLiteral)
+            IfThenElse(cond, thenBranch, elseBranch)
+        
+        | SynExpr.Sequential(_, _, first, second, _, _) ->
+            Sequential(mapExpression first, mapExpression second)
+        
+        | SynExpr.Lambda(_, _, pats, body, _, _) ->
+            // Map lambda parameters - a key improvement over the original
+            let parameters = 
+                pats 
+                |> List.choose (function
+                    | SynPat.Named(_, ident, _, _, _) -> 
+                        Some (ident.idText, UnitType)  // Type inference would improve this
+                    | SynPat.Typed(SynPat.Named(_, ident, _, _, _), synType, _) ->
+                        Some (ident.idText, mapType synType)
+                    | _ -> None)
+            
+            Lambda(parameters, mapExpression body)
+        
+        | SynExpr.Match(_, expr, clauses, _, _) ->
+            // Map pattern matching - important for F# idioms
+            let scrutinee = mapExpression expr
+            
+            // Map each clause to an if-then-else chain
+            let foldedMatch =
+                clauses
+                |> List.fold (fun elseExpr clause ->
+                    match clause with
+                    | SynMatchClause(pattern, whenExpr, result, _, _, _) ->
+                        // This is a simplification - a full implementation would handle patterns better
+                        let condition = 
+                            match pattern with
+                            | SynPat.Const(constant, _) ->
+                                Binary(Equal, scrutinee, Literal(mapLiteral constant))
+                            | SynPat.Named(_, ident, _, _, _) ->
+                                Binary(Equal, scrutinee, Variable(ident.idText))
+                            | SynPat.Wild(_) ->
+                                // Wildcard pattern always matches
+                                Literal(BoolLiteral(true))
+                            | _ ->
+                                // More complex patterns would need proper handling
+                                Literal(BoolLiteral(true))
+                                
+                        // Add when clause if present
+                        let finalCondition =
+                            match whenExpr with
+                            | Some guard -> Binary(And, condition, mapExpression guard)
+                            | None -> condition
+                            
+                        IfThenElse(finalCondition, mapExpression result, elseExpr)
+                ) (Literal(UnitLiteral))  // Default case
+                
+            foldedMatch
+            
+        | SynExpr.DotGet(expr, _, LongIdentWithDots(idents, _), _) ->
+            let target = mapExpression expr
+            let fieldName = idents |> List.map (fun id -> id.idText) |> String.concat "."
+            FieldAccess(target, fieldName)
+            
+        | SynExpr.DotIndexedGet(expr, indexArgs, _, _) ->
+            let target = mapExpression expr
+            // Map indexed access (arrays, collections)
+            let indices = 
+                indexArgs 
+                |> List.collect (fun (SynIndexerArg(exprs, _, _)) -> 
+                    exprs |> List.map mapExpression)
+            
+            IndexedAccess(target, indices)
+            
+        | SynExpr.ArrayOrList(_, elements, _) ->
+            // Map arrays/lists to ArrayLiteral
+            let mappedElements = elements |> List.map mapExpression
+            Literal(ArrayLiteral(mappedElements))
+            
+        | _ -> 
+            // Default fallback for unsupported expressions
+            Literal(UnitLiteral)
     
-    | SynExpr.LetOrUse(_, _, bindings, bodyExpr, _, _) ->
-        match bindings with
-        | [binding] ->
-            match binding with
-            | SynBinding(_, _, _, _, _, _, _, pat, _, valExpr, _, _, _) ->
-                // Extract name from pattern
-                match pat with
-                | SynPat.Named(_, ident, _, _, _) ->
-                    Let(ident.idText, synExprToOakExpression valExpr, synExprToOakExpression bodyExpr)
-                | SynPat.LongIdent(LongIdentWithDots(ident, _), _, _, _, _, _) ->
-                    Let(getIdentPath ident, synExprToOakExpression valExpr, synExprToOakExpression bodyExpr)
-                | _ -> 
-                    Let("_", synExprToOakExpression valExpr, synExprToOakExpression bodyExpr)
-        | _ -> Literal(UnitLiteral)
-    
-    | SynExpr.IfThenElse(condExpr, thenExpr, elseExprOpt, _, _, _, _) ->
-        let cond = synExprToOakExpression condExpr
-        let thenBranch = synExprToOakExpression thenExpr
-        let elseBranch = 
-            match elseExprOpt with
-            | Some(elseExpr) -> synExprToOakExpression elseExpr
-            | None -> Literal(UnitLiteral)
-        IfThenElse(cond, thenBranch, elseBranch)
-    
-    | SynExpr.Sequential(_, _, first, second, _, _) ->
-        Sequential(synExprToOakExpression first, synExprToOakExpression second)
-    
-    | _ -> Literal(UnitLiteral) // Default fallback
-
-// Function declaration conversion
-let synBindingToOakFunctionDecl (binding: SynBinding) : OakDeclaration option =
-    match binding with
-    | SynBinding(_, _, _, _, _, _, valData, SynPat.Named(SynPat.Wild(_), ident, _, _, _), returnTypeOpt, expr, _, _, _) ->
-        // Check for EntryPoint attribute
-        let isEntryPoint = 
-            valData.Attributes 
-            |> List.exists (fun attrList -> 
-                attrList.Attributes 
-                |> List.exists (fun attr -> 
-                    attr.TypeName.ToString().Contains("EntryPoint")))
+    /// Maps F# binding to function declaration or value binding
+    let mapBinding (binding: SynBinding) : OakDeclaration option =
+        match binding with
+        | SynBinding(_, _, _, _, _, _, valData, SynPat.Named(SynPat.Wild(_), ident, _, _, _), returnTypeOpt, expr, _, _, _) ->
+            // Check for EntryPoint attribute
+            let isEntryPoint = 
+                valData.Attributes 
+                |> List.exists (fun attrList -> 
+                    attrList.Attributes 
+                    |> List.exists (fun attr -> 
+                        attr.TypeName.ToString().Contains("EntryPoint")))
+                        
+            if isEntryPoint then
+                Some(EntryPoint(mapExpression expr))
+            else
+                let returnType = 
+                    match returnTypeOpt with
+                    | Some t -> mapType t
+                    | None -> UnitType
                     
-        if isEntryPoint then
-            Some(EntryPoint(synExprToOakExpression expr))
-        else
+                Some(FunctionDecl(ident.idText, [], returnType, mapExpression expr))
+                
+        | SynBinding(_, _, _, _, _, _, _, SynPat.LongIdent(LongIdentWithDots(idents, _), _, _, args, _, _), returnTypeOpt, expr, _, _, _) ->
+            // Process function parameters with better type information
+            let parameters = 
+                args 
+                |> List.choose (function
+                    | SynPat.Named(_, ident, _, _, _) ->
+                        Some (ident.idText, UnitType)
+                    | SynPat.Typed(SynPat.Named(_, ident, _, _, _), synType, _) ->
+                        // Extract type information when available
+                        Some (ident.idText, mapType synType)
+                    | _ -> None)
+                    
             let returnType = 
                 match returnTypeOpt with
-                | Some t -> synTypeToOakType t
+                | Some t -> mapType t
                 | None -> UnitType
-                
-            Some(FunctionDecl(ident.idText, [], returnType, synExprToOakExpression expr))
+                    
+            Some(FunctionDecl(
+                String.concat "." [for id in idents -> id.idText], 
+                parameters, 
+                returnType, 
+                mapExpression expr))
             
-    | SynBinding(_, _, _, _, _, _, _, SynPat.LongIdent(LongIdentWithDots(ident, _), _, _, args, _, _), returnTypeOpt, expr, _, _, _) ->
-        // Process function parameters
-        let parameters = 
-            args 
-            |> List.choose (fun arg ->
-                match arg with
-                | SynPat.Named(_, ident, isThis, _, _) ->
-                    Some (ident.idText, UnitType) // Default to UnitType as type info is missing
-                | _ -> None)
-                
-        let returnType = 
-            match returnTypeOpt with
-            | Some t -> synTypeToOakType t
-            | None -> UnitType
-                
-        Some(FunctionDecl(getIdentPath ident, parameters, returnType, synExprToOakExpression expr))
+        | _ -> None
+    
+    /// Maps a module declaration to Oak declarations
+    let mapModuleDecl (decl: SynModuleDecl) : OakDeclaration list =
+        match decl with
+        | SynModuleDecl.Let(_, bindings, _) ->
+            bindings 
+            |> List.choose mapBinding
         
-    | _ -> None
-
-// Module declaration conversion
-let convertModuleDecl (decl: SynModuleDecl) : OakDeclaration list =
-    match decl with
-    | SynModuleDecl.Let(_, bindings, _) ->
-        bindings 
-        |> List.choose synBindingToOakFunctionDecl
+        | SynModuleDecl.Types(typeDefns, _) ->
+            typeDefns
+            |> List.collect (fun typeDef ->
+                match typeDef with
+                | SynTypeDefn(SynComponentInfo(_, _, _, idents, _, _, _, _), typeRepr, members, _, _) ->
+                    let typeName = String.concat "." [for id in idents -> id.idText]
+                    
+                    // Map type representation
+                    let oakType =
+                        match typeRepr with
+                        | SynTypeDefnRepr.Simple(SynTypeDefnSimpleRepr.Union(_, cases, _), _) ->
+                            // Map discriminated union
+                            let unionCases =
+                                cases
+                                |> List.map (fun (SynUnionCase(_, ident, caseType, _, _, _, _)) ->
+                                    let caseTypeOption = 
+                                        match caseType with
+                                        | SynUnionCaseType.UnionCaseFields(fields) ->
+                                            if fields.IsEmpty then None
+                                            else
+                                                // For simplicity, just use the first field type
+                                                match fields with
+                                                | [SynField(_, _, Some(fieldType), _, _, _, _, _)] ->
+                                                    Some(mapType fieldType)
+                                                | _ -> 
+                                                    Some(StructType(
+                                                        fields 
+                                                        |> List.mapi (fun i (SynField(_, _, fieldType, _, _, _, _, _)) ->
+                                                            (sprintf "Field%d" i, 
+                                                             match fieldType with 
+                                                             | Some t -> mapType t 
+                                                             | None -> UnitType))
+                                                    ))
+                                        | SynUnionCaseType.UnionCaseFullType(fullType, _) ->
+                                            Some(mapType fullType)
+                                    
+                                    (ident.idText, caseTypeOption))
+                            
+                            UnionType(unionCases)
+                        
+                        | SynTypeDefnRepr.Simple(SynTypeDefnSimpleRepr.Record(_, fields, _), _) ->
+                            // Map record type
+                            let recordFields =
+                                fields
+                                |> List.choose (fun (SynField(_, _, fieldType, ident, _, _, _, _)) ->
+                                    match ident, fieldType with
+                                    | Some id, Some t -> Some (id.idText, mapType t)
+                                    | _ -> None)
+                            
+                            StructType(recordFields)
+                        
+                        | _ -> UnitType
+                    
+                    // Create type declaration
+                    [TypeDecl(typeName, oakType)]
+                    
+                    // Also map member declarations
+                    @ (members 
+                      |> List.choose (function
+                          | SynMemberDefn.Member(binding, _) -> mapBinding binding
+                          | _ -> None))
+            )
+        
+        | SynModuleDecl.Open(_, _, _) ->
+            // Track imports for module resolution
+            []
+            
+        | _ -> [] // Skip other declaration types for now
     
-    | _ -> [] // Skip other declaration types for now
+    /// Maps module or namespace to Oak module
+    let mapModule (mdl: SynModuleOrNamespace) : OakModule =
+        match mdl with
+        | SynModuleOrNamespace(idents, _, isModule, decls, _, _, _, _, _) ->
+            let moduleName = String.concat "." [for id in idents -> id.idText]
+            let declarations = decls |> List.collect mapModuleDecl
+            { Name = moduleName; Declarations = declarations }
 
-// Module conversion
-let convertSynModuleOrNamespace (mdl: SynModuleOrNamespace) : OakModule =
-    match mdl with
-    | SynModuleOrNamespace(longId, _, _, decls, _, _, _, _, _) ->
-        let moduleName = getIdentPath longId
-        let declarations = decls |> List.collect convertModuleDecl
-        { Name = moduleName; Declarations = declarations }
-
-// Main entry point for conversion
-let convertToOakAst (parsedInput: ParsedInput) : OakProgram =
-    match parsedInput with
-    | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
-        { Modules = modules |> List.map convertSynModuleOrNamespace }
-    
-    | _ -> { Modules = [] }
-
-// Convert F# source code to Oak AST - CRITICAL MISSING FUNCTION
-let parseAndConvertToOakAstWithIntermediate (sourceCode: string) : ASTConversionResult =
+/// Main entry point for F# to Oak AST conversion
+let parseAndConvertToOakAst (sourceCode: string) : OakProgram =
     try
-        // Parse the F# source code using F# Compiler Services
+        // Use Fantomas to parse the F# source code with better error handling
         let sourceText = SourceText.ofString sourceCode
-        let parsingOptions = FSharp.Compiler.CodeAnalysis.FSharpParsingOptions.Default
+        let checker = FSharp.Compiler.CodeAnalysis.FSharpChecker.Create()
         
+        // Create parsing options with Firefly-specific defines
+        let parsingOptions = 
+            { FSharp.Compiler.CodeAnalysis.FSharpParsingOptions.Default with
+                ConditionalDefines = ["FIREFLY"] }
+        
+        // Parse the source code
         let parseResults = 
-            FSharp.Compiler.CodeAnalysis.FSharpParsingOptions.GetParsingOptionsFromCommandLineArgs(
-                parsingOptions.SourceFiles,
-                [| "--noframework"; "--mlcompatibility" |],
-                parsingOptions.ConditionalDefines)
-            |> fun opts -> FSharp.Compiler.CodeAnalysis.FSharpParsingOptions.WithDefines opts ["FIREFLY"]
-            |> fun opts -> FSharp.Compiler.CodeAnalysis.FSharpChecker.Create().Parse(sourceText, "input.fs", opts)
+            checker.ParseFile("input.fs", sourceText, parsingOptions)
             |> Async.RunSynchronously
         
         match parseResults.ParseTree with
         | Some parsedInput ->
-            // Convert to text representation for debugging/intermediates
-            let fcsAstText = sprintf "%A" parsedInput
-            
-            // Convert to our Oak AST
-            let oakProgram = convertToOakAst parsedInput
-            let oakAstText = sprintf "%A" oakProgram
-            
-            { 
-                FCSAstText = fcsAstText
-                OakAstText = oakAstText
-                OakProgram = oakProgram 
-            }
+            // Convert parsed input to Oak AST
+            match parsedInput with
+            | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
+                { Modules = modules |> List.map AstMapping.mapModule }
+            | _ -> 
+                { Modules = [] }
         | None ->
-            let errorMessage = 
-                parseResults.Diagnostics 
-                |> Array.map (fun diag -> diag.Message)
-                |> String.concat "\n"
-                
-            // Return empty program with error info
-            { 
-                FCSAstText = sprintf "Parse error: %s" errorMessage
-                OakAstText = "No AST generated due to parse errors"
-                OakProgram = { Modules = [] }
-            }
+            // Return empty program if parsing failed
+            { Modules = [] }
+    with ex ->
+        // Handle any exceptions during parsing/conversion
+        { Modules = [] }
+
+/// Full conversion with diagnostic information
+let parseAndConvertWithDiagnostics (sourceCode: string) : ASTConversionResult =
+    try
+        // Use Fantomas for parsing with diagnostics
+        let sourceText = SourceText.ofString sourceCode
+        let checker = FSharp.Compiler.CodeAnalysis.FSharpChecker.Create()
+        
+        // Create parsing options with Firefly-specific defines
+        let parsingOptions = 
+            { FSharp.Compiler.CodeAnalysis.FSharpParsingOptions.Default with
+                ConditionalDefines = ["FIREFLY"] }
+        
+        // Parse the source code
+        let parseResults = 
+            checker.ParseFile("input.fs", sourceText, parsingOptions)
+            |> Async.RunSynchronously
+        
+        let diagnostics =
+            parseResults.Diagnostics
+            |> Array.map (fun diag -> diag.Message)
+            |> Array.toList
+        
+        match parseResults.ParseTree with
+        | Some parsedInput ->
+            // Convert parsed input to Oak AST
+            match parsedInput with
+            | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
+                let oakProgram = { Modules = modules |> List.map AstMapping.mapModule }
+                { OakProgram = oakProgram; Diagnostics = diagnostics }
+            | _ -> 
+                { OakProgram = { Modules = [] }; Diagnostics = "Unsupported input format" :: diagnostics }
+        | None ->
+            // Return empty program with parse error diagnostics
+            { OakProgram = { Modules = [] }; Diagnostics = "Parse error" :: diagnostics }
     with ex ->
         // Handle any exceptions during parsing/conversion
         { 
-            FCSAstText = sprintf "Exception: %s\n%s" ex.Message ex.StackTrace
-            OakAstText = "No AST generated due to exception"
-            OakProgram = { Modules = [] }
+            OakProgram = { Modules = [] }; 
+            Diagnostics = [sprintf "Exception: %s" ex.Message; ex.StackTrace] 
         }
-
-// Public API
-let convertSynType (synType: SynType) : OakType =
-    synTypeToOakType synType
-
-let convertSynExpr (expr: SynExpr) : OakExpression =
-    synExprToOakExpression expr

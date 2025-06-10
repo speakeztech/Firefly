@@ -64,9 +64,9 @@
 
     <!-- Command line argument parsing -->
     <PackageReference Include="Argu" Version="6.1.1" />
-    
+
     <PackageReference Include="FSharp.Compiler.Service" Version="43.9.300" />
-    
+
     <PackageReference Include="Fantomas.Core" Version="6.2.3" />
     <PackageReference Include="Fantomas.FCS" Version="6.2.3" />
 
