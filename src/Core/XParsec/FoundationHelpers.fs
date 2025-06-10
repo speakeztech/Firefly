@@ -1,5 +1,7 @@
 ﻿module Core.XParsec.FoundationHelpers
 
+open XParsec
+
 /// Helper module with additional parser combinators and utilities
 /// built on top of the core Foundation.fs functionality
 module Combinators =
