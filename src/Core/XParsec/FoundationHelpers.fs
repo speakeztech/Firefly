@@ -1,7 +1,5 @@
 ﻿module Core.XParsec.FoundationHelpers
 
-open Firefly.Core.XParsec.Foundation
-
 /// Helper module with additional parser combinators and utilities
 /// built on top of the core Foundation.fs functionality
 module Combinators =

@@ -2,6 +2,7 @@
 
 open System
 open XParsec
+open Core.XParsec.FoundationHelpers
 
 // ======================================
 // Type definitions for Firefly parsers
