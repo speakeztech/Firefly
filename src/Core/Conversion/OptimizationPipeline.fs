@@ -2,12 +2,7 @@
 
 open System
 open System.IO
-open XParsec
 open Core.XParsec.Foundation
-open Core.XParsec.Foundation.Combinators
-open Core.XParsec.Foundation.CharParsers
-open Core.XParsec.Foundation.StringParsers
-open Core.XParsec.Foundation.ErrorHandling
 open Core.Conversion.LLVMTranslator
 
 /// Optimization level for LLVM code generation
@@ -19,7 +14,7 @@ type OptimizationLevel =
     | Size        // -Os
     | SizeMin     // -Oz
 
-/// LLVM optimization passes with XParsec-based transformations
+/// LLVM optimization passes with transformation logic
 type OptimizationPass =
     | InliningPass of threshold: int
     | InstCombine of aggressiveness: int
@@ -42,110 +37,94 @@ type OptimizationState = {
     RemovedInstructions: string list
     SymbolRenaming: Map<string, string>
     OptimizationMetrics: Map<string, int>
-    ErrorContext: string list
+    TransformationHistory: (string * string) list
 }
 
-/// LLVM IR parsing using XParsec combinators for optimization
-module LLVMIRParsers =
+/// LLVM IR instruction analysis
+module LLVMIRAnalysis =
     
-    /// Parses LLVM instruction with full detail
-    let llvmInstruction : Parser<(string option * string * string list * string * string), OptimizationState> =
-        let result = opt (ssaValue .>> ws .>> pchar '=' .>> ws)
-        let opcode = identifier
-        let operands = sepBy (ssaValue <|> (many1 digit |>> fun chars -> String(Array.ofList chars))) (pchar ',')
-        let typeInfo = opt (pchar ':' >>= fun _ -> ws >>= fun _ -> typeAnnotation) |>> Option.defaultValue ""
-        let attrs = opt (between (pchar '{') (pchar '}') (sepBy (identifier .>> ws .>> pchar '=' .>> ws .>> identifier) (pchar ','))) |>> Option.defaultValue []
-        
-        result >>= fun resultOpt ->
-        opcode >>= fun op ->
-        ws >>= fun _ ->
-        operands >>= fun ops ->
-        ws >>= fun _ ->
-        typeInfo >>= fun typeStr ->
-        ws >>= fun _ ->
-        attrs >>= fun attributes ->
-        succeed (resultOpt, op, ops, typeStr, String.concat "," attributes)
-        |> withErrorContext "LLVM instruction parsing"
+    /// Extracts SSA values from an LLVM instruction
+    let extractSSAValues (instruction: string) : string list =
+        let parts = instruction.Split([|' '; ','|], StringSplitOptions.RemoveEmptyEntries)
+        parts 
+        |> Array.filter (fun part -> part.StartsWith("%"))
+        |> Array.toList
     
-    /// Parses LLVM function definition
-    let llvmFunction : Parser<(string * string list * string * string list), OptimizationState> =
-        pstring "define" >>= fun _ ->
-        ws >>= fun _ ->
-        typeAnnotation >>= fun returnType ->
-        ws >>= fun _ ->
-        functionName >>= fun funcName ->
-        between (pchar '(') (pchar ')') (sepBy (typeAnnotation .>> ws .>> ssaValue) (pchar ',')) >>= fun parameters ->
-        ws >>= fun _ ->
-        pchar '{' >>= fun _ ->
-        many (satisfy (fun c -> c <> '}')) >>= fun bodyChars ->
-        pchar '}' >>= fun _ ->
-        let bodyText = String(Array.ofList bodyChars)
-        succeed (funcName, [returnType], parameters |> List.map fst, [bodyText])
-        |> withErrorContext "LLVM function parsing"
+    /// Extracts function name from a function definition
+    let extractFunctionName (line: string) : string option =
+        if line.Contains("define") then
+            let parts = line.Split([|' '|], StringSplitOptions.RemoveEmptyEntries)
+            parts |> Array.tryFind (fun part -> part.StartsWith("@"))
+        else 
+            None
     
-    /// Parses LLVM basic block
-    let llvmBasicBlock : Parser<(string * string list), OptimizationState> =
-        identifier >>= fun label ->
-        pchar ':' >>= fun _ ->
-        ws >>= fun _ ->
-        many (satisfy (fun c -> c <> '\n')) >>= fun instructionChars ->
-        let instructions = String(Array.ofList instructionChars).Split([|'\n'|], StringSplitOptions.RemoveEmptyEntries) |> Array.toList
-        succeed (label, instructions)
-        |> withErrorContext "LLVM basic block parsing"
+    /// Checks if instruction is a memory allocation
+    let isMemoryAllocation (instruction: string) : bool =
+        instruction.Contains("alloca") || instruction.Contains("malloc") || instruction.Contains("calloc")
+    
+    /// Checks if instruction is a load operation
+    let isLoadOperation (instruction: string) : bool =
+        instruction.Contains("load") && instruction.Contains("=")
+    
+    /// Checks if instruction is a store operation
+    let isStoreOperation (instruction: string) : bool =
+        instruction.Contains("store") && not (instruction.Contains("="))
+    
+    /// Extracts constant values from instructions
+    let extractConstantValue (instruction: string) : int option =
+        if instruction.Contains("add") && instruction.Contains("i32") then
+            let parts = instruction.Split([|' '|], StringSplitOptions.RemoveEmptyEntries)
+            parts 
+            |> Array.tryPick (fun part ->
+                match Int32.TryParse(part.TrimEnd(',')) with
+                | true, value -> Some value
+                | false, _ -> None)
+        else 
+            None
+    
+    /// Identifies dead code patterns
+    let isDeadInstruction (instruction: string) (usedValues: Set<string>) : bool =
+        if instruction.Contains("=") then
+            let parts = instruction.Split([|'='|], 2)
+            if parts.Length = 2 then
+                let resultVar = parts.[0].Trim()
+                not (Set.contains resultVar usedValues)
+            else 
+                false
+        else 
+            false
 
-/// Optimization transformations using XParsec combinators
+/// Optimization transformations
 module OptimizationTransformations =
     
     /// Records an optimization transformation
-    let recordTransformation (passName: string) (description: string) : Parser<unit, OptimizationState> =
-        fun state ->
-            let newCount = state.TransformationCount + 1
-            let newMetrics = 
-                let currentCount = Map.tryFind passName state.OptimizationMetrics |> Option.defaultValue 0
-                Map.add passName (currentCount + 1) state.OptimizationMetrics
-            let newState = { 
-                state with 
-                    TransformationCount = newCount
-                    OptimizationMetrics = newMetrics
-            }
-            Reply(Ok (), newState)
-    
-    /// Adds an optimized instruction
-    let addOptimizedInstruction (instruction: string) : Parser<unit, OptimizationState> =
-        fun state ->
-            let newState = { 
-                state with 
-                    OptimizedInstructions = instruction :: state.OptimizedInstructions
-            }
-            Reply(Ok (), newState)
-    
-    /// Records a removed instruction
-    let recordRemovedInstruction (instruction: string) : Parser<unit, OptimizationState> =
-        fun state ->
-            let newState = { 
-                state with 
-                    RemovedInstructions = instruction :: state.RemovedInstructions
-            }
-            Reply(Ok (), newState)
+    let recordTransformation (passName: string) (description: string) (state: OptimizationState) : OptimizationState =
+        let newCount = state.TransformationCount + 1
+        let newMetrics = 
+            let currentCount = Map.tryFind passName state.OptimizationMetrics |> Option.defaultValue 0
+            Map.add passName (currentCount + 1) state.OptimizationMetrics
+        { 
+            state with 
+                TransformationCount = newCount
+                OptimizationMetrics = newMetrics
+                TransformationHistory = (passName, description) :: state.TransformationHistory
+        }
     
     /// Memory-to-register promotion transformation
-    let promoteMemoryToRegister (instruction: string) : Parser<string option, OptimizationState> =
-        // Pattern: %ptr = alloca i32 followed by store/load sequences
+    let promoteMemoryToRegister (instruction: string) (state: OptimizationState) : string option * OptimizationState =
         if instruction.Contains("alloca") then
-            recordTransformation "mem2reg" "Promoted stack allocation to register" >>= fun _ ->
-            recordRemovedInstruction instruction >>= fun _ ->
-            succeed None  // Remove alloca
+            let newState = recordTransformation "mem2reg" "Promoted stack allocation to register" state
+            let newState2 = { newState with RemovedInstructions = instruction :: newState.RemovedInstructions }
+            (None, newState2)  // Remove alloca
         elif instruction.Contains("store") && instruction.Contains("load") then
-            recordTransformation "mem2reg" "Eliminated redundant store-load pair" >>= fun _ ->
-            recordRemovedInstruction instruction >>= fun _ ->
-            succeed None  // Remove redundant store/load
+            let newState = recordTransformation "mem2reg" "Eliminated redundant store-load pair" state
+            let newState2 = { newState with RemovedInstructions = instruction :: newState.RemovedInstructions }
+            (None, newState2)  // Remove redundant store/load
         else
-            succeed (Some instruction)
-        |> withErrorContext "memory-to-register transformation"
+            (Some instruction, state)
     
     /// Constant folding transformation
-    let foldConstants (instruction: string) : Parser<string option, OptimizationState> =
-        // Pattern: %result = add i32 5, 3 -> %result = 8
+    let foldConstants (instruction: string) (state: OptimizationState) : string option * OptimizationState =
         if instruction.Contains("add") && instruction.Contains("i32") then
             let parts = instruction.Split([|' '|], StringSplitOptions.RemoveEmptyEntries)
             if parts.Length >= 6 then
@@ -153,182 +132,175 @@ module OptimizationTransformations =
                 | (true, val1), (true, val2) ->
                     let result = val1 + val2
                     let optimizedInstr = sprintf "%s = add i32 0, %d  ; constant folded" parts.[0] result
-                    recordTransformation "constfold" (sprintf "Folded constants %d + %d = %d" val1 val2 result) >>= fun _ ->
-                    addOptimizedInstruction optimizedInstr >>= fun _ ->
-                    succeed (Some optimizedInstr)
+                    let newState = recordTransformation "constfold" (sprintf "Folded constants %d + %d = %d" val1 val2 result) state
+                    let newState2 = { newState with OptimizedInstructions = optimizedInstr :: newState.OptimizedInstructions }
+                    (Some optimizedInstr, newState2)
                 | _ ->
-                    succeed (Some instruction)
+                    (Some instruction, state)
             else
-                succeed (Some instruction)
+                (Some instruction, state)
         else
-            succeed (Some instruction)
-        |> withErrorContext "constant folding transformation"
+            (Some instruction, state)
     
     /// Dead code elimination transformation
-    let eliminateDeadCode (instruction: string) (usedValues: Set<string>) : Parser<string option, OptimizationState> =
-        if instruction.Contains("=") then
-            let parts = instruction.Split([|'='|], 2)
-            if parts.Length = 2 then
-                let resultVar = parts.[0].Trim()
-                if Set.contains resultVar usedValues then
-                    succeed (Some instruction)
-                else
-                    recordTransformation "dce" (sprintf "Eliminated dead instruction: %s" resultVar) >>= fun _ ->
-                    recordRemovedInstruction instruction >>= fun _ ->
-                    succeed None
-            else
-                succeed (Some instruction)
+    let eliminateDeadCode (instruction: string) (usedValues: Set<string>) (state: OptimizationState) : string option * OptimizationState =
+        if LLVMIRAnalysis.isDeadInstruction instruction usedValues then
+            let newState = recordTransformation "dce" (sprintf "Eliminated dead instruction: %s" instruction) state
+            let newState2 = { newState with RemovedInstructions = instruction :: newState.RemovedInstructions }
+            (None, newState2)
         else
-            succeed (Some instruction)
-        |> withErrorContext "dead code elimination"
+            (Some instruction, state)
     
     /// Instruction combining transformation
-    let combineInstructions (instructions: string list) : Parser<string list, OptimizationState> =
-        let rec combineSequential acc remaining =
+    let combineInstructions (instructions: string list) (state: OptimizationState) : string list * OptimizationState =
+        let rec combineSequential acc remaining currentState =
             match remaining with
-            | [] -> succeed (List.rev acc)
+            | [] -> (List.rev acc, currentState)
             | instr1 :: instr2 :: rest when instr1.Contains("add") && instr2.Contains("add") ->
                 // Pattern: x = add a, b; y = add x, c -> y = add a, (b+c) if b,c are constants
-                recordTransformation "instcombine" "Combined sequential additions" >>= fun _ ->
+                let newState = recordTransformation "instcombine" "Combined sequential additions" currentState
                 let combinedInstr = sprintf "%s  ; combined from two adds" instr2
-                addOptimizedInstruction combinedInstr >>= fun _ ->
-                combineSequential (combinedInstr :: acc) rest
+                let newState2 = { newState with OptimizedInstructions = combinedInstr :: newState.OptimizedInstructions }
+                combineSequential (combinedInstr :: acc) rest newState2
             | instr :: rest ->
-                combineSequential (instr :: acc) rest
+                combineSequential (instr :: acc) rest currentState
         
-        combineSequential [] instructions
-        |> withErrorContext "instruction combining"
+        combineSequential [] instructions state
     
     /// Control flow simplification
-    let simplifyCFG (basicBlocks: (string * string list) list) : Parser<(string * string list) list, OptimizationState> =
-        let simplifyBlock (label: string, instructions: string list) : Parser<(string * string list), OptimizationState> =
+    let simplifyCFG (basicBlocks: (string * string list) list) (state: OptimizationState) : (string * string list) list * OptimizationState =
+        let simplifyBlock (label: string, instructions: string list) currentState =
             let simplifiedInstructions = 
                 instructions 
                 |> List.filter (fun instr -> 
                     not (instr.Contains("br") && instr.Contains("br ") && instr.Split(' ').Length = 3))  // Remove trivial branches
             
             if simplifiedInstructions.Length < instructions.Length then
-                recordTransformation "simplifycfg" (sprintf "Simplified control flow in block %s" label) >>= fun _ ->
-                succeed (label, simplifiedInstructions)
+                let newState = recordTransformation "simplifycfg" (sprintf "Simplified control flow in block %s" label) currentState
+                ((label, simplifiedInstructions), newState)
             else
-                succeed (label, instructions)
+                ((label, instructions), currentState)
         
-        basicBlocks
-        |> List.map simplifyBlock
-        |> List.fold (fun acc blockParser ->
-            acc >>= fun accBlocks ->
-            blockParser >>= fun block ->
-            succeed (block :: accBlocks)
-        ) (succeed [])
-        |>> List.rev
-        |> withErrorContext "control flow simplification"
+        let rec processBlocks blocks acc currentState =
+            match blocks with
+            | [] -> (List.rev acc, currentState)
+            | block :: rest ->
+                let (simplifiedBlock, newState) = simplifyBlock block currentState
+                processBlocks rest (simplifiedBlock :: acc) newState
+        
+        processBlocks basicBlocks [] state
 
-/// Pass execution using XParsec combinators
+/// Pass execution and management
 module PassExecution =
     
     /// Applies a single optimization pass to LLVM IR
-    let applyOptimizationPass (pass: OptimizationPass) (llvmIR: string) : Parser<string, OptimizationState> =
+    let applyOptimizationPass (pass: OptimizationPass) (llvmIR: string) (state: OptimizationState) : CompilerResult<string * OptimizationState> =
         let lines = llvmIR.Split('\n') |> Array.toList
         
-        match pass with
-        | MemoryToReg ->
-            lines
-            |> List.map promoteMemoryToRegister
-            |> List.fold (fun acc instrParser ->
-                acc >>= fun accInstrs ->
-                instrParser >>= fun instrOpt ->
-                match instrOpt with
-                | Some instr -> succeed (instr :: accInstrs)
-                | None -> succeed accInstrs
-            ) (succeed [])
-            |>> fun optimizedLines -> String.concat "\n" (List.rev optimizedLines)
-        
-        | ConstantFold ->
-            lines
-            |> List.map foldConstants
-            |> List.fold (fun acc instrParser ->
-                acc >>= fun accInstrs ->
-                instrParser >>= fun instrOpt ->
-                match instrOpt with
-                | Some instr -> succeed (instr :: accInstrs)
-                | None -> succeed accInstrs
-            ) (succeed [])
-            |>> fun optimizedLines -> String.concat "\n" (List.rev optimizedLines)
-        
-        | DeadCodeElim(_) ->
-            // First pass: collect all used values
-            let usedValues = 
-                lines 
-                |> List.collect (fun line -> 
-                    if line.Contains("%") then
-                        line.Split([|'%'|], StringSplitOptions.RemoveEmptyEntries)
-                        |> Array.skip 1
-                        |> Array.map (fun part -> "%" + part.Split([|' '; ','|]).[0])
-                        |> Array.toList
-                    else [])
-                |> Set.ofList
+        try
+            match pass with
+            | MemoryToReg ->
+                let rec processLines remainingLines acc currentState =
+                    match remainingLines with
+                    | [] -> Success (String.concat "\n" (List.rev acc), currentState)
+                    | line :: rest ->
+                        let (instrOpt, newState) = OptimizationTransformations.promoteMemoryToRegister line currentState
+                        match instrOpt with
+                        | Some instr -> processLines rest (instr :: acc) newState
+                        | None -> processLines rest acc newState
+                
+                processLines lines [] state
             
-            lines
-            |> List.map (fun instr -> eliminateDeadCode instr usedValues)
-            |> List.fold (fun acc instrParser ->
-                acc >>= fun accInstrs ->
-                instrParser >>= fun instrOpt ->
-                match instrOpt with
-                | Some instr -> succeed (instr :: accInstrs)
-                | None -> succeed accInstrs
-            ) (succeed [])
-            |>> fun optimizedLines -> String.concat "\n" (List.rev optimizedLines)
-        
-        | InstCombine(_) ->
-            combineInstructions lines |>> fun combinedLines -> String.concat "\n" combinedLines
-        
-        | SimplifyCFG(_) ->
-            // Parse into basic blocks (simplified)
-            let blocks = 
-                lines 
-                |> List.filter (not << String.IsNullOrWhiteSpace)
-                |> List.groupBy (fun line -> line.EndsWith(":"))
-                |> List.collect (fun (isLabel, blockLines) ->
-                    if isLabel && blockLines.Length = 1 then
-                        [(blockLines.[0].TrimEnd(':'), [])]
-                    else
-                        [("entry", blockLines)])
+            | ConstantFold ->
+                let rec processLines remainingLines acc currentState =
+                    match remainingLines with
+                    | [] -> Success (String.concat "\n" (List.rev acc), currentState)
+                    | line :: rest ->
+                        let (instrOpt, newState) = OptimizationTransformations.foldConstants line currentState
+                        match instrOpt with
+                        | Some instr -> processLines rest (instr :: acc) newState
+                        | None -> processLines rest acc newState
+                
+                processLines lines [] state
             
-            simplifyCFG blocks |>> fun simplifiedBlocks ->
-            simplifiedBlocks 
-            |> List.collect (fun (label, instrs) -> 
-                if String.IsNullOrEmpty(label) then instrs 
-                else (label + ":") :: instrs)
-            |> String.concat "\n"
+            | DeadCodeElim(_) ->
+                // First pass: collect all used values
+                let usedValues = 
+                    lines 
+                    |> List.collect (fun line -> 
+                        if line.Contains("%") then
+                            line.Split([|'%'|], StringSplitOptions.RemoveEmptyEntries)
+                            |> Array.skip 1
+                            |> Array.map (fun part -> "%" + part.Split([|' '; ','|]).[0])
+                            |> Array.toList
+                        else [])
+                    |> Set.ofList
+                
+                let rec processLines remainingLines acc currentState =
+                    match remainingLines with
+                    | [] -> Success (String.concat "\n" (List.rev acc), currentState)
+                    | line :: rest ->
+                        let (instrOpt, newState) = OptimizationTransformations.eliminateDeadCode line usedValues currentState
+                        match instrOpt with
+                        | Some instr -> processLines rest (instr :: acc) newState
+                        | None -> processLines rest acc newState
+                
+                processLines lines [] state
+            
+            | InstCombine(_) ->
+                let (combinedLines, newState) = OptimizationTransformations.combineInstructions lines state
+                Success (String.concat "\n" combinedLines, newState)
+            
+            | SimplifyCFG(_) ->
+                // Parse into basic blocks (simplified)
+                let blocks = 
+                    lines 
+                    |> List.filter (not << String.IsNullOrWhiteSpace)
+                    |> List.groupBy (fun line -> line.EndsWith(":"))
+                    |> List.collect (fun (isLabel, blockLines) ->
+                        if isLabel && blockLines.Length = 1 then
+                            [(blockLines.[0].TrimEnd(':'), [])]
+                        else
+                            [("entry", blockLines)])
+                
+                let (simplifiedBlocks, newState) = OptimizationTransformations.simplifyCFG blocks state
+                let result = 
+                    simplifiedBlocks 
+                    |> List.collect (fun (label, instrs) -> 
+                        if String.IsNullOrEmpty(label) then instrs 
+                        else (label + ":") :: instrs)
+                    |> String.concat "\n"
+                
+                Success (result, newState)
+            
+            | _ ->
+                Success (llvmIR, state)  // Other passes not implemented yet
         
-        | _ ->
-            succeed llvmIR  // Other passes not implemented yet
-        |> withErrorContext (sprintf "optimization pass: %A" pass)
+        with ex ->
+            CompilerFailure [ConversionError("optimization pass", pass.ToString(), "optimized LLVM IR", ex.Message)]
     
     /// Checks if external optimization tool is available
-    let isOptToolAvailable : Parser<bool, OptimizationState> =
-        fun state ->
-            try
-                let processInfo = System.Diagnostics.ProcessStartInfo()
-                processInfo.FileName <- "opt"
-                processInfo.Arguments <- "--version"
-                processInfo.UseShellExecute <- false
-                processInfo.RedirectStandardOutput <- true
-                processInfo.RedirectStandardError <- true
-                processInfo.CreateNoWindow <- true
-                
-                use proc = System.Diagnostics.Process.Start(processInfo)
-                proc.WaitForExit(5000) |> ignore
-                Reply(Ok (proc.ExitCode = 0), state)
-            with
-            | _ -> Reply(Ok false, state)
+    let isOptToolAvailable : bool =
+        try
+            let processInfo = System.Diagnostics.ProcessStartInfo()
+            processInfo.FileName <- "opt"
+            processInfo.Arguments <- "--version"
+            processInfo.UseShellExecute <- false
+            processInfo.RedirectStandardOutput <- true
+            processInfo.RedirectStandardError <- true
+            processInfo.CreateNoWindow <- true
+            
+            use proc = System.Diagnostics.Process.Start(processInfo)
+            proc.WaitForExit(5000) |> ignore
+            proc.ExitCode = 0
+        with
+        | _ -> false
     
     /// Runs external LLVM opt tool if available
-    let runExternalOptTool (passes: OptimizationPass list) (llvmIR: string) : Parser<string, OptimizationState> =
-        isOptToolAvailable >>= fun isAvailable ->
-        if not isAvailable then
-            recordTransformation "external-opt" "LLVM opt tool not available, using internal optimizations" >>= fun _ ->
-            succeed llvmIR
+    let runExternalOptTool (passes: OptimizationPass list) (llvmIR: string) (state: OptimizationState) : CompilerResult<string * OptimizationState> =
+        if not isOptToolAvailable then
+            let newState = OptimizationTransformations.recordTransformation "external-opt" "LLVM opt tool not available, using internal optimizations" state
+            Success (llvmIR, newState)
         else
             try
                 let tempInputPath = Path.GetTempFileName() + ".ll"
@@ -338,14 +310,13 @@ module PassExecution =
                 // Convert passes to opt arguments
                 let passArgs = 
                     passes 
-                    |> List.map (function
-                        | MemoryToReg -> "mem2reg"
-                        | ConstantFold -> "constprop"
-                        | DeadCodeElim(_) -> "dce"
-                        | InstCombine(_) -> "instcombine"
-                        | SimplifyCFG(_) -> "simplifycfg"
-                        | _ -> "")
-                    |> List.filter (not << String.IsNullOrEmpty)
+                    |> List.choose (function
+                        | MemoryToReg -> Some "mem2reg"
+                        | ConstantFold -> Some "constprop"
+                        | DeadCodeElim(_) -> Some "dce"
+                        | InstCombine(_) -> Some "instcombine"
+                        | SimplifyCFG(_) -> Some "simplifycfg"
+                        | _ -> None)
                     |> String.concat ","
                 
                 let optArgs = sprintf "-passes=\"%s\" %s -o %s -S" passArgs tempInputPath tempOutputPath
@@ -362,21 +333,20 @@ module PassExecution =
                 
                 if optProc.ExitCode = 0 && File.Exists(tempOutputPath) then
                     let optimizedIR = File.ReadAllText(tempOutputPath)
-                    recordTransformation "external-opt" (sprintf "Applied external optimizations: %s" passArgs) >>= fun _ ->
+                    let newState = OptimizationTransformations.recordTransformation "external-opt" (sprintf "Applied external optimizations: %s" passArgs) state
                     
                     // Cleanup
                     if File.Exists(tempInputPath) then File.Delete(tempInputPath)
                     if File.Exists(tempOutputPath) then File.Delete(tempOutputPath)
                     
-                    succeed optimizedIR
+                    Success (optimizedIR, newState)
                 else
-                    recordTransformation "external-opt" "External optimization failed, using original IR" >>= fun _ ->
-                    succeed llvmIR
+                    let newState = OptimizationTransformations.recordTransformation "external-opt" "External optimization failed, using original IR" state
+                    Success (llvmIR, newState)
             with
             | ex ->
-                recordTransformation "external-opt" (sprintf "External optimization error: %s" ex.Message) >>= fun _ ->
-                succeed llvmIR
-        |> withErrorContext "external optimization tool"
+                let newState = OptimizationTransformations.recordTransformation "external-opt" (sprintf "External optimization error: %s" ex.Message) state
+                Success (llvmIR, newState)
 
 /// Pipeline creation and management
 module PipelineManagement =
@@ -392,30 +362,33 @@ module PipelineManagement =
         | SizeMin -> [MemoryToReg; DeadCodeElim(true)]
     
     /// Applies a sequence of optimization passes
-    let applyOptimizationSequence (passes: OptimizationPass list) (llvmIR: string) : Parser<string, OptimizationState> =
-        passes
-        |> List.fold (fun accParser pass ->
-            accParser >>= fun currentIR ->
-            applyOptimizationPass pass currentIR
-        ) (succeed llvmIR)
-        |> withErrorContext "optimization sequence"
+    let applyOptimizationSequence (passes: OptimizationPass list) (llvmIR: string) (initialState: OptimizationState) : CompilerResult<string * OptimizationState> =
+        let rec applyPasses remainingPasses currentIR currentState =
+            match remainingPasses with
+            | [] -> Success (currentIR, currentState)
+            | pass :: rest ->
+                match PassExecution.applyOptimizationPass pass currentIR currentState with
+                | Success (optimizedIR, newState) ->
+                    applyPasses rest optimizedIR newState
+                | CompilerFailure errors -> CompilerFailure errors
+        
+        applyPasses passes llvmIR initialState
     
     /// Applies Firefly-specific optimizations
-    let applyFireflyOptimizations (llvmIR: string) : Parser<string, OptimizationState> =
+    let applyFireflyOptimizations (llvmIR: string) (state: OptimizationState) : string * OptimizationState =
         // Remove malloc/free patterns (should not exist in zero-allocation code)
         let removeMallocPatterns = 
             llvmIR.Replace("call void* @malloc", "; removed malloc (zero-allocation guarantee)")
                   .Replace("call void @free", "; removed free (zero-allocation guarantee)")
         
-        recordTransformation "firefly-opt" "Applied Firefly zero-allocation optimizations" >>= fun _ ->
-        succeed removeMallocPatterns
-        |> withErrorContext "Firefly-specific optimizations"
+        let newState = OptimizationTransformations.recordTransformation "firefly-opt" "Applied Firefly zero-allocation optimizations" state
+        (removeMallocPatterns, newState)
 
 /// Optimization metrics and reporting
 module OptimizationMetrics =
     
     /// Calculates optimization impact
-    let calculateOptimizationImpact (originalIR: string) (optimizedIR: string) : Parser<Map<string, float>, OptimizationState> =
+    let calculateOptimizationImpact (originalIR: string) (optimizedIR: string) : Map<string, float> =
         let originalLines = originalIR.Split('\n').Length
         let optimizedLines = optimizedIR.Split('\n').Length
         let sizeReduction = (float originalLines - float optimizedLines) / float originalLines * 100.0
@@ -424,19 +397,17 @@ module OptimizationMetrics =
         let optimizedSize = optimizedIR.Length
         let byteReduction = (float originalSize - float optimizedSize) / float originalSize * 100.0
         
-        succeed (Map.ofList [
+        Map.ofList [
             ("line_reduction_percent", sizeReduction)
             ("byte_reduction_percent", byteReduction)
             ("original_lines", float originalLines)
             ("optimized_lines", float optimizedLines)
-        ])
-        |> withErrorContext "optimization impact calculation"
-    
+        ]
 
-/// Main optimization entry point - NO FALLBACKS ALLOWED
+/// Main optimization entry point
 let optimizeLLVMIR (llvmOutput: LLVMOutput) (passes: OptimizationPass list) : CompilerResult<LLVMOutput> =
     if String.IsNullOrWhiteSpace(llvmOutput.LLVMIRText) then
-        CompilerFailure [TransformError("LLVM optimization", "empty LLVM IR", "optimized LLVM IR", "Input LLVM IR cannot be empty")]
+        CompilerFailure [ConversionError("LLVM optimization", "empty LLVM IR", "optimized LLVM IR", "Input LLVM IR cannot be empty")]
     else
         let initialState = {
             CurrentPass = "initialization"
@@ -445,33 +416,28 @@ let optimizeLLVMIR (llvmOutput: LLVMOutput) (passes: OptimizationPass list) : Co
             RemovedInstructions = []
             SymbolRenaming = Map.empty
             OptimizationMetrics = Map.empty
-            ErrorContext = []
+            TransformationHistory = []
         }
         
-        let optimizationPipeline = 
-            recordTransformation "pipeline-start" "Starting LLVM optimization pipeline" >>= fun _ ->
-            
+        try
             // Apply Firefly-specific optimizations first
-            applyFireflyOptimizations llvmOutput.LLVMIRText >>= fun fireflyOptimized ->
+            let (fireflyOptimized, state1) = PipelineManagement.applyFireflyOptimizations llvmOutput.LLVMIRText initialState
             
             // Apply standard optimization passes
-            applyOptimizationSequence passes fireflyOptimized >>= fun passOptimized ->
-            
-            // Try external tool optimization if available
-            runExternalOptTool passes passOptimized >>= fun finalOptimized ->
-            
-            recordTransformation "pipeline-complete" "Completed LLVM optimization pipeline" >>= fun _ ->
-            succeed finalOptimized
+            match PipelineManagement.applyOptimizationSequence passes fireflyOptimized state1 with
+            | Success (passOptimized, state2) ->
+                // Try external tool optimization if available
+                match PassExecution.runExternalOptTool passes passOptimized state2 with
+                | Success (finalOptimized, _) ->
+                    Success {
+                        llvmOutput with 
+                            LLVMIRText = finalOptimized
+                    }
+                | CompilerFailure errors -> CompilerFailure errors
+            | CompilerFailure errors -> CompilerFailure errors
         
-        match optimizationPipeline initialState with
-        | Reply(Ok optimizedIR, finalState) ->
-            Success {
-                llvmOutput with 
-                    LLVMIRText = optimizedIR
-            }
-        
-        | Reply(Error, errorMsg) ->
-            CompilerFailure [TransformError("LLVM optimization", "LLVM IR", "optimized LLVM IR", errorMsg)]
+        with ex ->
+            CompilerFailure [ConversionError("LLVM optimization", "LLVM IR", "optimized LLVM IR", ex.Message)]
 
 /// Validates that optimized IR maintains zero-allocation guarantees
 let validateZeroAllocationGuarantees (llvmIR: string) : CompilerResult<unit> =
@@ -490,7 +456,7 @@ let validateZeroAllocationGuarantees (llvmIR: string) : CompilerResult<unit> =
     if violations.IsEmpty then
         Success ()
     else
-        CompilerFailure [TransformError(
+        CompilerFailure [ConversionError(
             "zero-allocation validation", 
             "optimized LLVM IR", 
             "zero-allocation LLVM IR", 
@@ -500,23 +466,19 @@ let validateZeroAllocationGuarantees (llvmIR: string) : CompilerResult<unit> =
 let createProfileOptimizationPipeline (profile: string) : OptimizationPass list =
     match profile.ToLowerInvariant() with
     | "debug" -> [MemoryToReg]
-    | "release" -> createOptimizationPipeline Aggressive
-    | "size" -> createOptimizationPipeline Size
-    | "embedded" -> createOptimizationPipeline SizeMin
-    | _ -> createOptimizationPipeline Default
+    | "release" -> PipelineManagement.createOptimizationPipeline Aggressive
+    | "size" -> PipelineManagement.createOptimizationPipeline Size
+    | "embedded" -> PipelineManagement.createOptimizationPipeline SizeMin
+    | _ -> PipelineManagement.createOptimizationPipeline Default
 
 /// Estimates optimization benefits for given IR
 let estimateOptimizationBenefits (llvmIR: string) (level: OptimizationLevel) : CompilerResult<Map<string, float>> =
-    let initialState = {
-        CurrentPass = "estimation"
-        TransformationCount = 0
-        OptimizedInstructions = []
-        RemovedInstructions = []
-        SymbolRenaming = Map.empty
-        OptimizationMetrics = Map.empty
-        ErrorContext = []
-    }
-    
-    match OptimizationMetrics.calculateOptimizationImpact llvmIR llvmIR initialState with
-    | Reply(Ok metrics, _) -> Success metrics
-    | Reply(Error, error) -> CompilerFailure [TransformError("optimization estimation", "LLVM IR", "metrics", error)]
+    try
+        let metrics = OptimizationMetrics.calculateOptimizationImpact llvmIR llvmIR
+        Success metrics
+    with ex ->
+        CompilerFailure [ConversionError("optimization estimation", "LLVM IR", "metrics", ex.Message)]
+
+/// Main entry point for creating optimization passes
+let createOptimizationPipeline (level: OptimizationLevel) : OptimizationPass list =
+    PipelineManagement.createOptimizationPipeline level

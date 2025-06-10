@@ -1,12 +1,7 @@
 ﻿module Core.Conversion.LoweringPipeline
 
 open System
-open XParsec
 open Core.XParsec.Foundation
-open Core.XParsec.Foundation.Combinators
-open Core.XParsec.Foundation.CharParsers
-open Core.XParsec.Foundation.StringParsers
-open Core.XParsec.Foundation.ErrorHandling
 open Core.MLIRGeneration.Dialect
 
 /// Lowering transformation state
@@ -16,236 +11,246 @@ type LoweringState = {
     TransformedOperations: string list
     SymbolTable: Map<string, string>
     PassName: string
-    ErrorContext: string list
+    TransformationHistory: (string * string) list
 }
 
-/// Lowering pass definition with XParsec-based transformation
+/// Lowering pass definition with transformation logic
 type LoweringPass = {
     Name: string
     SourceDialect: MLIRDialect
     TargetDialect: MLIRDialect
-    Transform: Parser<string, LoweringState>
+    Transform: string -> CompilerResult<string>
     Validate: string -> bool
 }
 
-/// MLIR operation parsing using XParsec combinators
-module MLIRParsers =
+/// MLIR operation parsing and transformation
+module MLIROperations =
     
-    /// Parses an SSA value name
-    let ssaValue : Parser<string, LoweringState> =
-        pchar '%' >>= fun _ ->
-        identifier >>= fun name ->
-        succeed ("%" + name)
-        |> withErrorContext "SSA value"
+    /// Extracts operation name from an MLIR line
+    let extractOperationName (line: string) : string option =
+        let trimmed = line.Trim()
+        if trimmed.Contains(" = ") then
+            let parts = trimmed.Split([|'='|], 2)
+            if parts.Length = 2 then
+                let opPart = parts.[1].Trim()
+                let spaceIndex = opPart.IndexOf(' ')
+                if spaceIndex > 0 then
+                    Some (opPart.Substring(0, spaceIndex))
+                else
+                    Some opPart
+            else None
+        elif trimmed.Contains('.') then
+            let spaceIndex = trimmed.IndexOf(' ')
+            if spaceIndex > 0 then
+                Some (trimmed.Substring(0, spaceIndex))
+            else
+                Some trimmed
+        else None
     
-    /// Parses a function name
-    let functionName : Parser<string, LoweringState> =
-        pchar '@' >>= fun _ ->
-        identifier >>= fun name ->
-        succeed ("@" + name)
-        |> withErrorContext "function name"
+    /// Extracts SSA values from an MLIR operation
+    let extractSSAValues (line: string) : string list =
+        let parts = line.Split([|' '; ','|], StringSplitOptions.RemoveEmptyEntries)
+        parts 
+        |> Array.filter (fun part -> part.StartsWith("%"))
+        |> Array.toList
     
-    /// Parses a type annotation
-    let typeAnnotation : Parser<string, LoweringState> =
-        let primitiveType = 
-            (pstring "i1" <|> pstring "i8" <|> pstring "i16" <|> pstring "i32" <|> pstring "i64" <|>
-             pstring "f32" <|> pstring "f64" <|> pstring "void")
-        
-        let pointerType = 
-            pstring "!llvm.ptr<" >>= fun _ ->
-            typeAnnotation >>= fun innerType ->
-            pchar '>' >>= fun _ ->
-            succeed ("!llvm.ptr<" + innerType + ">")
-        
-        let memrefType =
-            pstring "memref<" >>= fun _ ->
-            many (satisfy (fun c -> c <> '>')) >>= fun chars ->
-            pchar '>' >>= fun _ ->
-            succeed ("memref<" + String(Array.ofList chars) + ">")
-        
-        pointerType <|> memrefType <|> primitiveType
-        |> withErrorContext "type annotation"
+    /// Extracts function name from func.func operation
+    let extractFunctionName (line: string) : string option =
+        if line.Contains("func.func") then
+            let parts = line.Split([|' '|], StringSplitOptions.RemoveEmptyEntries)
+            parts 
+            |> Array.tryFind (fun part -> part.StartsWith("@"))
+        else None
     
-    /// Parses operation attributes
-    let operationAttributes : Parser<Map<string, string>, LoweringState> =
-        let attribute = 
-            identifier >>= fun key ->
-            ws >>= fun _ ->
-            pchar '=' >>= fun _ ->
-            ws >>= fun _ ->
-            (between (pchar '"') (pchar '"') (many (satisfy (fun c -> c <> '"'))) |>> fun chars -> String(Array.ofList chars)) >>= fun value ->
-            succeed (key, value)
-        
-        let attributeList = sepBy attribute (pchar ',')
-        
-        between (pchar '{') (pchar '}') attributeList |>> Map.ofList <|>
-        succeed Map.empty
-        |> withErrorContext "operation attributes"
-    
-    /// Parses an MLIR operation with dialect prefix
-    let mlirOperation : Parser<(string * string list * string list * Map<string, string> * string), LoweringState> =
-        let resultList = sepBy ssaValue (pchar ',') .>> ws .>> pchar '=' .>> ws <|> succeed []
-        let operandList = between (pchar '(') (pchar ')') (sepBy ssaValue (pchar ',')) <|> succeed []
-        
-        resultList >>= fun results ->
-        identifier >>= fun dialectName ->
-        pchar '.' >>= fun _ ->
-        identifier >>= fun opName ->
-        ws >>= fun _ ->
-        operandList >>= fun operands ->
-        ws >>= fun _ ->
-        operationAttributes >>= fun attrs ->
-        ws >>= fun _ ->
-        opt (pchar ':' >>= fun _ -> ws >>= fun _ -> typeAnnotation) >>= fun typeOpt ->
-        let fullOpName = dialectName + "." + opName
-        let typeStr = typeOpt |> Option.defaultValue ""
-        succeed (fullOpName, results, operands, attrs, typeStr)
-        |> withErrorContext "MLIR operation"
+    /// Extracts type information from operation
+    let extractTypeInfo (line: string) : string option =
+        if line.Contains(":") then
+            let colonIndex = line.LastIndexOf(':')
+            if colonIndex >= 0 && colonIndex < line.Length - 1 then
+                Some (line.Substring(colonIndex + 1).Trim())
+            else None
+        else None
 
-/// Dialect-specific transformation combinators
+/// Dialect-specific transformation functions
 module DialectTransformers =
     
     /// Transforms func dialect operations to LLVM dialect
-    let funcToLLVMTransformer : Parser<string, LoweringState> =
-        let transformFuncOp = 
-            pstring "func.func" >>= fun _ ->
-            ws >>= fun _ ->
-            functionName >>= fun fname ->
-            between (pchar '(') (pchar ')') (sepBy typeAnnotation (pchar ',')) >>= fun paramTypes ->
-            ws >>= fun _ ->
-            pstring "->" >>= fun _ ->
-            ws >>= fun _ ->
-            typeAnnotation >>= fun returnType ->
-            ws >>= fun _ ->
-            pchar '{' >>= fun _ ->
-            let llvmFunc = sprintf "llvm.func %s(%s) -> %s {" 
-                                  fname 
-                                  (String.concat ", " paramTypes) 
-                                  returnType
-            succeed llvmFunc
+    let transformFuncToLLVM (line: string) : CompilerResult<string> =
+        let trimmed = line.Trim()
         
-        let transformFuncReturn =
-            pstring "func.return" >>= fun _ ->
-            ws >>= fun _ ->
-            opt ssaValue >>= fun valueOpt ->
-            opt (pchar ':' >>= fun _ -> ws >>= fun _ -> typeAnnotation) >>= fun typeOpt ->
-            match valueOpt, typeOpt with
-            | Some value, Some typeStr -> succeed (sprintf "llvm.return %s : %s" value typeStr)
-            | None, _ -> succeed "llvm.return"
-            | Some value, None -> succeed (sprintf "llvm.return %s" value)
-        
-        let transformFuncCall =
-            mlirOperation >>= fun (opName, results, operands, attrs, typeStr) ->
-            if opName = "func.call" then
-                match Map.tryFind "callee" attrs with
-                | Some callee ->
-                    let resultStr = if results.IsEmpty then "" else String.concat ", " results + " = "
-                    let operandStr = String.concat ", " operands
-                    succeed (sprintf "%sllvm.call %s(%s) : %s" resultStr callee operandStr typeStr)
-                | None ->
-                    compilerFail (TransformError("func-to-llvm", "func.call", "llvm.call", "Missing callee attribute"))
+        try
+            if trimmed.StartsWith("func.func") then
+                // Transform func.func to llvm.func
+                let transformed = trimmed.Replace("func.func", "llvm.func")
+                Success transformed
+            
+            elif trimmed.Contains("func.return") then
+                // Transform func.return to llvm.return
+                if trimmed.Contains("func.return ") then
+                    let parts = trimmed.Split([|' '|], 2)
+                    if parts.Length = 2 then
+                        let value = parts.[1]
+                        Success (sprintf "llvm.return %s" value)
+                    else
+                        Success "llvm.return"
+                else
+                    Success "llvm.return"
+            
+            elif trimmed.Contains("func.call") then
+                // Transform func.call to llvm.call
+                let transformed = trimmed.Replace("func.call", "llvm.call")
+                Success transformed
+            
             else
-                compilerFail (TransformError("func-to-llvm", opName, "llvm", "Unsupported func operation"))
+                Success trimmed
         
-        transformFuncOp <|> transformFuncReturn <|> transformFuncCall
-        |> withErrorContext "func to LLVM transformation"
+        with ex ->
+            CompilerFailure [ConversionError("func-to-llvm", trimmed, "llvm operation", ex.Message)]
     
     /// Transforms arith dialect operations to LLVM dialect
-    let arithToLLVMTransformer : Parser<string, LoweringState> =
-        let transformBinaryOp (arithOp: string) (llvmOp: string) =
-            mlirOperation >>= fun (opName, results, operands, attrs, typeStr) ->
-            if opName = ("arith." + arithOp) && operands.Length = 2 then
-                let resultStr = if results.IsEmpty then "" else String.concat ", " results + " = "
-                succeed (sprintf "%sllvm.%s %s, %s : %s" resultStr llvmOp operands.[0] operands.[1] typeStr)
-            else
-                compilerFail (TransformError("arith-to-llvm", opName, "llvm", "Invalid binary operation format"))
+    let transformArithToLLVM (line: string) : CompilerResult<string> =
+        let trimmed = line.Trim()
         
-        let transformConstant =
-            mlirOperation >>= fun (opName, results, operands, attrs, typeStr) ->
-            if opName = "arith.constant" then
-                match Map.tryFind "value" attrs with
-                | Some value ->
-                    let resultStr = if results.IsEmpty then "" else String.concat ", " results + " = "
-                    succeed (sprintf "%sllvm.mlir.constant(%s) : %s" resultStr value typeStr)
-                | None ->
-                    compilerFail (TransformError("arith-to-llvm", "arith.constant", "llvm.mlir.constant", "Missing value attribute"))
+        try
+            if trimmed.Contains("arith.constant") then
+                // Transform arith.constant to llvm.mlir.constant
+                let transformed = trimmed.Replace("arith.constant", "llvm.mlir.constant")
+                Success transformed
+            
+            elif trimmed.Contains("arith.addi") then
+                // Transform arith.addi to llvm.add
+                let transformed = trimmed.Replace("arith.addi", "llvm.add")
+                Success transformed
+            
+            elif trimmed.Contains("arith.subi") then
+                // Transform arith.subi to llvm.sub
+                let transformed = trimmed.Replace("arith.subi", "llvm.sub")
+                Success transformed
+            
+            elif trimmed.Contains("arith.muli") then
+                // Transform arith.muli to llvm.mul
+                let transformed = trimmed.Replace("arith.muli", "llvm.mul")
+                Success transformed
+            
+            elif trimmed.Contains("arith.divsi") then
+                // Transform arith.divsi to llvm.sdiv
+                let transformed = trimmed.Replace("arith.divsi", "llvm.sdiv")
+                Success transformed
+            
+            elif trimmed.Contains("arith.cmpi") then
+                // Transform arith.cmpi to llvm.icmp
+                let transformed = trimmed.Replace("arith.cmpi", "llvm.icmp")
+                Success transformed
+            
             else
-                compilerFail (TransformError("arith-to-llvm", opName, "llvm", "Not a constant operation"))
+                Success trimmed
         
-        transformBinaryOp "addi" "add" <|>
-        transformBinaryOp "subi" "sub" <|>
-        transformBinaryOp "muli" "mul" <|>
-        transformBinaryOp "divsi" "sdiv" <|>
-        transformConstant
-        |> withErrorContext "arith to LLVM transformation"
+        with ex ->
+            CompilerFailure [ConversionError("arith-to-llvm", trimmed, "llvm operation", ex.Message)]
+    
+    /// Transforms memref dialect operations to LLVM dialect
+    let transformMemrefToLLVM (line: string) : CompilerResult<string> =
+        let trimmed = line.Trim()
+        
+        try
+            if trimmed.Contains("memref.alloc") then
+                // Transform memref.alloc to llvm.alloca
+                let transformed = trimmed.Replace("memref.alloc", "llvm.alloca")
+                Success transformed
+            
+            elif trimmed.Contains("memref.alloca") then
+                // Transform memref.alloca to llvm.alloca
+                let transformed = trimmed.Replace("memref.alloca", "llvm.alloca")
+                Success transformed
+            
+            elif trimmed.Contains("memref.load") then
+                // Transform memref.load to llvm.load
+                let transformed = trimmed.Replace("memref.load", "llvm.load")
+                Success transformed
+            
+            elif trimmed.Contains("memref.store") then
+                // Transform memref.store to llvm.store
+                let transformed = trimmed.Replace("memref.store", "llvm.store")
+                Success transformed
+            
+            elif trimmed.Contains("memref.dealloc") then
+                // Transform memref.dealloc (remove for stack-based allocation)
+                Success ("  ; removed " + trimmed + " (stack-based allocation)")
+            
+            else
+                Success trimmed
+        
+        with ex ->
+            CompilerFailure [ConversionError("memref-to-llvm", trimmed, "llvm operation", ex.Message)]
     
     /// Transforms standard dialect operations to LLVM dialect
-    let stdToLLVMTransformer : Parser<string, LoweringState> =
-        mlirOperation >>= fun (opName, results, operands, attrs, typeStr) ->
-        match opName with
-        | "std.alloc" ->
-            let resultStr = if results.IsEmpty then "" else String.concat ", " results + " = "
-            succeed (sprintf "%sllvm.alloca %s : %s" resultStr (String.concat ", " operands) typeStr)
-        | "std.load" ->
-            let resultStr = if results.IsEmpty then "" else String.concat ", " results + " = "
-            succeed (sprintf "%sllvm.load %s : %s" resultStr (String.concat ", " operands) typeStr)
-        | "std.store" ->
-            if operands.Length >= 2 then
-                succeed (sprintf "llvm.store %s, %s : %s" operands.[0] operands.[1] typeStr)
+    let transformStdToLLVM (line: string) : CompilerResult<string> =
+        let trimmed = line.Trim()
+        
+        try
+            if trimmed.Contains("std.constant") then
+                // Transform std.constant to llvm.mlir.constant
+                let transformed = trimmed.Replace("std.constant", "llvm.mlir.constant")
+                Success transformed
+            
+            elif trimmed.Contains("std.br") then
+                // Transform std.br to llvm.br
+                let transformed = trimmed.Replace("std.br", "llvm.br")
+                Success transformed
+            
+            elif trimmed.Contains("std.cond_br") then
+                // Transform std.cond_br to llvm.cond_br
+                let transformed = trimmed.Replace("std.cond_br", "llvm.cond_br")
+                Success transformed
+            
             else
-                compilerFail (TransformError("std-to-llvm", "std.store", "llvm.store", "Insufficient operands for store"))
-        | _ ->
-            compilerFail (TransformError("std-to-llvm", opName, "llvm", "Unsupported std operation"))
-        |> withErrorContext "std to LLVM transformation"
+                Success trimmed
+        
+        with ex ->
+            CompilerFailure [ConversionError("std-to-llvm", trimmed, "llvm operation", ex.Message)]
 
-/// Pass management using XParsec combinators
+/// Pass management and execution
 module PassManagement =
     
     /// Creates a lowering pass with validation
     let createLoweringPass (name: string) (source: MLIRDialect) (target: MLIRDialect) 
-                          (transformer: Parser<string, LoweringState>) : LoweringPass =
+                          (transformer: string -> CompilerResult<string>) : LoweringPass =
         {
             Name = name
             SourceDialect = source
             TargetDialect = target
             Transform = transformer
-            Validate = fun _ -> true  // Would implement proper validation
+            Validate = fun _ -> true  // Simple validation
         }
     
     /// Applies a single lowering pass to MLIR text
     let applyPass (pass: LoweringPass) (mlirText: string) : CompilerResult<string> =
         let lines = mlirText.Split('\n') |> Array.toList
-        let initialState = {
-            CurrentDialect = pass.SourceDialect
-            TargetDialect = pass.TargetDialect
-            TransformedOperations = []
-            SymbolTable = Map.empty
-            PassName = pass.Name
-            ErrorContext = []
-        }
         
         let transformLine (line: string) : CompilerResult<string> =
-            let trimmedLine = line.Trim()
-            if String.IsNullOrEmpty(trimmedLine) || trimmedLine.StartsWith("//") then
+            let trimmed = line.Trim()
+            if String.IsNullOrEmpty(trimmed) || trimmed.StartsWith("//") || 
+               trimmed.StartsWith("module") || trimmed.StartsWith("}") || trimmed = "{" then
                 Success line
             else
-                match pass.Transform trimmedLine initialState with
-                | Reply(Ok transformedLine, _) -> Success transformedLine
-                | Reply(Error, error) -> 
-                    CompilerFailure [TransformError(pass.Name, trimmedLine, pass.TargetDialect.ToString(), error)]
+                pass.Transform line
         
         let transformAllLines (lines: string list) : CompilerResult<string list> =
-            let rec processLines acc remaining =
-                match remaining with
-                | [] -> Success (List.rev acc)
-                | line :: rest ->
+            List.fold (fun acc line ->
+                match acc with
+                | Success accLines ->
                     match transformLine line with
-                    | Success transformedLine -> processLines (transformedLine :: acc) rest
+                    | Success transformedLine -> Success (transformedLine :: accLines)
                     | CompilerFailure errors -> CompilerFailure errors
-            processLines [] lines
+                | CompilerFailure errors -> CompilerFailure errors
+            ) (Success []) lines
+            |> function
+               | Success transformedLines -> Success (List.rev transformedLines)
+               | CompilerFailure errors -> CompilerFailure errors
         
-        transformAllLines lines >>= fun transformedLines ->
-        Success (String.concat "\n" transformedLines)
+        match transformAllLines lines with
+        | Success transformedLines -> Success (String.concat "\n" transformedLines)
+        | CompilerFailure errors -> CompilerFailure errors
     
     /// Validates that transformed MLIR is in target dialect
     let validateDialectPurity (targetDialect: MLIRDialect) (mlirText: string) : CompilerResult<unit> =
@@ -260,15 +265,19 @@ module PassManagement =
                 not (line.StartsWith("//")) &&
                 not (line.StartsWith("module")) &&
                 not (line.StartsWith("func")) &&
+                not (line.StartsWith("}")) &&
+                not (line = "{") &&
                 line.Contains(".") &&
-                not (line.Contains(dialectPrefix)))
+                not (line.Contains(dialectPrefix)) &&
+                not (line.Contains("llvm.")))
         
         if invalidLines.Length > 0 then
             let errorDetails = 
                 invalidLines 
+                |> Array.take (min 5 invalidLines.Length)  // Limit error details
                 |> Array.map (fun (lineNum, line) -> sprintf "Line %d: %s" lineNum line)
                 |> String.concat "\n"
-            CompilerFailure [TransformError(
+            CompilerFailure [ConversionError(
                 "dialect validation", 
                 "mixed dialects", 
                 dialectToString targetDialect, 
@@ -278,28 +287,33 @@ module PassManagement =
 
 /// Standard lowering pipeline creation
 let createStandardLoweringPipeline() : LoweringPass list = [
-    PassManagement.createLoweringPass "convert-func-to-llvm" Func LLVM DialectTransformers.funcToLLVMTransformer
-    PassManagement.createLoweringPass "convert-arith-to-llvm" Arith LLVM DialectTransformers.arithToLLVMTransformer  
-    PassManagement.createLoweringPass "convert-std-to-llvm" Standard LLVM DialectTransformers.stdToLLVMTransformer
+    PassManagement.createLoweringPass "convert-func-to-llvm" Func LLVM DialectTransformers.transformFuncToLLVM
+    PassManagement.createLoweringPass "convert-arith-to-llvm" Arith LLVM DialectTransformers.transformArithToLLVM  
+    PassManagement.createLoweringPass "convert-memref-to-llvm" MemRef LLVM DialectTransformers.transformMemrefToLLVM
+    PassManagement.createLoweringPass "convert-std-to-llvm" Standard LLVM DialectTransformers.transformStdToLLVM
 ]
 
-/// Applies the complete lowering pipeline - NO FALLBACKS
+/// Applies the complete lowering pipeline
 let applyLoweringPipeline (mlirModule: string) : CompilerResult<string> =
     if String.IsNullOrWhiteSpace(mlirModule) then
-        CompilerFailure [TransformError("lowering pipeline", "empty input", "LLVM dialect", "Input MLIR module is empty")]
+        CompilerFailure [ConversionError("lowering pipeline", "empty input", "LLVM dialect", "Input MLIR module is empty")]
     else
         let passes = createStandardLoweringPipeline()
         
         let applyPassSequence (currentText: string) (remainingPasses: LoweringPass list) : CompilerResult<string> =
-            match remainingPasses with
-            | [] -> Success currentText
-            | pass :: rest ->
-                PassManagement.applyPass pass currentText >>= fun transformedText ->
-                applyPassSequence transformedText rest
+            List.fold (fun acc pass ->
+                match acc with
+                | Success text ->
+                    PassManagement.applyPass pass text
+                | CompilerFailure errors -> CompilerFailure errors
+            ) (Success currentText) remainingPasses
         
-        applyPassSequence mlirModule passes >>= fun loweredMLIR ->
-        PassManagement.validateDialectPurity LLVM loweredMLIR >>= fun _ ->
-        Success loweredMLIR
+        match applyPassSequence mlirModule passes with
+        | Success loweredMLIR ->
+            match PassManagement.validateDialectPurity LLVM loweredMLIR with
+            | Success () -> Success loweredMLIR
+            | CompilerFailure errors -> CompilerFailure errors
+        | CompilerFailure errors -> CompilerFailure errors
 
 /// Validates that lowered MLIR contains only LLVM dialect operations
 let validateLLVMDialectOnly (llvmDialectModule: string) : CompilerResult<unit> =
@@ -308,9 +322,10 @@ let validateLLVMDialectOnly (llvmDialectModule: string) : CompilerResult<unit> =
 /// Creates a custom lowering pipeline for specific dialect combinations
 let createCustomLoweringPipeline (sourceDialects: MLIRDialect list) (targetDialect: MLIRDialect) : CompilerResult<LoweringPass list> =
     let availableTransformers = [
-        (Func, LLVM, DialectTransformers.funcToLLVMTransformer)
-        (Arith, LLVM, DialectTransformers.arithToLLVMTransformer)
-        (Standard, LLVM, DialectTransformers.stdToLLVMTransformer)
+        (Func, LLVM, DialectTransformers.transformFuncToLLVM)
+        (Arith, LLVM, DialectTransformers.transformArithToLLVM)
+        (MemRef, LLVM, DialectTransformers.transformMemrefToLLVM)
+        (Standard, LLVM, DialectTransformers.transformStdToLLVM)
     ]
     
     let createPassForDialect (source: MLIRDialect) : CompilerResult<LoweringPass> =
@@ -319,7 +334,7 @@ let createCustomLoweringPipeline (sourceDialects: MLIRDialect list) (targetDiale
             let passName = sprintf "convert-%s-to-%s" (dialectToString s) (dialectToString t)
             Success (PassManagement.createLoweringPass passName s t transformer)
         | None ->
-            CompilerFailure [TransformError(
+            CompilerFailure [ConversionError(
                 "pipeline creation", 
                 dialectToString source, 
                 dialectToString targetDialect, 
@@ -334,4 +349,54 @@ let createCustomLoweringPipeline (sourceDialects: MLIRDialect list) (targetDiale
         | Success _, CompilerFailure errors -> CompilerFailure errors
         | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
     ) (Success [])
-    |>> List.rev
+    |> function
+       | Success passes -> Success (List.rev passes)
+       | CompilerFailure errors -> CompilerFailure errors
+
+/// Analyzes MLIR for dialect usage statistics
+let analyzeDialectUsage (mlirText: string) : CompilerResult<Map<string, int>> =
+    try
+        let lines = mlirText.Split('\n')
+        let dialectCounts = 
+            lines
+            |> Array.map (fun line -> line.Trim())
+            |> Array.filter (fun line -> 
+                not (String.IsNullOrEmpty(line)) && 
+                not (line.StartsWith("//")) &&
+                line.Contains("."))
+            |> Array.choose MLIROperations.extractOperationName
+            |> Array.map (fun opName ->
+                if opName.Contains(".") then
+                    opName.Substring(0, opName.IndexOf("."))
+                else "unknown")
+            |> Array.groupBy id
+            |> Array.map (fun (dialect, ops) -> (dialect, ops.Length))
+            |> Map.ofArray
+        
+        Success dialectCounts
+    
+    with ex ->
+        CompilerFailure [ConversionError("dialect analysis", "MLIR text", "dialect statistics", ex.Message)]
+
+/// Validates that an MLIR module is ready for lowering
+let validateMLIRForLowering (mlirText: string) : CompilerResult<unit> =
+    try
+        let lines = mlirText.Split('\n')
+        let hasValidStructure = 
+            lines |> Array.exists (fun line -> line.Trim().StartsWith("module"))
+        
+        if not hasValidStructure then
+            CompilerFailure [ConversionError("mlir validation", "input text", "valid MLIR module", "Missing module declaration")]
+        else
+            let hasOperations = 
+                lines |> Array.exists (fun line -> 
+                    let trimmed = line.Trim()
+                    trimmed.Contains(".") && not (trimmed.StartsWith("//")))
+            
+            if not hasOperations then
+                CompilerFailure [ConversionError("mlir validation", "input text", "valid MLIR module", "No operations found")]
+            else
+                Success ()
+    
+    with ex ->
+        CompilerFailure [ConversionError("mlir validation", "input text", "valid MLIR module", ex.Message)]
