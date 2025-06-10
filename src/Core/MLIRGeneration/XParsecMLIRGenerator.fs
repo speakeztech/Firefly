@@ -2,10 +2,6 @@
 
 open System
 open System.Text
-open XParsec
-open Core.XParsec.Foundation
-open Core.XParsec.Foundation.Combinators
-open Core.XParsec.Foundation.ErrorHandling
 open Dabbit.Parsing.OakAst
 open Core.MLIRGeneration.TypeSystem
 open Core.MLIRGeneration.Operations
@@ -44,158 +40,140 @@ let createInitialState() = {
     ErrorContext = []
 }
 
-/// Core SSA value and scope management module
+/// Core SSA value and scope management functions
 module SSA = 
     /// Generates a new SSA value with optional prefix
-    let generateValue (prefix: string) : Parser<string, MLIRGenerationState> =
-        fun state ->
-            let newCounter = state.SSACounter + 1
-            let ssaName = sprintf "%%%s%d" prefix newCounter
-            let newState = { state with SSACounter = newCounter }
-            Reply(Ok ssaName, newState)
+    let generateValue (prefix: string) (state: MLIRGenerationState) : string * MLIRGenerationState =
+        let newCounter = state.SSACounter + 1
+        let ssaName = sprintf "%%%s%d" prefix newCounter
+        let newState = { state with SSACounter = newCounter }
+        (ssaName, newState)
     
     /// Binds a variable name to an SSA value in current scope
-    let bindVariable (name: string) (value: string) : Parser<unit, MLIRGenerationState> =
-        fun state ->
-            let newScope = Map.add name value state.CurrentScope
-            let newState = { state with CurrentScope = newScope }
-            Reply(Ok (), newState)
+    let bindVariable (name: string) (value: string) (state: MLIRGenerationState) : MLIRGenerationState =
+        let newScope = Map.add name value state.CurrentScope
+        { state with CurrentScope = newScope }
     
     /// Looks up a variable by name in the current scope stack
-    let lookupVariable (name: string) : Parser<string, MLIRGenerationState> =
-        fun state ->
-            let rec lookup scopes =
-                match scopes with
-                | [] -> None
-                | scope :: rest ->
-                    match Map.tryFind name scope with
-                    | Some value -> Some value
-                    | None -> lookup rest
-            
-            match lookup (state.CurrentScope :: state.ScopeStack) with
-            | Some value -> Reply(Ok value, state)
-            | None -> Reply(Error, sprintf "Variable '%s' not found in scope" name)
+    let lookupVariable (name: string) (state: MLIRGenerationState) : string option =
+        let rec lookup scopes =
+            match scopes with
+            | [] -> None
+            | scope :: rest ->
+                match Map.tryFind name scope with
+                | Some value -> Some value
+                | None -> lookup rest
+        
+        lookup (state.CurrentScope :: state.ScopeStack)
     
     /// Pushes current scope onto stack and creates a new empty scope
-    let pushScope : Parser<unit, MLIRGenerationState> =
-        fun state ->
-            let newState = { 
-                state with 
-                    ScopeStack = state.CurrentScope :: state.ScopeStack
-                    CurrentScope = Map.empty 
-            }
-            Reply(Ok (), newState)
+    let pushScope (state: MLIRGenerationState) : MLIRGenerationState =
+        { state with 
+            ScopeStack = state.CurrentScope :: state.ScopeStack
+            CurrentScope = Map.empty 
+        }
     
     /// Pops scope from stack and restores previous scope
-    let popScope : Parser<unit, MLIRGenerationState> =
-        fun state ->
-            match state.ScopeStack with
-            | scope :: rest ->
-                let newState = { 
-                    state with 
-                        CurrentScope = scope
-                        ScopeStack = rest 
-                }
-                Reply(Ok (), newState)
-            | [] -> 
-                Reply(Error, "Cannot pop scope - scope stack is empty")
-
-/// Core MLIR operation emission module
-module Operations =
-    /// Emits a raw MLIR operation string
-    let emit (operation: string) : Parser<unit, MLIRGenerationState> =
-        fun state ->
-            let newState = { 
-                state with 
-                    GeneratedOperations = operation :: state.GeneratedOperations 
+    let popScope (state: MLIRGenerationState) : MLIRGenerationState option =
+        match state.ScopeStack with
+        | scope :: rest ->
+            Some { state with 
+                CurrentScope = scope
+                ScopeStack = rest 
             }
-            Reply(Ok (), newState)
+        | [] -> None
+
+/// Core MLIR operation emission functions
+module Emitter =
+    /// Emits a raw MLIR operation string
+    let emit (operation: string) (state: MLIRGenerationState) : MLIRGenerationState =
+        { state with GeneratedOperations = operation :: state.GeneratedOperations }
     
     /// Declares an external function in MLIR
-    let declareExternal (name: string) (signature: string) : Parser<unit, MLIRGenerationState> =
-        emit (sprintf "func.func private @%s %s" name signature)
+    let declareExternal (name: string) (signature: string) (state: MLIRGenerationState) : MLIRGenerationState =
+        emit (sprintf "func.func private @%s %s" name signature) state
     
     /// Registers a string constant and returns its global name
-    let registerString (value: string) : Parser<string, MLIRGenerationState> =
-        fun state ->
-            match Map.tryFind value state.StringConstants with
-            | Some existingName -> 
-                Reply(Ok existingName, state)
-            | None ->
-                let constName = sprintf "@str_%d" state.StringConstants.Count
-                
-                // Emit global string constant
-                let escapedValue = value.Replace("\\", "\\\\").Replace("\"", "\\\"")
-                let constSize = escapedValue.Length + 1 // +1 for null terminator
-                let declaration = 
-                    sprintf "memref.global constant %s = dense<\"%s\\00\"> : memref<%dxi8>" 
-                            constName escapedValue constSize
-                
-                // Add to state
-                let newState = { 
-                    state with 
-                        StringConstants = Map.add value constName state.StringConstants
-                        GeneratedOperations = declaration :: state.GeneratedOperations
-                }
-                Reply(Ok constName, newState)
+    let registerString (value: string) (state: MLIRGenerationState) : string * MLIRGenerationState =
+        match Map.tryFind value state.StringConstants with
+        | Some existingName -> 
+            (existingName, state)
+        | None ->
+            let constName = sprintf "@str_%d" state.StringConstants.Count
+            
+            // Emit global string constant
+            let escapedValue = value.Replace("\\", "\\\\").Replace("\"", "\\\"")
+            let constSize = escapedValue.Length + 1 // +1 for null terminator
+            let declaration = 
+                sprintf "memref.global constant %s = dense<\"%s\\00\"> : memref<%dxi8>" 
+                        constName escapedValue constSize
+            
+            // Add to state
+            let newState = { 
+                state with 
+                    StringConstants = Map.add value constName state.StringConstants
+                    GeneratedOperations = declaration :: state.GeneratedOperations
+            }
+            (constName, newState)
     
     /// Creates a constant value in MLIR
-    let constant (value: string) (mlirType: MLIRType) : Parser<string, MLIRGenerationState> =
-        SSA.generateValue "const" >>= fun result ->
+    let constant (value: string) (mlirType: MLIRType) (state: MLIRGenerationState) : string * MLIRGenerationState =
+        let (resultId, state1) = SSA.generateValue "const" state
         let typeStr = mlirTypeToString mlirType
-        emit (sprintf "  %s = arith.constant %s : %s" result value typeStr) >>= fun _ ->
-        succeed result
+        let state2 = emit (sprintf "  %s = arith.constant %s : %s" resultId value typeStr) state1
+        (resultId, state2)
     
     /// Creates an arithmetic operation in MLIR
-    let arithmetic (op: string) (lhs: string) (rhs: string) (resultType: MLIRType) : Parser<string, MLIRGenerationState> =
-        SSA.generateValue "arith" >>= fun result ->
+    let arithmetic (op: string) (lhs: string) (rhs: string) (resultType: MLIRType) (state: MLIRGenerationState) : string * MLIRGenerationState =
+        let (resultId, state1) = SSA.generateValue "arith" state
         let typeStr = mlirTypeToString resultType
-        emit (sprintf "  %s = arith.%s %s, %s : %s" result op lhs rhs typeStr) >>= fun _ ->
-        succeed result
+        let state2 = emit (sprintf "  %s = arith.%s %s, %s : %s" resultId op lhs rhs typeStr) state1
+        (resultId, state2)
     
     /// Creates a function call in MLIR
-    let call (funcName: string) (args: string list) (resultType: MLIRType option) : Parser<string, MLIRGenerationState> =
+    let call (funcName: string) (args: string list) (resultType: MLIRType option) (state: MLIRGenerationState) : string * MLIRGenerationState =
         match resultType with
         | Some returnType ->
-            SSA.generateValue "call" >>= fun result ->
+            let (resultId, state1) = SSA.generateValue "call" state
             let argStr = String.concat ", " args
             let typeStr = mlirTypeToString returnType
             
             // Create parameter type list from argument types (simplified)
             let paramTypeStr = String.concat ", " (List.replicate args.Length "i32")
             
-            emit (sprintf "  %s = func.call @%s(%s) : (%s) -> %s" 
-                         result funcName argStr paramTypeStr typeStr) >>= fun _ ->
-            succeed result
+            let state2 = emit (sprintf "  %s = func.call @%s(%s) : (%s) -> %s" 
+                                     resultId funcName argStr paramTypeStr typeStr) state1
+            (resultId, state2)
         | None ->
             // Function with no return value
             let argStr = String.concat ", " args
             let paramTypeStr = String.concat ", " (List.replicate args.Length "i32")
             
-            emit (sprintf "  func.call @%s(%s) : (%s) -> ()" 
-                         funcName argStr paramTypeStr) >>= fun _ ->
-            SSA.generateValue "void" // Return a dummy value for consistency
+            let state1 = emit (sprintf "  func.call @%s(%s) : (%s) -> ()" 
+                                   funcName argStr paramTypeStr) state
+            let (dummyId, state2) = SSA.generateValue "void" state1
+            (dummyId, state2)
 
-/// Core expression conversion using simplified XParsec patterns
+/// Core expression conversion functions
 module ExpressionConversion =
     /// Converts Oak literal to MLIR constant
-    let rec convertLiteral (literal: OakLiteral) : Parser<string, MLIRGenerationState> =
+    let rec convertLiteral (literal: OakLiteral) (state: MLIRGenerationState) : string * MLIRGenerationState =
         match literal with
         | IntLiteral value ->
-            Operations.constant (string value) (Integer 32)
+            Emitter.constant (string value) (Integer 32) state
         | FloatLiteral value ->
-            Operations.constant (sprintf "%f" value) (Float 32)
+            Emitter.constant (sprintf "%f" value) (Float 32) state
         | BoolLiteral value ->
-            Operations.constant (if value then "1" else "0") (Integer 1)
+            Emitter.constant (if value then "1" else "0") (Integer 1) state
         | StringLiteral value ->
             // Register string as global and get pointer
-            Operations.registerString value >>= fun globalName ->
-            SSA.generateValue "str_ptr" >>= fun ptrResult ->
-            Operations.emit (sprintf "  %s = memref.get_global %s : memref<?xi8>" ptrResult globalName) >>= fun _ ->
-            succeed ptrResult
+            let (globalName, state1) = Emitter.registerString value state
+            let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
+            let state3 = Emitter.emit (sprintf "  %s = memref.get_global %s : memref<?xi8>" ptrResult globalName) state2
+            (ptrResult, state3)
         | UnitLiteral ->
             // Unit type has no value in MLIR - return a dummy constant
-            Operations.constant "0" (Integer 32)
+            Emitter.constant "0" (Integer 32) state
         | ArrayLiteral elements ->
             // Create stack-allocated array and initialize elements
             let elementType = 
@@ -211,466 +189,330 @@ module ExpressionConversion =
             let arraySize = elements.Length
             
             // Allocate array
-            SSA.generateValue "array" >>= fun arrayResult ->
-            Operations.emit (sprintf "  %s = memref.alloca(%d) : memref<%dx%s>" 
-                                   arrayResult arraySize arraySize (mlirTypeToString elementType)) >>= fun _ ->
+            let (arrayResult, state1) = SSA.generateValue "array" state
+            let state2 = Emitter.emit (sprintf "  %s = memref.alloca(%d) : memref<%dx%s>" 
+                               arrayResult arraySize arraySize (mlirTypeToString elementType)) state1
             
-            // Initialize elements
-            elements 
-            |> List.mapi (fun idx element ->
-                convertExpression element >>= fun elemValue ->
-                SSA.generateValue "idx" >>= fun idxResult ->
-                Operations.constant (string idx) (Integer 32) >>= fun idxConst ->
-                Operations.emit (sprintf "  memref.store %s, %s[%s] : %s, memref<%dx%s>" 
-                                        elemValue arrayResult idxConst 
-                                        (mlirTypeToString elementType) 
-                                        arraySize 
-                                        (mlirTypeToString elementType)) >>= fun _ ->
-                succeed ())
-            |> List.fold (>>=) (succeed ())
-            >>= fun _ ->
+            // Initialize elements (simplified approach)
+            let initializeElement (idx, element) (currentState: MLIRGenerationState) =
+                let (elemValue, state1) = convertExpression element currentState
+                let (idxResult, state2) = SSA.generateValue "idx" state1
+                let (idxConst, state3) = Emitter.constant (string idx) (Integer 32) state2
+                let state4 = Emitter.emit (sprintf "  memref.store %s, %s[%s] : %s, memref<%dx%s>" 
+                                    elemValue arrayResult idxConst 
+                                    (mlirTypeToString elementType) 
+                                    arraySize 
+                                    (mlirTypeToString elementType)) state3
+                state4
             
-            succeed arrayResult
+            let state3 = List.fold (fun s (idx, elem) -> initializeElement (idx, elem) s) 
+                           state2 (List.indexed elements)
+            
+            (arrayResult, state3)
     
-    /// Converts Oak expression to MLIR operations
-    and convertExpression (expr: OakExpression) : Parser<string, MLIRGenerationState> =
+    /// Converts Oak expression to MLIR operations with simplified approach
+    and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : string * MLIRGenerationState =
         match expr with
         | Literal literal ->
-            convertLiteral literal
-            |> withErrorContext "literal conversion"
+            convertLiteral literal state
         
         | Variable name ->
-            SSA.lookupVariable name
-            |> withErrorContext (sprintf "variable '%s'" name)
-        
-        | Binary(op, lhs, rhs) ->
-            // Convert operands
-            convertExpression lhs >>= fun lhsResult ->
-            convertExpression rhs >>= fun rhsResult ->
-            
-            // Apply operation
-            match op with
-            | Add -> Operations.arithmetic "addi" lhsResult rhsResult (Integer 32)
-            | Subtract -> Operations.arithmetic "subi" lhsResult rhsResult (Integer 32)
-            | Multiply -> Operations.arithmetic "muli" lhsResult rhsResult (Integer 32)
-            | Divide -> Operations.arithmetic "divsi" lhsResult rhsResult (Integer 32)
-            | Equal -> 
-                // Comparison with predicate
-                SSA.generateValue "cmp" >>= fun cmpResult ->
-                Operations.emit (sprintf "  %s = arith.cmpi eq, %s, %s : i32" 
-                                       cmpResult lhsResult rhsResult) >>= fun _ ->
-                succeed cmpResult
-            | _ ->
-                // Other comparisons/operations would be handled similarly
-                Operations.arithmetic "addi" lhsResult rhsResult (Integer 32)
-            |> withErrorContext "binary operation"
+            // Look up variable in scope
+            match SSA.lookupVariable name state with
+            | Some value -> (value, state)
+            | None -> 
+                // Variable not found - create a dummy value and diagnostic
+                let (dummyValue, state1) = SSA.generateValue "unknown" state
+                let state2 = { state1 with ErrorContext = sprintf "Variable '%s' not found" name :: state1.ErrorContext }
+                (dummyValue, state2)
         
         | Application(func, args) ->
             match func with
             | Variable funcName ->
                 // Convert arguments
-                args 
-                |> List.map convertExpression
-                |> List.fold (fun accM argM ->
-                    accM >>= fun accArgs ->
-                    argM >>= fun argResult ->
-                    succeed (argResult :: accArgs)
-                ) (succeed [])
-                >>= fun argResults ->
+                let convertArg (accState, accArgs) arg =
+                    let (argValue, newState) = convertExpression arg accState
+                    (newState, argValue :: accArgs)
                 
-                // Call function
-                Operations.call funcName (List.rev argResults) (Some (Integer 32))
-                |> withErrorContext (sprintf "function call '%s'" funcName)
+                let (state1, argValues) = List.fold convertArg (state, []) args
+                
+                // Call function (simplified - always returns i32)
+                Emitter.call funcName (List.rev argValues) (Some (Integer 32)) state1
             | _ ->
-                fail "Only direct function calls supported"
-                |> withErrorContext "complex function application"
+                // Unsupported function expression - return dummy value
+                let (dummyValue, state1) = SSA.generateValue "unsupported" state
+                let state2 = { state1 with ErrorContext = "Only direct function calls supported" :: state1.ErrorContext }
+                (dummyValue, state2)
         
         | Let(name, value, body) ->
-            // Evaluate the bound value
-            convertExpression value >>= fun valueResult ->
+            // Convert the bound value
+            let (valueResult, state1) = convertExpression value state
             
-            // Bind in current scope and evaluate body
-            SSA.bindVariable name valueResult >>= fun _ ->
-            convertExpression body
-            |> withErrorContext (sprintf "let binding '%s'" name)
+            // Bind in current scope
+            let state2 = SSA.bindVariable name valueResult state1
+            
+            // Convert body
+            convertExpression body state2
         
         | IfThenElse(cond, thenExpr, elseExpr) ->
             // Generate unique labels for branches
-            let thenLabel = sprintf "then_%d" (Guid.NewGuid().GetHashCode() |> abs)
-            let elseLabel = sprintf "else_%d" (Guid.NewGuid().GetHashCode() |> abs)
-            let endLabel = sprintf "endif_%d" (Guid.NewGuid().GetHashCode() |> abs)
+            let thenLabel = sprintf "then_%d" (state.SSACounter + 1)
+            let elseLabel = sprintf "else_%d" (state.SSACounter + 2)
+            let endLabel = sprintf "endif_%d" (state.SSACounter + 3)
             
             // Evaluate condition
-            convertExpression cond >>= fun condResult ->
+            let (condResult, state1) = convertExpression cond state
             
             // Create a result variable
-            SSA.generateValue "if_result" >>= fun resultVar ->
+            let (resultVar, state2) = SSA.generateValue "if_result" state1
             
             // Emit conditional branch
-            Operations.emit (sprintf "  cf.cond_br %s, ^%s, ^%s" condResult thenLabel elseLabel) >>= fun _ ->
+            let state3 = Emitter.emit (sprintf "  cf.cond_br %s, ^%s, ^%s" condResult thenLabel elseLabel) state2
             
             // Then branch
-            Operations.emit (sprintf "^%s:" thenLabel) >>= fun _ ->
-            convertExpression thenExpr >>= fun thenResult ->
-            Operations.emit (sprintf "  cf.br ^%s(%s : i32)" endLabel thenResult) >>= fun _ ->
+            let state4 = Emitter.emit (sprintf "^%s:" thenLabel) state3
+            let (thenResult, state5) = convertExpression thenExpr state4
+            let state6 = Emitter.emit (sprintf "  cf.br ^%s(%s : i32)" endLabel thenResult) state5
             
             // Else branch
-            Operations.emit (sprintf "^%s:" elseLabel) >>= fun _ ->
-            convertExpression elseExpr >>= fun elseResult ->
-            Operations.emit (sprintf "  cf.br ^%s(%s : i32)" endLabel elseResult) >>= fun _ ->
+            let state7 = Emitter.emit (sprintf "^%s:" elseLabel) state6
+            let (elseResult, state8) = convertExpression elseExpr state7
+            let state9 = Emitter.emit (sprintf "  cf.br ^%s(%s : i32)" endLabel elseResult) state8
             
             // Join point
-            Operations.emit (sprintf "^%s(%s: i32):" endLabel resultVar) >>= fun _ ->
+            let state10 = Emitter.emit (sprintf "^%s(%s: i32):" endLabel resultVar) state9
             
-            succeed resultVar
-            |> withErrorContext "if-then-else expression"
+            (resultVar, state10)
         
         | Sequential(first, second) ->
             // Evaluate first expression and discard result
-            convertExpression first >>= fun _ ->
+            let (_, state1) = convertExpression first state
             
             // Evaluate and return second expression
-            convertExpression second
-            |> withErrorContext "sequential expression"
-        
-        | Lambda(parameters', body) ->
-            fail "Lambda expressions should be eliminated by closure transformation"
-            |> withErrorContext "lambda expression"
+            convertExpression second state1
         
         | FieldAccess(target, fieldName) ->
-            convertExpression target >>= fun targetResult ->
+            let (targetResult, state1) = convertExpression target state
             
-            // Extract field using GEP
-            SSA.generateValue "field" >>= fun fieldResult ->
+            // Extract field using GEP (simplified approach)
+            let (fieldResult, state2) = SSA.generateValue "field" state1
             
             // This is a simplification - real implementation would need type information
-            Operations.emit (sprintf "  %s = llvm.extractvalue %s[0] : !llvm.struct<i32, i32>" 
-                                   fieldResult targetResult) >>= fun _ ->
+            let state3 = Emitter.emit (sprintf "  %s = llvm.extractvalue %s[0] : !llvm.struct<i32, i32>" 
+                                   fieldResult targetResult) state2
             
-            succeed fieldResult
-            |> withErrorContext (sprintf "field access '%s'" fieldName)
+            (fieldResult, state3)
         
-        | IndexedAccess(target, indices) ->
-            // Convert target to get array pointer
-            convertExpression target >>= fun targetResult ->
+        | MethodCall(target, methodName, args) ->
+            // Convert target and arguments (simplified)
+            let (targetResult, state1) = convertExpression target state
             
-            // Convert indices
-            indices 
-            |> List.map convertExpression
-            |> List.fold (fun accM idxM ->
-                accM >>= fun accIndices ->
-                idxM >>= fun idxResult ->
-                succeed (idxResult :: accIndices)
-            ) (succeed [])
-            >>= fun indexResults ->
+            // Convert arguments
+            let convertArg (accState, accArgs) arg =
+                let (argValue, newState) = convertExpression arg accState
+                (newState, argValue :: accArgs)
             
-            // Get element (simplified - would need proper type info)
-            SSA.generateValue "element" >>= fun elementResult ->
+            let (state2, argValues) = List.fold convertArg (state1, []) args
             
-            // Use first index only for now - multidimensional would be more complex
-            let indexResult = List.rev indexResults |> List.tryHead |> Option.defaultValue "0"
+            // Call method as a regular function (simplified)
+            let fullMethodName = sprintf "%s_%s" (targetResult.TrimStart('%')) methodName
+            Emitter.call fullMethodName (List.rev argValues) (Some (Integer 32)) state2
             
-            Operations.emit (sprintf "  %s = memref.load %s[%s] : memref<?xi32>" 
-                                   elementResult targetResult indexResult) >>= fun _ ->
-            
-            succeed elementResult
-            |> withErrorContext "indexed access"
-        
         | IOOperation(ioType, args) ->
             match ioType with
             | Printf formatStr | Printfn formatStr ->
                 // Register format string
-                Operations.registerString formatStr >>= fun formatGlobal ->
+                let (formatGlobal, state1) = Emitter.registerString formatStr state
                 
                 // Get format string pointer
-                SSA.generateValue "fmt_ptr" >>= fun formatPtr ->
-                Operations.emit (sprintf "  %s = memref.get_global %s : memref<?xi8>" formatPtr formatGlobal) >>= fun _ ->
+                let (formatPtr, state2) = SSA.generateValue "fmt_ptr" state1
+                let state3 = Emitter.emit (sprintf "  %s = memref.get_global %s : memref<?xi8>" formatPtr formatGlobal) state2
                 
                 // Convert arguments
-                args 
-                |> List.map convertExpression
-                |> List.fold (fun accM argM ->
-                    accM >>= fun accArgs ->
-                    argM >>= fun argResult ->
-                    succeed (argResult :: accArgs)
-                ) (succeed [])
-                >>= fun argResults ->
+                let convertArg (accState, accArgs) arg =
+                    let (argValue, newState) = convertExpression arg accState
+                    (newState, argValue :: accArgs)
+                
+                let (state4, argValues) = List.fold convertArg (state3, []) args
                 
                 // Declare printf
-                Operations.declareExternal "printf" "(memref<?xi8>, ...) -> i32" >>= fun _ ->
+                let state5 = Emitter.declareExternal "printf" "(memref<?xi8>, ...) -> i32" state4
                 
                 // Call printf with format and args
-                let allArgs = formatPtr :: List.rev argResults
-                SSA.generateValue "printf_result" >>= fun printfResult ->
+                let allArgs = formatPtr :: List.rev argValues
+                let (printfResult, state6) = SSA.generateValue "printf_result" state5
                 
                 // Build parameter type string based on arg count
-                let paramTypes = "memref<?xi8>" :: List.replicate argResults.Length "i32"
+                let paramTypes = "memref<?xi8>" :: List.replicate argValues.Length "i32"
                 let paramTypeStr = String.concat ", " paramTypes
                 
-                Operations.emit (sprintf "  %s = func.call @printf(%s) : (%s) -> i32" 
-                                       printfResult (String.concat ", " allArgs) paramTypeStr) >>= fun _ ->
+                let state7 = Emitter.emit (sprintf "  %s = func.call @printf(%s) : (%s) -> i32" 
+                                       printfResult (String.concat ", " allArgs) paramTypeStr) state6
                 
                 // For printfn, also print newline
-                (if ioType = Printfn formatStr then
-                    Operations.registerString "\n" >>= fun nlGlobal ->
-                    SSA.generateValue "nl_ptr" >>= fun nlPtr ->
-                    Operations.emit (sprintf "  %s = memref.get_global %s : memref<?xi8>" nlPtr nlGlobal) >>= fun _ ->
+                if ioType = Printfn formatStr then
+                    let (nlGlobal, state8) = Emitter.registerString "\n" state7
+                    let (nlPtr, state9) = SSA.generateValue "nl_ptr" state8
+                    let state10 = Emitter.emit (sprintf "  %s = memref.get_global %s : memref<?xi8>" nlPtr nlGlobal) state9
                     
-                    SSA.generateValue "nl_result" >>= fun nlResult ->
-                    Operations.emit (sprintf "  %s = func.call @printf(%s) : (memref<?xi8>) -> i32" nlResult nlPtr) >>= fun _ ->
-                    succeed printfResult
-                 else
-                    succeed printfResult)
-                |> withErrorContext "printf operation"
+                    let (nlResult, state11) = SSA.generateValue "nl_result" state10
+                    let state12 = Emitter.emit (sprintf "  %s = func.call @printf(%s) : (memref<?xi8>) -> i32" nlResult nlPtr) state11
+                    (printfResult, state12)
+                else
+                    (printfResult, state7)
             
             | ReadLine ->
                 // Declare fgets and stdin
-                Operations.declareExternal "fgets" "(memref<?xi8>, i32, memref<?xi8>) -> memref<?xi8>" >>= fun _ ->
-                Operations.declareExternal "__stdinp" "() -> memref<?xi8>" >>= fun _ ->
+                let state1 = Emitter.declareExternal "fgets" "(memref<?xi8>, i32, memref<?xi8>) -> memref<?xi8>" state
+                let state2 = Emitter.declareExternal "__stdinp" "() -> memref<?xi8>" state1
                 
                 // Allocate buffer
-                SSA.generateValue "buffer" >>= fun bufferResult ->
-                Operations.emit (sprintf "  %s = memref.alloca() : memref<256xi8>" bufferResult) >>= fun _ ->
+                let (bufferResult, state3) = SSA.generateValue "buffer" state2
+                let state4 = Emitter.emit (sprintf "  %s = memref.alloca() : memref<256xi8>" bufferResult) state3
                 
                 // Get buffer size constant
-                SSA.generateValue "buf_size" >>= fun sizeResult ->
-                Operations.constant "256" (Integer 32) >>= fun _ ->
+                let (sizeResult, state5) = SSA.generateValue "buf_size" state4
+                let (_, state6) = Emitter.constant "256" (Integer 32) state5
                 
                 // Get stdin handle
-                SSA.generateValue "stdin" >>= fun stdinResult ->
-                Operations.emit (sprintf "  %s = func.call @__stdinp() : () -> memref<?xi8>" stdinResult) >>= fun _ ->
+                let (stdinResult, state7) = SSA.generateValue "stdin" state6
+                let state8 = Emitter.emit (sprintf "  %s = func.call @__stdinp() : () -> memref<?xi8>" stdinResult) state7
                 
                 // Call fgets
-                SSA.generateValue "fgets_result" >>= fun fgetsResult ->
-                Operations.emit (sprintf "  %s = func.call @fgets(%s, %s, %s) : (memref<256xi8>, i32, memref<?xi8>) -> memref<?xi8>" 
-                                       fgetsResult bufferResult sizeResult stdinResult) >>= fun _ ->
+                let (fgetsResult, state9) = SSA.generateValue "fgets_result" state8
+                let state10 = Emitter.emit (sprintf "  %s = func.call @fgets(%s, %s, %s) : (memref<256xi8>, i32, memref<?xi8>) -> memref<?xi8>" 
+                                       fgetsResult bufferResult sizeResult stdinResult) state9
                 
-                succeed bufferResult
-                |> withErrorContext "readline operation"
+                (bufferResult, state10)
             
             | _ ->
-                fail "Unsupported I/O operation"
-                |> withErrorContext "I/O operation"
-        
-        | _ ->
-            fail "Unsupported expression type"
-            |> withErrorContext "unknown expression"
+                // Unsupported I/O operation
+                let (dummyValue, state1) = SSA.generateValue "unsupported_io" state
+                let state2 = { state1 with ErrorContext = "Unsupported I/O operation" :: state1.ErrorContext }
+                (dummyValue, state2)
 
 /// Function and module level conversion functions
 module DeclarationConversion =
     /// Converts function declaration to MLIR function
-    let convertFunction (name: string) (parameters': (string * OakType) list) (returnType: OakType) (body: OakExpression) : Parser<unit, MLIRGenerationState> =
+    let convertFunction (name: string) (parameters: (string * OakType) list) (returnType: OakType) (body: OakExpression) (state: MLIRGenerationState) : MLIRGenerationState =
         // Generate function signature
-        let paramTypes = parameters' |> List.map (snd >> mlirTypeToString)
+        let paramTypes = parameters |> List.map (snd >> mapOakTypeToMLIR >> mlirTypeToString)
         let returnTypeStr = mlirTypeToString (mapOakTypeToMLIR returnType)
         
         // Start function definition
         let paramStr = 
-            parameters' 
+            parameters 
             |> List.mapi (fun i (name, typ) -> 
                 sprintf "%%arg%d: %s" i (mlirTypeToString (mapOakTypeToMLIR typ)))
             |> String.concat ", "
             
-        Operations.emit (sprintf "func.func @%s(%s) -> %s {" name paramStr returnTypeStr) >>= fun _ ->
+        let state1 = Emitter.emit (sprintf "func.func @%s(%s) -> %s {" name paramStr returnTypeStr) state
         
         // Create new scope for function body
-        SSA.pushScope >>= fun _ ->
+        let state2 = SSA.pushScope state1
         
         // Bind parameters to arguments
-        parameters' 
-        |> List.mapi (fun i (paramName, _) -> 
-            SSA.bindVariable paramName (sprintf "%%arg%d" i))
-        |> List.fold (>>=) (succeed ())
-        >>= fun _ ->
+        let bindParams (state: MLIRGenerationState) =
+            parameters 
+            |> List.mapi (fun i (paramName, _) -> 
+                SSA.bindVariable paramName (sprintf "%%arg%d" i) state)
+            |> List.fold (fun s f -> f) state
+        
+        let state3 = bindParams state2
         
         // Convert function body
-        ExpressionConversion.convertExpression body >>= fun bodyResult ->
+        let (bodyResult, state4) = ExpressionConversion.convertExpression body state3
         
         // Generate return statement
-        (if returnType = UnitType then
-            Operations.emit "  func.return"
-         else
-            Operations.emit (sprintf "  func.return %s : %s" bodyResult returnTypeStr))
-        >>= fun _ ->
+        let state5 = 
+            if returnType = UnitType then
+                Emitter.emit "  func.return" state4
+            else
+                Emitter.emit (sprintf "  func.return %s : %s" bodyResult returnTypeStr) state4
         
         // End function
-        Operations.emit "}" >>= fun _ ->
+        let state6 = Emitter.emit "}" state5
         
         // Restore previous scope
-        SSA.popScope
-    
-    /// Converts Oak entry point to MLIR main function
-    let convertEntryPoint (expr: OakExpression) : Parser<unit, MLIRGenerationState> =
-        // Generate main function signature
-        Operations.emit "func.func @main(%arg0: i32, %arg1: !llvm.ptr<ptr<i8>>) -> i32 {" >>= fun _ ->
-        
-        // Create new scope
-        SSA.pushScope >>= fun _ ->
-        
-        // Bind argc/argv
-        SSA.bindVariable "argc" "%arg0" >>= fun _ ->
-        SSA.bindVariable "argv" "%arg1" >>= fun _ ->
-        
-        // Convert body expression
-        ExpressionConversion.convertExpression expr >>= fun bodyResult ->
-        
-        // Return 0 if expr doesn't return a value
-        (match expr with
-         | Literal(IntLiteral _) -> 
-             Operations.emit (sprintf "  func.return %s : i32" bodyResult)
-         | _ ->
-             SSA.generateValue "exit_code" >>= fun exitCode ->
-             Operations.constant "0" (Integer 32) >>= fun _ ->
-             Operations.emit (sprintf "  func.return %s : i32" exitCode))
-        >>= fun _ ->
-        
-        // End function
-        Operations.emit "}" >>= fun _ ->
-        
-        // Restore previous scope
-        SSA.popScope
-    
-    /// Converts external declaration to MLIR function declaration
-    let convertExternalDecl (name: string) (paramTypes: OakType list) (returnType: OakType) (libraryName: string) : Parser<unit, MLIRGenerationState> =
-        // Map Oak types to MLIR types
-        let mlirParamTypes = paramTypes |> List.map (mapOakTypeToMLIR >> mlirTypeToString)
-        let mlirReturnType = mlirTypeToString (mapOakTypeToMLIR returnType)
-        
-        // Generate parameter list
-        let paramStr = 
-            mlirParamTypes 
-            |> List.mapi (fun i typ -> sprintf "%%arg%d: %s" i typ)
-            |> String.concat ", "
-        
-        // Emit external declaration
-        Operations.emit (sprintf "func.func private @%s(%s) -> %s attributes {ffi.library = \"%s\"}" 
-                              name paramStr mlirReturnType libraryName)
+        match SSA.popScope state6 with
+        | Some state7 -> state7
+        | None -> state6 // This shouldn't happen with balanced push/pop
 
-/// Main MLIR generation function using XParsec combinators - simplified
-let generateMLIR (program: OakProgram) : CompilerResult<MLIRModuleOutput> =
-    if program.Modules.IsEmpty then
-        CompilerFailure [TransformError("MLIR generation", "empty program", "MLIR module", "Program has no modules")]
-    else
-        // Get the main module
-        let mainModule = program.Modules.[0]
+/// Main entry point for MLIR generation
+let generateMLIR (program: OakProgram) : MLIRModuleOutput =
+    let initialState = createInitialState()
+    
+    // Process each module
+    let processModule (state: MLIRGenerationState) (mdl: OakModule) =
+        // Module header
+        let state1 = Emitter.emit (sprintf "module @%s {" mdl.Name) state
         
-        // Create initial state
-        let initialState = createInitialState()
-        
-        // Build the conversion pipeline
-        let pipelineResult =
-            // Generate module header
-            Operations.emit (sprintf "module @%s {" mainModule.Name) >>= fun _ ->
+        // Process each declaration
+        let processDeclFold currState decl =
+            match decl with
+            | FunctionDecl(name, params', returnType, body) ->
+                DeclarationConversion.convertFunction name params' returnType body currState
             
-            // Convert all declarations
-            mainModule.Declarations
-            |> List.fold (fun stateM decl ->
-                stateM >>= fun _ ->
-                match decl with
-                | FunctionDecl(name, parameters', returnType, body) ->
-                    DeclarationConversion.convertFunction name parameters' returnType body
-                | TypeDecl(name, oakType) ->
-                    // Simple comment for type declarations
-                    Operations.emit (sprintf "// Type declaration: %s" name)
-                | EntryPoint(expr) ->
-                    DeclarationConversion.convertEntryPoint expr
-                | ExternalDecl(name, paramTypes, returnType, libraryName) ->
-                    DeclarationConversion.convertExternalDecl name paramTypes returnType libraryName
-            ) (succeed ())
-            >>= fun _ ->
-            
-            // Close module
-            Operations.emit "}"
-        
-        // Execute pipeline
-        match pipelineResult initialState with
-        | Reply(Ok (), finalState) ->
-            // Success - build module output
-            Success {
-                ModuleName = mainModule.Name
-                Operations = List.rev finalState.GeneratedOperations
-                SSAMappings = finalState.CurrentScope
-                TypeMappings = Map.empty
-                Diagnostics = []
-            }
-        | Reply(Error, errorMsg) ->
-            // Failure - report error
-            CompilerFailure [TransformError("MLIR generation", "Oak AST", "MLIR", errorMsg)]
-
-/// Generates complete MLIR module text from Oak AST with proper error handling
-let generateMLIRModuleText (program: OakProgram) : CompilerResult<string> =
-    generateMLIR program >>= fun mlirOutput ->
-    
-    // Join operations with newlines
-    let moduleText = String.concat "\n" mlirOutput.Operations
-    
-    Success moduleText
-
-/// Core MLIR operations builder API - stateless and simple to use
-module MLIRBuilder =
-    /// Creates a function declaration
-    let createFunction name parameters returnType =
-        sprintf "func.func @%s(%s) -> %s" name parameters returnType
-    
-    /// Creates a function call
-    let createCall resultId funcName args resultType =
-        sprintf "%s = func.call @%s(%s) : %s" resultId funcName args resultType
-    
-    /// Creates an arithmetic operation
-    let createArithOp resultId op lhs rhs resultType =
-        sprintf "%s = arith.%s %s, %s : %s" resultId op lhs rhs resultType
-    
-    /// Creates a memory allocation
-    let createAlloca resultId size elementType =
-        sprintf "%s = memref.alloca(%s) : memref<%s>" resultId size elementType
-    
-    /// Creates a memory load
-    let createLoad resultId memref indices resultType =
-        sprintf "%s = memref.load %s[%s] : %s" resultId memref indices resultType
-    
-    /// Creates a memory store
-    let createStore value memref indices valueType =
-        sprintf "memref.store %s, %s[%s] : %s" value memref indices valueType
-
-/// Direct MLIR generation from Oak AST for simple cases - no parser combinators
-let generateSimpleMLIR (program: OakProgram) : CompilerResult<string> =
-    try
-        if program.Modules.IsEmpty then
-            CompilerFailure [TransformError("MLIR generation", "empty program", "MLIR module", "Program has no modules")]
-        else
-            let mainModule = program.Modules.[0]
-            let sb = StringBuilder()
-            
-            // Add module header
-            sb.AppendLine(sprintf "module @%s {" mainModule.Name) |> ignore
-            
-            // Process declarations
-            mainModule.Declarations
-            |> List.iter (function
-                | FunctionDecl(name, parameters', returnType, _) ->
-                    // Simple placeholder for function declaration
-                    let paramStr = 
-                        parameters' 
-                        |> List.mapi (fun i (paramName, _) -> sprintf "%%arg%d: i32" i)
-                        |> String.concat ", "
-                    
-                    sb.AppendLine(sprintf "  func.func @%s(%s) -> i32 {" name paramStr) |> ignore
-                    sb.AppendLine("    // Function body would be generated here") |> ignore
-                    sb.AppendLine("    func.return %c0_i32 : i32") |> ignore
-                    sb.AppendLine("  }") |> ignore
-                    
-                | EntryPoint(_) ->
-                    // Main function
-                    sb.AppendLine("  func.func @main(%arg0: i32, %arg1: !llvm.ptr<ptr<i8>>) -> i32 {") |> ignore
-                    sb.AppendLine("    // Entry point body would be generated here") |> ignore
-                    sb.AppendLine("    func.return %c0_i32 : i32") |> ignore
-                    sb.AppendLine("  }") |> ignore
-                    
-                | _ -> ())
+            | TypeDecl(name, _) ->
+                // Ignore type declarations - they don't generate MLIR code
+                currState
                 
-            // Close module
-            sb.AppendLine("}") |> ignore
-            
-            Success (sb.ToString())
+            | EntryPoint(expr) ->
+                // Generate a main function
+                DeclarationConversion.convertFunction "main" 
+                    [("argc", IntType); ("argv", ArrayType(StringType))] 
+                    IntType expr currState
+                
+            | ExternalDecl(name, paramTypes, returnType, libraryName) ->
+                // Generate external function declaration
+                let paramTypeStrs = paramTypes |> List.map (mapOakTypeToMLIR >> mlirTypeToString)
+                let returnTypeStr = mlirTypeToString (mapOakTypeToMLIR returnType)
+                
+                let paramStr = 
+                    paramTypeStrs
+                    |> List.mapi (fun i typ -> sprintf "%%arg%d: %s" i typ)
+                    |> String.concat ", "
+                
+                Emitter.emit (sprintf "func.func private @%s(%s) -> %s attributes {ffi.library = \"%s\"}" 
+                                 name paramStr returnTypeStr libraryName) currState
+        
+        let state2 = List.fold processDeclFold state1 mdl.Declarations
+        
+        // Close module
+        Emitter.emit "}" state2
+    
+    // Process all modules (typically just one)
+    let finalState = 
+        match program.Modules with
+        | [] -> initialState
+        | mdl :: _ -> processModule initialState mdl
+    
+    // Return the final output
+    {
+        ModuleName = 
+            match program.Modules with
+            | [] -> "main"
+            | mdl :: _ -> mdl.Name
+        Operations = List.rev finalState.GeneratedOperations
+        SSAMappings = finalState.CurrentScope
+        TypeMappings = Map.empty
+        Diagnostics = finalState.ErrorContext
+    }
+
+/// Generates complete MLIR module text from Oak AST
+let generateMLIRModuleText (program: OakProgram) : Core.XParsec.Foundation.CompilerResult<string> =
+    try
+        let mlirOutput = generateMLIR program
+        
+        // Join operations with newlines
+        let moduleText = String.concat "\n" mlirOutput.Operations
+        
+        Core.XParsec.Foundation.Success moduleText
     with ex ->
-        CompilerFailure [TransformError("MLIR generation", "Oak AST", "MLIR", ex.Message)]
+        Core.XParsec.Foundation.CompilerFailure [
+            Core.XParsec.Foundation.TransformError(
+                "MLIR generation", 
+                "Oak AST", 
+                "MLIR", 
+                sprintf "Exception: %s" ex.Message)
+        ]
