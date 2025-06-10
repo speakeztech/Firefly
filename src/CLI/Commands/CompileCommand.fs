@@ -158,7 +158,7 @@ let compile (args: ParseResults<CompileArgs>) =
                 // Execute complete XParsec-based translation pipeline
                 if verbose then printfn "Starting XParsec-based compilation pipeline..."
                 
-                match translateF#ToMLIRWithDiagnostics inputPath sourceCode with
+                match translateFsToMLIRWithDiagnostics inputPath sourceCode with
                 | CompilerFailure pipelineErrors ->
                     printfn "Compilation pipeline failed:"
                     pipelineErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
@@ -314,7 +314,7 @@ let compileWithFullDiagnostics (inputPath: string) (outputPath: string) (target:
         | Success config ->
             try
                 let sourceCode = File.ReadAllText(inputPath)
-                match translateF#ToMLIRWithDiagnostics inputPath sourceCode with
+                match translateFsToMLIRWithDiagnostics inputPath sourceCode with
                 | CompilerFailure pipelineErrors ->
                     printfn "XParsec compilation pipeline failed:"
                     pipelineErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))

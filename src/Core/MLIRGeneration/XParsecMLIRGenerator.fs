@@ -179,7 +179,7 @@ module OperationEmission =
 /// I/O operation conversion using XParsec
 module IOOperationConversion =
 
-	/// Converts ReadLine operation
+    /// Converts ReadLine operation
     let convertReadLine (bufferName: string option) : MLIRParser<string> =
         Operations.declareExternal "scanf" "(memref<?xi8>, ...) -> i32" >>= fun _ ->
         Operations.registerString "%s" >>= fun formatGlobal ->

@@ -337,12 +337,12 @@ let executeCompleteTranslationPipeline (sourceFile: string) (sourceCode: string)
             CompilerFailure [TransformError("pipeline execution", "F# source", "MLIR", errorMsg)]
 
 /// Entry point for translation with comprehensive error reporting
-let translateF#ToMLIR (sourceFile: string) (sourceCode: string) : CompilerResult<string> =
+let translateFsToMLIR (sourceFile: string) (sourceCode: string) : CompilerResult<string> =
     executeCompleteTranslationPipeline sourceFile sourceCode >>= fun pipelineOutput ->
     Success pipelineOutput.FinalMLIR
 
 /// Entry point for translation with full pipeline output for debugging
-let translateF#ToMLIRWithDiagnostics (sourceFile: string) (sourceCode: string) : CompilerResult<TranslationPipelineOutput> =
+let translateFsToMLIRWithDiagnostics (sourceFile: string) (sourceCode: string) : CompilerResult<TranslationPipelineOutput> =
     executeCompleteTranslationPipeline sourceFile sourceCode
 
 /// Validates a complete translation pipeline result

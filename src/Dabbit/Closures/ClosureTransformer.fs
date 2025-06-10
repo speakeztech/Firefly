@@ -106,10 +106,10 @@ module ClosureAnalysisParsers =
             succeed Set.empty
     
     /// Pushes a new scope with parameters
-    and pushScopeWithParams (params: Set<string>) : Parser<unit, ClosureAnalysisState> =
+    and pushScopeWithParams (parameters: Set<string>) : Parser<unit, ClosureAnalysisState> =
         fun state ->
             let newScopeStack = state.CurrentScope :: state.ScopeStack
-            let newCurrentScope = Set.union state.CurrentScope params
+            let newCurrentScope = Set.union state.CurrentScope parameters
             let newState = { 
                 state with 
                     CurrentScope = newCurrentScope

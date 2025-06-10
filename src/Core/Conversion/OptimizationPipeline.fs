@@ -74,13 +74,13 @@ module LLVMIRParsers =
         typeAnnotation >>= fun returnType ->
         ws >>= fun _ ->
         functionName >>= fun funcName ->
-        between (pchar '(') (pchar ')') (sepBy (typeAnnotation .>> ws .>> ssaValue) (pchar ',')) >>= fun params ->
+        between (pchar '(') (pchar ')') (sepBy (typeAnnotation .>> ws .>> ssaValue) (pchar ',')) >>= fun parameters ->
         ws >>= fun _ ->
         pchar '{' >>= fun _ ->
         many (satisfy (fun c -> c <> '}')) >>= fun bodyChars ->
         pchar '}' >>= fun _ ->
         let bodyText = String(Array.ofList bodyChars)
-        succeed (funcName, [returnType], params |> List.map fst, [bodyText])
+        succeed (funcName, [returnType], parameters |> List.map fst, [bodyText])
         |> withErrorContext "LLVM function parsing"
     
     /// Parses LLVM basic block
