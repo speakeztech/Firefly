@@ -91,13 +91,13 @@ module StateManagement =
         )
     
     /// Creates a parser that pushes a new scope
-    let pushScope : Parser<unit, char, FireflyState, 'Input, 'InputSlice> =
+    let pushScope() : Parser<unit, char, FireflyState, 'Input, 'InputSlice> =
         updateState (fun state ->
             { state with ScopeStack = [] :: state.ScopeStack }
         )
     
     /// Creates a parser that pops the current scope
-    let popScope : Parser<unit, char, FireflyState, 'Input, 'InputSlice> =
+    let popScope() : Parser<unit, char, FireflyState, 'Input, 'InputSlice> =
         updateState (fun state ->
             match state.ScopeStack with
             | _ :: rest -> { state with ScopeStack = rest }
@@ -113,18 +113,30 @@ module StateManagement =
 /// String level parsers
 module StringParsers =
     /// Parse an identifier
-    let identifier : Parser<string, char, FireflyState, 'Input, 'InputSlice> =
+    let identifier() : Parser<string, char, FireflyState, 'Input, 'InputSlice> =
         let isIdFirst c = Char.IsLetter c || c = '_'
         let isIdRest c = Char.IsLetterOrDigit c || c = '_'
         
-        satisfyL isIdFirst "Expected identifier" >>= fun first ->
-        many (satisfyL isIdRest "Expected identifier character") >>= fun rest ->
-        let idChars = first :: rest
-        preturn (String(Array.ofList idChars))
+        satisfy isIdFirst >>= fun first ->
+        many (satisfy isIdRest) >>= fun rest ->
+        let sb = System.Text.StringBuilder()
+        sb.Append(first) |> ignore
+        for c in rest do
+            sb.Append(c) |> ignore
+        preturn (sb.ToString())
     
     /// Parse a qualified identifier (Module.Name)
-    let qualifiedIdentifier : Parser<string list, char, FireflyState, 'Input, 'InputSlice> =
-        sepBy1 identifier (pchar '.')
+    let qualifiedIdentifier() : Parser<string list, char, FireflyState, 'Input, 'InputSlice> =
+        let dot = satisfy (fun c -> c = '.')
+        
+        // We need to handle the struct tuple return type carefully
+        sepBy1 (identifier()) dot >>= fun result ->
+            // Extract the identifiers from the struct tuple
+            let values = 
+                let struct(ids, _) = result
+                // Convert ImmutableArray to list
+                Seq.toList ids
+            preturn values
 
 /// Result helpers for Firefly compiler
 module ResultHelpers =
