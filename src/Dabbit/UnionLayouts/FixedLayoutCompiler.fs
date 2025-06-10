@@ -1,18 +1,20 @@
 ﻿module Dabbit.UnionLayouts.FixedLayoutCompiler
 
 open System
-open Core.XParsec.Foundation
+open XParsec
+open Firefly.Core.XParsec.Foundation
 open Dabbit.Parsing.OakAst
 
-/// Layout analysis for tracking union transformations
-type LayoutAnalysisContext = {
+/// Layout analysis state for tracking union transformations
+type LayoutAnalysisState = {
     UnionLayouts: Map<string, UnionLayout>
     TypeMappings: Map<string, OakType>
     LayoutStrategies: Map<string, UnionLayoutStrategy>
     TransformationHistory: (string * string) list
+    ErrorContext: string list
 }
 
-/// Union layout strategy with optimization information
+/// Union layout strategy with complete optimization information
 type UnionLayoutStrategy =
     | TaggedUnion of tagSize: int * maxPayloadSize: int * alignment: int
     | EnumOptimization of enumValues: int list * underlyingType: OakType
@@ -31,146 +33,175 @@ type UnionLayout = {
     IsZeroAllocation: bool
 }
 
-/// Type size calculation using simplified logic
+/// XParsec parser type for layout analysis
+type LayoutParser<'T> = LayoutAnalysisState -> Result<'T * LayoutAnalysisState, string>
+
+/// Parser combinators for layout analysis
+module LayoutParsers =
+    
+    /// Returns a successful result with the given value
+    let succeed (value: 'T) : LayoutParser<'T> =
+        fun state -> Ok(value, state)
+    
+    /// Returns a failed result with the given error message
+    let fail (message: string) : LayoutParser<'T> =
+        fun state -> Error message
+    
+    /// Monadic bind for parser combinators
+    let bind (parser: LayoutParser<'A>) (f: 'A -> LayoutParser<'B>) : LayoutParser<'B> =
+        fun state ->
+            match parser state with
+            | Ok(value, newState) -> f value newState
+            | Error msg -> Error msg
+    
+    /// Infix operator for bind
+    let (>>=) = bind
+    
+    /// Maps a function over the result of a parser
+    let map (f: 'A -> 'B) (parser: LayoutParser<'A>) : LayoutParser<'B> =
+        parser >>= (fun value -> succeed (f value))
+    
+    /// Infix operator for map
+    let (|>>) parser f = map f parser
+    
+    /// Adds error context to a parser
+    let withErrorContext (context: string) (parser: LayoutParser<'T>) : LayoutParser<'T> =
+        fun state ->
+            match parser state with
+            | Ok result -> Ok result
+            | Error msg -> Error (sprintf "%s: %s" context msg)
+
+/// Type size calculation using parser combinators
 module TypeSizeCalculation =
     
     /// Calculates the size of an Oak type in bytes
-    let calculateTypeSize (oakType: OakType) : CompilerResult<int> =
+    let rec calculateTypeSize (oakType: OakType) : LayoutParser<int> =
         match oakType with
-        | IntType -> Success 4
-        | FloatType -> Success 4  
-        | BoolType -> Success 1
-        | StringType -> Success 8  // Pointer size
-        | UnitType -> Success 0
-        | ArrayType _ -> Success 8  // Pointer size
-        | FunctionType(_, _) -> Success 8  // Function pointer
+        | IntType -> LayoutParsers.succeed 4
+        | FloatType -> LayoutParsers.succeed 4  
+        | BoolType -> LayoutParsers.succeed 1
+        | StringType -> LayoutParsers.succeed 8  // Pointer size
+        | UnitType -> LayoutParsers.succeed 0
+        | ArrayType _ -> LayoutParsers.succeed 8  // Pointer size
+        | FunctionType(_, _) -> LayoutParsers.succeed 8  // Function pointer
         | StructType fields ->
-            fields
-            |> List.map (snd >> calculateTypeSize)
-            |> List.fold (fun acc sizeResult ->
-                match acc, sizeResult with
-                | Success accSize, Success fieldSize -> Success (accSize + fieldSize)
-                | CompilerFailure errors, Success _ -> CompilerFailure errors
-                | Success _, CompilerFailure errors -> CompilerFailure errors
-                | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-            ) (Success 0)
+            let rec calculateFieldSizes acc fields =
+                match fields with
+                | [] -> LayoutParsers.succeed acc
+                | (_, fieldType) :: rest ->
+                    calculateTypeSize fieldType >>= fun fieldSize ->
+                    calculateFieldSizes (acc + fieldSize) rest
+            calculateFieldSizes 0 fields
         | UnionType cases ->
             // For unanalyzed unions, estimate conservatively
-            cases
-            |> List.map (fun (_, optType) ->
-                match optType with
-                | Some t -> calculateTypeSize t
-                | None -> Success 0)
-            |> List.fold (fun acc sizeResult ->
-                match acc, sizeResult with
-                | Success accSize, Success caseSize -> Success (max accSize caseSize)
-                | CompilerFailure errors, Success _ -> CompilerFailure errors
-                | Success _, CompilerFailure errors -> CompilerFailure errors
-                | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-            ) (Success 0)
-            |> fun maxResult ->
-                match maxResult with
-                | Success maxCaseSize -> Success (1 + maxCaseSize)  // Tag + largest payload
-                | CompilerFailure errors -> CompilerFailure errors
+            let rec calculateCaseSizes maxSize cases =
+                match cases with
+                | [] -> LayoutParsers.succeed maxSize
+                | (_, optType) :: rest ->
+                    match optType with
+                    | Some t -> 
+                        calculateTypeSize t >>= fun caseSize ->
+                        calculateCaseSizes (max maxSize caseSize) rest
+                    | None -> calculateCaseSizes maxSize rest
+            calculateCaseSizes 0 cases >>= fun maxCaseSize ->
+            LayoutParsers.succeed (1 + maxCaseSize)  // Tag + largest payload
+        |> LayoutParsers.withErrorContext "type size calculation"
     
     /// Calculates the alignment requirement for an Oak type
-    let calculateTypeAlignment (oakType: OakType) : CompilerResult<int> =
+    let rec calculateTypeAlignment (oakType: OakType) : LayoutParser<int> =
         match oakType with
-        | IntType -> Success 4
-        | FloatType -> Success 4
-        | BoolType -> Success 1
-        | StringType -> Success 8
-        | UnitType -> Success 1
-        | ArrayType _ -> Success 8
-        | FunctionType(_, _) -> Success 8
+        | IntType -> LayoutParsers.succeed 4
+        | FloatType -> LayoutParsers.succeed 4
+        | BoolType -> LayoutParsers.succeed 1
+        | StringType -> LayoutParsers.succeed 8
+        | UnitType -> LayoutParsers.succeed 1
+        | ArrayType _ -> LayoutParsers.succeed 8
+        | FunctionType(_, _) -> LayoutParsers.succeed 8
         | StructType fields ->
             if fields.IsEmpty then
-                Success 1
+                LayoutParsers.succeed 1
             else
-                fields
-                |> List.map (snd >> calculateTypeAlignment)
-                |> List.fold (fun acc alignResult ->
-                    match acc, alignResult with
-                    | Success accAlign, Success fieldAlign -> Success (max accAlign fieldAlign)
-                    | CompilerFailure errors, Success _ -> CompilerFailure errors
-                    | Success _, CompilerFailure errors -> CompilerFailure errors
-                    | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-                ) (Success 1)
-        | UnionType _ -> Success 8  // Conservative alignment
+                let rec calculateFieldAlignments maxAlign fields =
+                    match fields with
+                    | [] -> LayoutParsers.succeed maxAlign
+                    | (_, fieldType) :: rest ->
+                        calculateTypeAlignment fieldType >>= fun fieldAlign ->
+                        calculateFieldAlignments (max maxAlign fieldAlign) rest
+                calculateFieldAlignments 1 fields
+        | UnionType _ -> LayoutParsers.succeed 8  // Conservative alignment
+        |> LayoutParsers.withErrorContext "type alignment calculation"
 
-/// Layout strategy analysis
+/// Layout strategy analysis using parser combinators
 module LayoutStrategyAnalysis =
     
-    /// Analyzes union cases to determine optimal layout strategy
-    let analyzeUnionStrategy (name: string) (cases: (string * OakType option) list) : CompilerResult<UnionLayoutStrategy> =
-        if cases.IsEmpty then
-            CompilerFailure [CompilerError("layout analysis", "Empty unions are not supported", None)]
-        
-        elif cases.Length = 1 then
-            match cases.[0] with
-            | (_, Some caseType) ->
-                Success (SingleCase(caseType, true))
-            | (_, None) ->
-                Success (EnumOptimization([0], IntType))
-        
-        elif cases.Length = 2 then
-            match cases with
-            | [("None", None); ("Some", Some someType)] | [("Some", Some someType); ("None", None)] ->
-                Success (OptionOptimization(someType, true))
-            | _ ->
-                analyzeGeneralUnion name cases
-        
-        else
-            analyzeGeneralUnion name cases
+    /// State manipulation functions
+    let pushScopeWithParams (parameters: Set<string>) : LayoutParser<unit> =
+        fun state ->
+            Ok((), state)
+    
+    let popScope : LayoutParser<unit> =
+        fun state ->
+            Ok((), state)
+    
+    let bindVariable (varName: string) : LayoutParser<unit> =
+        fun state ->
+            Ok((), state)
     
     /// Analyzes a general union for layout strategy
-    and analyzeGeneralUnion (name: string) (cases: (string * OakType option) list) : CompilerResult<UnionLayoutStrategy> =
+    let analyzeGeneralUnion (name: string) (cases: (string * OakType option) list) : LayoutParser<UnionLayoutStrategy> =
         // Check if all cases are nullary (enum-like)
         let allNullary = cases |> List.forall (fun (_, optType) -> optType.IsNone)
         
         if allNullary then
             let enumValues = [0 .. cases.Length - 1]
             let underlyingType = 
-                if cases.Length <= 256 then IntType
+                if cases.Length <= 256 then IntType  // Could be optimized to BoolType for 2 cases, etc.
                 else IntType
-            Success (EnumOptimization(enumValues, underlyingType))
+            LayoutParsers.succeed (EnumOptimization(enumValues, underlyingType))
+            |> LayoutParsers.withErrorContext "enum union analysis"
         else
             // Calculate payload sizes for tagged union
-            cases
-            |> List.map (fun (_, optType) ->
-                match optType with
-                | Some t -> TypeSizeCalculation.calculateTypeSize t
-                | None -> Success 0)
-            |> List.fold (fun acc sizeResult ->
-                match acc, sizeResult with
-                | Success accSizes, Success size -> Success (size :: accSizes)
-                | CompilerFailure errors, Success _ -> CompilerFailure errors
-                | Success _, CompilerFailure errors -> CompilerFailure errors
-                | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-            ) (Success [])
-            |> fun payloadSizesResult ->
-                match payloadSizesResult with
-                | Success payloadSizes ->
-                    let maxPayloadSize = List.max (0 :: payloadSizes)
-                    let tagSize = 
-                        if cases.Length <= 256 then 1
-                        elif cases.Length <= 65536 then 2
-                        else 4
-                    
-                    let alignment = max tagSize (if maxPayloadSize > 0 then 8 else tagSize)
-                    Success (TaggedUnion(tagSize, maxPayloadSize, alignment))
-                | CompilerFailure errors -> CompilerFailure errors
+            let rec calculatePayloadSizes acc cases =
+                match cases with
+                | [] -> LayoutParsers.succeed acc
+                | (_, optType) :: rest ->
+                    match optType with
+                    | Some t -> 
+                        TypeSizeCalculation.calculateTypeSize t >>= fun size ->
+                        calculatePayloadSizes (size :: acc) rest
+                    | None -> calculatePayloadSizes (0 :: acc) rest
+            
+            calculatePayloadSizes [] cases >>= fun payloadSizes ->
+            
+            let maxPayloadSize = List.max (0 :: payloadSizes)
+            let tagSize = 
+                if cases.Length <= 256 then 1
+                elif cases.Length <= 65536 then 2
+                else 4
+            
+            let alignment = max tagSize (if maxPayloadSize > 0 then 8 else tagSize)
+            LayoutParsers.succeed (TaggedUnion(tagSize, maxPayloadSize, alignment))
+            |> LayoutParsers.withErrorContext "tagged union analysis"
+    
+    /// Records a layout strategy for a union type
+    let recordLayoutStrategy (name: string) (strategy: UnionLayoutStrategy) : LayoutParser<unit> =
+        fun state ->
+            let newState = { 
+                state with 
+                    LayoutStrategies = Map.add name strategy state.LayoutStrategies
+            }
+            Ok((), newState)
 
-/// Layout computation
+/// Layout computation using parser combinators
 module LayoutComputation =
     
     /// Computes the memory layout for a union based on its strategy
-    let computeUnionLayout (name: string) (strategy: UnionLayoutStrategy) (cases: (string * OakType option) list) : CompilerResult<UnionLayout> =
+    let computeUnionLayout (name: string) (strategy: UnionLayoutStrategy) (cases: (string * OakType option) list) : LayoutParser<UnionLayout> =
         match strategy with
         | SingleCase(caseType, isNewtype) ->
             TypeSizeCalculation.calculateTypeSize caseType >>= fun size ->
             TypeSizeCalculation.calculateTypeAlignment caseType >>= fun alignment ->
-            Success {
+            LayoutParsers.succeed {
                 Strategy = strategy
                 TotalSize = size
                 Alignment = alignment
@@ -187,7 +218,7 @@ module LayoutComputation =
                 cases 
                 |> List.mapi (fun i (caseName, _) -> (caseName, i))
                 |> Map.ofList
-            Success {
+            LayoutParsers.succeed {
                 Strategy = strategy
                 TotalSize = size
                 Alignment = alignment
@@ -204,7 +235,7 @@ module LayoutComputation =
                 cases 
                 |> List.mapi (fun i (caseName, _) -> (caseName, i))
                 |> Map.ofList
-            Success {
+            LayoutParsers.succeed {
                 Strategy = strategy
                 TotalSize = size
                 Alignment = alignment
@@ -222,7 +253,7 @@ module LayoutComputation =
                 cases 
                 |> List.mapi (fun i (caseName, _) -> (caseName, i))
                 |> Map.ofList
-            Success {
+            LayoutParsers.succeed {
                 Strategy = strategy
                 TotalSize = totalSize
                 Alignment = alignment
@@ -233,139 +264,187 @@ module LayoutComputation =
             }
         
         | EmptyUnion(errorMsg) ->
-            CompilerFailure [CompilerError("layout computation", errorMsg, None)]
+            LayoutParsers.fail errorMsg
+        |> LayoutParsers.withErrorContext (sprintf "layout computation for union '%s'" name)
+    
+    /// Records a computed layout
+    let recordUnionLayout (name: string) (layout: UnionLayout) : LayoutParser<unit> =
+        fun state ->
+            let newState = { 
+                state with 
+                    UnionLayouts = Map.add name layout state.UnionLayouts
+            }
+            Ok((), newState)
 
-/// Type transformation
-module TypeTransformation =
+/// Type transformation using parser combinators
+module TypeTransformationParsers =
     
     /// Transforms a union type declaration to use fixed layout
-    let transformUnionTypeDeclaration (name: string) (cases: (string * OakType option) list) : CompilerResult<OakType> =
+    let transformUnionTypeDeclaration (name: string) (cases: (string * OakType option) list) : LayoutParser<OakType> =
         LayoutStrategyAnalysis.analyzeUnionStrategy name cases >>= fun strategy ->
+        LayoutStrategyAnalysis.recordLayoutStrategy name strategy >>= fun _ ->
         LayoutComputation.computeUnionLayout name strategy cases >>= fun layout ->
+        LayoutComputation.recordUnionLayout name layout >>= fun _ ->
         
         // Transform to appropriate target type based on strategy
         match strategy with
         | SingleCase(caseType, _) ->
-            Success caseType
+            LayoutParsers.succeed caseType
         
         | OptionOptimization(someType, _) ->
-            Success someType  // Special handling in codegen
+            LayoutParsers.succeed someType  // Special handling in codegen
         
         | EnumOptimization(_, underlyingType) ->
-            Success underlyingType
+            LayoutParsers.succeed underlyingType
         
         | TaggedUnion(tagSize, payloadSize, _) ->
             // Create struct with tag and payload
             let tagType = IntType  // Could be optimized based on tagSize
             let payloadType = ArrayType(IntType)  // Byte array representation
-            Success (StructType [("tag", tagType); ("payload", payloadType)])
+            LayoutParsers.succeed (StructType [("tag", tagType); ("payload", payloadType)])
         
         | EmptyUnion(errorMsg) ->
-            CompilerFailure [CompilerError("union transformation", errorMsg, None)]
+            LayoutParsers.fail errorMsg
+        |> LayoutParsers.withErrorContext (sprintf "union type transformation '%s'" name)
+    
+    /// Records a type mapping for later reference
+    let recordTypeMapping (originalName: string) (transformedType: OakType) : LayoutParser<unit> =
+        fun state ->
+            let newState = { 
+                state with 
+                    TypeMappings = Map.add originalName transformedType state.TypeMappings
+                    TransformationHistory = (originalName, transformedType.ToString()) :: state.TransformationHistory
+            }
+            Ok((), newState)
 
 /// Expression transformation using layout information
-module ExpressionTransformation =
+module ExpressionLayoutTransformation =
     
-    /// Transforms expressions to use fixed layouts (simplified for POC)
-    let rec transformExpressionWithLayouts (expr: OakExpression) : CompilerResult<OakExpression> =
+    /// Transforms expressions to use fixed layouts (placeholder for now)
+    let rec transformExpressionWithLayouts (expr: OakExpression) : LayoutParser<OakExpression> =
         match expr with
         | Variable name ->
-            Success expr  // Variable references unchanged
+            LayoutParsers.succeed expr  // Variable references unchanged
         
         | Application(func, args) ->
             transformExpressionWithLayouts func >>= fun transformedFunc ->
-            args
-            |> List.map transformExpressionWithLayouts
-            |> List.fold (fun acc argResult ->
-                match acc, argResult with
-                | Success accArgs, Success transformedArg -> Success (transformedArg :: accArgs)
-                | CompilerFailure errors, Success _ -> CompilerFailure errors
-                | Success _, CompilerFailure errors -> CompilerFailure errors
-                | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-            ) (Success [])
-            >>= fun transformedArgs ->
-            Success (Application(transformedFunc, List.rev transformedArgs))
+            transformArguments args >>= fun transformedArgs ->
+            LayoutParsers.succeed (Application(transformedFunc, transformedArgs))
         
         | Let(name, value, body) ->
             transformExpressionWithLayouts value >>= fun transformedValue ->
             transformExpressionWithLayouts body >>= fun transformedBody ->
-            Success (Let(name, transformedValue, transformedBody))
+            LayoutParsers.succeed (Let(name, transformedValue, transformedBody))
         
         | IfThenElse(cond, thenExpr, elseExpr) ->
             transformExpressionWithLayouts cond >>= fun transformedCond ->
             transformExpressionWithLayouts thenExpr >>= fun transformedThen ->
             transformExpressionWithLayouts elseExpr >>= fun transformedElse ->
-            Success (IfThenElse(transformedCond, transformedThen, transformedElse))
+            LayoutParsers.succeed (IfThenElse(transformedCond, transformedThen, transformedElse))
         
         | Sequential(first, second) ->
             transformExpressionWithLayouts first >>= fun transformedFirst ->
             transformExpressionWithLayouts second >>= fun transformedSecond ->
-            Success (Sequential(transformedFirst, transformedSecond))
+            LayoutParsers.succeed (Sequential(transformedFirst, transformedSecond))
         
         | FieldAccess(target, fieldName) ->
             transformExpressionWithLayouts target >>= fun transformedTarget ->
-            Success (FieldAccess(transformedTarget, fieldName))
+            LayoutParsers.succeed (FieldAccess(transformedTarget, fieldName))
         
         | MethodCall(target, methodName, args) ->
             transformExpressionWithLayouts target >>= fun transformedTarget ->
-            args
-            |> List.map transformExpressionWithLayouts
-            |> List.fold (fun acc argResult ->
-                match acc, argResult with
-                | Success accArgs, Success transformedArg -> Success (transformedArg :: accArgs)
-                | CompilerFailure errors, Success _ -> CompilerFailure errors
-                | Success _, CompilerFailure errors -> CompilerFailure errors
-                | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-            ) (Success [])
-            >>= fun transformedArgs ->
-            Success (MethodCall(transformedTarget, methodName, List.rev transformedArgs))
+            transformArguments args >>= fun transformedArgs ->
+            LayoutParsers.succeed (MethodCall(transformedTarget, methodName, transformedArgs))
         
         | Lambda(parameters, body) ->
             transformExpressionWithLayouts body >>= fun transformedBody ->
-            Success (Lambda(parameters, transformedBody))
+            LayoutParsers.succeed (Lambda(parameters, transformedBody))
         
         | Literal _ ->
-            Success expr
+            LayoutParsers.succeed expr
         
         | IOOperation(ioType, args) ->
-            args
-            |> List.map transformExpressionWithLayouts
-            |> List.fold (fun acc argResult ->
-                match acc, argResult with
-                | Success accArgs, Success transformedArg -> Success (transformedArg :: accArgs)
-                | CompilerFailure errors, Success _ -> CompilerFailure errors
-                | Success _, CompilerFailure errors -> CompilerFailure errors
-                | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-            ) (Success [])
-            >>= fun transformedArgs ->
-            Success (IOOperation(ioType, List.rev transformedArgs))
+            transformArguments args >>= fun transformedArgs ->
+            LayoutParsers.succeed (IOOperation(ioType, transformedArgs))
+    
+    and transformArguments (args: OakExpression list) : LayoutParser<OakExpression list> =
+        let rec transformArgs acc remaining =
+            match remaining with
+            | [] -> LayoutParsers.succeed (List.rev acc)
+            | arg :: rest ->
+                transformExpressionWithLayouts arg >>= fun transformedArg ->
+                transformArgs (transformedArg :: acc) rest
+        transformArgs [] args
 
-/// Declaration transformation
-module DeclarationTransformation =
+/// Declaration transformation using parser combinators
+module DeclarationLayoutTransformation =
     
     /// Transforms a declaration to use fixed layouts
-    let transformDeclarationWithLayouts (decl: OakDeclaration) : CompilerResult<OakDeclaration> =
+    let transformDeclarationWithLayouts (decl: OakDeclaration) : LayoutParser<OakDeclaration list> =
         match decl with
         | FunctionDecl(name, parameters, returnType, body) ->
-            ExpressionTransformation.transformExpressionWithLayouts body >>= fun transformedBody ->
-            Success (FunctionDecl(name, parameters, returnType, transformedBody))
+            ExpressionLayoutTransformation.transformExpressionWithLayouts body >>= fun transformedBody ->
+            LayoutParsers.succeed [FunctionDecl(name, parameters, returnType, transformedBody)]
         
         | EntryPoint(expr) ->
-            ExpressionTransformation.transformExpressionWithLayouts expr >>= fun transformedExpr ->
-            Success (EntryPoint(transformedExpr))
+            ExpressionLayoutTransformation.transformExpressionWithLayouts expr >>= fun transformedExpr ->
+            LayoutParsers.succeed [EntryPoint(transformedExpr)]
         
         | TypeDecl(name, oakType) ->
             match oakType with
             | UnionType cases ->
-                TypeTransformation.transformUnionTypeDeclaration name cases >>= fun transformedType ->
-                Success (TypeDecl(name, transformedType))
+                TypeTransformationParsers.transformUnionTypeDeclaration name cases >>= fun transformedType ->
+                TypeTransformationParsers.recordTypeMapping name transformedType >>= fun _ ->
+                LayoutParsers.succeed [TypeDecl(name, transformedType)]
             | _ ->
-                Success decl
-                
+                LayoutParsers.succeed [decl]
         | ExternalDecl(_, _, _, _) ->
-            Success decl
+            LayoutParsers.succeed [decl]
+        |> LayoutParsers.withErrorContext (sprintf "declaration transformation with layouts '%s'" (match decl with FunctionDecl(n,_,_,_) -> n | TypeDecl(n,_) -> n | EntryPoint(_) -> "__entry__" | ExternalDecl(n,_,_,_) -> n))
 
-/// Layout validation
+/// Module transformation using parser combinators
+module ModuleTransformationParsers =
+    
+    /// Builds global scope from function declarations
+    let buildGlobalScope (declarations: OakDeclaration list) : Set<string> =
+        declarations
+        |> List.choose (function
+            | FunctionDecl(name, _, _, _) -> Some name
+            | _ -> None)
+        |> Set.ofList
+    
+    /// Transforms a complete module
+    let transformModule (module': OakModule) : LayoutParser<OakModule> =
+        let globalScope = buildGlobalScope module'.Declarations
+        
+        fun state ->
+            let initialState = { 
+                state with 
+                    UnionLayouts = Map.empty
+                    TypeMappings = Map.empty
+                    LayoutStrategies = Map.empty
+                    TransformationHistory = []
+                    ErrorContext = []
+            }
+            
+            // Transform all declarations
+            let rec transformAllDeclarations acc remaining state =
+                match remaining with
+                | [] -> Ok(List.rev acc, state)
+                | decl :: rest ->
+                    match DeclarationLayoutTransformation.transformDeclarationWithLayouts decl state with
+                    | Ok(transformedDecls, newState) ->
+                        transformAllDeclarations (transformedDecls @ acc) rest newState
+                    | Error msg -> Error msg
+            
+            match transformAllDeclarations [] module'.Declarations initialState with
+            | Ok(transformedDeclarations, finalState) ->
+                let transformedModule = { module' with Declarations = transformedDeclarations }
+                Ok(transformedModule, finalState)
+            | Error msg -> Error msg
+        |> LayoutParsers.withErrorContext (sprintf "module transformation '%s'" module'.Name)
+
+/// Closure elimination validation
 module LayoutValidation =
     
     /// Validates that a layout is zero-allocation
@@ -373,52 +452,73 @@ module LayoutValidation =
         if layout.IsZeroAllocation then
             Success ()
         else
-            CompilerFailure [CompilerError("layout validation", "Layout may cause heap allocations", None)]
+            CompilerFailure [CompilerError("layout validation", "Layout may cause heap allocations", Some "computed layout")]
+    
+    /// Validates that all computed layouts are zero-allocation
+    let validateAllLayoutsZeroAllocation : LayoutParser<unit> =
+        fun state ->
+            let validationResults = 
+                state.UnionLayouts
+                |> Map.toList
+                |> List.map (fun (name, layout) ->
+                    validateZeroAllocationLayout layout)
+            
+            let hasErrors = 
+                validationResults
+                |> List.exists (function CompilerFailure _ -> true | Success _ -> false)
+            
+            if hasErrors then
+                Error "Some layouts failed zero-allocation validation"
+            else
+                Ok((), state)
 
-/// Main fixed layout compilation entry point
+/// Main fixed layout compilation entry point - NO FALLBACKS ALLOWED
 let compileFixedLayouts (program: OakProgram) : CompilerResult<OakProgram> =
     if program.Modules.IsEmpty then
-        CompilerFailure [CompilerError("fixed layout compilation", "Program must contain at least one module", None)]
+        CompilerFailure [CompilerError("fixed layout compilation", "Program must contain at least one module", Some "empty program")]
     else
-        // Transform all modules
-        let transformAllModules (modules: OakModule list) : CompilerResult<OakModule list> =
-            modules
-            |> List.map (fun module' ->
-                // Transform all declarations in the module
-                let transformModuleDeclarations (declarations: OakDeclaration list) : CompilerResult<OakDeclaration list> =
-                    declarations
-                    |> List.map DeclarationTransformation.transformDeclarationWithLayouts
-                    |> List.fold (fun acc result ->
-                        match acc, result with
-                        | Success decls, Success decl -> Success (decl :: decls)
-                        | CompilerFailure errors, Success _ -> CompilerFailure errors
-                        | Success _, CompilerFailure errors -> CompilerFailure errors
-                        | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-                    ) (Success [])
-                    |> fun result ->
-                        match result with
-                        | Success decls -> Success (List.rev decls)
-                        | CompilerFailure errors -> CompilerFailure errors
-                
-                transformModuleDeclarations module'.Declarations >>= fun transformedDeclarations ->
-                Success { module' with Declarations = transformedDeclarations })
-            |> List.fold (fun acc result ->
-                match acc, result with
-                | Success modules, Success module' -> Success (module' :: modules)
-                | CompilerFailure errors, Success _ -> CompilerFailure errors
-                | Success _, CompilerFailure errors -> CompilerFailure errors
-                | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-            ) (Success [])
-            |> fun result ->
-                match result with
-                | Success modules -> Success (List.rev modules)
-                | CompilerFailure errors -> CompilerFailure errors
+        let initialState = {
+            UnionLayouts = Map.empty
+            TypeMappings = Map.empty
+            LayoutStrategies = Map.empty
+            TransformationHistory = []
+            ErrorContext = []
+        }
         
-        transformAllModules program.Modules >>= fun transformedModules ->
-        Success { program with Modules = transformedModules }
+        // Transform all modules
+        let rec transformAllModules acc remaining state =
+            match remaining with
+            | [] -> Ok(List.rev acc, state)
+            | module' :: rest ->
+                match ModuleTransformationParsers.transformModule module' state with
+                | Ok(transformedModule, newState) ->
+                    transformAllModules (transformedModule :: acc) rest newState
+                | Error msg -> Error msg
+        
+        match transformAllModules [] program.Modules initialState with
+        | Ok(transformedModules, finalState) ->
+            let transformedProgram = { program with Modules = transformedModules }
+            
+            // Validate all layouts are zero-allocation
+            match LayoutValidation.validateAllLayoutsZeroAllocation finalState with
+            | Ok((), _) ->
+                Success transformedProgram
+            | Error msg ->
+                CompilerFailure [CompilerError("layout validation", msg, Some "compiled layouts")]
+        
+        | Error msg ->
+            CompilerFailure [CompilerError("module transformation", msg, Some "module transformation")]
 
 /// Gets the computed layout for a union type by name
 let getUnionLayout (program: OakProgram) (unionName: string) : CompilerResult<UnionLayout option> =
+    let initialState = {
+        UnionLayouts = Map.empty
+        TypeMappings = Map.empty
+        LayoutStrategies = Map.empty
+        TransformationHistory = []
+        ErrorContext = []
+    }
+    
     // Find the union type declaration
     let unionDeclaration = 
         program.Modules
@@ -429,9 +529,12 @@ let getUnionLayout (program: OakProgram) (unionName: string) : CompilerResult<Un
     
     match unionDeclaration with
     | Some (TypeDecl(name, UnionType cases)) ->
-        LayoutStrategyAnalysis.analyzeUnionStrategy name cases >>= fun strategy ->
-        LayoutComputation.computeUnionLayout name strategy cases >>= fun layout ->
-        Success (Some layout)
+        match LayoutStrategyAnalysis.analyzeUnionStrategy name cases initialState with
+        | Ok(strategy, state1) ->
+            match LayoutComputation.computeUnionLayout name strategy cases state1 with
+            | Ok(layout, _) -> Success (Some layout)
+            | Error msg -> CompilerFailure [CompilerError("layout computation", msg, Some name)]
+        | Error msg -> CompilerFailure [CompilerError("strategy analysis", msg, Some name)]
     | _ -> Success None
 
 /// Validates that all union layouts in a program are zero-allocation
@@ -443,19 +546,17 @@ let validateZeroAllocationLayouts (program: OakProgram) : CompilerResult<bool> =
             | TypeDecl(name, UnionType cases) -> Some (name, cases)
             | _ -> None)
     
-    let validateUnion (name: string, cases: (string * OakType option) list) : CompilerResult<bool> =
-        getUnionLayout program name >>= function
-        | Some layout -> 
-            if layout.IsZeroAllocation then Success true
-            else Success false
-        | None -> Success true  // No layout computed means no issues
+    let rec validateUnions acc remaining =
+        match remaining with
+        | [] -> Success acc
+        | (name, cases) :: rest ->
+            match getUnionLayout program name with
+            | Success (Some layout) -> 
+                if layout.IsZeroAllocation then 
+                    validateUnions acc rest
+                else 
+                    validateUnions false rest
+            | Success None -> validateUnions acc rest  // No layout computed means no issues
+            | CompilerFailure errors -> CompilerFailure errors
     
-    unionTypes
-    |> List.map validateUnion
-    |> List.fold (fun acc result ->
-        match acc, result with
-        | Success accBool, Success resultBool -> Success (accBool && resultBool)
-        | CompilerFailure errors, Success _ -> CompilerFailure errors
-        | Success _, CompilerFailure errors -> CompilerFailure errors
-        | CompilerFailure errors1, CompilerFailure errors2 -> CompilerFailure (errors1 @ errors2)
-    ) (Success true)
+    validateUnions true unionTypes
