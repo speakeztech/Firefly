@@ -370,7 +370,8 @@ let validateConfig (config: FireflyConfig) : CompilerResult<FireflyConfig> =
             ["config validation"])]
     
     // Validate optimization level
-    elif not (["none"; "less"; "default"; "aggressive"; "size"; "sizemin"] |> List.contains config.Compilation.OptimizationLevel.ToLowerInvariant()) then
+    elif not (List.contains (config.Compilation.OptimizationLevel.ToLowerInvariant()) 
+                ["none"; "less"; "default"; "aggressive"; "size"; "sizemin"]) then
         CompilerFailure [ParseError(
             { Line = 0; Column = 0; File = ""; Offset = 0 },
             sprintf "Invalid optimization level: %s" config.Compilation.OptimizationLevel,

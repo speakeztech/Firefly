@@ -126,7 +126,7 @@ module LayoutStrategyAnalysis =
             |> withErrorContext "general union analysis"
     
     /// Analyzes a general union for layout strategy
-    and analyzeGeneralUnion (name: string) (cases: (string * OakType option) list) : Parser<UnionLayoutStrategy, LayoutAnalysisState> =
+    let analyzeGeneralUnion (name: string) (cases: (string * OakType option) list) : Parser<UnionLayoutStrategy, LayoutAnalysisState> =
         // Check if all cases are nullary (enum-like)
         let allNullary = cases |> List.forall (fun (_, optType) -> optType.IsNone)
         

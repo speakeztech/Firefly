@@ -432,33 +432,6 @@ module OptimizationMetrics =
         ])
         |> withErrorContext "optimization impact calculation"
     
-    /// Generates optimization report
-    let generateOptimizationReport : Parser<string, OptimizationState> =
-        fun state ->
-            let totalTransformations = state.TransformationCount
-            let passMetrics = 
-                state.OptimizationMetrics
-                |> Map.toList
-                |> List.map (fun (pass, count) -> sprintf "  %s: %d transformations" pass count)
-                |> String.concat "\n"
-            
-            let removedCount = state.RemovedInstructions.Length
-            let addedCount = state.OptimizedInstructions.Length
-            
-            let report = sprintf """
-Optimization Report:
-===================
-Total Transformations: %d
-Instructions Removed: %d
-Instructions Added/Modified: %d
-
-Pass-Specific Metrics:
-%s
-
-Symbol Renamings: %d
-""" totalTransformations removedCount addedCount passMetrics state.SymbolRenaming.Count
-            
-            Reply(Ok report, state)
 
 /// Main optimization entry point - NO FALLBACKS ALLOWED
 let optimizeLLVMIR (llvmOutput: LLVMOutput) (passes: OptimizationPass list) : CompilerResult<LLVMOutput> =
@@ -544,6 +517,6 @@ let estimateOptimizationBenefits (llvmIR: string) (level: OptimizationLevel) : C
         ErrorContext = []
     }
     
-    match calculateOptimizationImpact llvmIR llvmIR initialState with
+    match OptimizationMetrics.calculateOptimizationImpact llvmIR llvmIR initialState with
     | Reply(Ok metrics, _) -> Success metrics
     | Reply(Error, error) -> CompilerFailure [TransformError("optimization estimation", "LLVM IR", "metrics", error)]

@@ -238,7 +238,7 @@ let compile (args: ParseResults<CompileArgs>) =
                 1
 
 /// Compiles LLVM IR to native executable
-and private compileToNative (llvmOutput: LLVMOutput) (outputPath: string) (target: string) (verbose: bool) (noExternalTools: bool) =
+let private compileToNative (llvmOutput: LLVMOutput) (outputPath: string) (target: string) (verbose: bool) (noExternalTools: bool) =
     if verbose then printfn "Compiling to native executable for target: %s" target
     
     if noExternalTools then

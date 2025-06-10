@@ -172,8 +172,15 @@ module MLIRParsers =
         whitespace >>= fun _ ->
         opt (pstring "->" >>= fun _ -> whitespace >>= fun _ -> mlirType) >>= fun returnTypeOpt ->
         
-        let returnType = defaultArg returnTypeOpt "void"
-        let isExternal = isPrivateOpt.IsSome
+        let returnType = 
+            match returnTypeOpt with
+            | Some rt -> rt
+            | None -> "void"
+            
+        let isExternal = 
+            match isPrivateOpt with
+            | Some _ -> true
+            | None -> false
         
         succeed {
             Name = name
@@ -200,11 +207,16 @@ module MLIRParsers =
         many (satisfy (fun c -> c <> '\n')) >>= fun valueChars ->
         
         let value = String(Array.ofList valueChars)
+        let isConstant = 
+            match isConstantOpt with
+            | Some _ -> true
+            | None -> false
+            
         succeed {
             Name = name
             Type = globalType
             Value = value
-            IsConstant = isConstantOpt.IsSome
+            IsConstant = isConstant
         }
         |> withErrorContext "global constant"
     
@@ -227,9 +239,9 @@ module MLIRParsers =
             { state with Functions = Map.add func.Name func state.Functions })
     
     /// Records a global in the state
-    let recordGlobal (global: MLIRGlobal) : Parser<unit, MLIRParsingState> =
+    let recordGlobal (globalVar: MLIRGlobal) : Parser<unit, MLIRParsingState> =
         updateState (fun state -> 
-            { state with Globals = Map.add global.Name global state.Globals })
+            { state with Globals = Map.add globalVar.Name globalVar state.Globals })
     
     /// Records the module name in the state
     let recordModuleName (name: string) : Parser<unit, MLIRParsingState> =
@@ -281,22 +293,24 @@ module OperationConversion =
         
         // Convert parameters
         let paramStr = 
-            if func.Parameters.IsEmpty then ""
+            if func.Parameters.IsEmpty then 
+                ""
             else
-                func.Parameters
-                |> List.map (fun (name, paramType) -> 
-                    let llvmType = TypeConversion.mlirTypeToLLVM paramType
-                    sprintf "%s %s" llvmType name)
-                |> String.concat ", "
+                let paramStrings = 
+                    func.Parameters
+                    |> List.map (fun (name, paramType) -> 
+                        let llvmType = TypeConversion.mlirTypeToLLVM paramType
+                        sprintf "%s %s" llvmType name)
+                String.concat ", " paramStrings
         
         let llvmReturnType = TypeConversion.mlirTypeToLLVM func.ReturnType
         
         // Handle special case for main function
-        let (funcName, finalParamStr) = 
-            if func.Name = "@main" then
-                ("@main", "i32 %argc, i8** %argv")
-            else
-                (func.Name, paramStr)
+        let funcName = 
+            if func.Name = "@main" then "@main" else func.Name
+            
+        let finalParamStr = 
+            if func.Name = "@main" then "i32 %argc, i8** %argv" else paramStr
         
         if func.IsExternal then
             // External function declaration
@@ -307,7 +321,7 @@ module OperationConversion =
             writer.WriteLine("entry:")
             
             // Convert body operations
-            func.Body |> List.iter (fun line ->
+            for line in func.Body do
                 if line.Contains("arith.constant") then
                     // Convert arith.constant to LLVM add
                     let parts = line.Split('=')
@@ -338,7 +352,7 @@ module OperationConversion =
                     let cleanLine = line.Replace("memref.alloca", "alloca")
                                         .Replace("memref.load", "load")
                                         .Replace("memref.store", "store")
-                    writer.WriteLine(sprintf "  %s" cleanLine))
+                    writer.WriteLine(sprintf "  %s" cleanLine)
             
             writer.WriteLine("}")
         
@@ -346,36 +360,37 @@ module OperationConversion =
         succeed (writer.ToString())
     
     /// Converts an MLIR global to LLVM IR
-    let convertGlobal (global: MLIRGlobal) : Parser<string, MLIRParsingState> =
+    let convertGlobal (globalVar: MLIRGlobal) : Parser<string, MLIRParsingState> =
         use writer = new StringWriter()
         
         // Parse type and value from MLIR global
-        let typeMatch = global.Type.Contains("memref<")
-        let valueMatch = global.Value.Contains("dense<")
+        let typeMatch = globalVar.Type.Contains("memref<")
+        let valueMatch = globalVar.Value.Contains("dense<")
         
         if typeMatch && valueMatch then
             // Extract size from memref<NxiM>
-            let sizeStart = global.Type.IndexOf('<') + 1
-            let sizeEnd = global.Type.IndexOf('x', sizeStart)
-            let size = 
-                if sizeEnd > sizeStart then
-                    global.Type.Substring(sizeStart, sizeEnd - sizeStart)
-                else "1"
+            let sizeStart = globalVar.Type.IndexOf('<') + 1
+            let sizeEnd = 
+                let xIndex = globalVar.Type.IndexOf('x', sizeStart)
+                if xIndex > sizeStart then xIndex else globalVar.Type.Length - 1
+                
+            let size = globalVar.Type.Substring(sizeStart, sizeEnd - sizeStart)
             
             // Extract content from dense<"value">
-            let contentStart = global.Value.IndexOf('"') + 1
-            let contentEnd = global.Value.LastIndexOf('"')
             let content = 
-                if contentEnd > contentStart then
-                    global.Value.Substring(contentStart, contentEnd - contentStart)
-                       .Replace("\\00", "")
-                else ""
+                let startQuote = globalVar.Value.IndexOf('"')
+                let endQuote = globalVar.Value.LastIndexOf('"')
+                if startQuote >= 0 && endQuote > startQuote then
+                    let contentText = globalVar.Value.Substring(startQuote + 1, endQuote - startQuote - 1)
+                    contentText.Replace("\\00", "")
+                else
+                    ""
             
             let actualSize = content.Length + 1  // Include null terminator
             writer.WriteLine(sprintf "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\", align 1" 
-                    global.Name actualSize content)
+                    globalVar.Name actualSize content)
         else
-            writer.WriteLine(sprintf "%s = private unnamed_addr constant [1 x i8] zeroinitializer, align 1" global.Name)
+            writer.WriteLine(sprintf "%s = private unnamed_addr constant [1 x i8] zeroinitializer, align 1" globalVar.Name)
         
         MLIRParsers.emitOperation (writer.ToString()) >>= fun _ ->
         succeed (writer.ToString())
@@ -428,8 +443,8 @@ module OperationConversion =
             "attributes #1 = { nounwind }"
         ]
         
-        let rec emitAll declarations =
-            match declarations with
+        let rec emitAll remaining =
+            match remaining with
             | [] -> succeed ()
             | decl :: rest ->
                 MLIRParsers.emitOperation decl >>= fun _ ->
@@ -453,8 +468,8 @@ module MLIRProcessing =
             run (MLIRParsers.functionSignature) trimmedLine >>= fun func ->
             MLIRParsers.recordFunction func
         elif trimmedLine.StartsWith("memref.global") then
-            run (MLIRParsers.globalConstant) trimmedLine >>= fun global ->
-            MLIRParsers.recordGlobal global
+            run (MLIRParsers.globalConstant) trimmedLine >>= fun globalVar ->
+            MLIRParsers.recordGlobal globalVar
         else
             succeed ()
     
@@ -500,13 +515,16 @@ module MLIRProcessing =
         // Generate globals
         let convertGlobals =
             getState >>= fun state ->
-            let globals = state.Globals |> Map.toList |> List.map snd
+            let globals = 
+                state.Globals 
+                |> Map.toList 
+                |> List.map snd
             
-            let rec processGlobals globals =
-                match globals with
+            let rec processGlobals remaining =
+                match remaining with
                 | [] -> succeed ()
-                | global :: rest ->
-                    OperationConversion.convertGlobal global >>= fun _ ->
+                | globalVar :: rest ->
+                    OperationConversion.convertGlobal globalVar >>= fun _ ->
                     processGlobals rest
             
             processGlobals globals
@@ -516,10 +534,13 @@ module MLIRProcessing =
         // Generate functions
         let convertFunctions =
             getState >>= fun state ->
-            let functions = state.Functions |> Map.toList |> List.map snd
+            let functions = 
+                state.Functions 
+                |> Map.toList 
+                |> List.map snd
             
-            let rec processFunctions functions =
-                match functions with
+            let rec processFunctions remaining =
+                match remaining with
                 | [] -> succeed ()
                 | func :: rest ->
                     OperationConversion.convertFunction func >>= fun _ ->
@@ -532,15 +553,30 @@ module MLIRProcessing =
         // Ensure we have a proper main wrapper if needed
         let ensureMainWrapper =
             getState >>= fun state ->
+            
+            // Check if we already have a main function
             let hasMainFunc = state.Functions |> Map.containsKey "@main"
             
             if hasMainFunc then
                 succeed ()
             else
-                let functions = state.Functions |> Map.toList |> List.map (fun (_, func) -> func.Name)
-                if List.exists (fun name -> name.Contains("main") || name.Contains("Main")) functions then
-                    // Emit a main wrapper for user_main
-                    let userMain = functions |> List.find (fun name -> name.Contains("main") || name.Contains("Main"))
+                // Try to find a user-defined main-like function
+                let functions = 
+                    state.Functions 
+                    |> Map.toList 
+                    |> List.map (fun (_, func) -> func.Name)
+                
+                let hasUserMain = 
+                    functions 
+                    |> List.exists (fun name -> name.Contains("main") || name.Contains("Main"))
+                
+                if hasUserMain then
+                    // Get the user's main function name
+                    let userMain = 
+                        functions 
+                        |> List.find (fun name -> name.Contains("main") || name.Contains("Main"))
+                    
+                    // Emit main wrapper operations
                     MLIRParsers.emitOperation "" >>= fun _ ->
                     MLIRParsers.emitOperation "define i32 @main(i32 %argc, i8** %argv) {" >>= fun _ ->
                     MLIRParsers.emitOperation "entry:" >>= fun _ ->
@@ -573,7 +609,11 @@ let translateToLLVM (mlirText: string) : CompilerResult<LLVMOutput> =
         
         try
             let initialState = createMLIRParsingState()
-            match run (MLIRProcessing.processModule mlirText >>= fun _ -> MLIRProcessing.generateLLVMModule targetTriple) initialState with
+            let parser = 
+                MLIRProcessing.processModule mlirText >>= fun _ -> 
+                MLIRProcessing.generateLLVMModule targetTriple
+                
+            match run parser initialState with
             | (llvmIR, state) ->
                 Success {
                     ModuleName = state.CurrentModule
