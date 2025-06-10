@@ -3,7 +3,6 @@
 open System
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
-open FSharp.Compiler.SyntaxTree
 open Dabbit.Parsing.OakAst
 
 /// Result type containing the original ASTs and converted program
