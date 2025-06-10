@@ -17,7 +17,6 @@
 
   <ItemGroup>
     <!-- Core XParsec Foundation (must be first) -->
-    <Compile Include="Core/XParsec/FoundationHelpers.fs" />
     <Compile Include="Core/XParsec/Foundation.fs" />
 
     <!-- Oak AST Definition (core data structures) -->

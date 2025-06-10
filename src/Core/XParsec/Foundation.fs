@@ -1,416 +1,372 @@
-﻿module Firefly.Core.XParsec.Foundation
+﻿/// <summary>
+/// Core.XParsec.Foundation provides the foundational parser combinator infrastructure
+/// for the Firefly F# to native compiler. Built on top of XParsec, this module provides
+/// Firefly-specific error handling, state management, and utility combinators.
+/// </summary>
+module Core.XParsec.Foundation
 
 open System
 open XParsec
-open Core.XParsec.FoundationHelpers
 
 // ======================================
-// Type definitions for Firefly parsers
+// Compiler result types for integration
 // ======================================
 
-/// Our custom parser state for Firefly
-type FireflyParserState = {
-    Position: int
-    Input: string
-    IndentLevel: int
-    ErrorMessages: string list
-    Metadata: Map<string, obj>
-}
-
-/// Reply type for parser results
-type Reply<'T> = 
-    | Success of 'T * FireflyParserState
-    | Failure of string * FireflyParserState
-
-/// Define our own Parser type that works with FireflyParserState
-type Parser<'T> = FireflyParserState -> Reply<'T>
-
-// ======================================
-// Basic parser creation functions
-// ======================================
-
-/// Creates a parser that always succeeds with the given value
-let succeed (value: 'T) : Parser<'T> =
-    fun state -> Success(value, state)
-
-/// Creates a parser that always fails with the given message
-let fail (message: string) : Parser<'T> =
-    fun state -> Failure(message, state)
-
-// ======================================
-// Parser Combinators
-// ======================================
-
-/// Monadic bind operator
-let bind (p: Parser<'a>) (f: 'a -> Parser<'b>) : Parser<'b> =
-    fun state ->
-        match p state with
-        | Success(value, newState) -> f value newState
-        | Failure(msg, newState) -> Failure(msg, newState)
-
-/// Infix version of bind
-let (>>=) p f = bind p f
-
-/// Maps the result of a parser
-let map (f: 'a -> 'b) (p: Parser<'a>) : Parser<'b> =
-    p >>= (fun result -> succeed (f result))
-
-/// Infix version of map
-let (|>>) p f = map f p
-
-/// Applies a parser and returns its result, then applies another parser and discards its result
-let (.>>) (p1: Parser<'a>) (p2: Parser<'b>) : Parser<'a> =
-    p1 >>= (fun result1 ->
-        p2 >>= (fun _ ->
-            succeed result1))
-
-/// Applies a parser and discards its result, then applies another parser and returns its result
-let (>>.) (p1: Parser<'a>) (p2: Parser<'b>) : Parser<'b> =
-    p1 >>= (fun _ ->
-        p2)
-
-/// Applies two parsers in sequence and returns both results as a tuple
-let (.>>.) (p1: Parser<'a>) (p2: Parser<'b>) : Parser<'a * 'b> =
-    p1 >>= (fun result1 ->
-        p2 >>= (fun result2 ->
-            succeed (result1, result2)))
-
-/// Tries the first parser, if it fails, tries the second parser
-let (<|>) (p1: Parser<'a>) (p2: Parser<'a>) : Parser<'a> =
-    fun state ->
-        match p1 state with
-        | Success(result, newState) -> Success(result, newState)
-        | Failure(_, _) -> p2 state
-
-/// Tries multiple parsers in order, returning the result of the first one that succeeds
-let choice (parsers: Parser<'a> list) : Parser<'a> =
-    List.fold (<|>) (fail "No parsers succeeded") parsers
-
-/// Applies a parser and wraps its result in Some, or returns None if the parser fails
-let opt (p: Parser<'a>) : Parser<'a option> =
-    fun state ->
-        match p state with
-        | Success(value, newState) -> Success(Some value, newState)
-        | Failure(_, _) -> Success(None, state)
-
-/// Applies a parser that might fail without consuming input
-let attempt (p: Parser<'a>) : Parser<'a> =
-    fun state ->
-        match p state with
-        | Success(result, newState) -> Success(result, newState)
-        | Failure(msg, _) -> Failure(msg, state)  // Return original state on failure
-
-/// Applies a parser zero or more times, collecting the results in a list
-let rec many (p: Parser<'a>) : Parser<'a list> =
-    fun state ->
-        match p state with
-        | Success(first, newState) ->
-            match many p newState with
-            | Success(rest, finalState) -> Success(first :: rest, finalState)
-            | Failure(_, _) -> Success([first], newState)
-        | Failure(_, _) -> Success([], state)
-
-/// Applies a parser one or more times, collecting the results in a list
-let many1 (p: Parser<'a>) : Parser<'a list> =
-    p >>= (fun head ->
-        many p >>= (fun tail ->
-            succeed (head :: tail)))
-
-/// Applies a parser between two other parsers
-let between (pOpen: Parser<'a>) (pClose: Parser<'b>) (p: Parser<'c>) : Parser<'c> =
-    pOpen >>. p .>> pClose
-
-/// Applies a parser and a separator parser alternately, collecting the results in a list
-let sepBy (p: Parser<'a>) (sep: Parser<'b>) : Parser<'a list> =
-    fun state ->
-        match p state with
-        | Success(first, state1) ->
-            let rec sepByRest acc state =
-                match sep state with
-                | Success(_, state2) ->
-                    match p state2 with
-                    | Success(item, state3) -> sepByRest (item :: acc) state3
-                    | Failure(_, _) -> Success(acc, state) // Separator succeeded but item failed
-                | Failure(_, _) -> Success(acc, state) // No separator
-            
-            match sepByRest [first] state1 with
-            | Success(items, finalState) -> Success(List.rev items, finalState)
-            | Failure(msg, failState) -> Failure(msg, failState)
-        | Failure(_, _) -> Success([], state) // No first item
-
-/// Applies a parser and a separator parser alternately at least once, collecting the results in a list
-let sepBy1 (p: Parser<'a>) (sep: Parser<'b>) : Parser<'a list> =
-    p >>= (fun head ->
-        many (sep >>. p) >>= (fun tail ->
-            succeed (head :: tail)))
-
-/// Adds an error message context to a parser
-let withErrorContext (context: string) (p: Parser<'a>) : Parser<'a> =
-    fun state ->
-        match p state with
-        | Success(result, newState) -> Success(result, newState)
-        | Failure(msg, newState) -> Failure(sprintf "%s: %s" context msg, newState)
-
-// ======================================
-// Character and String Parsers
-// ======================================
-
-/// Parses a specific character
-let pchar (c: char) : Parser<char> =
-    fun state ->
-        if state.Position >= state.Input.Length then
-            Failure(sprintf "End of input, expected '%c'" c, state)
-        else
-            let currentChar = state.Input.[state.Position]
-            if currentChar = c then
-                Success(c, { state with Position = state.Position + 1 })
-            else
-                Failure(sprintf "Expected '%c', found '%c'" c currentChar, state)
-
-/// Parses a specific string
-let pstring (s: string) : Parser<string> =
-    fun state ->
-        let len = s.Length
-        let available = state.Input.Length - state.Position
-        
-        if available < len then
-            Failure(sprintf "End of input, expected '%s'" s, state)
-        else
-            let substring = state.Input.Substring(state.Position, len)
-            if substring = s then
-                Success(s, { state with Position = state.Position + len })
-            else
-                Failure(sprintf "Expected '%s', found '%s'" s substring, state)
-
-/// Parses any character that satisfies the predicate
-let satisfy (predicate: char -> bool) : Parser<char> =
-    fun state ->
-        if state.Position >= state.Input.Length then
-            Failure("End of input", state)
-        else
-            let currentChar = state.Input.[state.Position]
-            if predicate currentChar then
-                Success(currentChar, { state with Position = state.Position + 1 })
-            else
-                Failure(sprintf "Character '%c' didn't satisfy predicate" currentChar, state)
-
-/// Parses any character
-let anyChar : Parser<char> =
-    fun state ->
-        if state.Position >= state.Input.Length then
-            Failure("End of input", state)
-        else
-            let currentChar = state.Input.[state.Position]
-            Success(currentChar, { state with Position = state.Position + 1 })
-
-/// Parses a whitespace character
-let whitespace : Parser<char> =
-    satisfy Char.IsWhiteSpace
-
-/// Parses zero or more whitespace characters
-let spaces : Parser<unit> =
-    many whitespace |>> ignore
-
-/// Parses one or more whitespace characters
-let spaces1 : Parser<unit> =
-    many1 whitespace |>> ignore
-
-/// Parses a digit character
-let digit : Parser<char> =
-    satisfy Char.IsDigit
-
-/// Parses a letter character
-let letter : Parser<char> =
-    satisfy Char.IsLetter
-
-/// Parses a letter or digit character
-let letterOrDigit : Parser<char> =
-    satisfy Char.IsLetterOrDigit
-
-/// Parses an integer
-let pint : Parser<int> =
-    let isDigit c = c >= '0' && c <= '9'
-    let isSign c = c = '-' || c = '+'
+/// <summary>
+/// Represents different types of errors that can occur during compilation phases.
+/// </summary>
+type CompilerError = 
+    /// <summary>Parse error with position information and context stack.</summary>
+    /// <param name="position">String representation of the error position</param>
+    /// <param name="message">Error message describing what went wrong</param>
+    /// <param name="context">List of context strings showing the parsing stack</param>
+    | ParseError of position: string * message: string * context: string list
     
-    let digits = many1 (satisfy isDigit) |>> (fun chars -> String.Concat(chars))
-    let optSign = opt (satisfy isSign) |>> (function Some '-' -> "-" | _ -> "")
+    /// <summary>Transformation error between compilation phases.</summary>
+    /// <param name="phase">Name of the compilation phase where error occurred</param>
+    /// <param name="input">Description of the input that caused the error</param>
+    /// <param name="expected">Description of what was expected</param>
+    /// <param name="message">Detailed error message</param>
+    | TransformError of phase: string * input: string * expected: string * message: string
     
-    optSign .>>. digits
-    |>> (fun (sign, digits) -> int (sign + digits))
+    /// <summary>General compiler error with optional details.</summary>
+    /// <param name="phase">Name of the compilation phase where error occurred</param>
+    /// <param name="message">Error message</param>
+    /// <param name="details">Optional additional details about the error</param>
+    | CompilerError of phase: string * message: string * details: string option
+
+    override this.ToString() =
+        match this with
+        | ParseError(pos, msg, ctx) -> 
+            let contextStr = if ctx.IsEmpty then "" else sprintf " (Context: %s)" (String.concat " -> " ctx)
+            sprintf "Parse error at %s: %s%s" pos msg contextStr
+        | TransformError(phase, input, expected, msg) -> 
+            sprintf "Transform error in %s: Expected %s from %s, but %s" phase expected input msg
+        | CompilerError(phase, msg, details) -> 
+            match details with
+            | Some d -> sprintf "Compiler error in %s: %s (%s)" phase msg d
+            | None -> sprintf "Compiler error in %s: %s" phase msg
+
+/// <summary>
+/// Result type for compiler operations that can either succeed with a value
+/// or fail with a list of compilation errors.
+/// </summary>
+/// <typeparam name="T">The type of value returned on success</typeparam>
+type CompilerResult<'T> = 
+    /// <summary>Successful result containing the computed value.</summary>
+    | Success of 'T
+    /// <summary>Failed result containing one or more compilation errors.</summary>
+    | CompilerFailure of CompilerError list
+
+/// <summary>
+/// Monadic bind operator for CompilerResult, allowing for chaining of
+/// operations that may fail with compilation errors.
+/// </summary>
+/// <param name="result">The input CompilerResult</param>
+/// <param name="f">Function to apply if the input is successful</param>
+/// <returns>New CompilerResult after applying the function</returns>
+let (>>=) (result: CompilerResult<'a>) (f: 'a -> CompilerResult<'b>) : CompilerResult<'b> =
+    match result with
+    | Success value -> f value
+    | CompilerFailure errors -> CompilerFailure errors
+
+/// <summary>
+/// Map operator for CompilerResult, applying a function to the success value
+/// while preserving any errors.
+/// </summary>
+/// <param name="result">The input CompilerResult</param>
+/// <param name="f">Function to apply to the success value</param>
+/// <returns>New CompilerResult with the function applied</returns>
+let (|>>) (result: CompilerResult<'a>) (f: 'a -> 'b) : CompilerResult<'b> =
+    match result with
+    | Success value -> Success (f value)
+    | CompilerFailure errors -> CompilerFailure errors
+
+/// <summary>
+/// Convenience function to create a parser that fails with a CompilerError.
+/// Converts a CompilerError into a parser failure.
+/// </summary>
+/// <param name="error">The CompilerError to convert to a parser failure</param>
+/// <returns>A parser that always fails with the given error message</returns>
+let compilerFail (error: CompilerError) : Parser<'T> =
+    fail (error.ToString())
 
 // ======================================
-// F# Specific Parsers
+// Combinators Module
 // ======================================
 
-/// Parses an F# identifier
-let identifier : Parser<string> =
-    let isIdentifierFirstChar c = Char.IsLetter c || c = '_'
-    let isIdentifierChar c = Char.IsLetterOrDigit c || c = '_'
+/// <summary>
+/// Extended parser combinators for advanced parsing scenarios in Firefly.
+/// These combinators build upon XParsec's base functionality to provide
+/// additional capabilities needed for compiler construction.
+/// </summary>
+module Combinators =
     
-    satisfy isIdentifierFirstChar .>>. many (satisfy isIdentifierChar)
-    |>> (fun (first, rest) -> String(first :: rest |> List.toArray))
+    /// <summary>
+    /// Parses zero or more occurrences of a pattern separated by a separator.
+    /// This is an alias for XParsec's sepBy combinator for consistency.
+    /// </summary>
+    /// <param name="p">Parser for the main pattern</param>
+    /// <param name="sep">Parser for the separator</param>
+    /// <returns>Parser that returns a list of parsed values</returns>
+    let sepByZeroOrMore (p: Parser<'a>) (sep: Parser<'b>) : Parser<'a list> =
+        sepBy p sep
+    
+    /// <summary>
+    /// Runs a parser and saves its result in the parser state metadata
+    /// using the specified key. Useful for passing data between parsers.
+    /// </summary>
+    /// <param name="key">String key to use for storing the result</param>
+    /// <param name="p">Parser whose result should be saved</param>
+    /// <returns>Parser that returns the original result while saving it to state</returns>
+    let saveInState (key: string) (p: Parser<'a>) : Parser<'a> =
+        p >>= (fun result ->
+            getState >>= (fun state ->
+                let newState = { state with Metadata = Map.add key (box result) state.Metadata }
+                setState newState >>= (fun _ ->
+                    succeed result
+                )
+            )
+        )
+    
+    /// <summary>
+    /// Retrieves a previously saved value from the parser state metadata.
+    /// Returns None if no value was saved with the specified key.
+    /// </summary>
+    /// <param name="key">String key to look up in the state metadata</param>
+    /// <returns>Parser that returns Some(value) if found, None otherwise</returns>
+    let getFromState<'a> (key: string) : Parser<'a option> =
+        getState >>= (fun state ->
+            match Map.tryFind key state.Metadata with
+            | Some value -> succeed (Some (unbox<'a> value))
+            | None -> succeed None
+        )
+    
+    /// <summary>
+    /// Applies a parser exactly the specified number of times,
+    /// collecting all results in a list.
+    /// </summary>
+    /// <param name="count">Number of times to apply the parser</param>
+    /// <param name="p">Parser to apply repeatedly</param>
+    /// <returns>Parser that returns a list of results</returns>
+    let repeatParser (count: int) (p: Parser<'a>) : Parser<'a list> =
+        let rec repeat n acc =
+            if n <= 0 then
+                succeed (List.rev acc)
+            else
+                p >>= (fun result ->
+                    repeat (n - 1) (result :: acc)
+                )
+        repeat count []
+    
+    /// <summary>
+    /// Executes a parser with a temporary modification to the parser state,
+    /// then restores the original state after the parser completes.
+    /// Useful for scoped state changes.
+    /// </summary>
+    /// <param name="modifyState">Function to modify the parser state</param>
+    /// <param name="p">Parser to run with the modified state</param>
+    /// <returns>Parser that runs with temporary state modification</returns>
+    let withTemporaryState (modifyState: FireflyParserState -> FireflyParserState) (p: Parser<'a>) : Parser<'a> =
+        getState >>= (fun originalState ->
+            let modifiedState = modifyState originalState
+            setState modifiedState >>= (fun _ ->
+                p >>= (fun result ->
+                    setState originalState >>= (fun _ ->
+                        succeed result
+                    )
+                )
+            )
+        )
+    
+    /// <summary>
+    /// Parser that succeeds only at the end of a line (newline) or end of input.
+    /// Handles both Unix (\n) and Windows (\r\n) line endings.
+    /// </summary>
+    let eol : Parser<unit> =
+        fun state ->
+            if state.Position >= state.Input.Length then
+                Success((), state)
+            else
+                let ch = state.Input.[state.Position]
+                if ch = '\n' || ch = '\r' then
+                    let newPos = 
+                        if ch = '\r' && state.Position + 1 < state.Input.Length && 
+                           state.Input.[state.Position + 1] = '\n' then
+                            state.Position + 2
+                        else
+                            state.Position + 1
+                    Success((), { state with Position = newPos })
+                else
+                    Failure("Expected end of line", state)
+    
+    /// <summary>
+    /// Applies a parser exactly n times and returns all results in a list.
+    /// This is an alias for repeatParser for convenience.
+    /// </summary>
+    /// <param name="n">Number of times to apply the parser</param>
+    /// <param name="p">Parser to apply</param>
+    /// <returns>Parser that returns a list of n results</returns>
+    let pnTimes (n: int) (p: Parser<'a>) : Parser<'a list> =
+        let rec loop i acc =
+            if i = 0 then
+                succeed (List.rev acc)
+            else
+                p >>= (fun x -> loop (i-1) (x::acc))
+        loop n []
+    
+    /// <summary>
+    /// Skips zero or more whitespace characters without returning a result.
+    /// Preserves the current parser state otherwise.
+    /// </summary>
+    let skipWhitespace : Parser<unit> =
+        many whitespace |>> ignore
+    
+    /// <summary>
+    /// Parser that succeeds only if the current indentation level
+    /// in the parser state matches the specified level.
+    /// </summary>
+    /// <param name="level">Expected indentation level</param>
+    /// <returns>Parser that succeeds only at the correct indentation level</returns>
+    let atIndentLevel (level: int) : Parser<unit> =
+        getState >>= (fun state ->
+            if state.IndentLevel = level then
+                succeed ()
+            else
+                fail (sprintf "Expected indentation level %d, got %d" level state.IndentLevel)
+        )
 
-/// Parses an F# keyword
-let keyword (kw: string) : Parser<string> =
-    let notFollowedBy (p: Parser<'a>) : Parser<unit> =
+/// <summary>
+/// Error handling utilities for parser combinators, providing enhanced
+/// error reporting and recovery mechanisms for the Firefly compiler.
+/// </summary>
+module ErrorHandling =
+    
+    /// <summary>
+    /// Adds contextual information to parser errors. The context is added
+    /// to the error message stack and helps with debugging parse failures.
+    /// </summary>
+    /// <param name="context">Descriptive context string</param>
+    /// <param name="p">Parser to wrap with context</param>
+    /// <returns>Parser with enhanced error reporting</returns>
+    let withContext (context: string) (p: Parser<'a>) : Parser<'a> =
+        fun state ->
+            let errorState = { state with ErrorMessages = context :: state.ErrorMessages }
+            match p errorState with
+            | Success(value, newState) -> Success(value, { newState with ErrorMessages = state.ErrorMessages })
+            | Failure(msg, newState) -> Failure(sprintf "%s: %s" context msg, { newState with ErrorMessages = state.ErrorMessages })
+    
+    /// <summary>
+    /// Attempts to run a parser and returns the result wrapped in an Option.
+    /// Returns Some(result) on success, None on failure. Useful for optional parsing.
+    /// </summary>
+    /// <param name="p">Parser to attempt</param>
+    /// <returns>Parser that always succeeds, returning an Option</returns>
+    let tryParse (p: Parser<'a>) : Parser<'a option> =
         fun state ->
             match p state with
-            | Success(_, _) -> Failure("notFollowedBy", state)
-            | Failure(_, _) -> Success((), state)
-            
-    pstring kw .>> notFollowedBy letterOrDigit .>> spaces
-
-// ======================================
-// Running Parsers
-// ======================================
-
-/// Creates an initial parser state
-let createInitialState (input: string) : FireflyParserState =
-    {
-        Position = 0
-        Input = input
-        IndentLevel = 0
-        ErrorMessages = []
-        Metadata = Map.empty
-    }
-
-/// Runs a parser on the given input string
-let runParser (parser: Parser<'a>) (input: string) : Result<'a, string> =
-    let initialState = createInitialState input
+            | Success(value, newState) -> Success(Some value, newState)
+            | Failure(_, _) -> Success(None, state)
     
-    match parser initialState with
-    | Success(result, _) -> Ok result
-    | Failure(msg, _) -> Error msg
+    /// <summary>
+    /// Creates a comprehensive error message with position information,
+    /// context stack, and nearby input text for debugging purposes.
+    /// </summary>
+    /// <param name="message">Base error message</param>
+    /// <param name="state">Parser state at the time of error</param>
+    /// <returns>Formatted error message with detailed context</returns>
+    let createErrorMessage (message: string) (state: FireflyParserState) : string =
+        let errorStack = String.concat " -> " (List.rev state.ErrorMessages)
+        let pos = state.Position
+        let lineStart = state.Input.LastIndexOf('\n', pos - 1) + 1
+        let line = state.Input.Substring(lineStart, pos - lineStart)
+        let lineNum = state.Input.Substring(0, pos).Split('\n').Length
+        let colNum = pos - lineStart + 1
+        
+        sprintf "Error at line %d, column %d: %s\nContext: %s\nNear: %s" 
+                lineNum colNum message errorStack 
+                (if pos < state.Input.Length then state.Input.Substring(pos, min 20 (state.Input.Length - pos)) else "<end of input>")
 
-/// Runs a parser on the given input string and throws an exception if it fails
-let runParserOrThrow (parser: Parser<'a>) (input: string) : 'a =
-    match runParser parser input with
-    | Ok result -> result
-    | Error msg -> failwith msg
-
-// ======================================
-// Utility Functions and Combinators
-// ======================================
-
-/// Parses a value that might be in parentheses
-let parens (p: Parser<'a>) : Parser<'a> =
-    between (pchar '(' >>. spaces) (spaces >>. pchar ')') p
-
-/// Parses a value that might be in braces
-let braces (p: Parser<'a>) : Parser<'a> =
-    between (pchar '{' >>. spaces) (spaces >>. pchar '}') p
-
-/// Parses a value that might be in brackets
-let brackets (p: Parser<'a>) : Parser<'a> =
-    between (pchar '[' >>. spaces) (spaces >>. pchar ']') p
-
-/// Parses a value that might be in angle brackets
-let angleBrackets (p: Parser<'a>) : Parser<'a> =
-    between (pchar '<' >>. spaces) (spaces >>. pchar '>') p
-
-/// Parser that succeeds if the next character is not in the given list
-let noneOf (chars: char list) : Parser<char> =
-    satisfy (fun c -> not (List.contains c chars))
-
-/// Parser that succeeds if the next character is in the given list
-let oneOf (chars: char list) : Parser<char> =
-    satisfy (fun c -> List.contains c chars)
-
-/// Parser that fails if the next character would be parsed by the given parser
-let notFollowedBy (p: Parser<'a>) : Parser<unit> =
-    fun state ->
-        match p state with
-        | Success(_, _) -> Failure("notFollowedBy", state)
-        | Failure(_, _) -> Success((), state)
-
-/// Parses the end of input
-let eof : Parser<unit> =
-    fun state ->
-        if state.Position >= state.Input.Length then
+/// <summary>
+/// Debugging utilities for parser development and troubleshooting.
+/// These tools help with understanding parser execution flow and state changes.
+/// </summary>
+module DebugTools =
+    
+    /// <summary>
+    /// Logs a debug message with current parser position without affecting
+    /// the parser state or result. Useful for tracing parser execution.
+    /// </summary>
+    /// <param name="message">Debug message to log</param>
+    /// <returns>Parser that succeeds with unit while logging the message</returns>
+    let logDebug (message: string) : Parser<unit> =
+        fun state ->
+            printfn "[DEBUG] %s (Position: %d)" message state.Position
             Success((), state)
-        else
-            Failure(sprintf "Expected end of input, found '%c'" state.Input.[state.Position], state)
-
-/// Parses the given parser followed by spaces
-let lexeme (p: Parser<'a>) : Parser<'a> =
-    p .>> spaces
-
-/// Applies a parser and returns the specified value
-let preturn (x: 'a) (p: Parser<'b>) : Parser<'a> =
-    p |>> (fun _ -> x)
-
-/// Applies the parser and returns the specified value if it succeeds
-let value (x: 'a) (p: Parser<'b>) : Parser<'a> =
-    p |>> (fun _ -> x)
-
-/// Applies a parser repeatedly until the second parser succeeds
-let manyTill (p: Parser<'a>) (endp: Parser<'b>) : Parser<'a list> =
-    let rec manyTillHelper acc state =
-        match endp state with
-        | Success(_, newState) -> Success(List.rev acc, newState)
-        | Failure(_, _) ->
-            match p state with
-            | Success(x, newState) -> manyTillHelper (x :: acc) newState
-            | Failure(msg, newState) -> Failure(msg, newState)
-    fun state -> manyTillHelper [] state
-
-/// Parses a string enclosed in double quotes
-let quotedString : Parser<string> =
-    let escape = pstring "\\" >>. (pstring "\"" <|> pstring "\\" <|> pstring "n" <|> pstring "r" <|> pstring "t")
-                |>> function 
-                    | "\"" -> "\""
-                    | "\\" -> "\\"
-                    | "n" -> "\n"
-                    | "r" -> "\r"
-                    | "t" -> "\t"
-                    | _ -> failwith "Impossible case in escape parser"
     
-    let nonEscape = noneOf ['"'; '\\'] |>> string
+    /// <summary>
+    /// Logs detailed information about the current parser state including
+    /// position, indentation level, and error message stack.
+    /// </summary>
+    /// <param name="message">Context message for the state log</param>
+    /// <returns>Parser that succeeds with unit while logging state info</returns>
+    let logState (message: string) : Parser<unit> =
+        getState >>= (fun state ->
+            printfn "[STATE] %s: Position=%d, IndentLevel=%d, ErrorMessages=%A" 
+                    message state.Position state.IndentLevel state.ErrorMessages
+            succeed ()
+        )
     
-    between (pchar '"') (pchar '"') 
-            (many (escape <|> nonEscape) 
-             |>> String.concat "")
+    /// <summary>
+    /// Wraps a parser with debug logging that shows entry and exit points.
+    /// Helps with understanding the flow of parser execution.
+    /// </summary>
+    /// <param name="label">Label to identify this parser in debug output</param>
+    /// <param name="p">Parser to wrap with debug logging</param>
+    /// <returns>Parser with debug entry/exit logging</returns>
+    let debug (label: string) (p: Parser<'a>) : Parser<'a> =
+        logDebug (sprintf "Entering: %s" label) >>= (fun _ ->
+            p >>= (fun result ->
+                logDebug (sprintf "Exiting: %s (Success)" label) >>= (fun _ ->
+                    succeed result
+                )
+            )
+        )
 
-// ======================================
-// State Manipulation
-// ======================================
-
-/// Gets the current state
-let getState : Parser<FireflyParserState> =
-    fun state -> Success(state, state)
-
-/// Sets the current state
-let setState (newState: FireflyParserState) : Parser<unit> =
-    fun _ -> Success((), newState)
-
-/// Updates the current state
-let updateState (f: FireflyParserState -> FireflyParserState) : Parser<unit> =
-    fun state -> Success((), f state)
-
-/// Increments the indentation level
-let indentMore : Parser<unit> =
-    updateState (fun state -> { state with IndentLevel = state.IndentLevel + 1 })
-
-/// Decrements the indentation level
-let indentLess : Parser<unit> =
-    updateState (fun state -> { state with IndentLevel = state.IndentLevel - 1 })
-
-/// Runs a parser with an increased indentation level
-let indented (p: Parser<'a>) : Parser<'a> =
-    indentMore >>. p .>> indentLess
-
-/// Adds metadata to the parser state
-let addMetadata (key: string) (value: obj) : Parser<unit> =
-    updateState (fun state -> 
-        { state with Metadata = Map.add key value state.Metadata })
-
-/// Gets metadata from the parser state
-let getMetadata (key: string) : Parser<obj option> =
-    getState |>> (fun state -> 
-        state.Metadata |> Map.tryFind key)
-
-// ======================================
-// XParsec Integration - Add as needed
-// ======================================
-
-// If you need to integrate with specific XParsec functionality, add wrapper functions here
+/// <summary>
+/// File handling utilities for parsing files and including external content.
+/// Provides error handling and encoding management for file-based parsing operations.
+/// </summary>
+module FileHandling =
+    
+    /// <summary>
+    /// Parses a complete file using the specified parser with comprehensive
+    /// error handling including file I/O errors and parse errors.
+    /// </summary>
+    /// <param name="parser">Parser to apply to the file contents</param>
+    /// <param name="filename">Path to the file to parse</param>
+    /// <returns>Result containing either the parsed value or an error message</returns>
+    let parseFile (parser: Parser<'a>) (filename: string) : Result<'a, string> =
+        try
+            let content = System.IO.File.ReadAllText(filename)
+            let initialState = createInitialState content
+            match parser initialState with
+            | Success(result, _) -> Ok result
+            | Failure(msg, state) -> Error (ErrorHandling.createErrorMessage msg state)
+        with
+        | ex -> Error (sprintf "File error: %s" ex.Message)
+    
+    /// <summary>
+    /// Parser combinator for including the contents of another file at parse time.
+    /// Supports both quoted and unquoted filenames. Used for implementing
+    /// include directives in source files.
+    /// </summary>
+    let includeFile : Parser<string> =
+        let fileNameParser = quotedString <|> (many1 (satisfy (fun c -> c <> ' ' && c <> '\n' && c <> '\r')) |>> (List.map string >> String.concat ""))
+        pstring "include" >>. spaces1 >>. fileNameParser >>= (fun filename ->
+            try
+                let content = System.IO.File.ReadAllText(filename)
+                succeed content
+            with
+            | ex -> fail (sprintf "Failed to include file '%s': %s" filename ex.Message)
+        )
