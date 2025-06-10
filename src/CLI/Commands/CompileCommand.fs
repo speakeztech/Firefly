@@ -45,13 +45,141 @@ let private getDefaultTarget() =
     else
         "x86_64-w64-windows-gnu"
 
+/// Validates that the input file exists and is readable
+let private validateInputFile (inputPath: string) : CompilerResult<unit> =
+    printfn "Validating input file: %s" inputPath
+    
+    if String.IsNullOrWhiteSpace(inputPath) then
+        printfn "Error: Input path is null or empty"
+        CompilerFailure [SyntaxError(
+            { Line = 0; Column = 0; File = ""; Offset = 0 },
+            "Input path cannot be empty",
+            ["argument validation"])]
+    elif not (File.Exists(inputPath)) then
+        printfn "Error: Input file does not exist at path: %s" inputPath
+        CompilerFailure [SyntaxError(
+            { Line = 0; Column = 0; File = inputPath; Offset = 0 },
+            sprintf "Input file '%s' does not exist" inputPath,
+            ["file validation"])]
+    else
+        let fileInfo = FileInfo(inputPath)
+        printfn "Input file found: %s (%d bytes)" inputPath fileInfo.Length
+        
+        let inputExt = Path.GetExtension(inputPath).ToLowerInvariant()
+        if inputExt <> ".fs" && inputExt <> ".fsx" then
+            printfn "Error: Invalid file extension: %s" inputExt
+            CompilerFailure [SyntaxError(
+                { Line = 0; Column = 0; File = inputPath; Offset = 0 },
+                sprintf "Input file must be F# source (.fs or .fsx), got: %s" inputExt,
+                ["file validation"])]
+        else
+            printfn "File validation successful"
+            Success ()
+
+/// Reads the source file with comprehensive error handling
+let private readSourceFile (inputPath: string) : CompilerResult<string> =
+    printfn "Reading source file: %s" inputPath
+    
+    try
+        let sourceCode = File.ReadAllText(inputPath)
+        printfn "Source file read successfully: %d characters" sourceCode.Length
+        
+        if String.IsNullOrEmpty(sourceCode) then
+            printfn "Warning: Source file is empty"
+            CompilerFailure [SyntaxError(
+                { Line = 0; Column = 0; File = inputPath; Offset = 0 },
+                "Source file is empty",
+                ["file reading"])]
+        else
+            printfn "Source content preview: %s..." (sourceCode.Substring(0, min 50 sourceCode.Length))
+            Success sourceCode
+    with
+    | :? UnauthorizedAccessException as ex ->
+        printfn "Error: Access denied reading file: %s" ex.Message
+        CompilerFailure [SyntaxError(
+            { Line = 0; Column = 0; File = inputPath; Offset = 0 },
+            sprintf "Access denied: %s" ex.Message,
+            ["file reading"])]
+    | :? FileNotFoundException as ex ->
+        printfn "Error: File not found: %s" ex.Message
+        CompilerFailure [SyntaxError(
+            { Line = 0; Column = 0; File = inputPath; Offset = 0 },
+            sprintf "File not found: %s" ex.Message,
+            ["file reading"])]
+    | :? IOException as ex ->
+        printfn "Error: IO exception reading file: %s" ex.Message
+        CompilerFailure [SyntaxError(
+            { Line = 0; Column = 0; File = inputPath; Offset = 0 },
+            sprintf "IO error: %s" ex.Message,
+            ["file reading"])]
+    | ex ->
+        printfn "Error: Unexpected exception reading file: %s" ex.Message
+        CompilerFailure [SyntaxError(
+            { Line = 0; Column = 0; File = inputPath; Offset = 0 },
+            sprintf "Unexpected error: %s" ex.Message,
+            ["file reading"])]
+
+/// Validates the output path is writable
+let private validateOutputPath (outputPath: string) : CompilerResult<unit> =
+    printfn "Validating output path: %s" outputPath
+    
+    if String.IsNullOrWhiteSpace(outputPath) then
+        printfn "Error: Output path is null or empty"
+        CompilerFailure [SyntaxError(
+            { Line = 0; Column = 0; File = ""; Offset = 0 },
+            "Output path cannot be empty",
+            ["argument validation"])]
+    else
+        let outputDir = Path.GetDirectoryName(outputPath)
+        if not (String.IsNullOrEmpty(outputDir)) && not (Directory.Exists(outputDir)) then
+            printfn "Creating output directory: %s" outputDir
+            try
+                Directory.CreateDirectory(outputDir) |> ignore
+                printfn "Output directory created successfully"
+                Success ()
+            with
+            | ex ->
+                printfn "Error: Failed to create output directory: %s" ex.Message
+                CompilerFailure [SyntaxError(
+                    { Line = 0; Column = 0; File = outputPath; Offset = 0 },
+                    sprintf "Cannot create output directory: %s" ex.Message,
+                    ["output validation"])]
+        else
+            printfn "Output path validation successful"
+            Success ()
+
+/// Converts optimization level string to enum
+let private parseOptimizationLevel (optimizeStr: string) : OptimizationLevel =
+    match optimizeStr.ToLowerInvariant() with
+    | "none" -> OptimizationLevel.None
+    | "less" -> Less
+    | "aggressive" -> Aggressive
+    | "size" -> Size
+    | "sizemin" -> SizeMin
+    | _ -> Default
+
 /// Saves intermediate compilation results for debugging
 let private saveIntermediateFiles (basePath: string) (baseName: string) (keepIntermediates: bool) (pipelineOutput: TranslationPipelineOutput) =
     if keepIntermediates then
+        printfn "Saving intermediate files..."
         try
             let intermediatesDir = Path.Combine(basePath, "intermediates")
             if not (Directory.Exists(intermediatesDir)) then
                 Directory.CreateDirectory(intermediatesDir) |> ignore
+            
+            // Save Oak AST output immediately after successful pipeline completion
+            try
+                // Find the Oak AST content from phase outputs
+                match pipelineOutput.PhaseOutputs.TryFind "oak-ast" with
+                | Some oakContent ->
+                    let oakFilePath = Path.Combine(intermediatesDir, baseName + ".oak")
+                    File.WriteAllText(oakFilePath, oakContent, System.Text.Encoding.UTF8)
+                    printfn "Oak AST written to: %s (%d characters)" oakFilePath oakContent.Length
+                | Option.None ->
+                    printfn "Warning: Oak AST content not found in pipeline outputs"
+            with
+            | ex ->
+                printfn "Warning: Failed to write Oak AST file: %s" ex.Message
             
             // Save pipeline diagnostics
             let diagnosticsPath = Path.Combine(intermediatesDir, baseName + ".diagnostics.txt")
@@ -83,41 +211,18 @@ let private saveIntermediateFiles (basePath: string) (baseName: string) (keepInt
                 |> String.concat "\n"
             File.WriteAllText(symbolMappingsPath, symbolMappingsContent)
             
-            printfn "Saved intermediate files to: %s" intermediatesDir
+            printfn "Intermediate files saved to: %s" intermediatesDir
         with
         | ex ->
             printfn "Warning: Failed to save intermediate files: %s" ex.Message
 
-/// Validates compilation arguments
-let private validateCompilationArgs (inputPath: string) (outputPath: string) : CompilerResult<unit> =
-    if not (File.Exists inputPath) then
-        CompilerFailure [InternalError("argument validation", sprintf "Input file '%s' does not exist" inputPath, Option.None)]
-    elif String.IsNullOrWhiteSpace(outputPath) then
-        CompilerFailure [InternalError("argument validation", "Output path cannot be empty", Option.None)]
-    else
-        let inputExt = Path.GetExtension(inputPath).ToLowerInvariant()
-        if inputExt <> ".fs" && inputExt <> ".fsx" then
-            CompilerFailure [InternalError("argument validation", sprintf "Input file must be F# source (.fs or .fsx), got: %s" inputExt, Option.None)]
-        else
-            Success ()
-
-/// Converts optimization level string to enum
-let private parseOptimizationLevel (optimizeStr: string) : OptimizationLevel =
-    match optimizeStr.ToLowerInvariant() with
-    | "none" -> OptimizationLevel.None
-    | "less" -> Less
-    | "aggressive" -> Aggressive
-    | "size" -> Size
-    | "sizemin" -> SizeMin
-    | _ -> Default
-
 /// Compiles LLVM IR to native executable
 let private compileToNativeExecutable (llvmOutput: LLVMOutput) (outputPath: string) (target: string) (verbose: bool) (noExternalTools: bool) =
-    if verbose then printfn "Compiling to native executable for target: %s" target
+    printfn "Compiling to native executable for target: %s" target
     
     if noExternalTools then
         printfn "Warning: --no-external-tools specified, but native compilation requires external LLVM toolchain"
-        printfn "The XParsec pipeline has generated optimized LLVM IR, but cannot complete native compilation"
+        printfn "The compilation pipeline has generated optimized LLVM IR, but cannot complete native compilation"
         printfn "To complete compilation, remove --no-external-tools flag or use external LLVM tools"
         
         // Save the LLVM IR for manual compilation
@@ -129,6 +234,7 @@ let private compileToNativeExecutable (llvmOutput: LLVMOutput) (outputPath: stri
                  (Path.GetFileNameWithoutExtension(outputPath)) outputPath
         0
     else
+        printfn "Invoking LLVM toolchain for native compilation..."
         match compileLLVMToNative llvmOutput outputPath target with
         | CompilerFailure nativeErrors ->
             printfn "Native compilation failed:"
@@ -154,21 +260,30 @@ let private compileToNativeExecutable (llvmOutput: LLVMOutput) (outputPath: stri
             
             0
 
-/// Executes the complete XParsec-based compilation process
+/// Main compilation function with comprehensive error handling
 let compile (args: ParseResults<CompileArgs>) =
-    // Parse and validate arguments
+    printfn "Firefly F# Compiler - Starting compilation process"
+    
+    // Parse and validate arguments with explicit output
+    printfn "Parsing command line arguments..."
     let inputPath = 
         match args.TryGetResult Input with
-        | Some path -> path
+        | Some path -> 
+            printfn "Input file: %s" path
+            path
         | Option.None -> 
             printfn "Error: Input file is required"
+            printfn "Usage: firefly compile --input <file.fs> --output <executable>"
             exit 1
     
     let outputPath = 
         match args.TryGetResult Output with
-        | Some path -> path
+        | Some path -> 
+            printfn "Output file: %s" path
+            path
         | Option.None -> 
             printfn "Error: Output path is required"
+            printfn "Usage: firefly compile --input <file.fs> --output <executable>"
             exit 1
     
     let target = args.TryGetResult Target |> Option.defaultValue (getDefaultTarget())
@@ -179,173 +294,120 @@ let compile (args: ParseResults<CompileArgs>) =
     let verbose = args.Contains Verbose
     let noExternalTools = args.Contains No_External_Tools
     
-    // Validate arguments
-    match validateCompilationArgs inputPath outputPath with
+    printfn "Configuration: target=%s, optimize=%s, keep-intermediates=%b, verbose=%b" 
+            target optimizeStr keepIntermediates verbose
+    
+    // Step 1: Validate input file
+    match validateInputFile inputPath with
     | CompilerFailure errors ->
-        errors |> List.iter (fun error -> printfn "Error: %s" (error.ToString()))
+        printfn "Input file validation failed:"
+        errors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
         1
     | Success () ->
         
-        // Load and validate configuration
-        if verbose then printfn "Loading configuration from: %s" configPath
-        
-        match loadAndValidateConfig configPath with
-        | CompilerFailure configErrors ->
-            printfn "Configuration errors:"
-            configErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
+        // Step 2: Validate output path
+        match validateOutputPath outputPath with
+        | CompilerFailure errors ->
+            printfn "Output path validation failed:"
+            errors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
             1
-        | Success config ->
+        | Success () ->
             
-            if verbose then
+            // Step 3: Load configuration
+            printfn "Loading configuration from: %s" configPath
+            match loadAndValidateConfig configPath with
+            | CompilerFailure configErrors ->
+                printfn "Configuration errors:"
+                configErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
+                1
+            | Success config ->
+                
                 printfn "Loaded configuration for package: %s v%s" config.PackageName config.Version
-                printfn "Compilation settings:"
-                printfn "  Require static memory: %b" config.Compilation.RequireStaticMemory
-                printfn "  Eliminate closures: %b" config.Compilation.EliminateClosures
-                printfn "  Optimization level: %s" config.Compilation.OptimizationLevel
-                printfn "  Use LTO: %b" config.Compilation.UseLTO
-            
-            // Read and validate source code
-            try
-                let sourceCode = File.ReadAllText(inputPath)
-                if verbose then printfn "Read source file: %s (%d characters)" inputPath sourceCode.Length
+                if verbose then
+                    printfn "Compilation settings:"
+                    printfn "  Require static memory: %b" config.Compilation.RequireStaticMemory
+                    printfn "  Eliminate closures: %b" config.Compilation.EliminateClosures
+                    printfn "  Optimization level: %s" config.Compilation.OptimizationLevel
+                    printfn "  Use LTO: %b" config.Compilation.UseLTO
                 
-                // Execute complete XParsec-based translation pipeline
-                if verbose then printfn "Starting XParsec-based compilation pipeline..."
-                
-                match translateFsToMLIRWithDiagnostics inputPath sourceCode with
-                | CompilerFailure pipelineErrors ->
-                    printfn "Compilation pipeline failed:"
-                    pipelineErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
+                // Step 4: Read source file
+                match readSourceFile inputPath with
+                | CompilerFailure readErrors ->
+                    printfn "Source file reading failed:"
+                    readErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
                     1
-                
-                | Success pipelineOutput ->
-                    if verbose then
-                        printfn "Pipeline completed successfully with %d phases:" pipelineOutput.SuccessfulPhases.Length
+                | Success sourceCode ->
+                    
+                    // Step 5: Execute compilation pipeline
+                    printfn "Starting Firefly compilation pipeline..."
+                    printfn "Phase 1: F# to MLIR translation"
+                    
+                    match translateFsToMLIRWithDiagnostics inputPath sourceCode with
+                    | CompilerFailure pipelineErrors ->
+                        printfn "Compilation pipeline failed:"
+                        pipelineErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
+                        1
+                    
+                    | Success pipelineOutput ->
+                        printfn "Phase 1 completed successfully with %d phases:" pipelineOutput.SuccessfulPhases.Length
                         pipelineOutput.SuccessfulPhases |> List.iter (fun phase -> printfn "  ✓ %s" phase)
                         
                         if not pipelineOutput.Diagnostics.IsEmpty then
                             printfn "Pipeline diagnostics:"
                             pipelineOutput.Diagnostics |> List.iter (fun (phase, msg) -> printfn "  [%s] %s" phase msg)
-                    
-                    // Save intermediate files if requested
-                    let basePath = Path.GetDirectoryName(outputPath)
-                    let baseName = Path.GetFileNameWithoutExtension(outputPath)
-                    saveIntermediateFiles basePath baseName keepIntermediates pipelineOutput
-                    
-                    // Apply LLVM optimization pipeline
-                    if verbose then printfn "Translating MLIR to LLVM IR..."
-                    
-                    match translateToLLVM pipelineOutput.FinalMLIR with
-                    | CompilerFailure llvmErrors ->
-                        printfn "LLVM IR generation failed:"
-                        llvmErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-                        1
-                    
-                    | Success llvmOutput ->
-                        if verbose then printfn "Generated LLVM IR for module: %s" llvmOutput.ModuleName
                         
-                        // Apply optimizations based on configuration and arguments
-                        let optimizationPasses = createOptimizationPipeline optimizeLevel
+                        // Save intermediate files if requested
+                        let basePath = Path.GetDirectoryName(outputPath)
+                        let baseName = Path.GetFileNameWithoutExtension(outputPath)
+                        saveIntermediateFiles basePath baseName keepIntermediates pipelineOutput
                         
-                        if verbose then 
+                        // Step 6: MLIR to LLVM IR translation
+                        printfn "Phase 2: MLIR to LLVM IR translation"
+                        
+                        match translateToLLVM pipelineOutput.FinalMLIR with
+                        | CompilerFailure llvmErrors ->
+                            printfn "LLVM IR generation failed:"
+                            llvmErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
+                            1
+                        
+                        | Success llvmOutput ->
+                            printfn "Generated LLVM IR for module: %s" llvmOutput.ModuleName
+                            
+                            // Step 7: Apply optimizations
+                            printfn "Phase 3: LLVM optimization"
+                            let optimizationPasses = createOptimizationPipeline optimizeLevel
+                            
                             printfn "Applying LLVM optimizations (level: %A)..." optimizeLevel
                             if optimizationPasses.IsEmpty then
                                 printfn "  No optimization passes selected"
                             else
                                 printfn "  Optimization passes: %A" optimizationPasses
-                        
-                        match optimizeLLVMIR llvmOutput optimizationPasses with
-                        | CompilerFailure optimizationErrors ->
-                            printfn "LLVM optimization failed:"
-                            optimizationErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-                            1
-                        
-                        | Success optimizedLLVM ->
-                            // Validate zero-allocation guarantees
-                            if config.Compilation.RequireStaticMemory then
-                                if verbose then printfn "Validating zero-allocation guarantees..."
-                                
-                                match validateZeroAllocationGuarantees optimizedLLVM.LLVMIRText with
-                                | CompilerFailure validationErrors ->
-                                    printfn "Zero-allocation validation failed:"
-                                    validationErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-                                    printfn "Consider disabling require_static_memory in configuration if heap allocation is acceptable"
-                                    1
-                                | Success () ->
-                                    if verbose then printfn "✓ Zero-allocation guarantees validated"
-                                    compileToNativeExecutable optimizedLLVM outputPath target verbose noExternalTools
-                            else
-                                compileToNativeExecutable optimizedLLVM outputPath target verbose noExternalTools
-            
-            with
-            | ex ->
-                printfn "Error reading source file: %s" ex.Message
-                1
-
-/// Displays detailed compilation statistics
-let private showCompilationStats (pipelineOutput: TranslationPipelineOutput) =
-    printfn ""
-    printfn "Compilation Statistics:"
-    printfn "======================"
-    printfn "Successful phases: %d" pipelineOutput.SuccessfulPhases.Length
-    printfn "Symbol mappings: %d" pipelineOutput.SymbolMappings.Count
-    printfn "Phase outputs saved: %d" pipelineOutput.PhaseOutputs.Count
-    
-    if not pipelineOutput.Diagnostics.IsEmpty then
-        printfn ""
-        printfn "Detailed Diagnostics:"
-        pipelineOutput.Diagnostics 
-        |> List.groupBy fst
-        |> List.iter (fun (phase, messages) ->
-            printfn "  [%s]:" phase
-            messages |> List.iter (fun (_, msg) -> printfn "    %s" msg))
-
-/// Entry point for compilation with comprehensive error handling
-let compileWithFullDiagnostics (inputPath: string) (outputPath: string) (target: string) (configPath: string) =
-    match validateCompilationArgs inputPath outputPath with
-    | CompilerFailure errors ->
-        printfn "Argument validation failed:"
-        errors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-        1
-    | Success () ->
-        match loadAndValidateConfig configPath with
-        | CompilerFailure configErrors ->
-            printfn "Configuration validation failed:"
-            configErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-            1
-        | Success config ->
-            try
-                let sourceCode = File.ReadAllText(inputPath)
-                match translateFsToMLIRWithDiagnostics inputPath sourceCode with
-                | CompilerFailure pipelineErrors ->
-                    printfn "XParsec compilation pipeline failed:"
-                    pipelineErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-                    1
-                | Success pipelineOutput ->
-                    showCompilationStats pipelineOutput
-                    
-                    match translateToLLVM pipelineOutput.FinalMLIR with
-                    | CompilerFailure llvmErrors ->
-                        printfn "LLVM translation failed:"
-                        llvmErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-                        1
-                    | Success llvmOutput ->
-                        let optimizationPasses = createOptimizationPipeline Default
-                        match optimizeLLVMIR llvmOutput optimizationPasses with
-                        | CompilerFailure optimizationErrors ->
-                            printfn "Optimization failed:"
-                            optimizationErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-                            1
-                        | Success optimizedLLVM ->
-                            match compileLLVMToNative optimizedLLVM outputPath target with
-                            | CompilerFailure nativeErrors ->
-                                printfn "Native compilation failed:"
-                                nativeErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
+                            
+                            match optimizeLLVMIR llvmOutput optimizationPasses with
+                            | CompilerFailure optimizationErrors ->
+                                printfn "LLVM optimization failed:"
+                                optimizationErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
                                 1
-                            | Success () ->
-                                printfn "✓ Complete XParsec-based compilation successful!"
-                                0
-            with
-            | ex ->
-                printfn "Unexpected error: %s" ex.Message
-                1
+                            
+                            | Success optimizedLLVM ->
+                                
+                                // Step 8: Validate zero-allocation guarantees
+                                if config.Compilation.RequireStaticMemory then
+                                    printfn "Phase 4: Zero-allocation validation"
+                                    
+                                    match validateZeroAllocationGuarantees optimizedLLVM.LLVMIRText with
+                                    | CompilerFailure validationErrors ->
+                                        printfn "Zero-allocation validation failed:"
+                                        validationErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
+                                        printfn "Consider disabling require_static_memory in configuration if heap allocation is acceptable"
+                                        1
+                                    | Success () ->
+                                        printfn "✓ Zero-allocation guarantees validated"
+                                        
+                                        // Step 9: Native compilation
+                                        printfn "Phase 5: Native code generation"
+                                        compileToNativeExecutable optimizedLLVM outputPath target verbose noExternalTools
+                                else
+                                    // Step 9: Native compilation (skip validation)
+                                    printfn "Phase 4: Native code generation"
+                                    compileToNativeExecutable optimizedLLVM outputPath target verbose noExternalTools
