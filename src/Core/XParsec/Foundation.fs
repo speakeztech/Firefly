@@ -3,6 +3,40 @@
 open System
 open XParsec
 
+/// <summary>
+/// Parser state for Firefly compiler, extending the standard XParsec state with compiler-specific fields.
+/// </summary>
+type FireflyParserState = {
+    /// <summary>Current position in the input string</summary>
+    Position: int
+    
+    /// <summary>The input being parsed</summary>
+    Input: string
+    
+    /// <summary>Current indentation level for layout-sensitive parsing</summary>
+    IndentLevel: int
+    
+    /// <summary>Stack of error messages providing context for error reporting</summary>
+    ErrorMessages: string list
+    
+    /// <summary>Metadata store for passing data between parser combinators</summary>
+    Metadata: Map<string, obj>
+}
+
+/// <summary>
+/// Creates an initial parser state with default values
+/// </summary>
+/// <param name="input">The input string to parse</param>
+/// <returns>A fresh parser state</returns>
+let createInitialState (input: string) : FireflyParserState =
+    {
+        Position = 0
+        Input = input
+        IndentLevel = 0
+        ErrorMessages = []
+        Metadata = Map.empty
+    }
+
 /// Core error types for the Firefly compiler
 type FireflyError =
     | ParseError of position: Position * message: string * context: string list

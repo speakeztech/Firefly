@@ -64,25 +64,15 @@
 
     <!-- Command line argument parsing -->
     <PackageReference Include="Argu" Version="6.1.1" />
-
-    <!-- F# Compiler Services for AST parsing (used by XParsec-based AstConverter) -->
+    
     <PackageReference Include="FSharp.Compiler.Service" Version="43.9.300" />
-
-    <!-- Fantomas for F# code formatting/parsing support -->
+    
     <PackageReference Include="Fantomas.Core" Version="6.2.3" />
     <PackageReference Include="Fantomas.FCS" Version="6.2.3" />
 
     <!-- XParsec - Critical parser combinator library -->
     <!-- NOTE: This is the heart of the Firefly architecture - NO SUBSTITUTIONS -->
     <PackageReference Include="XParsec" Version="0.1.0" />
-
-    <!-- REMOVED: Temporary FParsec substitution -->
-    <!-- REMOVED: Temporary Tomlyn re-addition -->
-
-    <!-- REMOVED: Tomlyn - Now using XParsec-based TOML parser -->
-    <!-- <PackageReference Include="Tomlyn" Version="0.16.2" /> -->
-
-    <!-- LLVM/MLIR bindings for native code generation -->
     <PackageReference Include="Llvm.NET" Version="8.0.1" />
   </ItemGroup>
 

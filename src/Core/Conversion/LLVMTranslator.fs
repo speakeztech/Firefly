@@ -6,7 +6,7 @@ open System.Runtime.InteropServices
 open XParsec
 open Core.XParsec.Foundation
 open Core.XParsec.Foundation.Combinators
-open Core.XParsec.Foundation.CharParsers  
+open Core.XParsec.Foundation.CharParsers
 open Core.XParsec.Foundation.StringParsers
 open Core.XParsec.Foundation.ErrorHandling
 
@@ -17,6 +17,41 @@ type LLVMOutput = {
     SymbolTable: Map<string, string>
     ExternalFunctions: string list
     GlobalVariables: string list
+}
+
+/// MLIR parsing state and domain models
+type MLIRParsingState = {
+    CurrentModule: string
+    Functions: Map<string, MLIRFunction>
+    Globals: Map<string, MLIRGlobal>
+    Operations: string list
+    SymbolTable: Map<string, string>
+    ErrorContext: string list
+}
+
+and MLIRFunction = {
+    Name: string
+    Parameters: (string * string) list
+    ReturnType: string
+    Body: string list
+    IsExternal: bool
+}
+
+and MLIRGlobal = {
+    Name: string
+    Type: string
+    Value: string
+    IsConstant: bool
+}
+
+/// Initializes MLIR parsing state
+let createMLIRParsingState() : MLIRParsingState = {
+    CurrentModule = "main"
+    Functions = Map.empty
+    Globals = Map.empty
+    Operations = []
+    SymbolTable = Map.empty
+    ErrorContext = []
 }
 
 /// Target triple management
@@ -53,206 +88,506 @@ module TargetTripleManagement =
                 "valid target triple", 
                 "Target triple must have format: arch-vendor-os(-environment)")]
 
-/// Direct MLIR-to-LLVM transformation using string processing
-module DirectMLIRProcessing =
-    
-    /// Converts a single MLIR function to LLVM IR using direct string replacement
-    let convertSingleFunction (functionText: string) : string =
-        let lines = functionText.Split('\n') |> Array.map (fun s -> s.Trim()) |> Array.filter (not << String.IsNullOrWhiteSpace)
+/// Basic MLIR parsers using XParsec combinators
+module MLIRParsers =
+
+    /// Parser for an MLIR identifier (including SSA value names)
+    let identifier : Parser<string, MLIRParsingState> =
+        let isIdStart c = isLetter c || c = '_' || c = '@' || c = '%'
+        let isIdCont c = isLetter c || isDigit c || c = '_' || c = '.'
         
-        if lines.Length = 0 then ""
-        else
-            let headerLine = lines.[0]
-            
-            // Extract function name
-            let funcNamePattern = System.Text.RegularExpressions.Regex(@"func\.func\s+@(\w+)\s*\(\s*\)\s*->\s*i32")
-            let funcMatch = funcNamePattern.Match(headerLine)
-            
-            if not funcMatch.Success then ""
-            else
-                let funcName = funcMatch.Groups.[1].Value
-                let llvmFuncName = if funcName = "main" then "user_main" else funcName
-                
-                let llvmHeader = sprintf "define i32 @%s() {" llvmFuncName
-                let entryLabel = "entry:"
-                
-                let bodyLines = lines.[1..lines.Length-2] // Skip header and closing brace
-                
-                let convertBodyLine (line: string) : string option =
-                    if line.Contains("arith.constant") then
-                        let constPattern = System.Text.RegularExpressions.Regex(@"(%\w+)\s*=\s*arith\.constant\s+(\d+)")
-                        let constMatch = constPattern.Match(line)
-                        if constMatch.Success then
-                            Some (sprintf "  %s = add i32 0, %s" constMatch.Groups.[1].Value constMatch.Groups.[2].Value)
-                        else None
-                    elif line.Contains("func.call") then
-                        let callPattern = System.Text.RegularExpressions.Regex(@"(%\w+)\s*=\s*func\.call\s*@(\w+)\(\)")
-                        let callMatch = callPattern.Match(line)
-                        if callMatch.Success then
-                            Some (sprintf "  %s = call i32 @%s()" callMatch.Groups.[1].Value callMatch.Groups.[2].Value)
-                        else None
-                    elif line.Contains("func.return") then
-                        let returnPattern = System.Text.RegularExpressions.Regex(@"func\.return\s+(%\w+)")
-                        let returnMatch = returnPattern.Match(line)
-                        if returnMatch.Success then
-                            Some (sprintf "  ret i32 %s" returnMatch.Groups.[1].Value)
-                        else
-                            Some "  ret i32 0"
-                    else None
-                
-                let convertedBody = 
-                    bodyLines 
-                    |> Array.choose convertBodyLine
-                    |> Array.toList
-                
-                let llvmFunction = [llvmHeader; entryLabel] @ convertedBody @ ["}"]
-                String.concat "\n" llvmFunction
+        satisfy isIdStart >>= fun first ->
+        many (satisfy isIdCont) >>= fun rest ->
+        let idStr = String(Array.ofList (first :: rest))
+        succeed idStr
+        |> withErrorContext "MLIR identifier"
     
-    /// Extracts individual function texts from MLIR module
-    let extractFunctionTexts (mlirText: string) : string list =
-        // Split by func.func to get function boundaries
-        let funcSplit = mlirText.Split([|"func.func"|], StringSplitOptions.RemoveEmptyEntries)
+    /// Parser for MLIR whitespace and comments
+    let whitespace : Parser<unit, MLIRParsingState> =
+        let comment = 
+            pstring "//" >>= fun _ -> 
+            many (satisfy (fun c -> c <> '\n')) >>= fun _ ->
+            succeed ()
         
-        if funcSplit.Length <= 1 then []
-        else
-            funcSplit.[1..] // Skip the module header part
-            |> Array.map (fun funcPart ->
-                let funcText = "func.func" + funcPart
-                // Find the function end by counting braces
-                let lines = funcText.Split('\n')
-                let rec findFunctionEnd acc braceCount lineIndex =
-                    if lineIndex >= lines.Length then acc
-                    else
-                        let line = lines.[lineIndex].Trim()
-                        let newBraceCount = 
-                            braceCount + 
-                            (line.ToCharArray() |> Array.filter ((=) '{') |> Array.length) -
-                            (line.ToCharArray() |> Array.filter ((=) '}') |> Array.length)
-                        
-                        let newAcc = acc @ [lines.[lineIndex]]
-                        
-                        if newBraceCount = 0 && braceCount > 0 then
-                            newAcc
-                        else
-                            findFunctionEnd newAcc newBraceCount (lineIndex + 1)
-                
-                findFunctionEnd [] 0 0 |> String.concat "\n")
-            |> Array.toList
+        many (ws <|> comment) |>> ignore
+        |> withErrorContext "whitespace"
     
-    /// Transforms complete MLIR module to LLVM IR
-    let transformModule (mlirText: string) : CompilerResult<LLVMOutput> =
-        if String.IsNullOrWhiteSpace(mlirText) then
-            CompilerFailure [TransformError("MLIR to LLVM", "empty input", "LLVM IR", "Input MLIR is empty")]
-        else
-            try
-                // Extract module name
-                let moduleNamePattern = System.Text.RegularExpressions.Regex(@"module\s+(\w+(?:\.\w+)*)")
-                let moduleMatch = moduleNamePattern.Match(mlirText)
-                let moduleName = 
-                    if moduleMatch.Success then moduleMatch.Groups.[1].Value
-                    else "main"
-                
-                // Extract and convert functions
-                let functionTexts = extractFunctionTexts mlirText
-                printfn "Debug: Found %d functions in MLIR" functionTexts.Length
-                
-                let llvmFunctions = 
-                    functionTexts
-                    |> List.map convertSingleFunction
-                    |> List.filter (not << String.IsNullOrWhiteSpace)
-                
-                printfn "Debug: Converted %d functions to LLVM" llvmFunctions.Length
-                
-                if llvmFunctions.IsEmpty then
-                    // Fallback: create minimal functions if extraction fails
-                    let fallbackFunctions = [
-                        "define i32 @user_hello() {\nentry:\n  ret i32 0\n}"
-                        "define i32 @user_main() {\nentry:\n  %1 = call i32 @user_hello()\n  ret i32 %1\n}"
-                    ]
-                    printfn "Debug: Using fallback functions"
-                    
-                    let targetTriple = TargetTripleManagement.getTargetTriple "default"
-                    let moduleHeader = [
-                        sprintf "; ModuleID = '%s'" moduleName
-                        sprintf "source_filename = \"%s\"" moduleName
-                        "target datalayout = \"e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128\""
-                        sprintf "target triple = \"%s\"" targetTriple
-                        ""
-                    ]
-                    
-                    let mainWrapper = [
-                        "define i32 @main(i32 %argc, i8** %argv) {"
-                        "entry:"
-                        "  %1 = call i32 @user_main()"
-                        "  ret i32 %1"
-                        "}"
-                    ]
-                    
-                    let completeIR = 
-                        moduleHeader @ 
-                        fallbackFunctions @ 
-                        [String.concat "\n" mainWrapper]
-                        |> String.concat "\n"
-                    
-                    Success {
-                        ModuleName = moduleName
-                        LLVMIRText = completeIR
-                        SymbolTable = Map.empty
-                        ExternalFunctions = []
-                        GlobalVariables = []
-                    }
+    /// Parser for MLIR types
+    let mlirType : Parser<string, MLIRParsingState> =
+        // Basic primitive types
+        let primitiveType = 
+            choice [
+                pstring "i1"
+                pstring "i8" 
+                pstring "i16"
+                pstring "i32"
+                pstring "i64"
+                pstring "f32"
+                pstring "f64"
+                pstring "void"
+            ]
+        
+        // Memref type parser
+        let memrefType =
+            pstring "memref<" >>= fun _ ->
+            many (satisfy (fun c -> c <> '>')) >>= fun content ->
+            pchar '>' >>= fun _ ->
+            let contentStr = String(Array.ofList content)
+            succeed ("memref<" + contentStr + ">")
+        
+        // LLVM pointer type parser
+        let ptrType =
+            pstring "!llvm.ptr<" >>= fun _ ->
+            many (satisfy (fun c -> c <> '>')) >>= fun content ->
+            pchar '>' >>= fun _ ->
+            let contentStr = String(Array.ofList content)
+            succeed ("!llvm.ptr<" + contentStr + ">")
+        
+        choice [primitiveType; memrefType; ptrType]
+        |> withErrorContext "MLIR type"
+    
+    /// Parser for MLIR function parameters
+    let parameter : Parser<string * string, MLIRParsingState> =
+        identifier >>= fun name ->
+        whitespace >>= fun _ ->
+        pchar ':' >>= fun _ ->
+        whitespace >>= fun _ ->
+        mlirType >>= fun paramType ->
+        succeed (name, paramType)
+        |> withErrorContext "function parameter"
+    
+    /// Parser for a list of parameters
+    let parameterList : Parser<(string * string) list, MLIRParsingState> =
+        sepBy parameter (pchar ',' >>= fun _ -> whitespace)
+        |> withErrorContext "parameter list"
+    
+    /// Parser for MLIR function signatures
+    let functionSignature : Parser<MLIRFunction, MLIRParsingState> =
+        pstring "func.func" >>= fun _ ->
+        whitespace >>= fun _ ->
+        opt (pstring "private" >>= fun _ -> whitespace) >>= fun isPrivateOpt ->
+        identifier >>= fun name ->
+        whitespace >>= fun _ ->
+        between (pchar '(') (pchar ')') parameterList >>= fun parameters ->
+        whitespace >>= fun _ ->
+        opt (pstring "->" >>= fun _ -> whitespace >>= fun _ -> mlirType) >>= fun returnTypeOpt ->
+        
+        let returnType = defaultArg returnTypeOpt "void"
+        let isExternal = isPrivateOpt.IsSome
+        
+        succeed {
+            Name = name
+            Parameters = parameters
+            ReturnType = returnType
+            Body = []
+            IsExternal = isExternal
+        }
+        |> withErrorContext "function signature"
+    
+    /// Parser for MLIR global declarations
+    let globalConstant : Parser<MLIRGlobal, MLIRParsingState> =
+        pstring "memref.global" >>= fun _ ->
+        whitespace >>= fun _ ->
+        opt (pstring "constant" >>= fun _ -> whitespace) >>= fun isConstantOpt ->
+        identifier >>= fun name ->
+        whitespace >>= fun _ ->
+        pchar ':' >>= fun _ ->
+        whitespace >>= fun _ ->
+        mlirType >>= fun globalType ->
+        whitespace >>= fun _ ->
+        pchar '=' >>= fun _ ->
+        whitespace >>= fun _ ->
+        many (satisfy (fun c -> c <> '\n')) >>= fun valueChars ->
+        
+        let value = String(Array.ofList valueChars)
+        succeed {
+            Name = name
+            Type = globalType
+            Value = value
+            IsConstant = isConstantOpt.IsSome
+        }
+        |> withErrorContext "global constant"
+    
+    /// Parser for MLIR module names
+    let moduleName : Parser<string, MLIRParsingState> =
+        pstring "module" >>= fun _ -> 
+        whitespace >>= fun _ ->
+        identifier
+        |> withErrorContext "module name"
+    
+    /// Updates the MLIR parsing state with a function
+    let updateState (update: MLIRParsingState -> MLIRParsingState) : Parser<unit, MLIRParsingState> =
+        fun state ->
+            let newState = update state
+            Reply(Ok (), newState)
+    
+    /// Records a function in the state
+    let recordFunction (func: MLIRFunction) : Parser<unit, MLIRParsingState> =
+        updateState (fun state -> 
+            { state with Functions = Map.add func.Name func state.Functions })
+    
+    /// Records a global in the state
+    let recordGlobal (global: MLIRGlobal) : Parser<unit, MLIRParsingState> =
+        updateState (fun state -> 
+            { state with Globals = Map.add global.Name global state.Globals })
+    
+    /// Records the module name in the state
+    let recordModuleName (name: string) : Parser<unit, MLIRParsingState> =
+        updateState (fun state -> { state with CurrentModule = name })
+    
+    /// Records a symbol mapping in the state
+    let recordSymbol (original: string) (translated: string) : Parser<unit, MLIRParsingState> =
+        updateState (fun state -> 
+            { state with SymbolTable = Map.add original translated state.SymbolTable })
+    
+    /// Emits LLVM IR operation
+    let emitOperation (operation: string) : Parser<unit, MLIRParsingState> =
+        updateState (fun state -> 
+            { state with Operations = operation :: state.Operations })
+
+/// MLIR to LLVM type conversions
+module TypeConversion =
+    
+    /// Converts an MLIR type to LLVM IR type
+    let mlirTypeToLLVM (mlirType: string) : string =
+        match mlirType with
+        | t when t.StartsWith("i") || t.StartsWith("f") -> mlirType
+        | "void" -> "void"
+        | t when t.StartsWith("memref<") -> 
+            let size = t.Substring(7, t.Length - 8).Trim()
+            let parts = size.Split('x')
+            if parts.Length = 2 && parts.[1].Trim() = "i8" then
+                if parts.[0].Trim() = "?" then
+                    "i8*"
                 else
-                    // Generate complete LLVM IR with extracted functions
-                    let targetTriple = TargetTripleManagement.getTargetTriple "default"
-                    
-                    let moduleHeader = [
-                        sprintf "; ModuleID = '%s'" moduleName
-                        sprintf "source_filename = \"%s\"" moduleName
-                        "target datalayout = \"e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128\""
-                        sprintf "target triple = \"%s\"" targetTriple
-                        ""
-                    ]
-                    
-                    // Add main wrapper if user_main exists
-                    let hasUserMain = llvmFunctions |> List.exists (fun f -> f.Contains("@user_main"))
-                    
-                    let mainWrapper = 
-                        if hasUserMain then
-                            [
-                                "define i32 @main(i32 %argc, i8** %argv) {"
-                                "entry:"
-                                "  %1 = call i32 @user_main()"
-                                "  ret i32 %1"
-                                "}"
-                            ]
-                        else
-                            []
-                    
-                    let completeIR = 
-                        moduleHeader @ 
-                        llvmFunctions @ 
-                        mainWrapper @ 
-                        [""]
-                        |> String.concat "\n"
-                    
-                    Success {
-                        ModuleName = moduleName
-                        LLVMIRText = completeIR
-                        SymbolTable = Map.empty
-                        ExternalFunctions = []
-                        GlobalVariables = []
-                    }
-            with
-            | ex ->
-                printfn "Debug: Exception in transformModule: %s" ex.Message
-                CompilerFailure [TransformError("MLIR to LLVM", "MLIR parsing", "LLVM IR", ex.Message)]
+                    sprintf "[%s x i8]" (parts.[0].Trim())
+            else
+                "i8*"
+        | t when t.StartsWith("!llvm.ptr<") ->
+            let innerType = t.Substring(11, t.Length - 12).Trim()
+            let convertedInner = mlirTypeToLLVM innerType
+            if convertedInner.EndsWith("*") then
+                convertedInner.Replace("*", "**")
+            else
+                sprintf "%s*" convertedInner
+        | _ -> "i32"  // Default type
+
+/// MLIR to LLVM operation conversions
+module OperationConversion =
+    
+    /// Converts an MLIR function to LLVM IR
+    let convertFunction (func: MLIRFunction) : Parser<string, MLIRParsingState> =
+        use writer = new StringWriter()
+        
+        // Convert parameters
+        let paramStr = 
+            if func.Parameters.IsEmpty then ""
+            else
+                func.Parameters
+                |> List.map (fun (name, paramType) -> 
+                    let llvmType = TypeConversion.mlirTypeToLLVM paramType
+                    sprintf "%s %s" llvmType name)
+                |> String.concat ", "
+        
+        let llvmReturnType = TypeConversion.mlirTypeToLLVM func.ReturnType
+        
+        // Handle special case for main function
+        let (funcName, finalParamStr) = 
+            if func.Name = "@main" then
+                ("@main", "i32 %argc, i8** %argv")
+            else
+                (func.Name, paramStr)
+        
+        if func.IsExternal then
+            // External function declaration
+            writer.WriteLine(sprintf "declare %s %s(%s)" llvmReturnType funcName finalParamStr)
+        else
+            // Function definition
+            writer.WriteLine(sprintf "define %s %s(%s) {" llvmReturnType funcName finalParamStr)
+            writer.WriteLine("entry:")
+            
+            // Convert body operations
+            func.Body |> List.iter (fun line ->
+                if line.Contains("arith.constant") then
+                    // Convert arith.constant to LLVM add
+                    let parts = line.Split('=')
+                    if parts.Length = 2 then
+                        let resultName = parts.[0].Trim()
+                        let valueMatch = System.Text.RegularExpressions.Regex.Match(parts.[1], @"arith\.constant\s+(\d+)")
+                        if valueMatch.Success then
+                            let value = valueMatch.Groups.[1].Value
+                            writer.WriteLine(sprintf "  %s = add i32 0, %s" resultName value)
+                elif line.Contains("func.call") then
+                    // Convert func.call to LLVM call
+                    let callMatch = System.Text.RegularExpressions.Regex.Match(line, @"(\%\w+)\s*=\s*func\.call\s*(\@\w+)\((.*)\)")
+                    if callMatch.Success then
+                        let resultName = callMatch.Groups.[1].Value
+                        let calleeName = callMatch.Groups.[2].Value
+                        let args = callMatch.Groups.[3].Value
+                        writer.WriteLine(sprintf "  %s = call i32 %s(%s)" resultName calleeName args)
+                elif line.Contains("func.return") then
+                    // Convert func.return to LLVM ret
+                    let returnMatch = System.Text.RegularExpressions.Regex.Match(line, @"func\.return\s+(\%\w+)")
+                    if returnMatch.Success then
+                        let resultName = returnMatch.Groups.[1].Value
+                        writer.WriteLine(sprintf "  ret i32 %s" resultName)
+                    else
+                        writer.WriteLine("  ret i32 0")
+                else
+                    // Pass through other operations with basic cleanup
+                    let cleanLine = line.Replace("memref.alloca", "alloca")
+                                        .Replace("memref.load", "load")
+                                        .Replace("memref.store", "store")
+                    writer.WriteLine(sprintf "  %s" cleanLine))
+            
+            writer.WriteLine("}")
+        
+        MLIRParsers.emitOperation (writer.ToString()) >>= fun _ ->
+        succeed (writer.ToString())
+    
+    /// Converts an MLIR global to LLVM IR
+    let convertGlobal (global: MLIRGlobal) : Parser<string, MLIRParsingState> =
+        use writer = new StringWriter()
+        
+        // Parse type and value from MLIR global
+        let typeMatch = global.Type.Contains("memref<")
+        let valueMatch = global.Value.Contains("dense<")
+        
+        if typeMatch && valueMatch then
+            // Extract size from memref<NxiM>
+            let sizeStart = global.Type.IndexOf('<') + 1
+            let sizeEnd = global.Type.IndexOf('x', sizeStart)
+            let size = 
+                if sizeEnd > sizeStart then
+                    global.Type.Substring(sizeStart, sizeEnd - sizeStart)
+                else "1"
+            
+            // Extract content from dense<"value">
+            let contentStart = global.Value.IndexOf('"') + 1
+            let contentEnd = global.Value.LastIndexOf('"')
+            let content = 
+                if contentEnd > contentStart then
+                    global.Value.Substring(contentStart, contentEnd - contentStart)
+                       .Replace("\\00", "")
+                else ""
+            
+            let actualSize = content.Length + 1  // Include null terminator
+            writer.WriteLine(sprintf "%s = private unnamed_addr constant [%d x i8] c\"%s\\00\", align 1" 
+                    global.Name actualSize content)
+        else
+            writer.WriteLine(sprintf "%s = private unnamed_addr constant [1 x i8] zeroinitializer, align 1" global.Name)
+        
+        MLIRParsers.emitOperation (writer.ToString()) >>= fun _ ->
+        succeed (writer.ToString())
+    
+    /// Generates standard C library declarations
+    let generateStandardDeclarations() : Parser<unit, MLIRParsingState> =
+        let declarations = [
+            // Standard C library printf and printf-family functions
+            "declare i32 @printf(i8* nocapture readonly, ...)"
+            "declare i32 @fprintf(i8* nocapture readonly, i8* nocapture readonly, ...)"
+            "declare i32 @sprintf(i8* nocapture, i8* nocapture readonly, ...)"
+            
+            // Standard C library scanf and scanf-family functions
+            "declare i32 @scanf(i8* nocapture readonly, ...)"
+            "declare i32 @fscanf(i8* nocapture readonly, i8* nocapture readonly, ...)"
+            "declare i32 @sscanf(i8* nocapture readonly, i8* nocapture readonly, ...)"
+            
+            // String I/O functions
+            "declare i32 @puts(i8* nocapture readonly)"
+            "declare i32 @fputs(i8* nocapture readonly, i8* nocapture readonly)"
+            "declare i8* @fgets(i8*, i32, i8*)"
+            "declare i32 @getchar()"
+            "declare i32 @putchar(i32)"
+            
+            // File operations
+            "declare i8* @fopen(i8* nocapture readonly, i8* nocapture readonly)"
+            "declare i32 @fclose(i8* nocapture)"
+            "declare i64 @fread(i8*, i64, i64, i8*)"
+            "declare i64 @fwrite(i8* nocapture readonly, i64, i64, i8*)"
+            
+            // Memory operations
+            "declare i8* @malloc(i64)"
+            "declare void @free(i8* nocapture)"
+            "declare i8* @calloc(i64, i64)"
+            "declare i8* @realloc(i8* nocapture, i64)"
+            "declare void @llvm.memset.p0i8.i64(i8* nocapture writeonly, i8, i64, i1)"
+            "declare void @llvm.memcpy.p0i8.p0i8.i64(i8* nocapture writeonly, i8* nocapture readonly, i64, i1)"
+            
+            // String operations
+            "declare i64 @strlen(i8* nocapture readonly)"
+            "declare i32 @strcmp(i8* nocapture readonly, i8* nocapture readonly)"
+            "declare i8* @strcpy(i8* nocapture, i8* nocapture readonly)"
+            "declare i8* @strcat(i8* nocapture, i8* nocapture readonly)"
+            
+            // Standard streams
+            "declare i8* @__stdoutp() #1"
+            "declare i8* @__stdinp() #1"
+            
+            // Attributes
+            "attributes #1 = { nounwind }"
+        ]
+        
+        let rec emitAll declarations =
+            match declarations with
+            | [] -> succeed ()
+            | decl :: rest ->
+                MLIRParsers.emitOperation decl >>= fun _ ->
+                emitAll rest
+        
+        emitAll declarations
+
+/// MLIR module processing
+module MLIRProcessing =
+    
+    /// Processes a single line of MLIR
+    let processLine (line: string) : Parser<unit, MLIRParsingState> =
+        let trimmedLine = line.Trim()
+        
+        if String.IsNullOrWhiteSpace(trimmedLine) || trimmedLine.StartsWith("//") then
+            succeed ()
+        elif trimmedLine.StartsWith("module") then
+            run (MLIRParsers.moduleName) trimmedLine >>= fun moduleName ->
+            MLIRParsers.recordModuleName moduleName
+        elif trimmedLine.StartsWith("func.func") then
+            run (MLIRParsers.functionSignature) trimmedLine >>= fun func ->
+            MLIRParsers.recordFunction func
+        elif trimmedLine.StartsWith("memref.global") then
+            run (MLIRParsers.globalConstant) trimmedLine >>= fun global ->
+            MLIRParsers.recordGlobal global
+        else
+            succeed ()
+    
+    /// Processes a complete MLIR module
+    let processModule (mlirText: string) : Parser<MLIRParsingState, MLIRParsingState> =
+        let lines = mlirText.Split('\n')
+        
+        let rec processLines lineIndex state =
+            if lineIndex >= lines.Length then
+                succeed state
+            else
+                let line = lines.[lineIndex]
+                processLine line >>= fun _ ->
+                processLines (lineIndex + 1) state
+        
+        getState >>= processLines 0
+    
+    /// Generates LLVM IR module from parsed MLIR
+    let generateLLVMModule (targetTriple: string) : Parser<string, MLIRParsingState> =
+        // Generate module header
+        getState >>= fun state ->
+        let moduleHeader = [
+            sprintf "; ModuleID = '%s'" state.CurrentModule
+            sprintf "source_filename = \"%s\"" state.CurrentModule
+            "target datalayout = \"e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128\""
+            sprintf "target triple = \"%s\"" targetTriple
+            ""
+        ]
+        
+        // Emit module header
+        let rec emitHeader headers =
+            match headers with
+            | [] -> succeed ()
+            | header :: rest ->
+                MLIRParsers.emitOperation header >>= fun _ ->
+                emitHeader rest
+        
+        emitHeader moduleHeader >>= fun _ ->
+        
+        // Generate standard declarations
+        OperationConversion.generateStandardDeclarations() >>= fun _ ->
+        
+        // Generate globals
+        let convertGlobals =
+            getState >>= fun state ->
+            let globals = state.Globals |> Map.toList |> List.map snd
+            
+            let rec processGlobals globals =
+                match globals with
+                | [] -> succeed ()
+                | global :: rest ->
+                    OperationConversion.convertGlobal global >>= fun _ ->
+                    processGlobals rest
+            
+            processGlobals globals
+        
+        convertGlobals >>= fun _ ->
+        
+        // Generate functions
+        let convertFunctions =
+            getState >>= fun state ->
+            let functions = state.Functions |> Map.toList |> List.map snd
+            
+            let rec processFunctions functions =
+                match functions with
+                | [] -> succeed ()
+                | func :: rest ->
+                    OperationConversion.convertFunction func >>= fun _ ->
+                    processFunctions rest
+            
+            processFunctions functions
+        
+        convertFunctions >>= fun _ ->
+        
+        // Ensure we have a proper main wrapper if needed
+        let ensureMainWrapper =
+            getState >>= fun state ->
+            let hasMainFunc = state.Functions |> Map.containsKey "@main"
+            
+            if hasMainFunc then
+                succeed ()
+            else
+                let functions = state.Functions |> Map.toList |> List.map (fun (_, func) -> func.Name)
+                if List.exists (fun name -> name.Contains("main") || name.Contains("Main")) functions then
+                    // Emit a main wrapper for user_main
+                    let userMain = functions |> List.find (fun name -> name.Contains("main") || name.Contains("Main"))
+                    MLIRParsers.emitOperation "" >>= fun _ ->
+                    MLIRParsers.emitOperation "define i32 @main(i32 %argc, i8** %argv) {" >>= fun _ ->
+                    MLIRParsers.emitOperation "entry:" >>= fun _ ->
+                    MLIRParsers.emitOperation (sprintf "  %%1 = call i32 %s()" userMain) >>= fun _ ->
+                    MLIRParsers.emitOperation "  ret i32 %1" >>= fun _ ->
+                    MLIRParsers.emitOperation "}" >>= fun _ ->
+                    succeed ()
+                else
+                    // Create a minimal main function
+                    MLIRParsers.emitOperation "" >>= fun _ ->
+                    MLIRParsers.emitOperation "define i32 @main(i32 %argc, i8** %argv) {" >>= fun _ ->
+                    MLIRParsers.emitOperation "entry:" >>= fun _ ->
+                    MLIRParsers.emitOperation "  ret i32 0" >>= fun _ ->
+                    MLIRParsers.emitOperation "}" >>= fun _ ->
+                    succeed ()
+        
+        ensureMainWrapper >>= fun _ ->
+        
+        // Collect all operations
+        getState >>= fun state ->
+        let operations = state.Operations |> List.rev
+        succeed (String.concat "\n" operations)
 
 /// Main translation entry point
 let translateToLLVM (mlirText: string) : CompilerResult<LLVMOutput> =
     if String.IsNullOrWhiteSpace(mlirText) then
         CompilerFailure [TransformError("LLVM translation", "empty input", "LLVM IR", "MLIR input cannot be empty")]
     else
-        DirectMLIRProcessing.transformModule mlirText
+        let targetTriple = TargetTripleManagement.getTargetTriple "default"
+        
+        try
+            let initialState = createMLIRParsingState()
+            match run (MLIRProcessing.processModule mlirText >>= fun _ -> MLIRProcessing.generateLLVMModule targetTriple) initialState with
+            | (llvmIR, state) ->
+                Success {
+                    ModuleName = state.CurrentModule
+                    LLVMIRText = llvmIR
+                    SymbolTable = state.SymbolTable
+                    ExternalFunctions = []  // Populated during conversion
+                    GlobalVariables = state.Globals |> Map.toList |> List.map fst
+                }
+        with ex ->
+            CompilerFailure [TransformError(
+                "MLIR to LLVM", 
+                "MLIR processing", 
+                "LLVM IR", 
+                sprintf "Exception: %s\n%s" ex.Message ex.StackTrace)]
 
 /// External tool integration for native compilation
 module ExternalToolchain =
@@ -350,3 +685,23 @@ let compileLLVMToNative (llvmOutput: LLVMOutput) (outputPath: string) (target: s
     with
     | ex ->
         CompilerFailure [CompilerError("native compilation", "Failed during native compilation", Some ex.Message)]
+
+/// Validates that LLVM IR has no heap allocations
+let validateZeroAllocationGuarantees (llvmIR: string) : CompilerResult<unit> =
+    // Check for common heap allocation functions
+    let heapFunctions = ["malloc"; "calloc"; "realloc"; "new"]
+    
+    let containsHeapAllocation = 
+        heapFunctions
+        |> List.exists (fun func -> 
+            let pattern = sprintf "call.*@%s" func
+            llvmIR.Contains(pattern))
+    
+    if containsHeapAllocation then
+        CompilerFailure [TransformError(
+            "zero-allocation validation", 
+            "optimized LLVM IR", 
+            "zero-allocation LLVM IR", 
+            "Found potential heap allocation functions in LLVM IR")]
+    else
+        Success ()

@@ -178,6 +178,62 @@ module OperationEmission =
 
 /// I/O operation conversion using XParsec
 module IOOperationConversion =
+
+	/// Converts ReadLine operation
+    let convertReadLine (bufferName: string option) : MLIRParser<string> =
+        Operations.declareExternal "scanf" "(memref<?xi8>, ...) -> i32" >>= fun _ ->
+        Operations.registerString "%s" >>= fun formatGlobal ->
+        SSA.generateValue "fmt_ptr" >>= fun formatPtr ->
+        
+        let getFormatOp = sprintf "  %s = memref.get_global %s : memref<%dxi8>" 
+                                 formatPtr formatGlobal 3  // "%s\0" is 3 chars
+        Operations.emit getFormatOp >>= fun _ ->
+        
+        match bufferName with
+        | Some buffer ->
+            // Use provided buffer
+            SSA.lookupVariable buffer >>= fun bufferSSA ->
+            SSA.generateValue "scanf_result" >>= fun resultSSA ->
+            let callOp = sprintf "  %s = func.call @scanf(%s, %s) : (memref<?xi8>, memref<?xi8>) -> i32" 
+                               resultSSA formatPtr bufferSSA
+            Operations.emit callOp >>= fun _ ->
+            succeed bufferSSA
+        | None ->
+            // Create a default buffer
+            SSA.generateValue "readbuf" >>= fun bufferSSA ->
+            let allocOp = sprintf "  %s = memref.alloca() : memref<256xi8>" bufferSSA
+            Operations.emit allocOp >>= fun _ ->
+            
+            SSA.generateValue "scanf_result" >>= fun resultSSA ->
+            let callOp = sprintf "  %s = func.call @scanf(%s, %s) : (memref<?xi8>, memref<256xi8>) -> i32" 
+                               resultSSA formatPtr bufferSSA
+            Operations.emit callOp >>= fun _ ->
+            succeed bufferSSA
+    
+    // Modify the convert function in the IOOperations module to handle ReadLine
+    let convert (ioType: IOOperationType) (args: OakExpression list) 
+               (convertExpr: OakExpression -> MLIRParser<string>) : MLIRParser<string> =
+        match ioType with
+        | Printf(formatString) -> convertPrintf formatString args convertExpr
+        | Printfn(formatString) -> convertPrintfn formatString args convertExpr
+        | ReadLine -> 
+            match args with
+            | [Variable bufferName] -> convertReadLine (Some bufferName)
+            | _ -> convertReadLine None
+        | Scanf(formatString) -> 
+            // Basic implementation for scanf
+            Operations.declareExternal "scanf" "(memref<?xi8>, ...) -> i32" >>= fun _ ->
+            Operations.registerString formatString >>= fun formatGlobal ->
+            SSA.generateValue "fmt_ptr" >>= fun formatPtr ->
+            let getFormatOp = sprintf "  %s = memref.get_global %s : memref<%dxi8>" 
+                                     formatPtr formatGlobal (formatString.Length + 1)
+            Operations.emit getFormatOp >>= fun _ ->
+            SSA.generateValue "scanf_result" >>= fun resultSSA ->
+            let callOp = sprintf "  %s = func.call @scanf(%s) : (memref<?xi8>) -> i32" 
+                               resultSSA formatPtr
+            Operations.emit callOp >>= fun _ ->
+            succeed resultSSA
+        | WriteFile _ | ReadFile _ -> fail "File I/O operations not implemented"
     
     /// Converts I/O operation to MLIR with external function calls
     let convertIOOperation (ioType: IOOperationType) (args: OakExpression list) : Parser<string, MLIRGenerationState> =
@@ -508,24 +564,27 @@ module DeclarationConversion =
         |> withErrorContext (sprintf "function declaration '%s'" name)
     
     /// Converts entry point to MLIR main function with proper C calling convention
-    let convertEntryPoint (expr: OakExpression) : Parser<unit, MLIRGenerationState> =
-        emitOperation "func.func @main(%arg0: i32, %arg1: !llvm.ptr<!llvm.ptr<i8>>) -> i32 {" >>= fun _ ->
-        pushScope >>= fun _ ->
+    let convertEntryPoint (expr: OakExpression) : MLIRParser<unit> =
+        // Proper MLIR syntax for the main function
+        Operations.emit "func.func @main(%arg0: i32, %arg1: !llvm.ptr<ptr<i8>>) -> i32 {" >>= fun _ ->
+        SSA.pushScope >>= fun _ ->
+        SSA.bindVariable "argc" "%arg0" >>= fun _ ->
+        SSA.bindVariable "argv" "%arg1" >>= fun _ ->
+        
         convertExpression expr >>= fun exprSSA ->
         
-        // Entry point must return i32 (exit code)
         let returnSSA = 
-            if String.IsNullOrEmpty(exprSSA) then
-                // Unit expression - return 0
-                emitConstant "0" (Integer 32)
-            else
-                succeed exprSSA
+            match expr with
+            | Literal(IntLiteral(_)) -> succeed exprSSA
+            | _ ->
+                SSA.generateValue "const" >>= fun constSSA ->
+                Operations.emit (sprintf "  %s = arith.constant 0 : i32" constSSA) >>= fun _ ->
+                succeed constSSA
         
         returnSSA >>= fun finalSSA ->
-        emitOperation (sprintf "  func.return %s : i32" finalSSA) >>= fun _ ->
-        emitOperation "}" >>= fun _ ->
-        popScope
-        |> withErrorContext "entry point conversion"
+        Operations.emit (sprintf "  func.return %s : i32" finalSSA) >>= fun _ ->
+        Operations.emit "}" >>= fun _ ->
+        SSA.popScope
     
     /// Converts external declaration to MLIR
     let convertExternalDeclaration (name: string) (paramTypes: OakType list) (returnType: OakType) (libraryName: string) : Parser<unit, MLIRGenerationState> =
