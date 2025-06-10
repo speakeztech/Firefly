@@ -29,16 +29,17 @@ type MLIRModuleOutput = {
 }
 
 /// Creates a clean initial state for MLIR generation
-let createInitialState() = {
-    SSACounter = 0
-    CurrentScope = Map.empty
-    ScopeStack = []
-    GeneratedOperations = []
-    CurrentFunction = None
-    StringConstants = Map.empty
-    CurrentDialect = Func
-    ErrorContext = []
-}
+let createInitialState () : MLIRGenerationState = 
+    {
+        SSACounter = 0
+        CurrentScope = Map.empty
+        ScopeStack = []
+        GeneratedOperations = []
+        CurrentFunction = None
+        StringConstants = Map.empty
+        CurrentDialect = Func
+        ErrorContext = []
+    }
 
 /// Core SSA value and scope management functions
 module SSA = 
@@ -68,18 +69,20 @@ module SSA =
     
     /// Pushes current scope onto stack and creates a new empty scope
     let pushScope (state: MLIRGenerationState) : MLIRGenerationState =
-        { state with 
-            ScopeStack = state.CurrentScope :: state.ScopeStack
-            CurrentScope = Map.empty 
+        { 
+            state with 
+                ScopeStack = state.CurrentScope :: state.ScopeStack
+                CurrentScope = Map.empty 
         }
     
     /// Pops scope from stack and restores previous scope
     let popScope (state: MLIRGenerationState) : MLIRGenerationState option =
         match state.ScopeStack with
         | scope :: rest ->
-            Some { state with 
-                CurrentScope = scope
-                ScopeStack = rest 
+            Some { 
+                state with 
+                    CurrentScope = scope
+                    ScopeStack = rest 
             }
         | [] -> None
 
@@ -440,7 +443,7 @@ module DeclarationConversion =
 
 /// Main entry point for MLIR generation
 let generateMLIR (program: OakProgram) : MLIRModuleOutput =
-    let initialState = createInitialState()
+    let initialState = createInitialState ()
     
     // Process each module
     let processModule (state: MLIRGenerationState) (mdl: OakModule) =
@@ -510,7 +513,7 @@ let generateMLIRModuleText (program: OakProgram) : Core.XParsec.Foundation.Compi
         Core.XParsec.Foundation.Success moduleText
     with ex ->
         Core.XParsec.Foundation.CompilerFailure [
-            Core.XParsec.Foundation.TransformError(
+            Core.XParsec.Foundation.ConversionError(
                 "MLIR generation", 
                 "Oak AST", 
                 "MLIR", 
