@@ -76,7 +76,8 @@ module Transformations =
     let sourceToOak (sourceFile: string) (sourceCode: string) : CompilerResult<OakProgram * string> =
         try
             // Parse using Fantomas/FCS via AstConverter
-            let result = AstConverter.parseAndConvertWithDiagnostics sourceCode
+            // Fix: Pass both sourceFile and sourceCode to match the updated function signature
+            let result = AstConverter.parseAndConvertWithDiagnostics sourceFile sourceCode
             
             // Check for parse failures
             if result.OakProgram.Modules.IsEmpty && result.Diagnostics.Length > 0 then
