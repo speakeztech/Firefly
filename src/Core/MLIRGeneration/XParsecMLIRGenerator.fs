@@ -86,13 +86,9 @@ module Emitter =
             (existingName, state)
         | Option.None ->
             let constName = sprintf "@str_%d" state.StringConstants.Count
-            
-            // FIXED: Only add to StringConstants map, NOT to ModuleLevelDeclarations
-            // The string will be emitted later from the StringConstants map
             let newState = { 
                 state with 
                     StringConstants = Map.add value constName state.StringConstants
-                    // DON'T add to ModuleLevelDeclarations here
             }
             (constName, newState)
     
@@ -103,7 +99,7 @@ module Emitter =
         let state2 = emit (sprintf "    %s = arith.constant %s : %s" resultId value typeStr) state1
         (resultId, state2)
     
-    /// Creates a function call in MLIR - FIXED for void functions
+    /// Creates a function call in MLIR
     let call (funcName: string) (args: string list) (resultType: MLIRType option) (state: MLIRGenerationState) : string * MLIRGenerationState =
         let argStr = if args.IsEmpty then "" else String.concat ", " args
         let paramTypeStr = if args.IsEmpty then "" else String.concat ", " (List.replicate args.Length "i32")
@@ -123,7 +119,6 @@ module Emitter =
             let state2 = emit callStr state1
             (resultId, state2)
         | _ ->
-            // Void function or no return type
             let callStr = 
                 if args.IsEmpty then
                     sprintf "    func.call @%s() : () -> ()" funcName
@@ -134,245 +129,312 @@ module Emitter =
             let (dummyId, state2) = SSA.generateValue "void" state1
             (dummyId, state2)
 
-/// Core expression conversion functions - COMPLETE MODULE WITH PROPER ORDERING
-module ExpressionConversion =
-    /// Converts Oak literal to MLIR constant
-    let rec convertLiteral (literal: OakLiteral) (state: MLIRGenerationState) : string * MLIRGenerationState =
-        match literal with
-        | IntLiteral value ->
-            Emitter.constant (string value) (Integer 32) state
-        | FloatLiteral value ->
-            Emitter.constant (sprintf "%f" value) (Float 32) state
-        | BoolLiteral value ->
-            Emitter.constant (if value then "1" else "0") (Integer 1) state
-        | StringLiteral value ->
-            // Register string as global and get pointer
-            let (globalName, state1) = Emitter.registerString value state
-            let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
-            let state3 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" ptrResult globalName) state2
-            (ptrResult, state3)
-        | UnitLiteral ->
-            // Unit type - return a dummy constant
-            Emitter.constant "0" (Integer 32) state
-        | ArrayLiteral _ ->
-            // Simplified array handling
-            let (arrayResult, state1) = SSA.generateValue "array" state
-            (arrayResult, state1)
+/// Core expression conversion functions with proper mutual recursion
+let rec convertLiteral (literal: OakLiteral) (state: MLIRGenerationState) : string * MLIRGenerationState =
+    match literal with
+    | IntLiteral value ->
+        Emitter.constant (string value) (Integer 32) state
+    | FloatLiteral value ->
+        Emitter.constant (sprintf "%f" value) (Float 32) state
+    | BoolLiteral value ->
+        Emitter.constant (if value then "1" else "0") (Integer 1) state
+    | StringLiteral value ->
+        let (globalName, state1) = Emitter.registerString value state
+        let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
+        let state3 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" ptrResult globalName) state2
+        (ptrResult, state3)
+    | UnitLiteral ->
+        Emitter.constant "0" (Integer 32) state
+    | ArrayLiteral _ ->
+        let (arrayResult, state1) = SSA.generateValue "array" state
+        (arrayResult, state1)
+
+and convertStackAllocation (args: OakExpression list) (state: MLIRGenerationState) : string * MLIRGenerationState =
+    match args with
+    | [Literal (IntLiteral size)] ->
+        let (bufferResult, state1) = SSA.generateValue "buffer" state
+        let state2 = Emitter.emit (sprintf "    %s = memref.alloca() : memref<%dxi8>" bufferResult size) state1
+        (bufferResult, state2)
+    | _ ->
+        let (dummyValue, state1) = SSA.generateValue "invalid_alloca" state
+        (dummyValue, state1)
+
+and convertConsoleReadLine (args: OakExpression list) (state: MLIRGenerationState) : string * MLIRGenerationState =
+    printfn "DEBUG: convertConsoleReadLine called with args: %A" args
     
-    /// Converts stack allocation to MLIR memref.alloca
-    and convertStackAllocation (args: OakExpression list) (state: MLIRGenerationState) : string * MLIRGenerationState =
-        match args with
-        | [Literal (IntLiteral size)] ->
-            // Generate stack allocation for byte buffer
-            let (bufferResult, state1) = SSA.generateValue "buffer" state
-            let state2 = Emitter.emit (sprintf "    %s = memref.alloca() : memref<%dxi8>" bufferResult size) state1
-            (bufferResult, state2)
-        | _ ->
-            // Invalid stack allocation arguments
-            let (dummyValue, state1) = SSA.generateValue "invalid_alloca" state
-            (dummyValue, state1)
-
-    /// Converts Console.readLine to MLIR scanf call
-    and convertConsoleReadLine (args: OakExpression list) (state: MLIRGenerationState) : string * MLIRGenerationState =
-        match args with
-        | [Variable bufferName; Literal (IntLiteral size)] ->
-            // Look up buffer variable
-            match SSA.lookupVariable bufferName state with
-            | Some bufferValue ->
-                // Declare scanf at module level if not already done
-                let state1 = Emitter.emitModuleLevel "  func.func private @scanf(memref<?xi8>, ...) -> i32" state
-                
-                // Create format string for scanf ("%s")
-                let (scanfFormat, state2) = Emitter.registerString "%s" state1
-                let (formatPtr, state3) = SSA.generateValue "scanf_fmt" state2
-                let state4 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" formatPtr scanfFormat) state3
-                
-                // Cast buffer to appropriate type for scanf
-                let (castBuffer, state5) = SSA.generateValue "cast_buffer" state4
-                let state6 = Emitter.emit (sprintf "    %s = memref.cast %s : memref<%dxi8> to memref<?xi8>" castBuffer bufferValue size) state5
-                
-                // Call scanf
-                let (scanfResult, state7) = SSA.generateValue "scanf_result" state6
-                let state8 = Emitter.emit (sprintf "    %s = func.call @scanf(%s, %s) : (memref<?xi8>, memref<?xi8>) -> i32" scanfResult formatPtr castBuffer) state7
-                
-                (scanfResult, state8)
-            | None ->
-                // Buffer variable not found
-                let (dummyValue, state1) = SSA.generateValue "missing_buffer" state
-                (dummyValue, state1)
-        | _ ->
-            // Invalid readLine arguments
-            let (dummyValue, state1) = SSA.generateValue "invalid_readline" state
-            (dummyValue, state1)
-
-    /// Converts Span creation to MLIR operations
-    and convertSpanCreation (args: OakExpression list) (state: MLIRGenerationState) : string * MLIRGenerationState =
-        match args with
-        | [Variable bufferName; Variable lengthName] ->
-            // Look up buffer and length variables
-            match SSA.lookupVariable bufferName state, SSA.lookupVariable lengthName state with
-            | Some bufferValue, Some lengthValue ->
-                // For now, just return the buffer (Span is essentially a view)
-                (bufferValue, state)
-            | _ ->
-                // Variables not found
-                let (dummyValue, state1) = SSA.generateValue "missing_span_args" state
-                (dummyValue, state1)
-        | _ ->
-            // Invalid span arguments
-            let (dummyValue, state1) = SSA.generateValue "invalid_span" state
+    match args with
+    | [Variable bufferName; Literal (IntLiteral size)] ->
+        printfn "DEBUG: Processing Console.readLine(%s, %d)" bufferName size
+        
+        match SSA.lookupVariable bufferName state with
+        | Some bufferValue ->
+            printfn "DEBUG: Found buffer variable: %s -> %s" bufferName bufferValue
+            
+            let state1 = Emitter.emitModuleLevel "  func.func private @scanf(memref<?xi8>, memref<?xi8>) -> i32" state
+            
+            let formatStr = sprintf "%%%ds" (size - 1)
+            let (scanfFormat, state2) = Emitter.registerString formatStr state1
+            
+            let (formatPtr, state3) = SSA.generateValue "scanf_fmt" state2
+            let state4 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" formatPtr scanfFormat) state3
+            
+            let (castBuffer, state5) = SSA.generateValue "scanf_buffer" state4
+            let state6 = Emitter.emit (sprintf "    %s = memref.cast %s : memref<%dxi8> to memref<?xi8>" castBuffer bufferValue size) state5
+            
+            let (scanfResult, state7) = SSA.generateValue "scanf_result" state6
+            let state8 = Emitter.emit (sprintf "    %s = func.call @scanf(%s, %s) : (memref<?xi8>, memref<?xi8>) -> i32" scanfResult formatPtr castBuffer) state7
+            
+            printfn "DEBUG: Console.readLine completed, returning: %s" scanfResult
+            (scanfResult, state8)
+        
+        | None ->
+            printfn "DEBUG: Buffer variable '%s' not found in scope" bufferName
+            let (dummyValue, state1) = SSA.generateValue "missing_buffer" state
             (dummyValue, state1)
     
-    /// Converts Oak expression to MLIR operations with Alloy library recognition
-    and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : string * MLIRGenerationState =
-        match expr with
-        | Literal literal ->
-            convertLiteral literal state
-        
-        | Variable name ->
-            // Look up variable in scope
-            match SSA.lookupVariable name state with
-            | Some value -> (value, state)
-            | Option.None -> 
-                // Variable not found - create a dummy value
-                let (dummyValue, state1) = SSA.generateValue "unknown" state
-                (dummyValue, state1)
-        
-        | Application(func, args) ->
-            match func with
-            | Variable "NativePtr.stackalloc" ->
-                // Handle stack allocation specially
-                convertStackAllocation args state
-            | Variable "Console.readLine" ->
-                // Handle console input
-                convertConsoleReadLine args state
-            | Variable "Span.create" ->
-                // Handle span creation
-                convertSpanCreation args state
-            | Variable funcName ->
-                // FIXED: Handle functions with no arguments properly
-                if args.IsEmpty || (args.Length = 1 && match args.[0] with Literal(UnitLiteral) -> true | _ -> false) then
-                    // Function call with no arguments
-                    Emitter.call funcName [] (Some (Integer 32)) state
-                else
-                    // Convert arguments
-                    let convertArg (accState, accArgs) arg =
-                        let (argValue, newState) = convertExpression arg accState
-                        (newState, argValue :: accArgs)
-                    
-                    let (state1, argValues) = List.fold convertArg (state, []) args
-                    
-                    // Call function with arguments
-                    Emitter.call funcName (List.rev argValues) (Some (Integer 32)) state1
-            | _ ->
-                // Unsupported function expression
-                let (dummyValue, state1) = SSA.generateValue "unsupported" state
-                (dummyValue, state1)
-        
-        | Let(name, value, body) ->
-            // Convert the bound value
-            let (valueResult, state1) = convertExpression value state
+    | _ ->
+        printfn "DEBUG: Invalid Console.readLine arguments: %A" args
+        let (dummyValue, state1) = SSA.generateValue "invalid_readline" state
+        (dummyValue, state1)
+
+and convertSpanCreation (args: OakExpression list) (state: MLIRGenerationState) : string * MLIRGenerationState =
+    match args with
+    | [Variable bufferName; Variable lengthName] ->
+        match SSA.lookupVariable bufferName state, SSA.lookupVariable lengthName state with
+        | Some bufferValue, Some lengthValue ->
+            (bufferValue, state)
+        | _ ->
+            let (dummyValue, state1) = SSA.generateValue "missing_span_args" state
+            (dummyValue, state1)
+    | _ ->
+        let (dummyValue, state1) = SSA.generateValue "invalid_span" state
+        (dummyValue, state1)
+
+and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : string * MLIRGenerationState =
+    match expr with
+    | Literal literal ->
+        convertLiteral literal state
+    
+    | Variable name ->
+        match SSA.lookupVariable name state with
+        | Some value -> (value, state)
+        | None -> 
+            let (dummyValue, state1) = SSA.generateValue "unknown" state
+            (dummyValue, state1)
+    
+    | Application(func, args) ->
+        match func with
+        // Handle curried Console.readLine: Console.readLine(buffer)(size)
+        | Application(Variable "Console.readLine", innerArgs) ->
+            printfn "DEBUG: Found curried Console.readLine"
+            printfn "DEBUG: Inner args: %A" innerArgs
+            printfn "DEBUG: Outer args: %A" args
             
-            // Bind in current scope
-            let state2 = SSA.bindVariable name valueResult state1
+            let allArgs = innerArgs @ args
+            printfn "DEBUG: Combined args for Console.readLine: %A" allArgs
             
-            // Convert body
-            convertExpression body state2
+            convertConsoleReadLine allArgs state
         
-        | Sequential(first, second) ->
-            // Evaluate first expression
-            let (_, state1) = convertExpression first state
+        // Handle IOOperation wrapped in Application: Application(IOOperation(...), args)
+        | IOOperation(ioType, ioArgs) ->
+            printfn "DEBUG: Found IOOperation wrapped in Application: %A with args: %A" ioType args
             
-            // Evaluate and return second expression
-            convertExpression second state1
+            // Process the IOOperation with its original args plus the application args
+            let combinedArgs = ioArgs @ args
+            convertExpression (IOOperation(ioType, combinedArgs)) state
         
-        | IOOperation(ioType, _) ->
-            match ioType with
-            | Printf formatStr | Printfn formatStr ->
-                // Register format string at module level
-                let (formatGlobal, state1) = Emitter.registerString formatStr state
+        | Variable "Console.readLine" ->
+            printfn "DEBUG: Direct Console.readLine call with args: %A" args
+            convertConsoleReadLine args state
+            
+        | Variable "NativePtr.stackalloc" ->
+            printfn "DEBUG: NativePtr.stackalloc with args: %A" args
+            convertStackAllocation args state
+            
+        | Variable "Span.create" ->
+            printfn "DEBUG: Span.create with args: %A" args
+            convertSpanCreation args state
+            
+        | Variable funcName ->
+            printfn "DEBUG: Regular function call: %s with args: %A" funcName args
+            if args.IsEmpty || (args.Length = 1 && match args.[0] with Literal(UnitLiteral) -> true | _ -> false) then
+                Emitter.call funcName [] (Some (Integer 32)) state
+            else
+                let convertArg (accState, accArgs) arg =
+                    let (argValue, newState) = convertExpression arg accState
+                    (newState, argValue :: accArgs)
                 
-                // Declare printf at module level if not already done
-                let state2 = Emitter.emitModuleLevel "  func.func private @printf(memref<?xi8>, ...) -> i32" state1
-                
-                // Get format string pointer
-                let (formatPtr, state3) = SSA.generateValue "fmt_ptr" state2
-                let state4 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" formatPtr formatGlobal) state3
-                
-                // Call printf
+                let (state1, argValues) = List.fold convertArg (state, []) args
+                Emitter.call funcName (List.rev argValues) (Some (Integer 32)) state1
+        | _ ->
+            printfn "DEBUG: Unsupported function expression: %A" func
+            let (dummyValue, state1) = SSA.generateValue "unsupported_func" state
+            (dummyValue, state1)
+    
+    | Let(name, value, body) ->
+        printfn "DEBUG: Converting Let - name: %s" name
+        printfn "DEBUG: Converting Let - value: %A" value
+        printfn "DEBUG: Converting Let - body: %A" body
+        
+        let (valueResult, state1) = convertExpression value state
+        printfn "DEBUG: Let value converted, result: %s" valueResult
+        
+        let state2 = SSA.bindVariable name valueResult state1
+        printfn "DEBUG: Variable '%s' bound to '%s'" name valueResult
+        
+        let (bodyResult, state3) = convertExpression body state2
+        printfn "DEBUG: Let body converted, result: %s" bodyResult
+        
+        (bodyResult, state3)
+    
+    | Sequential(first, second) ->
+        printfn "DEBUG: Converting Sequential - first: %A" first
+        printfn "DEBUG: Converting Sequential - second: %A" second
+        
+        let (firstResult, state1) = convertExpression first state
+        printfn "DEBUG: First expression converted, result: %s" firstResult
+        
+        let state1_debug = Emitter.emit (sprintf "    ; Sequential: completed first part, result: %s" firstResult) state1
+        
+        printfn "DEBUG: About to convert second expression..."
+        let (secondResult, state2) = convertExpression second state1_debug
+        printfn "DEBUG: Second expression converted, result: %s" secondResult
+        
+        let state3 = Emitter.emit (sprintf "    ; Sequential: completed second part, result: %s" secondResult) state2
+        
+        (secondResult, state3)
+    
+    | IfThenElse(cond, thenExpr, elseExpr) ->
+        let (condResult, state1) = convertExpression cond state
+        let (thenResult, state2) = convertExpression thenExpr state1
+        let (elseResult, state3) = convertExpression elseExpr state2
+        (thenResult, state3)
+    
+    | FieldAccess(target, fieldName) ->
+        let (targetResult, state1) = convertExpression target state
+        (targetResult, state1)
+    
+    | MethodCall(target, methodName, args) ->
+        let (targetResult, state1) = convertExpression target state
+        let convertArg (accState, accArgs) arg =
+            let (argValue, newState) = convertExpression arg accState
+            (newState, argValue :: accArgs)
+        
+        let (state2, argValues) = List.fold convertArg (state1, []) args
+        (targetResult, state2)
+    
+    | IOOperation(ioType, args) ->
+        match ioType with
+        | Printf formatStr | Printfn formatStr ->
+            printfn "DEBUG: Processing IO operation: %A" ioType
+            
+            let (formatGlobal, state1) = Emitter.registerString formatStr state
+            let state2 = Emitter.emitModuleLevel "  func.func private @printf(memref<?xi8>, ...) -> i32" state1
+            
+            let (formatPtr, state3) = SSA.generateValue "fmt_ptr" state2
+            let state4 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" formatPtr formatGlobal) state3
+            
+            match args with
+            | [] ->
                 let (printfResult, state5) = SSA.generateValue "printf_result" state4
                 let state6 = Emitter.emit (sprintf "    %s = func.call @printf(%s) : (memref<?xi8>) -> i32" printfResult formatPtr) state5
-                
                 (printfResult, state6)
-            
-            | _ ->
-                // Unsupported I/O operation
-                let (dummyValue, state1) = SSA.generateValue "unsupported_io" state
-                (dummyValue, state1)
+            | argList ->
+                let convertArg (accState, accArgs) arg =
+                    let (argValue, newState) = convertExpression arg accState
+                    (newState, argValue :: accArgs)
+                
+                let (state5, convertedArgs) = List.fold convertArg (state4, []) argList
+                let allArgs = formatPtr :: (List.rev convertedArgs)
+                let (printfResult, state6) = SSA.generateValue "printf_result" state5
+                
+                let argTypes = "memref<?xi8>" :: (List.replicate convertedArgs.Length "i32")
+                let argTypeStr = String.concat ", " argTypes
+                let argStr = String.concat ", " allArgs
+                
+                let state7 = Emitter.emit (sprintf "    %s = func.call @printf(%s) : (%s) -> i32" printfResult argStr argTypeStr) state6
+                (printfResult, state7)
         
-        | _ ->
-            // Handle other expression types
-            let (dummyValue, state1) = SSA.generateValue "todo" state
+        | ReadLine ->
+            let (dummyValue, state1) = SSA.generateValue "readline" state
             (dummyValue, state1)
+        
+        | Scanf formatStr ->
+            let (dummyValue, state1) = SSA.generateValue "scanf" state
+            (dummyValue, state1)
+        
+        | WriteFile path ->
+            let (dummyValue, state1) = SSA.generateValue "writefile" state
+            (dummyValue, state1)
+        
+        | ReadFile path ->
+            let (dummyValue, state1) = SSA.generateValue "readfile" state
+            (dummyValue, state1)
+    
+    | Lambda(params', body) ->
+        let (bodyResult, state1) = convertExpression body state
+        (bodyResult, state1)
+    
+    | _ ->
+        printfn "DEBUG: Unhandled expression type: %A" expr
+        let (dummyValue, state1) = SSA.generateValue "unhandled" state
+        (dummyValue, state1)
 
 /// Function and module level conversion functions
-module DeclarationConversion =
-    /// Converts function declaration to MLIR function
-    let convertFunction (name: string) (parameters: (string * OakType) list) (returnType: OakType) (body: OakExpression) (state: MLIRGenerationState) : MLIRGenerationState =
-        // Generate function signature
-        let returnTypeStr = mlirTypeToString (mapOakTypeToMLIR returnType)
-        
-        // Start function definition
-        let paramStr = 
-            if parameters.IsEmpty then
-                ""
-            else
-                parameters 
-                |> List.mapi (fun i (_, typ) -> 
-                    sprintf "%%arg%d: %s" i (mlirTypeToString (mapOakTypeToMLIR typ)))
-                |> String.concat ", "
-                
-        let state1 = Emitter.emit (sprintf "  func.func @%s(%s) -> %s {" name paramStr returnTypeStr) state
-        
-        // Bind parameters to arguments
-        let state2 = 
+let convertFunction (name: string) (parameters: (string * OakType) list) (returnType: OakType) (body: OakExpression) (state: MLIRGenerationState) : MLIRGenerationState =
+    printfn "DEBUG: Converting function %s" name
+    printfn "DEBUG: Function body: %A" body
+    
+    let returnTypeStr = mlirTypeToString (mapOakTypeToMLIR returnType)
+    
+    let paramStr = 
+        if parameters.IsEmpty then
+            ""
+        else
             parameters 
-            |> List.mapi (fun i (paramName, _) -> 
-                SSA.bindVariable paramName (sprintf "%%arg%d" i))
-            |> List.fold (fun s f -> f s) state1
-        
-        // Convert function body
-        let (bodyResult, state3) = ExpressionConversion.convertExpression body state2
-        
-        // Generate return statement
-        let state4 = 
-            if returnType = UnitType then
-                Emitter.emit "    func.return" state3
-            else
-                Emitter.emit (sprintf "    func.return %s : %s" bodyResult returnTypeStr) state3
-        
-        // End function
-        let state5 = Emitter.emit "  }" state4
-        
-        state5
+            |> List.mapi (fun i (_, typ) -> 
+                sprintf "%%arg%d: %s" i (mlirTypeToString (mapOakTypeToMLIR typ)))
+            |> String.concat ", "
+            
+    let state1 = Emitter.emit (sprintf "  func.func @%s(%s) -> %s {" name paramStr returnTypeStr) state
+    
+    let state2 = 
+        parameters 
+        |> List.mapi (fun i (paramName, _) -> 
+            SSA.bindVariable paramName (sprintf "%%arg%d" i))
+        |> List.fold (fun s f -> f s) state1
+    
+    printfn "DEBUG: About to convert function body for %s" name
+    let (bodyResult, state3) = convertExpression body state2
+    printfn "DEBUG: Function body conversion completed for %s, result: %s" name bodyResult
+    
+    let state4 = 
+        if returnType = UnitType then
+            printfn "DEBUG: Adding void return for %s" name
+            Emitter.emit "    func.return" state3
+        else
+            printfn "DEBUG: Adding value return for %s: %s" name bodyResult
+            Emitter.emit (sprintf "    func.return %s : %s" bodyResult returnTypeStr) state3
+    
+    let state5 = Emitter.emit "  }" state4
+    
+    printfn "DEBUG: Function %s conversion completed" name
+    state5
 
-/// Fixed MLIR generation that avoids duplicate string constants
+/// MLIR module generation
 let generateMLIR (program: OakProgram) : MLIRModuleOutput =
     let initialState = createInitialState ()
     
-    // Process the first module
     let processModule (state: MLIRGenerationState) (mdl: OakModule) =
-        // Start with module header
         let state1 = Emitter.emit (sprintf "module @%s {" mdl.Name) state
         
-        // Process each declaration
         let processDeclFold currState decl =
             match decl with
             | FunctionDecl(name, parameters, returnType, body) ->
-                DeclarationConversion.convertFunction name parameters returnType body currState
+                convertFunction name parameters returnType body currState
             
             | EntryPoint(expr) ->
-                DeclarationConversion.convertFunction "main" 
+                convertFunction "main" 
                     [("argc", IntType); ("argv", ArrayType(StringType))] 
                     IntType expr currState
                 
@@ -394,7 +456,6 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
         
         let state2 = List.fold processDeclFold state1 mdl.Declarations
         
-        // Emit string constants ONLY once from StringConstants map
         let state3 = 
             state2.StringConstants
             |> Map.toList
@@ -405,17 +466,15 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
                                         globalName escapedValue constSize
                 Emitter.emit declaration s) state2
         
-        // Emit module-level function declarations (like printf) - but filter out duplicates
         let uniqueDeclarations = 
             state3.ModuleLevelDeclarations
             |> List.rev
-            |> List.distinct  // Remove duplicates
+            |> List.distinct
         
         let state4 = 
             uniqueDeclarations
             |> List.fold (fun s decl -> Emitter.emit decl s) state3
         
-        // Close module
         Emitter.emit "}" state4
     
     let finalState = 
@@ -423,25 +482,6 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
         | [] -> initialState
         | mdl :: _ -> processModule initialState mdl
     
-    // Return the record (make sure this is the last expression)
-    {
-        ModuleName = 
-            match program.Modules with
-            | [] -> "main"
-            | mdl :: _ -> mdl.Name
-        Operations = List.rev finalState.GeneratedOperations
-        SSAMappings = finalState.CurrentScope
-        TypeMappings = Map.empty
-        Diagnostics = finalState.ErrorContext
-    }
-    
-    // Process all modules (typically just one)
-    let finalState = 
-        match program.Modules with
-        | [] -> initialState
-        | mdl :: _ -> processModule initialState mdl
-    
-    // Return the final output with correct structure
     {
         ModuleName = 
             match program.Modules with
@@ -457,10 +497,7 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
 let generateMLIRModuleText (program: OakProgram) : Core.XParsec.Foundation.CompilerResult<string> =
     try
         let mlirOutput = generateMLIR program
-        
-        // Join operations with newlines
         let moduleText = String.concat "\n" mlirOutput.Operations
-        
         Core.XParsec.Foundation.Success moduleText
     with ex ->
         Core.XParsec.Foundation.CompilerFailure [

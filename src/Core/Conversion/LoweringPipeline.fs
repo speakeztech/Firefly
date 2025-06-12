@@ -118,7 +118,7 @@ module DialectTransformers =
         with ex ->
             CompilerFailure [ConversionError("func-to-llvm", trimmed, "llvm operation", ex.Message)]
     
-    /// Transforms memref dialect operations to LLVM dialect  
+    /// Transforms memref dialect operations to LLVM dialect - ENHANCED  
     let transformMemrefToLLVM (line: string) : CompilerResult<string> =
         let trimmed = line.Trim()
         
@@ -134,8 +134,15 @@ module DialectTransformers =
                 Success transformed
             
             elif trimmed.Contains("memref.alloca") then
-                // FIXED: Transform memref.alloca to llvm.alloca (not llvm.allocaa!)
+                // Transform memref.alloca to llvm.alloca
                 let transformed = trimmed.Replace("memref.alloca", "llvm.alloca")
+                Success transformed
+            
+            elif trimmed.Contains("memref.cast") then
+                // Transform memref.cast to llvm.bitcast
+                // memref.cast %buffer1 : memref<256xi8> to memref<?xi8>
+                // -> llvm.bitcast %buffer1 : !llvm.ptr<i8> to !llvm.ptr<i8>
+                let transformed = trimmed.Replace("memref.cast", "llvm.bitcast")
                 Success transformed
             
             elif trimmed.Contains("memref.load") then
@@ -268,17 +275,32 @@ module PassManagement =
             Validate = fun _ -> true  // Simple validation
         }
     
-    /// Applies a single lowering pass to MLIR text
+    /// Applies a single lowering pass to MLIR text with indentation preservation
     let applyPass (pass: LoweringPass) (mlirText: string) : CompilerResult<string> =
         let lines = mlirText.Split('\n') |> Array.toList
         
         let transformLine (line: string) : CompilerResult<string> =
             let trimmed = line.Trim()
+            let leadingWhitespace = 
+                if line.Length > trimmed.Length then
+                    line.Substring(0, line.Length - trimmed.Length)
+                else
+                    ""
+            
             if String.IsNullOrEmpty(trimmed) || trimmed.StartsWith("//") || 
                trimmed.StartsWith("module") || trimmed.StartsWith("}") || trimmed = "{" then
                 Success line
             else
-                pass.Transform line
+                match pass.Transform line with
+                | Success transformedLine ->
+                    // Preserve original indentation if the transformed line doesn't start with whitespace
+                    let finalLine = 
+                        if transformedLine.Trim() = transformedLine && not (String.IsNullOrEmpty(leadingWhitespace)) then
+                            leadingWhitespace + transformedLine.Trim()
+                        else
+                            transformedLine
+                    Success finalLine
+                | CompilerFailure errors -> CompilerFailure errors
         
         let transformAllLines (lines: string list) : CompilerResult<string list> =
             List.fold (fun acc line ->
@@ -292,6 +314,10 @@ module PassManagement =
             |> function
                | Success transformedLines -> Success (List.rev transformedLines)
                | CompilerFailure errors -> CompilerFailure errors
+        
+        match transformAllLines lines with
+        | Success transformedLines -> Success (String.concat "\n" transformedLines)
+        | CompilerFailure errors -> CompilerFailure errors
         
         match transformAllLines lines with
         | Success transformedLines -> Success (String.concat "\n" transformedLines)
