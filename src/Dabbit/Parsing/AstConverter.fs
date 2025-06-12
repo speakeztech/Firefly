@@ -287,54 +287,42 @@ module ModuleMapping =
         with
         | _ -> []
 
-/// Main conversion functions
-let parseAndConvertToOakAst (sourceCode: string) : OakProgram =
-    try
-        let sourceText = SourceText.ofString sourceCode
-        let checker = FSharp.Compiler.CodeAnalysis.FSharpChecker.Create(keepAssemblyContents = true)
-        let parsingOptions = { 
-            FSharp.Compiler.CodeAnalysis.FSharpParsingOptions.Default with
-                SourceFiles = [|"HelloWorld.fs"|]
-                ConditionalDefines = []
-                ApplyLineDirectives = false
-        }
-        let parseResults = checker.ParseFile("input.fs", sourceText, parsingOptions) |> Async.RunSynchronously
-        
-        let modules = ModuleMapping.extractModulesFromParseTree (Some parseResults.ParseTree)
-        { Modules = modules }
-    with _ ->
-        { Modules = [] }
-
-let parseAndConvertWithDiagnostics (inputPath: string) (sourceCode: string) : ASTConversionResult =
-    printfn "Starting F# Compiler Services parsing..."
+/// Single unified conversion function combining best practices from both approaches
+let parseAndConvertToOakAst (inputPath: string) (sourceCode: string) : ASTConversionResult =
+    printfn "Starting unified F# Compiler Services parsing..."
     
     try
         let sourceText = SourceText.ofString sourceCode
         printfn "SourceText created - Length: %d" sourceText.Length
-        printfn "SourceText first 50 chars: %s" (sourceText.ToString().Substring(0, min 50 sourceText.Length))
-        let checker = FSharp.Compiler.CodeAnalysis.FSharpChecker.Create()
-        let parsingOptions = FSharp.Compiler.CodeAnalysis.FSharpParsingOptions.Default
         
-        printfn "Invoking F# Compiler Services ParseFile..."
+        // Use configuration that has proven to work (from parseAndConvertToOakAst)
+        let checker = FSharp.Compiler.CodeAnalysis.FSharpChecker.Create(keepAssemblyContents = true)
+        let parsingOptions = { 
+            FSharp.Compiler.CodeAnalysis.FSharpParsingOptions.Default with
+                SourceFiles = [|Path.GetFileName(inputPath)|]
+                ConditionalDefines = []
+                ApplyLineDirectives = false
+        }
+        
+        printfn "Invoking F# Compiler Services ParseFile with proven configuration..."
         let parseResults = checker.ParseFile(inputPath, sourceText, parsingOptions) |> Async.RunSynchronously
         
         printfn "F# Compiler Services parsing completed"
         
-        // Immediately capture F# AST data regardless of success or failure
+        // Write F# AST diagnostics
         try
-            printfn "Serializing F# AST data..."
-            let fcsContent = sprintf "Parse Results Structure:\nDiagnostics Count: %d\nParseTree: %A" 
+            let fcsContent = sprintf "Parse Results Structure:\nFile: %s\nDiagnostics Count: %d\nParseTree: %A" 
+                                    inputPath
                                     parseResults.Diagnostics.Length 
                                     parseResults.ParseTree
-            let fcsFilePath = "HelloWorld.fcs"
+            let fcsFilePath = Path.ChangeExtension(inputPath, ".fcs")
             File.WriteAllText(fcsFilePath, fcsContent, System.Text.Encoding.UTF8)
             printfn "F# AST written to: %s (%d characters)" fcsFilePath fcsContent.Length
         with
         | ex ->
             printfn "Warning: Failed to write F# AST file: %s" ex.Message
         
-        // Process diagnostics with validation
-        printfn "Processing F# Compiler Services diagnostics..."
+        // Process diagnostics
         let diagnostics = 
             try
                 if parseResults.Diagnostics.Length = 0 then 
@@ -353,49 +341,40 @@ let parseAndConvertWithDiagnostics (inputPath: string) (sourceCode: string) : AS
                 printfn "%s" diagError
                 [diagError]
         
-        // Validate parse tree before module extraction
-        printfn "Validating parse tree structure..."
+        // Extract modules and create Oak AST
+        printfn "Beginning module extraction from F# AST..."
+        let modules = ModuleMapping.extractModulesFromParseTree (Some parseResults.ParseTree)
+        printfn "Module extraction completed: %d modules found" modules.Length
+        
+        // Write Oak AST
+        let oakProgram = { Modules = modules }
         try
-            printfn "Parse tree structure validated successfully"
-            
-            printfn "Beginning module extraction from F# AST..."
-            let modules = ModuleMapping.extractModulesFromParseTree (Some parseResults.ParseTree)
-            printfn "Module extraction completed successfully: %d modules found" modules.Length
-            
-            // Generate Oak AST output immediately after successful conversion
-            try
-                printfn "Serializing Oak AST data..."
-                let oakContent = sprintf "Oak Program Structure:\nModules Count: %d\nModules: %A" 
-                                        modules.Length 
-                                        { Modules = modules }
-                let oakFilePath = "HelloWorld.oak"
-                File.WriteAllText(oakFilePath, oakContent, System.Text.Encoding.UTF8)
-                printfn "Oak AST written to: %s (%d characters)" oakFilePath oakContent.Length
-            with
-            | ex ->
-                printfn "Warning: Failed to write Oak AST file: %s" ex.Message
-            
-            { OakProgram = { Modules = modules }; Diagnostics = diagnostics }
-            
-        with moduleEx ->
-            let moduleError = sprintf "Error during module extraction: %s" moduleEx.Message
-            printfn "%s" moduleError
-            printfn "Module extraction stack trace: %s" moduleEx.StackTrace
-            { OakProgram = { Modules = [] }; 
-              Diagnostics = moduleError :: diagnostics }
-    
+            let oakContent = sprintf "Oak Program Structure:\nSource: %s\nModules Count: %d\nModules: %A" 
+                                    inputPath
+                                    modules.Length 
+                                    oakProgram
+            let oakFilePath = Path.ChangeExtension(inputPath, ".oak")
+            File.WriteAllText(oakFilePath, oakContent, System.Text.Encoding.UTF8)
+            printfn "Oak AST written to: %s (%d characters)" oakFilePath oakContent.Length
+        with
+        | ex ->
+            printfn "Warning: Failed to write Oak AST file: %s" ex.Message
+        
+        { OakProgram = oakProgram; Diagnostics = diagnostics }
+        
     with parseEx ->
         let parseError = sprintf "Exception during F# Compiler Services operation: %s" parseEx.Message
         printfn "%s" parseError
-        printfn "F# Compiler Services stack trace: %s" parseEx.StackTrace
+        printfn "Stack trace: %s" parseEx.StackTrace
         
-        // Attempt to write minimal diagnostic information even on complete failure
+        // Write error details
         try
-            let errorContent = sprintf "F# Compiler Services Exception:\nMessage: %s\nStack Trace: %s\nSource Code Length: %d" 
+            let errorContent = sprintf "F# Compiler Services Exception:\nFile: %s\nMessage: %s\nStack Trace: %s\nSource Code Length: %d" 
+                                      inputPath
                                       parseEx.Message 
                                       parseEx.StackTrace 
                                       sourceCode.Length
-            let errorFilePath = "HelloWorld.error"
+            let errorFilePath = Path.ChangeExtension(inputPath, ".error")
             File.WriteAllText(errorFilePath, errorContent, System.Text.Encoding.UTF8)
             printfn "Error details written to: %s" errorFilePath
         with

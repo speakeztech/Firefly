@@ -327,7 +327,7 @@ module OperationConversion =
         
         writer.ToString()
     
-    /// Generates standard C library declarations
+    /// Generates standard C library declarations (zero-allocation subset)
     let generateStandardDeclarations() : string list =
         [
             // Standard C library printf and printf-family functions
@@ -347,17 +347,19 @@ module OperationConversion =
             "declare i32 @getchar()"
             "declare i32 @putchar(i32)"
             
-            // File operations
+            // File operations (read-only for zero-allocation)
             "declare i8* @fopen(i8* nocapture readonly, i8* nocapture readonly)"
             "declare i32 @fclose(i8* nocapture)"
             "declare i64 @fread(i8*, i64, i64, i8*)"
             "declare i64 @fwrite(i8* nocapture readonly, i64, i64, i8*)"
             
-            // Memory operations
-            "declare i8* @malloc(i64)"
-            "declare void @free(i8* nocapture)"
-            "declare i8* @calloc(i64, i64)"
-            "declare i8* @realloc(i8* nocapture, i64)"
+            // HEAP ALLOCATION FUNCTIONS REMOVED FOR ZERO-ALLOCATION GUARANTEE
+            // "declare i8* @malloc(i64)"           <- REMOVED
+            // "declare void @free(i8* nocapture)"  <- REMOVED  
+            // "declare i8* @calloc(i64, i64)"      <- REMOVED
+            // "declare i8* @realloc(i8* nocapture, i64)" <- REMOVED
+            
+            // Memory operations (intrinsics only)
             "declare void @llvm.memset.p0i8.i64(i8* nocapture writeonly, i8, i64, i1)"
             "declare void @llvm.memcpy.p0i8.p0i8.i64(i8* nocapture writeonly, i8* nocapture readonly, i64, i1)"
             
@@ -465,11 +467,18 @@ let translateToLLVM (mlirText: string) : CompilerResult<LLVMOutput> =
     if String.IsNullOrWhiteSpace(mlirText) then
         CompilerFailure [ConversionError("LLVM translation", "empty input", "LLVM IR", "MLIR input cannot be empty")]
     else
+        printfn "MLIR-to-LLVM translation starting..."
+        printfn "Input MLIR text length: %d characters" mlirText.Length
+        printfn "First 200 chars of MLIR: %s" (mlirText.Substring(0, min 200 mlirText.Length))
+        
         let targetTriple = TargetTripleManagement.getTargetTriple "default"
         
         try
             let state = MLIRProcessing.processModule mlirText
+            printfn "Processed MLIR - found %d functions, %d globals" state.Functions.Count state.Globals.Count
+            
             let llvmIR = MLIRProcessing.generateLLVMModule targetTriple state
+            printfn "Generated LLVM IR length: %d characters" llvmIR.Length
             
             Success {
                 ModuleName = state.CurrentModule

@@ -10,6 +10,7 @@ open Core.Conversion.LoweringPipeline
 open Core.Conversion.LLVMTranslator
 open Core.Conversion.OptimizationPipeline
 open CLI.Configurations.ProjectConfig
+open Dabbit.Parsing.Translator
 
 /// Command line arguments for the compile command
 type CompileArgs =
@@ -293,6 +294,7 @@ let compile (args: ParseResults<CompileArgs>) =
     let keepIntermediates = args.Contains Keep_Intermediates
     let verbose = args.Contains Verbose
     let noExternalTools = args.Contains No_External_Tools
+    setSaveIntermediates(keepIntermediates)
     
     printfn "Configuration: target=%s, optimize=%s, keep-intermediates=%b, verbose=%b" 
             target optimizeStr keepIntermediates verbose

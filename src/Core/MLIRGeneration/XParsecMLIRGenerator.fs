@@ -398,6 +398,11 @@ module ExpressionConversion =
 module DeclarationConversion =
     /// Converts function declaration to MLIR function
     let convertFunction (name: string) (parameters: (string * OakType) list) (returnType: OakType) (body: OakExpression) (state: MLIRGenerationState) : MLIRGenerationState =
+        printfn "Converting function %s to MLIR..." name
+        printfn "  Parameters: %A" parameters
+        printfn "  Return type: %A" returnType
+        printfn "  Current operations count: %d" state.GeneratedOperations.Length
+        
         // Generate function signature
         let paramTypes = parameters |> List.map (snd >> mapOakTypeToMLIR >> mlirTypeToString)
         let returnTypeStr = mlirTypeToString (mapOakTypeToMLIR returnType)
@@ -410,9 +415,12 @@ module DeclarationConversion =
             |> String.concat ", "
             
         let state1 = Emitter.emit (sprintf "func.func @%s(%s) -> %s {" name paramStr returnTypeStr) state
+        printfn "Emitted function header for %s" name
+        printfn "  Operations count after header: %d" state1.GeneratedOperations.Length
         
         // Create new scope for function body
         let state2 = SSA.pushScope state1
+        printfn "  Pushed scope for function body" 
         
         // Bind parameters to arguments
         let bindParams (state: MLIRGenerationState) =
@@ -422,24 +430,39 @@ module DeclarationConversion =
             |> List.fold (fun s f -> f) state
         
         let state3 = bindParams state2
+        printfn "  Bound %d parameters" parameters.Length
         
         // Convert function body
         let (bodyResult, state4) = ExpressionConversion.convertExpression body state3
+        printfn "  Converted function body, result: %s" bodyResult
+        printfn "  Operations count after body: %d" state4.GeneratedOperations.Length
         
         // Generate return statement
         let state5 = 
             if returnType = UnitType then
-                Emitter.emit "  func.return" state4
+                let updatedState = Emitter.emit "  func.return" state4
+                printfn "  Emitted void return"
+                updatedState
             else
-                Emitter.emit (sprintf "  func.return %s : %s" bodyResult returnTypeStr) state4
+                let updatedState = Emitter.emit (sprintf "  func.return %s : %s" bodyResult returnTypeStr) state4
+                printfn "  Emitted return with value: %s" bodyResult
+                updatedState
         
         // End function
         let state6 = Emitter.emit "}" state5
+        printfn "Completed function %s" name
+        printfn "  Final operations count: %d" state6.GeneratedOperations.Length
+        printfn "  Generated operations:"
+        state6.GeneratedOperations |> List.rev |> List.iteri (fun i op -> printfn "    [%d] %s" i op)
         
         // Restore previous scope
         match SSA.popScope state6 with
-        | Some state7 -> state7
-        | None -> state6 // This shouldn't happen with balanced push/pop
+        | Some state7 -> 
+            printfn "  Restored previous scope"
+            state7
+        | None -> 
+            printfn "  Warning: Could not restore scope (this should not happen)"
+            state6
 
 /// Main entry point for MLIR generation
 let generateMLIR (program: OakProgram) : MLIRModuleOutput =
@@ -450,24 +473,25 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
         // Module header
         let state1 = Emitter.emit (sprintf "module @%s {" mdl.Name) state
         
-        // Process each declaration
+        // Process each declaration - local function definition
         let processDeclFold currState decl =
             match decl with
             | FunctionDecl(name, params', returnType, body) ->
+                printfn "Processing function declaration: %s" name
                 DeclarationConversion.convertFunction name params' returnType body currState
             
             | TypeDecl(name, _) ->
-                // Ignore type declarations - they don't generate MLIR code
+                printfn "Skipping type declaration: %s" name
                 currState
                 
             | EntryPoint(expr) ->
-                // Generate a main function
+                printfn "Processing entry point as main function"
                 DeclarationConversion.convertFunction "main" 
                     [("argc", IntType); ("argv", ArrayType(StringType))] 
                     IntType expr currState
                 
             | ExternalDecl(name, paramTypes, returnType, libraryName) ->
-                // Generate external function declaration
+                printfn "Processing external declaration: %s from %s" name libraryName
                 let paramTypeStrs = paramTypes |> List.map (mapOakTypeToMLIR >> mlirTypeToString)
                 let returnTypeStr = mlirTypeToString (mapOakTypeToMLIR returnType)
                 
@@ -480,6 +504,7 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
                                  name paramStr returnTypeStr libraryName) currState
         
         let state2 = List.fold processDeclFold state1 mdl.Declarations
+        printfn "Processed %d declarations from module %s" mdl.Declarations.Length mdl.Name
         
         // Close module
         Emitter.emit "}" state2
@@ -490,13 +515,18 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
         | [] -> initialState
         | mdl :: _ -> processModule initialState mdl
     
-    // Return the final output
+    // Extract operations from finalState
+    let operationsList = List.rev finalState.GeneratedOperations
+    printfn "generateMLIR: Extracted %d operations from finalState" operationsList.Length
+    operationsList |> List.iteri (fun i op -> printfn "  Final[%d] %s" i op)
+    
+    // Return the final output with correct operations
     {
         ModuleName = 
             match program.Modules with
             | [] -> "main"
             | mdl :: _ -> mdl.Name
-        Operations = List.rev finalState.GeneratedOperations
+        Operations = operationsList
         SSAMappings = finalState.CurrentScope
         TypeMappings = Map.empty
         Diagnostics = finalState.ErrorContext
@@ -507,7 +537,7 @@ let generateMLIRModuleText (program: OakProgram) : Core.XParsec.Foundation.Compi
     try
         let mlirOutput = generateMLIR program
         
-        // Join operations with newlines
+        // Join operations with newlines - this is where the text should be extracted
         let moduleText = String.concat "\n" mlirOutput.Operations
         
         Core.XParsec.Foundation.Success moduleText

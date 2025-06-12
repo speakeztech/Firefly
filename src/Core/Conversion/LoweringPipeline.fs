@@ -153,7 +153,17 @@ module DialectTransformers =
         let trimmed = line.Trim()
         
         try
-            if trimmed.Contains("memref.alloc") then
+            if trimmed.Contains("memref.global") then
+                // Transform memref.global to llvm.mlir.global
+                let transformed = trimmed.Replace("memref.global", "llvm.mlir.global")
+                Success transformed
+            
+            elif trimmed.Contains("memref.get_global") then
+                // Transform memref.get_global to llvm.mlir.addressof
+                let transformed = trimmed.Replace("memref.get_global", "llvm.mlir.addressof")
+                Success transformed
+            
+            elif trimmed.Contains("memref.alloc") then
                 // Transform memref.alloc to llvm.alloca
                 let transformed = trimmed.Replace("memref.alloc", "llvm.alloca")
                 Success transformed
