@@ -347,7 +347,7 @@ module DeclarationConversion =
         
         state5
 
-/// Main entry point for MLIR generation with CORRECT module structure
+/// Fixed MLIR generation that properly emits string globals INSIDE the module
 let generateMLIR (program: OakProgram) : MLIRModuleOutput =
     let initialState = createInitialState ()
     
@@ -356,7 +356,7 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
         // Start with module header
         let state1 = Emitter.emit (sprintf "module @%s {" mdl.Name) state
         
-        // Process each declaration to collect module-level needs
+        // Process each declaration to collect all string constants and functions
         let processDeclFold currState decl =
             match decl with
             | FunctionDecl(name, parameters, returnType, body) ->
@@ -378,16 +378,33 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
                         |> List.mapi (fun i typ -> sprintf "%%arg%d: %s" i typ)
                         |> String.concat ", "
                 
-                Emitter.emitModuleLevel (sprintf "  func.func private @%s(%s) -> %s" 
+                // Add external declaration inside module
+                Emitter.emit (sprintf "  func.func private @%s(%s) -> %s" 
                                  name paramStr returnTypeStr) currState
             
             | _ -> currState
         
         let state2 = List.fold processDeclFold state1 mdl.Declarations
         
+        // FIXED: Emit all string constants BEFORE closing module
+        let state3 = 
+            state2.StringConstants
+            |> Map.toList
+            |> List.fold (fun s (value, globalName) ->
+                let escapedValue = value.Replace("\\", "\\\\").Replace("\"", "\\\"")
+                let constSize = escapedValue.Length + 1
+                let declaration = sprintf "  memref.global constant %s = dense<\"%s\\00\"> : memref<%dxi8>" 
+                                        globalName escapedValue constSize
+                Emitter.emit declaration s) state2
+        
+        // FIXED: Emit all module-level declarations (like printf) inside module
+        let state4 = 
+            state3.ModuleLevelDeclarations
+            |> List.fold (fun s decl -> Emitter.emit decl s) state3
+        
         // Close module
-        let state3 = Emitter.emit "}" state2
-        state3
+        let state5 = Emitter.emit "}" state4
+        state5
     
     // Process all modules (typically just one)
     let finalState = 
@@ -395,25 +412,13 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
         | [] -> initialState
         | mdl :: _ -> processModule initialState mdl
     
-    // CORRECT: Build operations with proper module structure
-    let moduleOperations = List.rev finalState.GeneratedOperations
-    let moduleDeclarations = List.rev finalState.ModuleLevelDeclarations
-    
-    // Insert module-level declarations RIGHT AFTER module opening
-    let correctOperations = 
-        match moduleOperations with
-        | moduleHeader :: rest ->
-            // Insert module-level declarations after "module @Name {"
-            moduleHeader :: (moduleDeclarations @ rest)
-        | [] -> moduleDeclarations
-    
-    // Return the final output with CORRECT operations order
+    // Return the final output with correct structure
     {
         ModuleName = 
             match program.Modules with
             | [] -> "main"
             | mdl :: _ -> mdl.Name
-        Operations = correctOperations
+        Operations = List.rev finalState.GeneratedOperations
         SSAMappings = finalState.CurrentScope
         TypeMappings = Map.empty
         Diagnostics = finalState.ErrorContext

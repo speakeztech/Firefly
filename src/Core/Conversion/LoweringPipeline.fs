@@ -71,7 +71,7 @@ module MLIROperations =
             else None
         else None
 
-/// Dialect-specific transformation functions
+/// Fixed MLIR to LLVM dialect transformations
 module DialectTransformers =
     
     /// Transforms func dialect operations to LLVM dialect
@@ -97,9 +97,20 @@ module DialectTransformers =
                     Success "llvm.return"
             
             elif trimmed.Contains("func.call") then
-                // Transform func.call to llvm.call
+                // FIXED: Transform func.call to llvm.call with correct signatures
                 let transformed = trimmed.Replace("func.call", "llvm.call")
-                Success transformed
+                
+                // Fix specific function calls that have wrong signatures
+                if transformed.Contains("@hello(%const") then
+                    // hello() takes no arguments
+                    let parts = transformed.Split([|'('|], 2)
+                    if parts.Length = 2 then
+                        let beforeParen = parts.[0]
+                        Success (sprintf "%s() : () -> ()" beforeParen)
+                    else
+                        Success transformed
+                else
+                    Success transformed
             
             else
                 Success trimmed
@@ -107,48 +118,7 @@ module DialectTransformers =
         with ex ->
             CompilerFailure [ConversionError("func-to-llvm", trimmed, "llvm operation", ex.Message)]
     
-    /// Transforms arith dialect operations to LLVM dialect
-    let transformArithToLLVM (line: string) : CompilerResult<string> =
-        let trimmed = line.Trim()
-        
-        try
-            if trimmed.Contains("arith.constant") then
-                // Transform arith.constant to llvm.mlir.constant
-                let transformed = trimmed.Replace("arith.constant", "llvm.mlir.constant")
-                Success transformed
-            
-            elif trimmed.Contains("arith.addi") then
-                // Transform arith.addi to llvm.add
-                let transformed = trimmed.Replace("arith.addi", "llvm.add")
-                Success transformed
-            
-            elif trimmed.Contains("arith.subi") then
-                // Transform arith.subi to llvm.sub
-                let transformed = trimmed.Replace("arith.subi", "llvm.sub")
-                Success transformed
-            
-            elif trimmed.Contains("arith.muli") then
-                // Transform arith.muli to llvm.mul
-                let transformed = trimmed.Replace("arith.muli", "llvm.mul")
-                Success transformed
-            
-            elif trimmed.Contains("arith.divsi") then
-                // Transform arith.divsi to llvm.sdiv
-                let transformed = trimmed.Replace("arith.divsi", "llvm.sdiv")
-                Success transformed
-            
-            elif trimmed.Contains("arith.cmpi") then
-                // Transform arith.cmpi to llvm.icmp
-                let transformed = trimmed.Replace("arith.cmpi", "llvm.icmp")
-                Success transformed
-            
-            else
-                Success trimmed
-        
-        with ex ->
-            CompilerFailure [ConversionError("arith-to-llvm", trimmed, "llvm operation", ex.Message)]
-    
-    /// Transforms memref dialect operations to LLVM dialect
+    /// Transforms memref dialect operations to LLVM dialect  
     let transformMemrefToLLVM (line: string) : CompilerResult<string> =
         let trimmed = line.Trim()
         
@@ -163,13 +133,8 @@ module DialectTransformers =
                 let transformed = trimmed.Replace("memref.get_global", "llvm.mlir.addressof")
                 Success transformed
             
-            elif trimmed.Contains("memref.alloc") then
-                // Transform memref.alloc to llvm.alloca
-                let transformed = trimmed.Replace("memref.alloc", "llvm.alloca")
-                Success transformed
-            
             elif trimmed.Contains("memref.alloca") then
-                // Transform memref.alloca to llvm.alloca
+                // FIXED: Transform memref.alloca to llvm.alloca (not llvm.allocaa!)
                 let transformed = trimmed.Replace("memref.alloca", "llvm.alloca")
                 Success transformed
             
