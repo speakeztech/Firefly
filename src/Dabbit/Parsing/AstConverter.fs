@@ -85,7 +85,7 @@ module TypeMapping =
         | SynConst.Unit -> UnitLiteral
         | _ -> UnitLiteral
 
-/// Expression conversion functions
+/// Expression conversion functions - COMPLETE MODULE WITH PROPER ORDERING
 module ExpressionMapping =
     
     let rec mapExpression (expr: SynExpr) : OakExpression =
@@ -108,6 +108,10 @@ module ExpressionMapping =
             | SynExpr.App(_, _, funcExpr, argExpr, _) ->
                 mapFunctionApplication funcExpr argExpr
             
+            | SynExpr.TypeApp(expr, _, typeArgs, _, _, _, _) ->
+                // Handle generic function applications like NativePtr.stackalloc<byte>
+                mapTypeApplication expr typeArgs
+            
             | SynExpr.LetOrUse(_, _, bindings, bodyExpr, _, _) ->
                 mapLetBinding bindings bodyExpr
             
@@ -124,6 +128,30 @@ module ExpressionMapping =
         with
         | _ -> Literal(UnitLiteral)
     
+    and mapTypeApplication (expr: SynExpr) (typeArgs: SynType list) : OakExpression =
+        try
+            match expr with
+            | SynExpr.LongIdent(_, longIdent, _, _) ->
+                let idents = longIdent |> AstHelpers.extractLongIdent
+                let qualifiedName = AstHelpers.getQualifiedName idents
+                
+                // Handle Alloy library functions
+                match qualifiedName with
+                | "NativePtr.stackalloc" ->
+                    // This is a stack allocation - convert to Alloy operation
+                    Variable "NativePtr.stackalloc"
+                | "Console.readLine" ->
+                    Variable "Console.readLine"
+                | "Span" ->
+                    Variable "Span.create"
+                | _ ->
+                    // Generic type application
+                    Variable qualifiedName
+            | _ ->
+                mapExpression expr
+        with
+        | _ -> Variable "_unknown_type_app_"
+    
     and mapFunctionApplication funcExpr argExpr =
         try
             let func = mapExpression funcExpr
@@ -138,6 +166,15 @@ module ExpressionMapping =
                 match arg with
                 | Literal(StringLiteral formatStr) -> IOOperation(Printfn(formatStr), [])
                 | _ -> Application(func, [arg])
+            | Variable "NativePtr.stackalloc" ->
+                // Stack allocation with size argument
+                Application(Variable "NativePtr.stackalloc", [arg])
+            | Variable "Console.readLine" ->
+                // Console read line with buffer and size
+                Application(Variable "Console.readLine", [arg])
+            | Variable "Span.create" ->
+                // Span creation with buffer and length
+                Application(Variable "Span.create", [arg])
             | _ -> Application(func, [arg])
         with
         | _ -> Literal(UnitLiteral)
@@ -176,6 +213,38 @@ module ExpressionMapping =
             Lambda(params', mapExpression body)
         with
         | _ -> Lambda([("x", UnitType)], Literal(UnitLiteral))
+    
+    and mapChainedApplication (funcExpr: SynExpr) (args: SynExpr list) : OakExpression =
+        try
+            let func = mapExpression funcExpr
+            let mappedArgs = args |> List.map mapExpression
+            
+            match func with
+            | Variable "Console.readLine" when mappedArgs.Length = 2 ->
+                // Console.readLine buffer size -> Console.readLine(buffer, size)
+                Application(Variable "Console.readLine", mappedArgs)
+            | Variable "Span.create" when mappedArgs.Length = 2 ->
+                // Span.create buffer length -> Span.create(buffer, length)
+                Application(Variable "Span.create", mappedArgs)
+            | _ ->
+                Application(func, mappedArgs)
+        with
+        | _ -> Literal(UnitLiteral)
+    
+    // Add this helper to detect and properly handle chained applications
+    and mapExpressionChain (expr: SynExpr) : OakExpression =
+        let rec collectApplications expr args =
+            match expr with
+            | SynExpr.App(_, _, funcExpr, argExpr, _) ->
+                collectApplications funcExpr (argExpr :: args)
+            | _ -> (expr, args)
+        
+        let (baseFunc, allArgs) = collectApplications expr []
+        
+        if allArgs.Length > 1 then
+            mapChainedApplication baseFunc allArgs
+        else
+            mapExpression expr
 
 /// Declaration mapping functions  
 module DeclarationMapping =

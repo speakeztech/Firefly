@@ -130,7 +130,7 @@ module Emitter =
             let (dummyId, state2) = SSA.generateValue "void" state1
             (dummyId, state2)
 
-/// Core expression conversion functions
+/// Core expression conversion functions - COMPLETE MODULE WITH PROPER ORDERING
 module ExpressionConversion =
     /// Converts Oak literal to MLIR constant
     let rec convertLiteral (literal: OakLiteral) (state: MLIRGenerationState) : string * MLIRGenerationState =
@@ -155,7 +155,71 @@ module ExpressionConversion =
             let (arrayResult, state1) = SSA.generateValue "array" state
             (arrayResult, state1)
     
-    /// Converts Oak expression to MLIR operations
+    /// Converts stack allocation to MLIR memref.alloca
+    and convertStackAllocation (args: OakExpression list) (state: MLIRGenerationState) : string * MLIRGenerationState =
+        match args with
+        | [Literal (IntLiteral size)] ->
+            // Generate stack allocation for byte buffer
+            let (bufferResult, state1) = SSA.generateValue "buffer" state
+            let state2 = Emitter.emit (sprintf "    %s = memref.alloca() : memref<%dxi8>" bufferResult size) state1
+            (bufferResult, state2)
+        | _ ->
+            // Invalid stack allocation arguments
+            let (dummyValue, state1) = SSA.generateValue "invalid_alloca" state
+            (dummyValue, state1)
+
+    /// Converts Console.readLine to MLIR scanf call
+    and convertConsoleReadLine (args: OakExpression list) (state: MLIRGenerationState) : string * MLIRGenerationState =
+        match args with
+        | [Variable bufferName; Literal (IntLiteral size)] ->
+            // Look up buffer variable
+            match SSA.lookupVariable bufferName state with
+            | Some bufferValue ->
+                // Declare scanf at module level if not already done
+                let state1 = Emitter.emitModuleLevel "  func.func private @scanf(memref<?xi8>, ...) -> i32" state
+                
+                // Create format string for scanf ("%s")
+                let (scanfFormat, state2) = Emitter.registerString "%s" state1
+                let (formatPtr, state3) = SSA.generateValue "scanf_fmt" state2
+                let state4 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" formatPtr scanfFormat) state3
+                
+                // Cast buffer to appropriate type for scanf
+                let (castBuffer, state5) = SSA.generateValue "cast_buffer" state4
+                let state6 = Emitter.emit (sprintf "    %s = memref.cast %s : memref<%dxi8> to memref<?xi8>" castBuffer bufferValue size) state5
+                
+                // Call scanf
+                let (scanfResult, state7) = SSA.generateValue "scanf_result" state6
+                let state8 = Emitter.emit (sprintf "    %s = func.call @scanf(%s, %s) : (memref<?xi8>, memref<?xi8>) -> i32" scanfResult formatPtr castBuffer) state7
+                
+                (scanfResult, state8)
+            | None ->
+                // Buffer variable not found
+                let (dummyValue, state1) = SSA.generateValue "missing_buffer" state
+                (dummyValue, state1)
+        | _ ->
+            // Invalid readLine arguments
+            let (dummyValue, state1) = SSA.generateValue "invalid_readline" state
+            (dummyValue, state1)
+
+    /// Converts Span creation to MLIR operations
+    and convertSpanCreation (args: OakExpression list) (state: MLIRGenerationState) : string * MLIRGenerationState =
+        match args with
+        | [Variable bufferName; Variable lengthName] ->
+            // Look up buffer and length variables
+            match SSA.lookupVariable bufferName state, SSA.lookupVariable lengthName state with
+            | Some bufferValue, Some lengthValue ->
+                // For now, just return the buffer (Span is essentially a view)
+                (bufferValue, state)
+            | _ ->
+                // Variables not found
+                let (dummyValue, state1) = SSA.generateValue "missing_span_args" state
+                (dummyValue, state1)
+        | _ ->
+            // Invalid span arguments
+            let (dummyValue, state1) = SSA.generateValue "invalid_span" state
+            (dummyValue, state1)
+    
+    /// Converts Oak expression to MLIR operations with Alloy library recognition
     and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : string * MLIRGenerationState =
         match expr with
         | Literal literal ->
@@ -172,6 +236,15 @@ module ExpressionConversion =
         
         | Application(func, args) ->
             match func with
+            | Variable "NativePtr.stackalloc" ->
+                // Handle stack allocation specially
+                convertStackAllocation args state
+            | Variable "Console.readLine" ->
+                // Handle console input
+                convertConsoleReadLine args state
+            | Variable "Span.create" ->
+                // Handle span creation
+                convertSpanCreation args state
             | Variable funcName ->
                 // Convert arguments
                 let convertArg (accState, accArgs) arg =
@@ -274,7 +347,7 @@ module DeclarationConversion =
         
         state5
 
-/// Main entry point for MLIR generation with correct structure
+/// Main entry point for MLIR generation with CORRECT module structure
 let generateMLIR (program: OakProgram) : MLIRModuleOutput =
     let initialState = createInitialState ()
     
@@ -283,7 +356,7 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
         // Start with module header
         let state1 = Emitter.emit (sprintf "module @%s {" mdl.Name) state
         
-        // Process each declaration
+        // Process each declaration to collect module-level needs
         let processDeclFold currState decl =
             match decl with
             | FunctionDecl(name, parameters, returnType, body) ->
@@ -322,18 +395,25 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
         | [] -> initialState
         | mdl :: _ -> processModule initialState mdl
     
-    // Combine module-level declarations with function operations in correct order
-    let allOperations = 
-        (List.rev finalState.GeneratedOperations) @
-        (List.rev finalState.ModuleLevelDeclarations)
+    // CORRECT: Build operations with proper module structure
+    let moduleOperations = List.rev finalState.GeneratedOperations
+    let moduleDeclarations = List.rev finalState.ModuleLevelDeclarations
     
-    // Return the final output with correct operations
+    // Insert module-level declarations RIGHT AFTER module opening
+    let correctOperations = 
+        match moduleOperations with
+        | moduleHeader :: rest ->
+            // Insert module-level declarations after "module @Name {"
+            moduleHeader :: (moduleDeclarations @ rest)
+        | [] -> moduleDeclarations
+    
+    // Return the final output with CORRECT operations order
     {
         ModuleName = 
             match program.Modules with
             | [] -> "main"
             | mdl :: _ -> mdl.Name
-        Operations = allOperations
+        Operations = correctOperations
         SSAMappings = finalState.CurrentScope
         TypeMappings = Map.empty
         Diagnostics = finalState.ErrorContext
