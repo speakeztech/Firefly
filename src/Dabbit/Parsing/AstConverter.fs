@@ -288,7 +288,7 @@ module ModuleMapping =
         with
         | _ -> []
 
-/// Enhanced unified conversion function including F# AST capture
+/// Single unified conversion function with minimal output
 let parseAndConvertToOakAst (inputPath: string) (sourceCode: string) : ASTConversionResult =
     try
         let sourceText = SourceText.ofString sourceCode
@@ -303,9 +303,6 @@ let parseAndConvertToOakAst (inputPath: string) (sourceCode: string) : ASTConver
         
         let parseResults = checker.ParseFile(inputPath, sourceText, parsingOptions) |> Async.RunSynchronously
         
-        // Capture F# AST as text
-        let fsharpASTText = sprintf "F# AST for %s:\n%A" (Path.GetFileName(inputPath)) parseResults.ParseTree
-        
         // Process diagnostics quietly
         let diagnostics = 
             if parseResults.Diagnostics.Length = 0 then []
@@ -315,8 +312,8 @@ let parseAndConvertToOakAst (inputPath: string) (sourceCode: string) : ASTConver
         let modules = ModuleMapping.extractModulesFromParseTree (Some parseResults.ParseTree)
         let oakProgram = { Modules = modules }
         
-        { OakProgram = oakProgram; Diagnostics = diagnostics; FSharpASTText = fsharpASTText }
+        { OakProgram = oakProgram; Diagnostics = diagnostics }
         
     with parseEx ->
         let parseError = sprintf "F# parsing failed: %s" parseEx.Message
-        { OakProgram = { Modules = [] }; Diagnostics = [parseError]; FSharpASTText = parseError }
+        { OakProgram = { Modules = [] }; Diagnostics = [parseError] }

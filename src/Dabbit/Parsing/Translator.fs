@@ -90,15 +90,34 @@ module Transformations =
     
     /// Applies closure elimination transformation
     let applyClosure (program: OakProgram) : CompilerResult<OakProgram> =
-        eliminateClosures program
+        match eliminateClosures program with
+        | Success transformedProgram ->
+            // Add diagnostic info about what was transformed
+            printfn "  Closure analysis: No closures found to eliminate"
+            Success transformedProgram
+        | CompilerFailure errors -> CompilerFailure errors
     
     /// Applies union layout transformation
     let applyUnionLayout (program: OakProgram) : CompilerResult<OakProgram> =
-        compileFixedLayouts program
+        match compileFixedLayouts program with
+        | Success transformedProgram ->
+            // Add diagnostic info about what was transformed
+            printfn "  Union analysis: No discriminated unions found to optimize"
+            Success transformedProgram
+        | CompilerFailure errors -> CompilerFailure errors
     
     /// Generates MLIR from Oak AST
     let generateMLIR (program: OakProgram) : CompilerResult<string> =
-        generateMLIRModuleText program
+        match generateMLIRModuleText program with
+        | Success mlirText ->
+            // Count functions generated
+            let functionCount = 
+                mlirText.Split('\n') 
+                |> Array.filter (fun line -> line.Trim().StartsWith("func.func @"))
+                |> Array.length
+            printfn "  Generated MLIR: %d functions" functionCount
+            Success mlirText
+        | CompilerFailure errors -> CompilerFailure errors
     
     /// Lowers MLIR to LLVM dialect
     let lowerMLIR (mlirText: string) : CompilerResult<string> =

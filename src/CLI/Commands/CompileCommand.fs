@@ -184,12 +184,21 @@ let private saveIntermediateFiles (basePath: string) (baseName: string) (keepInt
             printfn "Warning: Failed to save intermediate files: %s" ex.Message
 
 /// Compiles LLVM IR to native executable
-let private compileToNativeExecutable (llvmOutput: LLVMOutput) (outputPath: string) (target: string) (verbose: bool) (noExternalTools: bool) =
+let private compileToNativeExecutable (llvmOutput: LLVMOutput) (outputPath: string) (target: string) (verbose: bool) (noExternalTools: bool) (intermediatesDir: string option) =
     if noExternalTools then
         printfn "Warning: --no-external-tools specified, but native compilation requires external LLVM toolchain"
-        let llvmPath = Path.ChangeExtension(outputPath, ".ll")
-        File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, System.Text.UTF8Encoding(false))
-        printfn "Saved LLVM IR to: %s" llvmPath
+        
+        // Save to intermediates only if keeping intermediates
+        match intermediatesDir with
+        | Some dir ->
+            let baseName = Path.GetFileNameWithoutExtension(outputPath)
+            let llvmPath = Path.Combine(dir, baseName + ".ll")
+            File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, System.Text.UTF8Encoding(false))
+            printfn "Saved LLVM IR to: %s" (Path.GetFileName(llvmPath))
+        | None ->
+            let llvmPath = Path.ChangeExtension(outputPath, ".ll")
+            File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, System.Text.UTF8Encoding(false))
+            printfn "Saved LLVM IR to: %s" llvmPath
         0
     else
         match compileLLVMToNative llvmOutput outputPath target with
@@ -271,21 +280,25 @@ let compile (args: ParseResults<CompileArgs>) =
                             saveIntermediateFiles basePath baseName keepIntermediates pipelineOutput
                         
                         // Continue with LLVM translation
+                        printfn "Phase 2: MLIR → LLVM IR"
                         match translateToLLVM pipelineOutput.FinalMLIR with
                         | CompilerFailure llvmErrors ->
                             llvmErrors |> List.iter (fun error -> printfn "LLVM Error: %s" (error.ToString()))
                             1
                         
                         | Success llvmOutput ->
+                            printfn "Generated LLVM IR (%d chars)" llvmOutput.LLVMIRText.Length
                             
-                            // Save LLVM IR to intermediates if requested
+                            // Save unoptimized LLVM IR to intermediates if requested
                             if keepIntermediates then
                                 let intermediatesDir = Path.Combine(Path.GetDirectoryName(outputPath), "intermediates")
                                 let baseName = Path.GetFileNameWithoutExtension(outputPath)
                                 let llvmPath = Path.Combine(intermediatesDir, baseName + ".ll")
                                 File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, System.Text.UTF8Encoding(false))
+                                printfn "  llvm-ir → %s.ll" baseName
                             
                             // Apply optimizations
+                            printfn "Phase 3: LLVM optimization (%s)" optimizeStr
                             let optimizationPasses = createOptimizationPipeline optimizeLevel
                             match optimizeLLVMIR llvmOutput optimizationPasses with
                             | CompilerFailure optimizationErrors ->
@@ -293,14 +306,29 @@ let compile (args: ParseResults<CompileArgs>) =
                                 1
                             
                             | Success optimizedLLVM ->
+                                printfn "✓ LLVM optimized (%d chars)" optimizedLLVM.LLVMIRText.Length
+                                
+                                // Save optimized LLVM IR to intermediates if requested
+                                if keepIntermediates then
+                                    let intermediatesDir = Path.Combine(Path.GetDirectoryName(outputPath), "intermediates")
+                                    let baseName = Path.GetFileNameWithoutExtension(outputPath)
+                                    let optimizedLlvmPath = Path.Combine(intermediatesDir, baseName + ".optimized.ll")
+                                    File.WriteAllText(optimizedLlvmPath, optimizedLLVM.LLVMIRText, System.Text.UTF8Encoding(false))
+                                    printfn "  optimized-llvm → %s.optimized.ll" baseName
                                 
                                 // Validate zero-allocation if required
                                 if config.Compilation.RequireStaticMemory then
+                                    printfn "Phase 4: Zero-allocation validation"
                                     match validateZeroAllocationGuarantees optimizedLLVM.LLVMIRText with
                                     | CompilerFailure validationErrors ->
                                         validationErrors |> List.iter (fun error -> printfn "Validation Error: %s" (error.ToString()))
                                         1
                                     | Success () ->
-                                        compileToNativeExecutable optimizedLLVM outputPath target verbose noExternalTools
+                                        printfn "✓ Zero-allocation guarantees validated"
+                                        printfn "Phase 5: Native compilation"
+                                        let intermediatesDir = if keepIntermediates then Some (Path.Combine(Path.GetDirectoryName(outputPath), "intermediates")) else None
+                                        compileToNativeExecutable optimizedLLVM outputPath target verbose noExternalTools intermediatesDir
                                 else
-                                    compileToNativeExecutable optimizedLLVM outputPath target verbose noExternalTools
+                                    printfn "Phase 4: Native compilation"
+                                    let intermediatesDir = if keepIntermediates then Some (Path.Combine(Path.GetDirectoryName(outputPath), "intermediates")) else None
+                                    compileToNativeExecutable optimizedLLVM outputPath target verbose noExternalTools intermediatesDir
