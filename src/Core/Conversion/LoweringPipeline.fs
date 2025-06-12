@@ -183,6 +183,76 @@ module DialectTransformers =
         
         with ex ->
             CompilerFailure [ConversionError("std-to-llvm", trimmed, "llvm operation", ex.Message)]
+    /// Transforms arithmetic dialect operations to LLVM dialect
+    let transformArithToLLVM (line: string) : CompilerResult<string> =
+        let trimmed = line.Trim()
+        
+        try
+            if trimmed.Contains("arith.constant") then
+                // Transform arith.constant to llvm.mlir.constant
+                let transformed = trimmed.Replace("arith.constant", "llvm.mlir.constant")
+                Success transformed
+            
+            elif trimmed.Contains("arith.addi") then
+                // Transform arith.addi to llvm.add
+                let transformed = trimmed.Replace("arith.addi", "llvm.add")
+                Success transformed
+            
+            elif trimmed.Contains("arith.subi") then
+                // Transform arith.subi to llvm.sub
+                let transformed = trimmed.Replace("arith.subi", "llvm.sub")
+                Success transformed
+            
+            elif trimmed.Contains("arith.muli") then
+                // Transform arith.muli to llvm.mul
+                let transformed = trimmed.Replace("arith.muli", "llvm.mul")
+                Success transformed
+            
+            elif trimmed.Contains("arith.divsi") then
+                // Transform arith.divsi to llvm.sdiv (signed division)
+                let transformed = trimmed.Replace("arith.divsi", "llvm.sdiv")
+                Success transformed
+            
+            elif trimmed.Contains("arith.divui") then
+                // Transform arith.divui to llvm.udiv (unsigned division)
+                let transformed = trimmed.Replace("arith.divui", "llvm.udiv")
+                Success transformed
+            
+            elif trimmed.Contains("arith.cmpi") then
+                // Transform arith.cmpi to llvm.icmp (integer comparison)
+                let transformed = trimmed.Replace("arith.cmpi", "llvm.icmp")
+                Success transformed
+            
+            elif trimmed.Contains("arith.cmpf") then
+                // Transform arith.cmpf to llvm.fcmp (float comparison)
+                let transformed = trimmed.Replace("arith.cmpf", "llvm.fcmp")
+                Success transformed
+            
+            elif trimmed.Contains("arith.addf") then
+                // Transform arith.addf to llvm.fadd (float addition)
+                let transformed = trimmed.Replace("arith.addf", "llvm.fadd")
+                Success transformed
+            
+            elif trimmed.Contains("arith.subf") then
+                // Transform arith.subf to llvm.fsub (float subtraction)
+                let transformed = trimmed.Replace("arith.subf", "llvm.fsub")
+                Success transformed
+            
+            elif trimmed.Contains("arith.mulf") then
+                // Transform arith.mulf to llvm.fmul (float multiplication)
+                let transformed = trimmed.Replace("arith.mulf", "llvm.fmul")
+                Success transformed
+            
+            elif trimmed.Contains("arith.divf") then
+                // Transform arith.divf to llvm.fdiv (float division)
+                let transformed = trimmed.Replace("arith.divf", "llvm.fdiv")
+                Success transformed
+            
+            else
+                Success trimmed
+        
+        with ex ->
+            CompilerFailure [ConversionError("arith-to-llvm", trimmed, "llvm operation", ex.Message)]
 
 /// Pass management and execution
 module PassManagement =

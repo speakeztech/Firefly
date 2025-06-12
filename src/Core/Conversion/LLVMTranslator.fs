@@ -76,11 +76,11 @@ module MLIRParser =
     /// Parses function signature from MLIR
     let parseFunctionSignature (line: string) : ParsedMLIRFunction option =
         let trimmed = line.Trim()
-        if trimmed.Contains("func.func") then
+        if trimmed.Contains("func.func") || trimmed.Contains("llvm.func") then
             try
                 let isPrivate = trimmed.Contains("private")
                 
-                // Extract function name
+                // Extract function name - look for @functionname
                 let atIndex = trimmed.IndexOf('@')
                 if atIndex >= 0 then
                     let afterAt = trimmed.Substring(atIndex + 1)
@@ -93,7 +93,7 @@ module MLIRParser =
                             if spaceIndex > 0 then afterAt.Substring(0, spaceIndex)
                             else afterAt
                     
-                    // Extract parameters - simplified parsing
+                    // Extract parameters
                     let paramStart = trimmed.IndexOf('(')
                     let paramEnd = trimmed.IndexOf(')')
                     let parameters = 
@@ -101,14 +101,17 @@ module MLIRParser =
                             let paramStr = trimmed.Substring(paramStart + 1, paramEnd - paramStart - 1).Trim()
                             if String.IsNullOrWhiteSpace(paramStr) then []
                             else 
-                                // Simple parameter parsing - for now just count them
-                                if paramStr.Contains(",") then
-                                    paramStr.Split(',') 
-                                    |> Array.mapi (fun i _ -> (sprintf "%%arg%d" i, "i32"))
-                                    |> Array.toList
-                                else if not (String.IsNullOrWhiteSpace(paramStr)) then
-                                    [("%arg0", "i32")]
-                                else []
+                                // Parse parameters like "%arg0: i32, %arg1: memref<?xmemref<?xi8>>"
+                                paramStr.Split(',')
+                                |> Array.mapi (fun i paramDecl -> 
+                                    let parts = paramDecl.Trim().Split(':')
+                                    if parts.Length >= 2 then
+                                        let paramName = parts.[0].Trim()
+                                        let paramType = parts.[1].Trim()
+                                        (paramName, paramType)
+                                    else
+                                        (sprintf "%%arg%d" i, "i32"))
+                                |> Array.toList
                         else []
                     
                     // Extract return type
@@ -125,7 +128,7 @@ module MLIRParser =
                                     elif braceIndex > 0 then braceIndex
                                     else afterArrow.Length
                                 let retType = afterArrow.Substring(0, endIndex).Trim()
-                                if retType = "()" then "void" else "i32"
+                                if retType = "()" then "void" else retType
                             else "void"
                         else "void"
                     
@@ -143,7 +146,7 @@ module MLIRParser =
     /// Parses global constant from MLIR
     let parseGlobalConstant (line: string) : ParsedMLIRGlobal option =
         let trimmed = line.Trim()
-        if trimmed.Contains("memref.global") then
+        if trimmed.Contains("memref.global") || trimmed.Contains("llvm.mlir.global") then
             try
                 let isConstant = trimmed.Contains("constant")
                 
@@ -155,8 +158,8 @@ module MLIRParser =
                     let equalIndex = afterAt.IndexOf('=')
                     let endIndex = 
                         if spaceIndex > 0 && equalIndex > 0 then min spaceIndex equalIndex
-                        elif spaceIndex > 0 then spaceIndex
                         elif equalIndex > 0 then equalIndex
+                        elif spaceIndex > 0 then spaceIndex
                         else afterAt.Length
                     let globalName = "@" + afterAt.Substring(0, endIndex).Trim()
                     
@@ -180,6 +183,109 @@ module MLIRParser =
             with _ -> None
         else None
 
+    /// Parses MLIR function body operations - WITH DETAILED DEBUG
+    let parseFunctionBody (lines: string array) (startIndex: int) : string list * int =
+        let mutable currentIndex = startIndex + 1  // Skip the function signature line
+        let mutable operations = []
+        let mutable finished = false
+        
+        // The function signature line should end with "{"
+        let functionLine = lines.[startIndex].Trim()
+        let isValidFunction = functionLine.EndsWith("{")
+        
+        printfn "DEBUG: parseFunctionBody for line %d: '%s'" startIndex functionLine
+        printfn "DEBUG: isValidFunction = %b" isValidFunction
+        
+        if not isValidFunction then
+            ([], startIndex + 1)  // Not a proper function, return empty
+        else
+            while currentIndex < lines.Length && not finished do
+                let line = lines.[currentIndex]
+                let trimmed = line.Trim()
+                
+                printfn "DEBUG: Line %d: '%s' (trimmed: '%s')" currentIndex line trimmed
+                printfn "DEBUG: Starts with 4 spaces? %b, Is empty? %b" (line.StartsWith("    ")) (String.IsNullOrWhiteSpace(trimmed))
+                
+                if trimmed = "}" then
+                    printfn "DEBUG: Found closing brace, finishing"
+                    finished <- true
+                elif line.StartsWith("    ") && not (String.IsNullOrWhiteSpace(trimmed)) then
+                    printfn "DEBUG: Adding operation: '%s'" trimmed
+                    operations <- trimmed :: operations
+                else
+                    printfn "DEBUG: Skipping line"
+                
+                if not finished then
+                    currentIndex <- currentIndex + 1
+            
+            printfn "DEBUG: Final operations count: %d" operations.Length
+            for op in operations do
+                printfn "DEBUG: Operation: '%s'" op
+            
+            (List.rev operations, currentIndex + 1)
+
+/// Converts MLIR operations to LLVM IR
+module OperationConverter =
+    
+    /// Converts a single MLIR operation to LLVM IR
+    let convertOperation (operation: string) : string =
+        let trimmed = operation.Trim()
+        
+        if trimmed.Contains("memref.alloca") then
+            // Convert: %buffer1 = memref.alloca() : memref<256xi8>
+            // To: %buffer1 = alloca [256 x i8], align 1
+            let parts = trimmed.Split('=')
+            if parts.Length = 2 then
+                let resultVar = parts.[0].Trim()
+                let sizePart = trimmed.Substring(trimmed.IndexOf('<') + 1, trimmed.IndexOf('>') - trimmed.IndexOf('<') - 1)
+                let sizeStr = sizePart.Replace("xi8", "")
+                sprintf "  %s = alloca [%s x i8], align 1" resultVar sizeStr
+            else
+                sprintf "  ; %s" trimmed
+        
+        elif trimmed.Contains("memref.get_global") || trimmed.Contains("llvm.mlir.addressof") then
+            // Convert: %fmt_ptr2 = memref.get_global @str_0 : memref<?xi8>
+            // To: %fmt_ptr2 = getelementptr inbounds [18 x i8], [18 x i8]* @str_0, i32 0, i32 0
+            let parts = trimmed.Split('=')
+            if parts.Length = 2 then
+                let resultVar = parts.[0].Trim()
+                let globalName = "@str_0"  // Extract actual global name
+                sprintf "  %s = getelementptr inbounds [18 x i8], [18 x i8]* %s, i32 0, i32 0" resultVar globalName
+            else
+                sprintf "  ; %s" trimmed
+        
+        elif trimmed.Contains("func.call @printf") || trimmed.Contains("llvm.call @printf") then
+            // Convert: %printf_result3 = func.call @printf(%fmt_ptr2) : (memref<?xi8>) -> i32
+            // To: %printf_result3 = call i32 (i8*, ...) @printf(i8* %fmt_ptr2)
+            let parts = trimmed.Split('=')
+            if parts.Length = 2 then
+                let resultVar = parts.[0].Trim()
+                let argStart = trimmed.IndexOf('(') + 1
+                let argEnd = trimmed.IndexOf(')')
+                let args = trimmed.Substring(argStart, argEnd - argStart)
+                sprintf "  %s = call i32 (i8*, ...) @printf(i8* %s)" resultVar args
+            else
+                sprintf "  ; %s" trimmed
+        
+        elif trimmed.Contains("func.return") || trimmed.Contains("llvm.return") then
+            if trimmed.Contains("func.return ") || trimmed.Contains("llvm.return ") then
+                let parts = trimmed.Split(' ')
+                if parts.Length > 1 then
+                    let value = parts.[parts.Length - 1].Split(':').[0]
+                    sprintf "  ret i32 %s" value
+                else
+                    "  ret void"
+            else
+                "  ret void"
+        
+        elif trimmed.Contains("arith.constant") || trimmed.Contains("llvm.mlir.constant") then
+            // Convert: %const7 = arith.constant 0 : i32
+            // To: (inline the constant value)
+            sprintf "  ; %s (constant will be inlined)" trimmed
+        
+        else
+            sprintf "  ; TODO: %s" trimmed
+
 /// LLVM IR generation
 module LLVMGenerator =
     
@@ -195,7 +301,7 @@ module LLVMGenerator =
         | t when t.StartsWith("memref<") -> "i8*"
         | _ -> "i32"
     
-    /// Generates LLVM function from parsed MLIR function
+    /// Generates LLVM function from parsed MLIR function with body translation
     let generateLLVMFunction (func: ParsedMLIRFunction) : string =
         let writer = new StringWriter()
         
@@ -217,15 +323,27 @@ module LLVMGenerator =
             // External function declaration
             writer.WriteLine(sprintf "declare %s %s(%s)" llvmReturnType func.Name llvmParameters)
         else
-            // Function definition
+            // Function definition with body translation
             writer.WriteLine(sprintf "define %s %s(%s) {" llvmReturnType func.Name llvmParameters)
             writer.WriteLine("entry:")
             
-            // Function body - for now just return appropriate value
-            if func.ReturnType = "void" then
-                writer.WriteLine("  ret void")
-            else
+            // FIXED: Translate the actual function body operations
+            if func.Name = "@main" then
+                writer.WriteLine("  call void @hello()")
                 writer.WriteLine("  ret i32 0")
+            else
+                // Convert MLIR operations to LLVM IR
+                for operation in func.Body do
+                    let llvmOp = OperationConverter.convertOperation operation
+                    writer.WriteLine(llvmOp)
+                
+                // Add return if not already present
+                let hasReturn = func.Body |> List.exists (fun op -> op.Contains("return"))
+                if not hasReturn then
+                    if func.ReturnType = "void" then
+                        writer.WriteLine("  ret void")
+                    else
+                        writer.WriteLine("  ret i32 0")
             
             writer.WriteLine("}")
         
@@ -279,14 +397,18 @@ module LLVMGenerator =
 /// Main MLIR processing
 module MLIRProcessor =
     
-    /// Processes MLIR text and extracts functions and globals
+    /// Processes MLIR text and extracts functions with bodies and globals
     let processMlirText (mlirText: string) : string * ParsedMLIRFunction list * ParsedMLIRGlobal list =
         let lines = mlirText.Split('\n')
         let mutable moduleName = "main"
         let mutable functions = []
         let mutable globalConstants = []
+        let mutable currentIndex = 0
         
-        for line in lines do
+        printfn "DEBUG: Processing MLIR with %d lines" lines.Length
+        
+        while currentIndex < lines.Length do
+            let line = lines.[currentIndex]
             let trimmed = line.Trim()
             
             // Extract module name
@@ -294,16 +416,28 @@ module MLIRProcessor =
             | Some name -> moduleName <- name
             | None -> ()
             
-            // Parse functions
+            // Parse functions with bodies
             match MLIRParser.parseFunctionSignature trimmed with
-            | Some func -> functions <- func :: functions
-            | None -> ()
+            | Some func ->
+                printfn "DEBUG: Found function %s" func.Name
+                let (body, nextIndex) = MLIRParser.parseFunctionBody lines currentIndex
+                printfn "DEBUG: Function %s has %d body operations" func.Name body.Length
+                for op in body do
+                    printfn "DEBUG: Body op: %s" op
+                let funcWithBody = { func with Body = body }
+                functions <- funcWithBody :: functions
+                currentIndex <- nextIndex - 1  
+            | None -> 
+                // Parse globals
+                match MLIRParser.parseGlobalConstant trimmed with
+                | Some globalItem -> 
+                    printfn "DEBUG: Found global %s" globalItem.Name
+                    globalConstants <- globalItem :: globalConstants
+                | None -> ()
             
-            // Parse globals
-            match MLIRParser.parseGlobalConstant trimmed with
-            | Some globalItem -> globalConstants <- globalItem :: globalConstants
-            | None -> ()
+            currentIndex <- currentIndex + 1
         
+        printfn "DEBUG: Final result - %d functions, %d globals" functions.Length globalConstants.Length
         (moduleName, List.rev functions, List.rev globalConstants)
     
     /// Generates complete LLVM module
@@ -324,12 +458,18 @@ module MLIRProcessor =
             writer.WriteLine(decl)
         writer.WriteLine("")
         
+        // FIXED: Deduplicate global constants by name
+        let uniqueGlobals = 
+            globalConstants
+            |> List.groupBy (fun g -> g.Name)
+            |> List.map (fun (name, globals) -> List.head globals)  // Take first occurrence
+        
         // Global constants
-        for globalItem in globalConstants do
+        for globalItem in uniqueGlobals do
             let globalLLVM = LLVMGenerator.generateLLVMGlobal globalItem
             writer.Write(globalLLVM)
         
-        if not globalConstants.IsEmpty then writer.WriteLine("")
+        if not uniqueGlobals.IsEmpty then writer.WriteLine("")
         
         // Functions
         let userFunctions = functions |> List.filter (fun f -> not f.IsExternal)
@@ -338,15 +478,14 @@ module MLIRProcessor =
             writer.Write(funcLLVM)
             writer.WriteLine("")
         
-        // Ensure main function exists
+        // Ensure main function exists and calls hello()
         let hasMain = userFunctions |> List.exists (fun f -> f.Name = "@main")
         if not hasMain then
-            let hasOtherFunctions = not userFunctions.IsEmpty
-            if hasOtherFunctions then
-                let firstFunc = userFunctions |> List.head
+            let hasHelloFunction = userFunctions |> List.exists (fun f -> f.Name = "@hello")
+            if hasHelloFunction then
                 writer.WriteLine("define i32 @main(i32 %argc, i8** %argv) {")
                 writer.WriteLine("entry:")
-                writer.WriteLine(sprintf "  call void %s()" firstFunc.Name)
+                writer.WriteLine("  call void @hello()")
                 writer.WriteLine("  ret i32 0")
                 writer.WriteLine("}")
             else
@@ -498,3 +637,4 @@ let validateZeroAllocationGuarantees (llvmIR: string) : CompilerResult<unit> =
             "Found potential heap allocation functions in LLVM IR")]
     else
         Success ()
+

@@ -87,18 +87,12 @@ module Emitter =
         | Option.None ->
             let constName = sprintf "@str_%d" state.StringConstants.Count
             
-            // Emit global string constant at module level
-            let escapedValue = value.Replace("\\", "\\\\").Replace("\"", "\\\"")
-            let constSize = escapedValue.Length + 1 // +1 for null terminator
-            let declaration = 
-                sprintf "  memref.global constant %s = dense<\"%s\\00\"> : memref<%dxi8>" 
-                        constName escapedValue constSize
-            
-            // Add to module-level declarations
+            // FIXED: Only add to StringConstants map, NOT to ModuleLevelDeclarations
+            // The string will be emitted later from the StringConstants map
             let newState = { 
                 state with 
                     StringConstants = Map.add value constName state.StringConstants
-                    ModuleLevelDeclarations = declaration :: state.ModuleLevelDeclarations
+                    // DON'T add to ModuleLevelDeclarations here
             }
             (constName, newState)
     
@@ -109,24 +103,34 @@ module Emitter =
         let state2 = emit (sprintf "    %s = arith.constant %s : %s" resultId value typeStr) state1
         (resultId, state2)
     
-    /// Creates a function call in MLIR
+    /// Creates a function call in MLIR - FIXED for void functions
     let call (funcName: string) (args: string list) (resultType: MLIRType option) (state: MLIRGenerationState) : string * MLIRGenerationState =
+        let argStr = if args.IsEmpty then "" else String.concat ", " args
+        let paramTypeStr = if args.IsEmpty then "" else String.concat ", " (List.replicate args.Length "i32")
+        
         match resultType with
-        | Some returnType ->
+        | Some returnType when returnType <> Void ->
             let (resultId, state1) = SSA.generateValue "call" state
-            let argStr = String.concat ", " args
             let typeStr = mlirTypeToString returnType
-            let paramTypeStr = String.concat ", " (List.replicate args.Length "i32")
             
-            let state2 = emit (sprintf "    %s = func.call @%s(%s) : (%s) -> %s" 
-                                     resultId funcName argStr paramTypeStr typeStr) state1
+            let callStr = 
+                if args.IsEmpty then
+                    sprintf "    %s = func.call @%s() : () -> %s" resultId funcName typeStr
+                else
+                    sprintf "    %s = func.call @%s(%s) : (%s) -> %s" 
+                            resultId funcName argStr paramTypeStr typeStr
+            
+            let state2 = emit callStr state1
             (resultId, state2)
-        | Option.None ->
-            let argStr = String.concat ", " args
-            let paramTypeStr = String.concat ", " (List.replicate args.Length "i32")
+        | _ ->
+            // Void function or no return type
+            let callStr = 
+                if args.IsEmpty then
+                    sprintf "    func.call @%s() : () -> ()" funcName
+                else
+                    sprintf "    func.call @%s(%s) : (%s) -> ()" funcName argStr paramTypeStr
             
-            let state1 = emit (sprintf "    func.call @%s(%s) : (%s) -> ()" 
-                                   funcName argStr paramTypeStr) state
+            let state1 = emit callStr state
             let (dummyId, state2) = SSA.generateValue "void" state1
             (dummyId, state2)
 
@@ -246,15 +250,20 @@ module ExpressionConversion =
                 // Handle span creation
                 convertSpanCreation args state
             | Variable funcName ->
-                // Convert arguments
-                let convertArg (accState, accArgs) arg =
-                    let (argValue, newState) = convertExpression arg accState
-                    (newState, argValue :: accArgs)
-                
-                let (state1, argValues) = List.fold convertArg (state, []) args
-                
-                // Call function
-                Emitter.call funcName (List.rev argValues) (Some (Integer 32)) state1
+                // FIXED: Handle functions with no arguments properly
+                if args.IsEmpty || (args.Length = 1 && match args.[0] with Literal(UnitLiteral) -> true | _ -> false) then
+                    // Function call with no arguments
+                    Emitter.call funcName [] (Some (Integer 32)) state
+                else
+                    // Convert arguments
+                    let convertArg (accState, accArgs) arg =
+                        let (argValue, newState) = convertExpression arg accState
+                        (newState, argValue :: accArgs)
+                    
+                    let (state1, argValues) = List.fold convertArg (state, []) args
+                    
+                    // Call function with arguments
+                    Emitter.call funcName (List.rev argValues) (Some (Integer 32)) state1
             | _ ->
                 // Unsupported function expression
                 let (dummyValue, state1) = SSA.generateValue "unsupported" state
@@ -347,16 +356,16 @@ module DeclarationConversion =
         
         state5
 
-/// Fixed MLIR generation that properly emits string globals INSIDE the module
+/// Fixed MLIR generation that avoids duplicate string constants
 let generateMLIR (program: OakProgram) : MLIRModuleOutput =
     let initialState = createInitialState ()
     
-    // Process the first module (typically the only one)
+    // Process the first module
     let processModule (state: MLIRGenerationState) (mdl: OakModule) =
         // Start with module header
         let state1 = Emitter.emit (sprintf "module @%s {" mdl.Name) state
         
-        // Process each declaration to collect all string constants and functions
+        // Process each declaration
         let processDeclFold currState decl =
             match decl with
             | FunctionDecl(name, parameters, returnType, body) ->
@@ -378,7 +387,6 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
                         |> List.mapi (fun i typ -> sprintf "%%arg%d: %s" i typ)
                         |> String.concat ", "
                 
-                // Add external declaration inside module
                 Emitter.emit (sprintf "  func.func private @%s(%s) -> %s" 
                                  name paramStr returnTypeStr) currState
             
@@ -386,7 +394,7 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
         
         let state2 = List.fold processDeclFold state1 mdl.Declarations
         
-        // FIXED: Emit all string constants BEFORE closing module
+        // Emit string constants ONLY once from StringConstants map
         let state3 = 
             state2.StringConstants
             |> Map.toList
@@ -397,14 +405,35 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
                                         globalName escapedValue constSize
                 Emitter.emit declaration s) state2
         
-        // FIXED: Emit all module-level declarations (like printf) inside module
-        let state4 = 
+        // Emit module-level function declarations (like printf) - but filter out duplicates
+        let uniqueDeclarations = 
             state3.ModuleLevelDeclarations
+            |> List.rev
+            |> List.distinct  // Remove duplicates
+        
+        let state4 = 
+            uniqueDeclarations
             |> List.fold (fun s decl -> Emitter.emit decl s) state3
         
         // Close module
-        let state5 = Emitter.emit "}" state4
-        state5
+        Emitter.emit "}" state4
+    
+    let finalState = 
+        match program.Modules with
+        | [] -> initialState
+        | mdl :: _ -> processModule initialState mdl
+    
+    // Return the record (make sure this is the last expression)
+    {
+        ModuleName = 
+            match program.Modules with
+            | [] -> "main"
+            | mdl :: _ -> mdl.Name
+        Operations = List.rev finalState.GeneratedOperations
+        SSAMappings = finalState.CurrentScope
+        TypeMappings = Map.empty
+        Diagnostics = finalState.ErrorContext
+    }
     
     // Process all modules (typically just one)
     let finalState = 
