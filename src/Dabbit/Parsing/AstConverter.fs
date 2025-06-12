@@ -288,6 +288,17 @@ module ModuleMapping =
         with
         | _ -> []
 
+/// Helper function to generate F# AST text representation
+let generateFSharpASTText (parseTree: ParsedInput option) : string =
+    try
+        match parseTree with
+        | Some tree ->
+            // Create a simplified text representation of the F# AST
+            sprintf "%A" tree
+        | None -> "No F# AST available"
+    with
+    | ex -> sprintf "Error generating F# AST text: %s" ex.Message
+
 /// Single unified conversion function with minimal output
 let parseAndConvertToOakAst (inputPath: string) (sourceCode: string) : ASTConversionResult =
     try
@@ -308,12 +319,23 @@ let parseAndConvertToOakAst (inputPath: string) (sourceCode: string) : ASTConver
             if parseResults.Diagnostics.Length = 0 then []
             else parseResults.Diagnostics |> Array.map (fun diag -> diag.Message) |> Array.toList
         
+        // Generate F# AST text representation
+        let fsharpAstText = generateFSharpASTText (Some parseResults.ParseTree)
+        
         // Extract modules and create Oak AST
         let modules = ModuleMapping.extractModulesFromParseTree (Some parseResults.ParseTree)
         let oakProgram = { Modules = modules }
         
-        { OakProgram = oakProgram; Diagnostics = diagnostics }
+        { 
+            OakProgram = oakProgram
+            Diagnostics = diagnostics
+            FSharpASTText = fsharpAstText
+        }
         
     with parseEx ->
         let parseError = sprintf "F# parsing failed: %s" parseEx.Message
-        { OakProgram = { Modules = [] }; Diagnostics = [parseError] }
+        { 
+            OakProgram = { Modules = [] }
+            Diagnostics = [parseError]
+            FSharpASTText = sprintf "Parse error: %s" parseError
+        }

@@ -34,6 +34,19 @@ with
             | Verbose -> "Enable verbose output and diagnostics"
             | No_External_Tools -> "Use only internal XParsec-based transformations"
 
+/// Compilation context with all settings
+type CompilationContext = {
+    InputPath: string
+    OutputPath: string
+    Target: string
+    OptimizeLevel: OptimizationLevel
+    OptimizeStr: string
+    Config: FireflyConfig
+    KeepIntermediates: bool
+    Verbose: bool
+    NoExternalTools: bool
+}
+
 /// Gets the default target for the current platform
 let private getDefaultTarget() =
     if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
@@ -44,6 +57,16 @@ let private getDefaultTarget() =
         "x86_64-apple-darwin"
     else
         "x86_64-w64-windows-gnu"
+
+/// Converts optimization level string to enum
+let private parseOptimizationLevel (optimizeStr: string) : OptimizationLevel =
+    match optimizeStr.ToLowerInvariant() with
+    | "none" -> OptimizationLevel.None
+    | "less" -> OptimizationLevel.Less
+    | "aggressive" -> OptimizationLevel.Aggressive
+    | "size" -> OptimizationLevel.Size
+    | "sizemin" -> OptimizationLevel.SizeMin
+    | _ -> OptimizationLevel.Default
 
 /// Validates that the input file exists and is readable
 let private validateInputFile (inputPath: string) : CompilerResult<unit> =
@@ -64,6 +87,28 @@ let private validateInputFile (inputPath: string) : CompilerResult<unit> =
                 { Line = 0; Column = 0; File = inputPath; Offset = 0 },
                 sprintf "Input file must be F# source (.fs or .fsx), got: %s" inputExt,
                 ["file validation"])]
+        else
+            Success ()
+
+/// Validates the output path is writable
+let private validateOutputPath (outputPath: string) : CompilerResult<unit> =
+    if String.IsNullOrWhiteSpace(outputPath) then
+        CompilerFailure [SyntaxError(
+            { Line = 0; Column = 0; File = ""; Offset = 0 },
+            "Output path cannot be empty",
+            ["argument validation"])]
+    else
+        let outputDir = Path.GetDirectoryName(outputPath)
+        if not (String.IsNullOrEmpty(outputDir)) && not (Directory.Exists(outputDir)) then
+            try
+                Directory.CreateDirectory(outputDir) |> ignore
+                Success ()
+            with
+            | ex ->
+                CompilerFailure [SyntaxError(
+                    { Line = 0; Column = 0; File = outputPath; Offset = 0 },
+                    sprintf "Cannot create output directory: %s" ex.Message,
+                    ["output validation"])]
         else
             Success ()
 
@@ -100,68 +145,41 @@ let private readSourceFile (inputPath: string) : CompilerResult<string> =
             sprintf "Unexpected error: %s" ex.Message,
             ["file reading"])]
 
-/// Validates the output path is writable
-let private validateOutputPath (outputPath: string) : CompilerResult<unit> =
-    if String.IsNullOrWhiteSpace(outputPath) then
-        CompilerFailure [SyntaxError(
-            { Line = 0; Column = 0; File = ""; Offset = 0 },
-            "Output path cannot be empty",
-            ["argument validation"])]
-    else
-        let outputDir = Path.GetDirectoryName(outputPath)
-        if not (String.IsNullOrEmpty(outputDir)) && not (Directory.Exists(outputDir)) then
-            try
-                Directory.CreateDirectory(outputDir) |> ignore
-                Success ()
-            with
-            | ex ->
-                CompilerFailure [SyntaxError(
-                    { Line = 0; Column = 0; File = outputPath; Offset = 0 },
-                    sprintf "Cannot create output directory: %s" ex.Message,
-                    ["output validation"])]
-        else
-            Success ()
-
-/// Converts optimization level string to enum
-let private parseOptimizationLevel (optimizeStr: string) : OptimizationLevel =
-    match optimizeStr.ToLowerInvariant() with
-    | "none" -> OptimizationLevel.None
-    | "less" -> OptimizationLevel.Less
-    | "aggressive" -> OptimizationLevel.Aggressive
-    | "size" -> OptimizationLevel.Size
-    | "sizemin" -> OptimizationLevel.SizeMin
-    | _ -> OptimizationLevel.Default
-
-/// Saves intermediate compilation results with clean, simple naming
-let private saveIntermediateFiles (basePath: string) (baseName: string) (keepIntermediates: bool) (pipelineOutput: TranslationPipelineOutput) =
-    if keepIntermediates then
+/// Saves intermediate compilation results
+let private saveIntermediateFiles (compilationCtx: CompilationContext) (pipelineOutput: TranslationPipelineOutput) : unit =
+    if compilationCtx.KeepIntermediates then
         printfn "Saving intermediate files..."
         try
+            let basePath = Path.GetDirectoryName(compilationCtx.OutputPath)
+            let baseName = Path.GetFileNameWithoutExtension(compilationCtx.OutputPath)
             let intermediatesDir = Path.Combine(basePath, "intermediates")
+            
             if not (Directory.Exists(intermediatesDir)) then
                 Directory.CreateDirectory(intermediatesDir) |> ignore
             
-            // Simple, clean file mapping
-            let fileMap = [
-                ("fsharp-ast", ".fcs")      // F# Compiler Services AST
-                ("oak-ast", ".oak")         // Oak AST
+            let fileExtensions = [
+                ("fsharp-ast", ".fcs")
+                ("oak-ast", ".oak")
                 ("closure-transformed", ".closures") 
                 ("layout-transformed", ".unions")
                 ("mlir", ".mlir")
                 ("lowered-mlir", ".lowered")
             ]
             
-            // Save phase outputs with clean names
-            for (phaseName, extension) in fileMap do
-                match pipelineOutput.PhaseOutputs.TryFind phaseName with
-                | Some content ->
+            // Process each phase output file with explicit typing
+            let processPhaseFile (phaseName: string, extension: string) : unit =
+                let outputsMap : Map<string, string> = pipelineOutput.PhaseOutputs
+                let lookupResult : string option = Map.tryFind phaseName outputsMap
+                match lookupResult with
+                | Some (content: string) ->
                     let filePath = Path.Combine(intermediatesDir, baseName + extension)
                     File.WriteAllText(filePath, content, System.Text.Encoding.UTF8)
                     printfn "  %s → %s" phaseName (Path.GetFileName(filePath))
                 | Option.None ->
                     printfn "  %s (not found)" phaseName
             
-            // Save diagnostics with clean name
+            fileExtensions |> List.iter processPhaseFile
+            
             let diagPath = Path.Combine(intermediatesDir, baseName + ".diag")
             let diagContent = 
                 pipelineOutput.Diagnostics
@@ -169,7 +187,6 @@ let private saveIntermediateFiles (basePath: string) (baseName: string) (keepInt
                 |> String.concat "\n"
             File.WriteAllText(diagPath, diagContent)
             
-            // Save symbol mappings
             let symbolsPath = Path.Combine(intermediatesDir, baseName + ".symbols")
             let symbolsContent = 
                 pipelineOutput.SymbolMappings
@@ -183,152 +200,171 @@ let private saveIntermediateFiles (basePath: string) (baseName: string) (keepInt
         | ex ->
             printfn "Warning: Failed to save intermediate files: %s" ex.Message
 
-/// Compiles LLVM IR to native executable
-let private compileToNativeExecutable (llvmOutput: LLVMOutput) (outputPath: string) (target: string) (verbose: bool) (noExternalTools: bool) (intermediatesDir: string option) =
-    if noExternalTools then
-        printfn "Warning: --no-external-tools specified, but native compilation requires external LLVM toolchain"
-        
-        // Save to intermediates only if keeping intermediates
-        match intermediatesDir with
-        | Some dir ->
-            let baseName = Path.GetFileNameWithoutExtension(outputPath)
-            let llvmPath = Path.Combine(dir, baseName + ".ll")
-            File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, System.Text.UTF8Encoding(false))
-            printfn "Saved LLVM IR to: %s" (Path.GetFileName(llvmPath))
-        | None ->
-            let llvmPath = Path.ChangeExtension(outputPath, ".ll")
-            File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, System.Text.UTF8Encoding(false))
-            printfn "Saved LLVM IR to: %s" llvmPath
-        0
-    else
-        match compileLLVMToNative llvmOutput outputPath target with
-        | CompilerFailure nativeErrors ->
-            printfn "Native compilation failed:"
-            nativeErrors |> List.iter (fun error -> printfn "  %s" (error.ToString()))
-            1
-        | Success () ->
-            printfn "✓ Compilation successful: %s" outputPath
-            if verbose then
-                try
-                    let fileInfo = FileInfo(outputPath)
-                    printfn "  Output size: %d bytes" fileInfo.Length
-                    printfn "  Target: %s" target
-                with _ -> ()
-            0
+/// Saves LLVM IR file to intermediates
+let private saveLLVMFile (ctx: CompilationContext) (suffix: string) (llvmText: string) : unit =
+    if ctx.KeepIntermediates then
+        let intermediatesDir = Path.Combine(Path.GetDirectoryName(ctx.OutputPath), "intermediates")
+        let baseName = Path.GetFileNameWithoutExtension(ctx.OutputPath)
+        let fileName = if String.IsNullOrEmpty(suffix) then sprintf "%s.ll" baseName else sprintf "%s.%s.ll" baseName suffix
+        let llvmPath = Path.Combine(intermediatesDir, fileName)
+        File.WriteAllText(llvmPath, llvmText, System.Text.UTF8Encoding(false))
+        printfn "  llvm-ir → %s" fileName
 
-/// Main compilation function with clean, concise output
+/// Compiles to native executable
+let private compileToNative (ctx: CompilationContext) (llvmOutput: LLVMOutput) : CompilerResult<int> =
+    if ctx.NoExternalTools then
+        printfn "Warning: --no-external-tools specified, but native compilation requires external LLVM toolchain"
+        let llvmPath = 
+            if ctx.KeepIntermediates then
+                let intermediatesDir = Path.Combine(Path.GetDirectoryName(ctx.OutputPath), "intermediates")
+                let baseName = Path.GetFileNameWithoutExtension(ctx.OutputPath)
+                Path.Combine(intermediatesDir, baseName + ".ll")
+            else
+                Path.ChangeExtension(ctx.OutputPath, ".ll")
+        
+        File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, System.Text.UTF8Encoding(false))
+        printfn "Saved LLVM IR to: %s" (Path.GetFileName(llvmPath))
+        Success 0
+    else
+        match compileLLVMToNative llvmOutput ctx.OutputPath ctx.Target with
+        | CompilerFailure errors ->
+            errors |> List.iter (fun error -> printfn "Native compilation failed: %s" (error.ToString()))
+            Success 1
+        | Success () ->
+            printfn "✓ Compilation successful: %s" ctx.OutputPath
+            if ctx.Verbose then
+                try
+                    let fileInfo = FileInfo(ctx.OutputPath)
+                    printfn "  Output size: %d bytes" fileInfo.Length
+                    printfn "  Target: %s" ctx.Target
+                with _ -> ()
+            Success 0
+
+/// Result computation expression for chaining operations
+type CompilerResultBuilder() =
+    member _.Bind(result, f) =
+        match result with
+        | Success value -> f value
+        | CompilerFailure errors -> CompilerFailure errors
+    
+    member _.Return(value) = Success value
+    
+    member _.ReturnFrom(result) = result
+    
+    member _.Zero() = Success ()
+    
+    member _.Delay(f) = f
+    
+    member _.Run(f) = f ()
+    
+    member _.Combine(a, b) =
+        match a with
+        | Success _ -> b ()
+        | CompilerFailure errors -> CompilerFailure errors
+
+let result = CompilerResultBuilder()
+
+/// Main compilation pipeline
+let private runCompilationPipeline (ctx: CompilationContext) (sourceCode: string) : CompilerResult<int> =
+    result {
+        // Phase 1: F# to MLIR
+        let! pipelineOutput = translateFsToMLIRWithDiagnostics ctx.InputPath sourceCode
+        
+        // Save intermediate files
+        saveIntermediateFiles ctx pipelineOutput
+        
+        // Phase 2: MLIR to LLVM IR
+        printfn "Phase 2: MLIR → LLVM IR"
+        let! llvmOutput = translateToLLVM pipelineOutput.FinalMLIR
+        printfn "Generated LLVM IR (%d chars)" llvmOutput.LLVMIRText.Length
+        
+        // Save unoptimized LLVM IR
+        saveLLVMFile ctx "" llvmOutput.LLVMIRText
+        
+        // Phase 3: LLVM Optimization
+        printfn "Phase 3: LLVM optimization (%s)" ctx.OptimizeStr
+        let optimizationPasses = createOptimizationPipeline ctx.OptimizeLevel
+        let! optimizedLLVM = optimizeLLVMIR llvmOutput optimizationPasses
+        printfn "✓ LLVM optimized (%d chars)" optimizedLLVM.LLVMIRText.Length
+        
+        // Save optimized LLVM IR
+        saveLLVMFile ctx "optimized" optimizedLLVM.LLVMIRText
+        
+        // Phase 4: Zero-allocation validation (if required)
+        let! validationResult = 
+            if ctx.Config.Compilation.RequireStaticMemory then
+                result {
+                    printfn "Phase 4: Zero-allocation validation"
+                    let! _ = validateZeroAllocationGuarantees optimizedLLVM.LLVMIRText
+                    printfn "✓ Zero-allocation guarantees validated"
+                    printfn "Phase 5: Native compilation"
+                    return ()
+                }
+            else
+                result {
+                    printfn "Phase 4: Native compilation"
+                    return ()
+                }
+        
+        // Phase 5: Native compilation
+        return! compileToNative ctx optimizedLLVM
+    }
+
+/// Creates compilation context from command line arguments
+let private createCompilationContext (args: ParseResults<CompileArgs>) : CompilerResult<CompilationContext * string> =
+    result {
+        let inputPath = args.GetResult Input
+        let outputPath = args.GetResult Output
+        let target = args.TryGetResult Target |> Option.defaultValue (getDefaultTarget())
+        let optimizeStr = args.TryGetResult Optimize |> Option.defaultValue "default"
+        let optimizeLevel = parseOptimizationLevel optimizeStr
+        let configPath = args.TryGetResult Config |> Option.defaultValue "firefly.toml"
+        let keepIntermediates = args.Contains Keep_Intermediates
+        let verbose = args.Contains Verbose
+        let noExternalTools = args.Contains No_External_Tools
+        
+        // Validate inputs
+        let! _ = validateInputFile inputPath
+        let! _ = validateOutputPath outputPath
+        
+        // Load configuration
+        let! config = loadAndValidateConfig configPath
+        
+        // Read source file
+        let! sourceCode = readSourceFile inputPath
+        
+        // Handle verbose output
+        if verbose then
+            printfn "Input: %s → Output: %s" (Path.GetFileName(inputPath)) (Path.GetFileName(outputPath))
+            printfn "Target: %s, Optimize: %s" target optimizeStr
+            printfn "Configuration: %s v%s" config.PackageName config.Version
+        
+        let ctx = {
+            InputPath = inputPath
+            OutputPath = outputPath
+            Target = target
+            OptimizeLevel = optimizeLevel
+            OptimizeStr = optimizeStr
+            Config = config
+            KeepIntermediates = keepIntermediates
+            Verbose = verbose
+            NoExternalTools = noExternalTools
+        }
+        
+        return (ctx, sourceCode)
+    }
+
+/// Main compilation function - clean and functional
 let compile (args: ParseResults<CompileArgs>) =
     printfn "Firefly F# Compiler"
     
-    // Parse arguments with minimal output
-    let inputPath = args.GetResult Input
-    let outputPath = args.GetResult Output
-    let target = args.TryGetResult Target |> Option.defaultValue (getDefaultTarget())
-    let optimizeStr = args.TryGetResult Optimize |> Option.defaultValue "default"
-    let optimizeLevel = parseOptimizationLevel optimizeStr
-    let configPath = args.TryGetResult Config |> Option.defaultValue "firefly.toml"
-    let keepIntermediates = args.Contains Keep_Intermediates
-    let verbose = args.Contains Verbose
-    let noExternalTools = args.Contains No_External_Tools
-    
-    if verbose then
-        printfn "Input: %s → Output: %s" (Path.GetFileName(inputPath)) (Path.GetFileName(outputPath))
-        printfn "Target: %s, Optimize: %s" target optimizeStr
-    
-    // Validation
-    match validateInputFile inputPath with
-    | CompilerFailure errors ->
-        errors |> List.iter (fun error -> printfn "Error: %s" (error.ToString()))
-        1
-    | Success () ->
-        
-        match validateOutputPath outputPath with
+    match createCompilationContext args with
+    | Success (ctx, sourceCode) ->
+        match runCompilationPipeline ctx sourceCode with
+        | Success exitCode -> exitCode
         | CompilerFailure errors ->
             errors |> List.iter (fun error -> printfn "Error: %s" (error.ToString()))
             1
-        | Success () ->
-            
-            // Load configuration quietly
-            match loadAndValidateConfig configPath with
-            | CompilerFailure configErrors ->
-                configErrors |> List.iter (fun error -> printfn "Config Error: %s" (error.ToString()))
-                1
-            | Success config ->
-                
-                if verbose then
-                    printfn "Configuration: %s v%s" config.PackageName config.Version
-                
-                // Read source file
-                match readSourceFile inputPath with
-                | CompilerFailure readErrors ->
-                    readErrors |> List.iter (fun error -> printfn "Read Error: %s" (error.ToString()))
-                    1
-                | Success sourceCode ->
-                    
-                    // Execute compilation pipeline
-                    match translateFsToMLIRWithDiagnostics inputPath sourceCode with
-                    | CompilerFailure pipelineErrors ->
-                        pipelineErrors |> List.iter (fun error -> printfn "Pipeline Error: %s" (error.ToString()))
-                        1
-                    
-                    | Success pipelineOutput ->
-                        
-                        // Save all intermediate files in one place
-                        if keepIntermediates then
-                            let basePath = Path.GetDirectoryName(outputPath)
-                            let baseName = Path.GetFileNameWithoutExtension(outputPath)
-                            saveIntermediateFiles basePath baseName keepIntermediates pipelineOutput
-                        
-                        // Continue with LLVM translation
-                        printfn "Phase 2: MLIR → LLVM IR"
-                        match translateToLLVM pipelineOutput.FinalMLIR with
-                        | CompilerFailure llvmErrors ->
-                            llvmErrors |> List.iter (fun error -> printfn "LLVM Error: %s" (error.ToString()))
-                            1
-                        
-                        | Success llvmOutput ->
-                            printfn "Generated LLVM IR (%d chars)" llvmOutput.LLVMIRText.Length
-                            
-                            // Save unoptimized LLVM IR to intermediates if requested
-                            if keepIntermediates then
-                                let intermediatesDir = Path.Combine(Path.GetDirectoryName(outputPath), "intermediates")
-                                let baseName = Path.GetFileNameWithoutExtension(outputPath)
-                                let llvmPath = Path.Combine(intermediatesDir, baseName + ".ll")
-                                File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, System.Text.UTF8Encoding(false))
-                                printfn "  llvm-ir → %s.ll" baseName
-                            
-                            // Apply optimizations
-                            printfn "Phase 3: LLVM optimization (%s)" optimizeStr
-                            let optimizationPasses = createOptimizationPipeline optimizeLevel
-                            match optimizeLLVMIR llvmOutput optimizationPasses with
-                            | CompilerFailure optimizationErrors ->
-                                optimizationErrors |> List.iter (fun error -> printfn "Optimization Error: %s" (error.ToString()))
-                                1
-                            
-                            | Success optimizedLLVM ->
-                                printfn "✓ LLVM optimized (%d chars)" optimizedLLVM.LLVMIRText.Length
-                                
-                                // Save optimized LLVM IR to intermediates if requested
-                                if keepIntermediates then
-                                    let intermediatesDir = Path.Combine(Path.GetDirectoryName(outputPath), "intermediates")
-                                    let baseName = Path.GetFileNameWithoutExtension(outputPath)
-                                    let optimizedLlvmPath = Path.Combine(intermediatesDir, baseName + ".optimized.ll")
-                                    File.WriteAllText(optimizedLlvmPath, optimizedLLVM.LLVMIRText, System.Text.UTF8Encoding(false))
-                                    printfn "  optimized-llvm → %s.optimized.ll" baseName
-                                
-                                // Validate zero-allocation if required
-                                if config.Compilation.RequireStaticMemory then
-                                    printfn "Phase 4: Zero-allocation validation"
-                                    match validateZeroAllocationGuarantees optimizedLLVM.LLVMIRText with
-                                    | CompilerFailure validationErrors ->
-                                        validationErrors |> List.iter (fun error -> printfn "Validation Error: %s" (error.ToString()))
-                                        1
-                                    | Success () ->
-                                        printfn "✓ Zero-allocation guarantees validated"
-                                        printfn "Phase 5: Native compilation"
-                                        let intermediatesDir = if keepIntermediates then Some (Path.Combine(Path.GetDirectoryName(outputPath), "intermediates")) else None
-                                        compileToNativeExecutable optimizedLLVM outputPath target verbose noExternalTools intermediatesDir
-                                else
-                                    printfn "Phase 4: Native compilation"
-                                    let intermediatesDir = if keepIntermediates then Some (Path.Combine(Path.GetDirectoryName(outputPath), "intermediates")) else None
-                                    compileToNativeExecutable optimizedLLVM outputPath target verbose noExternalTools intermediatesDir
+    | CompilerFailure errors ->
+        errors |> List.iter (fun error -> printfn "Error: %s" (error.ToString()))
+        1
