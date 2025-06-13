@@ -170,43 +170,58 @@ and convertConsoleReadLine (args: OakExpression list) (state: MLIRGenerationStat
         | Some bufferValue ->
             printfn "DEBUG: Found buffer variable: %s -> %s" bufferName bufferValue
             
+            // Declare scanf with proper types
             let state1 = Emitter.emitModuleLevel "  func.func private @scanf(memref<?xi8>, memref<?xi8>) -> i32" state
             
+            // Format string that limits the input size for safety
             let formatStr = sprintf "%%%ds" (size - 1)
             let (scanfFormat, state2) = Emitter.registerString formatStr state1
             
             let (formatPtr, state3) = SSA.generateValue "scanf_fmt" state2
             let state4 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" formatPtr scanfFormat) state3
             
+            // Cast buffer to correct type for scanf
             let (castBuffer, state5) = SSA.generateValue "scanf_buffer" state4
             let state6 = Emitter.emit (sprintf "    %s = memref.cast %s : memref<%dxi8> to memref<?xi8>" castBuffer bufferValue size) state5
             
             let (scanfResult, state7) = SSA.generateValue "scanf_result" state6
-            let state8 = Emitter.emit (sprintf "    %s = func.call @scanf(%s, %s) : (memref<?xi8>, memref<?xi8>) -> i32" scanfResult formatPtr castBuffer) state7
+            let state8 = Emitter.emit (sprintf "    %s = func.call @scanf(%s, %s) : (memref<?xi8>, memref<?xi8>) -> i32" 
+                                      scanfResult formatPtr castBuffer) state7
             
-            printfn "DEBUG: Console.readLine completed, returning: %s" scanfResult
             (scanfResult, state8)
         
         | None ->
-            printfn "DEBUG: Buffer variable '%s' not found in scope" bufferName
             let (dummyValue, state1) = SSA.generateValue "missing_buffer" state
             (dummyValue, state1)
     
     | _ ->
-        printfn "DEBUG: Invalid Console.readLine arguments: %A" args
         let (dummyValue, state1) = SSA.generateValue "invalid_readline" state
         (dummyValue, state1)
 
 and convertSpanCreation (args: OakExpression list) (state: MLIRGenerationState) : string * MLIRGenerationState =
+    printfn "DEBUG: Span creation with args: %A" args
     match args with
     | [Variable bufferName; Variable lengthName] ->
+        printfn "DEBUG: Span creation with buffer %s and length %s" bufferName lengthName
         match SSA.lookupVariable bufferName state, SSA.lookupVariable lengthName state with
         | Some bufferValue, Some lengthValue ->
+            // For Span<byte>, we just pass the buffer pointer directly
+            printfn "DEBUG: Resolved buffer %s to %s and length %s to %s" bufferName bufferValue lengthName lengthValue
             (bufferValue, state)
-        | _ ->
+        | Some bufferValue, None ->
+            printfn "DEBUG: Resolved buffer %s to %s, but length %s not found" bufferName bufferValue lengthName
+            (bufferValue, state)
+        | None, _ ->
+            printfn "DEBUG: Buffer %s not found in scope" bufferName
             let (dummyValue, state1) = SSA.generateValue "missing_span_args" state
             (dummyValue, state1)
+    | [expr1; expr2] ->
+        printfn "DEBUG: Span creation with non-variable expressions"
+        let (bufferValue, state1) = convertExpression expr1 state
+        let (lengthValue, state2) = convertExpression expr2 state1
+        (bufferValue, state2)
     | _ ->
+        printfn "DEBUG: Invalid Span arguments: %A" args
         let (dummyValue, state1) = SSA.generateValue "invalid_span" state
         (dummyValue, state1)
 
@@ -235,6 +250,11 @@ and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : strin
             
             convertConsoleReadLine allArgs state
         
+        // Handle Span<byte> constructor properly
+        | Variable "Span<byte>" ->
+            printfn "DEBUG: Found Span<byte> constructor with args: %A" args
+            convertSpanCreation args state
+        
         // Handle IOOperation wrapped in Application: Application(IOOperation(...), args)
         | IOOperation(ioType, ioArgs) ->
             printfn "DEBUG: Found IOOperation wrapped in Application: %A with args: %A" ioType args
@@ -254,22 +274,6 @@ and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : strin
         | Variable "Span.create" ->
             printfn "DEBUG: Span.create with args: %A" args
             convertSpanCreation args state
-            
-        | Variable funcName ->
-            printfn "DEBUG: Regular function call: %s with args: %A" funcName args
-            if args.IsEmpty || (args.Length = 1 && match args.[0] with Literal(UnitLiteral) -> true | _ -> false) then
-                Emitter.call funcName [] (Some (Integer 32)) state
-            else
-                let convertArg (accState, accArgs) arg =
-                    let (argValue, newState) = convertExpression arg accState
-                    (newState, argValue :: accArgs)
-                
-                let (state1, argValues) = List.fold convertArg (state, []) args
-                Emitter.call funcName (List.rev argValues) (Some (Integer 32)) state1
-        | _ ->
-            printfn "DEBUG: Unsupported function expression: %A" func
-            let (dummyValue, state1) = SSA.generateValue "unsupported_func" state
-            (dummyValue, state1)
     
     | Let(name, value, body) ->
         printfn "DEBUG: Converting Let - name: %s" name
@@ -326,7 +330,10 @@ and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : strin
     | IOOperation(ioType, args) ->
         match ioType with
         | Printf formatStr | Printfn formatStr ->
-            printfn "DEBUG: Processing IO operation: %A" ioType
+            printfn "DEBUG: Processing IO operation: %A with args: %A" ioType args
+            
+            // Check if format string has placeholders for strings
+            let hasStringPlaceholder = formatStr.Contains("%s")
             
             let (formatGlobal, state1) = Emitter.registerString formatStr state
             let state2 = Emitter.emitModuleLevel "  func.func private @printf(memref<?xi8>, ...) -> i32" state1
@@ -335,11 +342,27 @@ and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : strin
             let state4 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" formatPtr formatGlobal) state3
             
             match args with
+            | [] when hasStringPlaceholder ->
+                // If format has %s but no buffer is provided, use a dummy buffer
+                let (dummyBuffer, state5) = SSA.generateValue "dummy_buffer" state4
+                let state6 = Emitter.emit (sprintf "    %s = memref.alloca() : memref<1xi8>" dummyBuffer) state5
+                let (printfResult, state7) = SSA.generateValue "printf_result" state6
+                let state8 = Emitter.emit (sprintf "    %s = func.call @printf(%s, %s) : (memref<?xi8>, memref<?xi8>) -> i32" 
+                                          printfResult formatPtr dummyBuffer) state7
+                (printfResult, state8)
             | [] ->
                 let (printfResult, state5) = SSA.generateValue "printf_result" state4
                 let state6 = Emitter.emit (sprintf "    %s = func.call @printf(%s) : (memref<?xi8>) -> i32" printfResult formatPtr) state5
                 (printfResult, state6)
+            | [bufferArg] when hasStringPlaceholder ->
+                // Special case for string format with buffer argument
+                let (bufferValue, state5) = convertExpression bufferArg state4
+                let (printfResult, state6) = SSA.generateValue "printf_result" state5
+                let state7 = Emitter.emit (sprintf "    %s = func.call @printf(%s, %s) : (memref<?xi8>, memref<?xi8>) -> i32" 
+                                          printfResult formatPtr bufferValue) state6
+                (printfResult, state7)
             | argList ->
+                // Multiple arguments
                 let convertArg (accState, accArgs) arg =
                     let (argValue, newState) = convertExpression arg accState
                     (newState, argValue :: accArgs)
@@ -348,7 +371,7 @@ and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : strin
                 let allArgs = formatPtr :: (List.rev convertedArgs)
                 let (printfResult, state6) = SSA.generateValue "printf_result" state5
                 
-                let argTypes = "memref<?xi8>" :: (List.replicate convertedArgs.Length "i32")
+                let argTypes = "memref<?xi8>" :: (List.replicate convertedArgs.Length "memref<?xi8>")
                 let argTypeStr = String.concat ", " argTypes
                 let argStr = String.concat ", " allArgs
                 

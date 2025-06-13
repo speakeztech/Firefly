@@ -183,7 +183,7 @@ module MLIRParser =
             with _ -> None
         else None
 
-    /// Parses MLIR function body operations - FIXED for flexible indentation
+    /// Parses MLIR function body operations
     let parseFunctionBody (lines: string array) (startIndex: int) : string list * int =
         let mutable currentIndex = startIndex + 1  // Skip the function signature line
         let mutable operations = []
@@ -214,8 +214,7 @@ module MLIRParser =
                      not (trimmed.StartsWith("llvm.func")) &&
                      not (trimmed.StartsWith("func.func")) &&
                      trimmed <> "{" then
-                    // FIXED: Accept any non-empty, non-comment, non-function-declaration line
-                    // This handles operations regardless of indentation
+                    // Accept any non-empty, non-comment, non-function-declaration line
                     printfn "DEBUG: Adding operation: '%s'" trimmed
                     operations <- trimmed :: operations
                 else
@@ -233,7 +232,7 @@ module MLIRParser =
 /// Converts MLIR operations to LLVM IR
 module OperationConverter =
     
-    /// Converts a single MLIR operation to LLVM IR - Enhanced version
+    /// Converts a single MLIR operation to LLVM IR
     let convertOperation (operation: string) : string =
         let trimmed = operation.Trim()
         
@@ -286,19 +285,56 @@ module OperationConverter =
                 let parenEnd = trimmed.IndexOf(')')
                 if parenStart >= 0 && parenEnd > parenStart then
                     let args = trimmed.Substring(parenStart + 1, parenEnd - parenStart - 1)
-                    sprintf "  %s = call i32 (i8*, ...) @printf(i8* %s)" resultVar args
+                    
+                    // Process args to add proper types
+                    let processedArgs = 
+                        if args.Contains(",") then
+                            let argParts = args.Split(',')
+                            let formatPtr = argParts.[0].Trim()
+                            let otherArgs = 
+                                argParts 
+                                |> Array.skip 1 
+                                |> Array.map (fun a -> sprintf "i32 %s" (a.Trim()))
+                            sprintf "i8* %s, %s" formatPtr (String.concat ", " otherArgs)
+                        else
+                            sprintf "i8* %s" (args.Trim())
+                    
+                    sprintf "  %s = call i32 (i8*, ...) @printf(%s)" resultVar processedArgs
                 else
                     sprintf "  %s = call i32 (i8*, ...) @printf()" resultVar
             else
                 sprintf "  ; TODO: %s" trimmed
         
+        elif trimmed.Contains("llvm.call @scanf") then
+            // Convert: %scanf_result6 = llvm.call @scanf(%scanf_fmt4, %scanf_buffer5) : (memref<?xi8>, memref<?xi8>) -> i32
+            // To: %scanf_result6 = call i32 (i8*, ...) @scanf(i8* %scanf_fmt4, i8* %scanf_buffer5)
+            let parts = trimmed.Split('=')
+            if parts.Length = 2 then
+                let resultVar = parts.[0].Trim()
+                let parenStart = trimmed.IndexOf('(')
+                let parenEnd = trimmed.IndexOf(')')
+                if parenStart >= 0 && parenEnd > parenStart then
+                    let args = trimmed.Substring(parenStart + 1, parenEnd - parenStart - 1)
+                    let argParts = args.Split(',')
+                    
+                    if argParts.Length >= 2 then
+                        let formatPtr = argParts.[0].Trim()
+                        let bufferPtr = argParts.[1].Trim()
+                        sprintf "  %s = call i32 (i8*, ...) @scanf(i8* %s, i8* %s)" resultVar formatPtr bufferPtr
+                    else
+                        sprintf "  %s = call i32 (i8*, ...) @scanf(i8* %s)" resultVar (args.Trim())
+                else
+                    sprintf "  %s = call i32 (i8*, ...) @scanf()" resultVar
+            else
+                sprintf "  ; TODO: %s" trimmed
+        
         elif trimmed.Contains("llvm.call @hello") then
             // Convert: %call6 = llvm.call @hello() : () -> i32
-            // To: call void @hello()  (hello should return void, not i32)
+            // To: call void @hello()
             if trimmed.Contains("=") then
                 let parts = trimmed.Split('=')
                 let resultVar = parts.[0].Trim()
-                sprintf "  call void @hello()"  // hello() returns void, ignore result
+                sprintf "  %s = call void @hello()" resultVar
             else
                 sprintf "  call void @hello()"
         
@@ -317,8 +353,54 @@ module OperationConverter =
         
         elif trimmed.Contains("llvm.mlir.constant") then
             // Convert: %const7 = llvm.mlir.constant 0 : i32
-            // Constants are typically inlined in LLVM IR, so we can comment them
-            sprintf "  ; %s (constant will be inlined)" trimmed
+            // To: %const7 = add i32 0, 0
+            let parts = trimmed.Split('=')
+            if parts.Length = 2 then
+                let resultVar = parts.[0].Trim()
+                
+                // Extract the constant value and type
+                let valueStartIdx = trimmed.IndexOf("constant") + "constant".Length
+                let valueEndIdx = trimmed.LastIndexOf(':')
+                
+                if valueStartIdx > 0 && valueEndIdx > valueStartIdx then
+                    let constValue = trimmed.Substring(valueStartIdx, valueEndIdx - valueStartIdx).Trim()
+                    let constType = trimmed.Substring(valueEndIdx + 1).Trim()
+                    
+                    if constType.Contains("i32") then
+                        sprintf "  %s = add i32 %s, 0" resultVar constValue
+                    elif constType.Contains("i64") then
+                        sprintf "  %s = add i64 %s, 0" resultVar constValue
+                    elif constType.Contains("f32") then
+                        sprintf "  %s = fadd float %s, 0.0" resultVar constValue
+                    elif constType.Contains("f64") then
+                        sprintf "  %s = fadd double %s, 0.0" resultVar constValue
+                    else
+                        sprintf "  %s = add i32 %s, 0" resultVar constValue
+                else
+                    sprintf "  ; Error parsing constant: %s" trimmed
+            else
+                sprintf "  ; Invalid constant format: %s" trimmed
+        
+        elif trimmed.Contains("llvm.bitcast") then
+            // Convert: %scanf_buffer5 = llvm.bitcast %buffer1 : memref<256xi8> to memref<?xi8>
+            // To: %scanf_buffer5 = bitcast [256 x i8]* %buffer1 to i8*
+            let parts = trimmed.Split('=')
+            if parts.Length = 2 then
+                let resultVar = parts.[0].Trim()
+                let sourceVarIdx = parts.[1].IndexOf('%', parts.[1].IndexOf("bitcast") + "bitcast".Length)
+                let toIdx = parts.[1].IndexOf("to")
+                
+                if sourceVarIdx > 0 && toIdx > sourceVarIdx then
+                    let sourceVar = parts.[1].Substring(sourceVarIdx, toIdx - sourceVarIdx).Trim()
+                    sprintf "  %s = bitcast i8* %s to i8*" resultVar sourceVar
+                else
+                    sprintf "  ; TODO: %s" trimmed
+            else
+                sprintf "  ; TODO: %s" trimmed
+        
+        elif trimmed.StartsWith(";") then
+            // Pass through comments
+            sprintf "  %s" trimmed
         
         else
             sprintf "  ; TODO: %s" trimmed
@@ -335,7 +417,8 @@ module LLVMGenerator =
         | "f64" -> "double"
         | "()" -> "void"
         | "void" -> "void"
-        | t when t.StartsWith("memref<") -> "i8*"
+        | t when t.StartsWith("memref<") && t.Contains("xi8>") -> "i8*"
+        | t when t.StartsWith("memref<") -> "i8*"  // Default to i8* for all memrefs
         | _ -> "i32"
     
     /// Generates LLVM function from parsed MLIR function with body translation
@@ -364,23 +447,28 @@ module LLVMGenerator =
             writer.WriteLine(sprintf "define %s %s(%s) {" llvmReturnType func.Name llvmParameters)
             writer.WriteLine("entry:")
             
-            // FIXED: Translate the actual function body operations
-            if func.Name = "@main" then
-                writer.WriteLine("  call void @hello()")
-                writer.WriteLine("  ret i32 0")
-            else
-                // Convert MLIR operations to LLVM IR
-                for operation in func.Body do
-                    let llvmOp = OperationConverter.convertOperation operation
-                    writer.WriteLine(llvmOp)
-                
-                // Add return if not already present
-                let hasReturn = func.Body |> List.exists (fun op -> op.Contains("return"))
-                if not hasReturn then
-                    if func.ReturnType = "void" then
-                        writer.WriteLine("  ret void")
-                    else
-                        writer.WriteLine("  ret i32 0")
+            // First sort constants to the beginning
+            let (constants, otherOps) = 
+                func.Body
+                |> List.partition (fun op -> op.Contains("llvm.mlir.constant"))
+            
+            // Process constants first
+            for constOp in constants do
+                let llvmConstOp = OperationConverter.convertOperation constOp
+                writer.WriteLine(llvmConstOp)
+            
+            // Then process all other operations
+            for op in otherOps do
+                let llvmOp = OperationConverter.convertOperation op
+                writer.WriteLine(llvmOp)
+            
+            // Add return if not already present
+            let hasReturn = func.Body |> List.exists (fun op -> op.Contains("return"))
+            if not hasReturn then
+                if func.ReturnType = "void" then
+                    writer.WriteLine("  ret void")
+                else
+                    writer.WriteLine("  ret i32 0")
             
             writer.WriteLine("}")
         
@@ -495,11 +583,11 @@ module MLIRProcessor =
             writer.WriteLine(decl)
         writer.WriteLine("")
         
-        // FIXED: Deduplicate global constants by name
+        // Deduplicate global constants by name
         let uniqueGlobals = 
             globalConstants
             |> List.groupBy (fun g -> g.Name)
-            |> List.map (fun (name, globals) -> List.head globals)  // Take first occurrence
+            |> List.map (fun (name, globals) -> List.head globals)
         
         // Global constants
         for globalItem in uniqueGlobals do
@@ -674,4 +762,3 @@ let validateZeroAllocationGuarantees (llvmIR: string) : CompilerResult<unit> =
             "Found potential heap allocation functions in LLVM IR")]
     else
         Success ()
-
