@@ -91,6 +91,17 @@ module ExpressionMapping =
     let rec mapExpression (expr: SynExpr) : OakExpression =
         try
             match expr with
+            | SynExpr.Match(_, expr, clauses, _, _) ->
+                let matchExpr = mapExpression expr
+                let cases = 
+                    clauses 
+                    |> List.map (fun clause ->
+                        match clause with
+                        | SynMatchClause(pat, whenExpr, resultExpr, _, _, _) ->
+                            let pattern = mapPattern pat
+                            let result = mapExpression resultExpr
+                            (pattern, result))
+                Match(matchExpr, cases)
             | SynExpr.Const(constant, _) ->
                 constant |> TypeMapping.mapLiteral |> Literal
             
@@ -245,6 +256,27 @@ module ExpressionMapping =
             mapChainedApplication baseFunc allArgs
         else
             mapExpression expr
+
+    and mapPattern (pat: SynPat) : OakPattern =
+        match pat with
+        | SynPat.Named(synIdent, _, _, _) ->
+            let ident = AstHelpers.extractIdent synIdent
+            PatternVariable(AstHelpers.getIdentifierName ident)
+        | SynPat.Wild(_) ->
+            PatternWildcard
+        | SynPat.Const(constant, _) ->
+            PatternLiteral(TypeMapping.mapLiteral constant)
+        | SynPat.LongIdent(longDotId, _, _, args, _, _) ->
+            let idents = longDotId |> AstHelpers.extractLongIdent
+            let name = AstHelpers.getQualifiedName idents
+            match args with
+            | SynArgPats.Pats pats ->
+                let patterns = pats |> List.map mapPattern
+                PatternConstructor(name, patterns)
+            | _ ->
+                PatternConstructor(name, [])
+        | _ ->
+            PatternWildcard
 
 /// Declaration mapping functions  
 module DeclarationMapping =

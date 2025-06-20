@@ -128,6 +128,28 @@ let buildDependencyGraph (program: OakProgram) : DependencyGraph =
         EntryPoints = Set.empty
         QualifiedNames = Map.empty
     }
+
+    let addAlloyDependencies (graph: DependencyGraph) : DependencyGraph =
+        // Add common Alloy functions that might be called
+        let alloyFunctions = [
+            "stackBuffer", "Alloy.Memory"
+            "spanToString", "Alloy.Memory"
+            "prompt", "Alloy.IO.Console"
+            "readInto", "Alloy.IO.Console"
+            "writeLine", "Alloy.IO.Console"
+            "String.format", "Alloy.IO.String"
+        ]
+    
+        let updatedGraph = 
+            alloyFunctions
+            |> List.fold (fun g (funcName, moduleName) ->
+                let qualifiedName = sprintf "%s.%s" moduleName funcName
+                { g with 
+                    Declarations = Map.add qualifiedName (ExternalDecl(funcName, [], UnitType, "Alloy")) g.Declarations
+                    QualifiedNames = Map.add funcName qualifiedName g.QualifiedNames
+                }) graph
+        
+        updatedGraph
     
     let processModule (graph: DependencyGraph) (oakModule: OakModule) =
         let initialState = {
@@ -142,4 +164,4 @@ let buildDependencyGraph (program: OakProgram) : DependencyGraph =
         
         finalState.Graph
     
-    program.Modules |> List.fold processModule initialGraph
+    program.Modules |> List.fold processModule initialGraph |> addAlloyDependencies

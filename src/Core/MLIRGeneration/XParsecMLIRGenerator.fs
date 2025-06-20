@@ -244,9 +244,12 @@ and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : strin
             match args with
             | [value; funcExpr] ->
                 // Convert pipe to regular application
-                convertExpression (Application(funcExpr, [value])) state
+                match funcExpr with
+                | Variable fname -> convertExpression (Application(Variable fname, [value])) state
+                | Application(f, existingArgs) -> 
+                    convertExpression (Application(f, value :: existingArgs)) state
+                | _ -> convertExpression (Application(funcExpr, [value])) state
             | _ ->
-                // Invalid pipe operator usage
                 let (dummyValue, state1) = SSA.generateValue "invalid_pipe" state
                 (dummyValue, state1)
         // Handle curried Console.readLine: Console.readLine(buffer)(size)
