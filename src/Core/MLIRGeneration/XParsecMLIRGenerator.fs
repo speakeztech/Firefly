@@ -239,6 +239,16 @@ and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : strin
     
     | Application(func, args) ->
         match func with
+        // Handle pipe operator: x |> f becomes f(x)
+        | Variable "op_PipeRight" ->
+            match args with
+            | [value; funcExpr] ->
+                // Convert pipe to regular application
+                convertExpression (Application(funcExpr, [value])) state
+            | _ ->
+                // Invalid pipe operator usage
+                let (dummyValue, state1) = SSA.generateValue "invalid_pipe" state
+                (dummyValue, state1)
         // Handle curried Console.readLine: Console.readLine(buffer)(size)
         | Application(Variable "Console.readLine", innerArgs) ->
             printfn "DEBUG: Found curried Console.readLine"
@@ -280,16 +290,25 @@ and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : strin
         printfn "DEBUG: Converting Let - value: %A" value
         printfn "DEBUG: Converting Let - body: %A" body
         
-        let (valueResult, state1) = convertExpression value state
-        printfn "DEBUG: Let value converted, result: %s" valueResult
-        
-        let state2 = SSA.bindVariable name valueResult state1
-        printfn "DEBUG: Variable '%s' bound to '%s'" name valueResult
-        
-        let (bodyResult, state3) = convertExpression body state2
-        printfn "DEBUG: Let body converted, result: %s" bodyResult
-        
-        (bodyResult, state3)
+        // Special handling for the match expression pattern
+        match value with
+        | Literal UnitLiteral ->
+            // This seems to be a placeholder from AST conversion
+            // Just bind unit and continue
+            let (unitValue, state1) = Emitter.constant "0" (Integer 32) state
+            let state2 = SSA.bindVariable name unitValue state1
+            convertExpression body state2
+        | _ ->
+            let (valueResult, state1) = convertExpression value state
+            printfn "DEBUG: Let value converted, result: %s" valueResult
+            
+            let state2 = SSA.bindVariable name valueResult state1
+            printfn "DEBUG: Variable '%s' bound to '%s'" name valueResult
+            
+            let (bodyResult, state3) = convertExpression body state2
+            printfn "DEBUG: Let body converted, result: %s" bodyResult
+            
+            (bodyResult, state3)
     
     | Sequential(first, second) ->
         printfn "DEBUG: Converting Sequential - first: %A" first

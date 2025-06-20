@@ -53,3 +53,7 @@ CodeCoverage/
 TestResult.xml
 nunit-*.xml
 /src/nupkg/
+.idea/AndroidProjectSystem.xml
+.idea/encodings.xml
+.idea/indexLayout.xml
+.idea/vcs.xml

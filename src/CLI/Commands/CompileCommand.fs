@@ -160,25 +160,23 @@ let private saveIntermediateFiles (compilationCtx: CompilationContext) (pipeline
             let fileExtensions = [
                 ("fsharp-ast", ".fcs")
                 ("oak-ast", ".oak")
+                ("tree-shaking-stats", ".treeshake.log")
+                ("ra-oak", ".ra.oak")
                 ("closure-transformed", ".closures") 
                 ("layout-transformed", ".unions")
                 ("mlir", ".mlir")
                 ("lowered-mlir", ".lowered")
             ]
             
-            // Process each phase output file with explicit typing
-            let processPhaseFile (phaseName: string, extension: string) : unit =
-                let outputsMap : Map<string, string> = pipelineOutput.PhaseOutputs
-                let lookupResult : string option = Map.tryFind phaseName outputsMap
-                match lookupResult with
-                | Some (content: string) ->
+            // Process each phase output file
+            for (phaseName, extension) in fileExtensions do
+                match Map.tryFind phaseName pipelineOutput.PhaseOutputs with
+                | Some content ->
                     let filePath = Path.Combine(intermediatesDir, baseName + extension)
                     File.WriteAllText(filePath, content, System.Text.Encoding.UTF8)
                     printfn "  %s → %s" phaseName (Path.GetFileName(filePath))
-                | Option.None ->
+                | Option.None ->  // Explicitly use Option.None to avoid conflict with OptimizationLevel.None
                     printfn "  %s (not found)" phaseName
-            
-            fileExtensions |> List.iter processPhaseFile
             
             let diagPath = Path.Combine(intermediatesDir, baseName + ".diag")
             let diagContent = 

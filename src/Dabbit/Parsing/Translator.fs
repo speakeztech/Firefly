@@ -8,6 +8,9 @@ open Dabbit.Parsing.AstConverter
 open Dabbit.Closures.ClosureTransformer
 open Dabbit.UnionLayouts.FixedLayoutCompiler
 open Core.MLIRGeneration.XParsecMLIRGenerator
+open Dabbit.TreeShaking.DependencyGraphBuilder
+open Dabbit.TreeShaking.ReachabilityTraversal
+open Dabbit.TreeShaking.AstPruner
 
 /// Pipeline phase identifier and metadata
 type PipelinePhase = {
@@ -29,6 +32,7 @@ type TranslationPipelineOutput = {
 let standardPipeline = [
     { Name = "parse"; Description = "Parse F# source code to AST"; IsOptional = false }
     { Name = "oak-convert"; Description = "Convert F# AST to Oak AST"; IsOptional = false }
+    { Name = "tree-shaking"; Description = "Intelligent tree-shaking for dead code elimination"; IsOptional = false }
     { Name = "closure-elimination"; Description = "Eliminate closures with explicit parameters"; IsOptional = false }
     { Name = "union-layout"; Description = "Compile discriminated unions to fixed layouts"; IsOptional = false }
     { Name = "mlir-generation"; Description = "Generate MLIR from Oak AST"; IsOptional = false }
@@ -88,6 +92,27 @@ module Transformations =
                 sprintf "Exception during parsing: %s" ex.Message,
                 ["parsing"; ex.StackTrace])]
     
+    /// Apply tree-shaking to Oak AST
+    let applyTreeShaking (program: OakProgram) : CompilerResult<OakProgram * string> =
+        try
+            // Build dependency graph
+            let graph = buildDependencyGraph program
+            
+            // Perform reachability analysis
+            let reachabilityResult = analyzeReachability graph
+            
+            // Prune unreachable code
+            let prunedProgram = pruneUnreachableCode program reachabilityResult
+            
+            // Generate diagnostic report
+            let diagnostics = generateDiagnosticReport reachabilityResult.EliminationStats
+            
+            printfn "%s" diagnostics
+            Success (prunedProgram, diagnostics)
+        
+        with ex ->
+            CompilerFailure [ConversionError("tree-shaking", "Oak AST", "pruned Oak AST", ex.Message)]
+    
     /// Applies closure elimination transformation
     let applyClosure (program: OakProgram) : CompilerResult<OakProgram> =
         match eliminateClosures program with
@@ -146,71 +171,88 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) : Compi
                 |> Map.add "oak-ast" oakAstText
             printfn "✓ Parsing completed"
             
-            // Step 2: Apply closure elimination
-            match PipelineExecution.runPhase "closure-elimination" 
-                Transformations.applyClosure 
+            // Step 2: Apply tree-shaking (NEW)
+            match PipelineExecution.runPhase "tree-shaking" 
+                Transformations.applyTreeShaking 
                 oakProgram 
                 diagnostics1 with
-            | Success (transformedProgram1, diagnostics2) ->
+            | Success ((prunedProgram, treeDiagnostics), diagnostics2) ->
                 
-                let closureTransformedText = sprintf "%A" transformedProgram1
-                let phaseOutputs2 = PipelineExecution.savePhaseOutput "closure-transformed" closureTransformedText id phaseOutputs1
-                printfn "✓ Closure elimination completed"
+                let prunedOakText = sprintf "%A" prunedProgram
+                let phaseOutputs2 = 
+                    phaseOutputs1
+                    |> Map.add "tree-shaking-stats" treeDiagnostics
+                    |> Map.add "ra-oak" prunedOakText  // The ra.oak file
+                printfn "✓ Tree shaking completed"
                 
-                // Step 3: Apply union layout transformation
-                match PipelineExecution.runPhase "union-layout" 
-                    Transformations.applyUnionLayout 
-                    transformedProgram1 
+                // Step 3: Apply closure elimination
+                match PipelineExecution.runPhase "closure-elimination" 
+                    Transformations.applyClosure 
+                    prunedProgram 
                     diagnostics2 with
-                | Success (transformedProgram2, diagnostics3) ->
+                | Success (transformedProgram1, diagnostics3) ->
                     
-                    let layoutTransformedText = sprintf "%A" transformedProgram2
-                    let phaseOutputs3 = PipelineExecution.savePhaseOutput "layout-transformed" layoutTransformedText id phaseOutputs2
-                    printfn "✓ Union layout completed"
+                    let closureTransformedText = sprintf "%A" transformedProgram1
+                    let phaseOutputs3 = PipelineExecution.savePhaseOutput "closure-transformed" closureTransformedText id phaseOutputs2
+                    printfn "✓ Closure elimination completed"
                     
-                    // Step 4: Generate MLIR
-                    match PipelineExecution.runPhase "mlir-generation" 
-                        Transformations.generateMLIR 
-                        transformedProgram2 
+                    // Step 4: Apply union layout transformation
+                    match PipelineExecution.runPhase "union-layout" 
+                        Transformations.applyUnionLayout 
+                        transformedProgram1 
                         diagnostics3 with
-                    | Success (mlirText, diagnostics4) ->
+                    | Success (transformedProgram2, diagnostics4) ->
                         
-                        let phaseOutputs4 = PipelineExecution.savePhaseOutput "mlir" mlirText id phaseOutputs3
-                        printfn "✓ MLIR generated (%d chars)" mlirText.Length
+                        let layoutTransformedText = sprintf "%A" transformedProgram2
+                        let phaseOutputs4 = PipelineExecution.savePhaseOutput "layout-transformed" layoutTransformedText id phaseOutputs3
+                        printfn "✓ Union layout completed"
                         
-                        // Step 5: Lower MLIR to LLVM dialect
-                        match PipelineExecution.runPhase "mlir-lowering" 
-                            Transformations.lowerMLIR 
-                            mlirText 
+                        // Step 5: Generate MLIR
+                        match PipelineExecution.runPhase "mlir-generation" 
+                            Transformations.generateMLIR 
+                            transformedProgram2 
                             diagnostics4 with
-                        | Success (loweredMlir, diagnostics5) ->
+                        | Success (mlirText, diagnostics5) ->
                             
-                            let phaseOutputs5 = PipelineExecution.savePhaseOutput "lowered-mlir" loweredMlir id phaseOutputs4
-                            printfn "✓ MLIR lowering completed (%d chars)" loweredMlir.Length
+                            let phaseOutputs5 = PipelineExecution.savePhaseOutput "mlir" mlirText id phaseOutputs4
+                            printfn "✓ MLIR generated (%d chars)" mlirText.Length
                             
-                            let successfulPhases = 
-                                ["parsing"; "closure-elimination"; "union-layout"; "mlir-generation"; "mlir-lowering"]
-                            
-                            printfn "=== Pipeline completed successfully ==="
-                            
-                            Success {
-                                FinalMLIR = loweredMlir
-                                PhaseOutputs = phaseOutputs5
-                                SymbolMappings = Map.empty
-                                Diagnostics = List.rev diagnostics5
-                                SuccessfulPhases = successfulPhases
-                            }
+                            // Step 6: Lower MLIR to LLVM dialect
+                            match PipelineExecution.runPhase "mlir-lowering" 
+                                Transformations.lowerMLIR 
+                                mlirText 
+                                diagnostics5 with
+                            | Success (loweredMlir, diagnostics6) ->
+                                
+                                let phaseOutputs6 = PipelineExecution.savePhaseOutput "lowered-mlir" loweredMlir id phaseOutputs5
+                                printfn "✓ MLIR lowering completed (%d chars)" loweredMlir.Length
+                                
+                                let successfulPhases = 
+                                    ["parsing"; "tree-shaking"; "closure-elimination"; "union-layout"; "mlir-generation"; "mlir-lowering"]
+                                
+                                printfn "=== Pipeline completed successfully ==="
+                                
+                                Success {
+                                    FinalMLIR = loweredMlir
+                                    PhaseOutputs = phaseOutputs6
+                                    SymbolMappings = Map.empty
+                                    Diagnostics = List.rev diagnostics6
+                                    SuccessfulPhases = successfulPhases
+                                }
+                            | CompilerFailure errors -> 
+                                printfn "✗ MLIR lowering failed"
+                                CompilerFailure errors
                         | CompilerFailure errors -> 
-                            printfn "✗ MLIR lowering failed"
+                            printfn "✗ MLIR generation failed"
                             CompilerFailure errors
                     | CompilerFailure errors -> 
-                        printfn "✗ MLIR generation failed"
+                        printfn "✗ Union layout failed"
                         CompilerFailure errors
                 | CompilerFailure errors -> 
-                    printfn "✗ Union layout failed"
+                    printfn "✗ Closure elimination failed"
                     CompilerFailure errors
             | CompilerFailure errors -> 
-                printfn "✗ Closure elimination failed"
+                printfn "✗ Tree shaking failed"
                 CompilerFailure errors
         | CompilerFailure errors -> 
             printfn "✗ Parsing failed"
