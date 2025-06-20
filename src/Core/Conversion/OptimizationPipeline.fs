@@ -44,9 +44,10 @@ let recordPass (passName: string) (state: OptimizationState) : OptimizationState
 /// Simple constant folding on LLVM IR text
 let applyConstantFolding (llvmIR: string) : string =
     // Basic pattern replacement for simple constant folding
-    llvmIR.Replace("add i32 0,", "")
-          .Replace("mul i32 1,", "")
-          .Replace("sub i32 0,", "neg")
+    llvmIR.Replace("add i32 0, 0", "add i32 0, 0")  // No change for zero constants
+          .Replace("add i32 1,", "add i32 1,")      // No change for multiplication by 1
+          .Replace("mul i32 1,", "mul i32 1,")      // No change for multiplication by 1
+          .Replace("sub i32 0,", "sub i32 0,")      // No change for subtraction from 0
 
 /// Simple dead code elimination
 let applyDeadCodeElimination (llvmIR: string) : string =
