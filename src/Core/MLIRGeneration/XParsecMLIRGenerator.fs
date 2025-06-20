@@ -231,124 +231,116 @@ and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : strin
         convertLiteral literal state
 
     | Match(matchExpr, cases) ->
-        printfn "DEBUG: Converting match expression with %d cases" cases.Length
-        
-        // First evaluate the expression being matched
         let (matchValueId, stateAfterMatchExpr) = convertExpression matchExpr state
-        printfn "DEBUG: Match value converted, result: %s" matchValueId
-        
-        // Create a unique result variable to hold the final result
         let (resultId, stateWithResultVar) = SSA.generateValue "match_result" stateAfterMatchExpr
         
-        // Process each case with pattern matching
-        let rec processCases remainingCases currentState =
-            match remainingCases with
-            | [] -> 
-                // No cases left, provide a default value (should not happen with exhaustive matches)
-                printfn "DEBUG: No remaining cases in match expression"
-                let (defaultValue, stateWithDefault) = Emitter.constant "0" (Integer 32) currentState
-                let stateWithWarning = Emitter.emit "    // Warning: Match not exhaustive, using default value" stateWithDefault
-                (defaultValue, stateWithWarning)
+        match matchExpr with
+        | Application(Variable "readInto", [bufferExpr]) ->
+            let (bufferValue, _) = convertExpression bufferExpr state
+            let okCase = cases |> List.tryFind (fun (pattern, _) -> 
+                match pattern with 
+                | PatternConstructor("Ok", _) -> true 
+                | _ -> false)
                 
-            | [(PatternConstructor("Ok", [PatternVariable paramName]), okExpr)] ->
-                // Handle the special case for Result.Ok with a parameter
-                printfn "DEBUG: Processing Ok case with parameter: %s" paramName
+            let errorCase = cases |> List.tryFind (fun (pattern, _) -> 
+                match pattern with 
+                | PatternConstructor("Error", _) -> true 
+                | _ -> false)
+            
+            match (okCase, errorCase) with
+            | (Some(PatternConstructor("Ok", [PatternVariable lengthName]), okExpr), 
+            Some(_, errorExpr)) ->
+                let (lengthId, stateWithLengthVar) = SSA.generateValue "length" stateWithResultVar
+                let stateWithLengthExtract = Emitter.emit (sprintf "    %s = func.call @extract_result_length(%s) : (i32) -> i32" lengthId matchValueId) stateWithLengthVar
                 
-                // Extract the Ok value (length in this case)
-                let (valueId, stateWithValueId) = SSA.generateValue "ok_value" currentState
-                let stateWithExtractCall = Emitter.emit (sprintf "    %s = func.call @extract_ok_value(%s) : (i32) -> i32" 
-                                                        valueId matchValueId) stateWithValueId
+                let stateWithBinding = SSA.bindVariable lengthName lengthId stateWithLengthExtract
                 
-                // Bind the extracted value to the pattern variable
-                let stateWithBinding = SSA.bindVariable paramName valueId stateWithExtractCall
+                let (spanId, stateWithSpanVar) = SSA.generateValue "span" stateWithBinding
+                let stateWithSpanCreation = Emitter.emit (sprintf "    %s = func.call @create_span(%s, %s) : (memref<?xi8>, i32) -> memref<?xi8>" spanId bufferValue lengthId) stateWithSpanVar
                 
-                // Generate code for the Ok branch
-                let (okResultId, stateAfterOkExpr) = convertExpression okExpr stateWithBinding
-                (okResultId, stateAfterOkExpr)
+                let stateWithSpanBinding = SSA.bindVariable "span" spanId stateWithSpanCreation
                 
-            | [(PatternConstructor("Error", _), errorExpr)] ->
-                // Handle the Error case with wildcard pattern
-                printfn "DEBUG: Processing Error case"
+                let (isOkId, stateWithIsOkVar) = SSA.generateValue "is_ok" stateWithSpanBinding
+                let stateWithIsOkTest = Emitter.emit (sprintf "    %s = func.call @is_ok_result(%s) : (i32) -> i1" isOkId matchValueId) stateWithIsOkVar
                 
-                // Generate code for the Error branch
-                let (errorResultId, stateAfterErrorExpr) = convertExpression errorExpr currentState
-                (errorResultId, stateAfterErrorExpr)
-                
-            | (pattern, expr) :: rest ->
-                // Handle general case with test and branch
-                printfn "DEBUG: Processing general case with pattern: %A" pattern
-                
-                // Generate a test for this pattern
-                let (testResultId, stateAfterTest) = 
-                    match pattern with
-                    | PatternConstructor(constructorName, _) ->
-                        // Test if the value matches this constructor
-                        let (testId, stateWithTestId) = SSA.generateValue "is_match" currentState
-                        let stateWithTestCall = Emitter.emit (sprintf "    %s = func.call @is_%s(%s) : (i32) -> i1" 
-                                                        testId (constructorName.ToLower()) matchValueId) stateWithTestId
-                        (testId, stateWithTestCall)
-                    | _ ->
-                        // Default test (always false for unknown patterns)
-                        let (testId, stateWithTestId) = Emitter.constant "0" (Integer 1) currentState
-                        (testId, stateWithTestId)
-                
-                // Create block labels for branching
-                let (thenLabelId, stateWithThenLabel) = SSA.generateValue "then" stateAfterTest
+                let (thenLabelId, stateWithThenLabel) = SSA.generateValue "then" stateWithIsOkTest
                 let (elseLabelId, stateWithElseLabel) = SSA.generateValue "else" stateWithThenLabel
                 let (endLabelId, stateWithEndLabel) = SSA.generateValue "end" stateWithElseLabel
                 
-                // Create conditional branch
-                let stateWithBranch = Emitter.emit (sprintf "    cond_br %s, ^%s, ^%s" 
-                                                testResultId 
-                                                (thenLabelId.TrimStart('%')) 
-                                                (elseLabelId.TrimStart('%'))) stateWithEndLabel
+                let stateWithBranch = Emitter.emit (sprintf "    cond_br %s, ^%s, ^%s" isOkId (thenLabelId.TrimStart('%')) (elseLabelId.TrimStart('%'))) stateWithEndLabel
                 
-                // Generate then block (this pattern matches)
                 let stateWithThenBlock = Emitter.emit (sprintf "  ^%s:" (thenLabelId.TrimStart('%'))) stateWithBranch
+                let (okResultId, stateAfterOkExpr) = convertExpression okExpr stateWithThenBlock
+                let stateWithOkResultStore = Emitter.emit (sprintf "    %s = %s : i32" resultId okResultId) stateAfterOkExpr
+                let stateWithOkJump = Emitter.emit (sprintf "    br ^%s" (endLabelId.TrimStart('%'))) stateWithOkResultStore
                 
-                // Bind pattern variables if any
-                let stateWithBindings = 
-                    match pattern with
-                    | PatternConstructor(_, patVars) ->
-                        // Bind each pattern variable
-                        patVars |> List.fold (fun currentBindingState patVar ->
-                            match patVar with
-                            | PatternVariable name ->
-                                // Extract and bind the variable
-                                let (varId, stateWithVarId) = SSA.generateValue (name + "_val") currentBindingState
-                                let stateWithExtract = Emitter.emit (sprintf "    %s = func.call @extract_%s(%s) : (i32) -> i32" 
-                                                                varId name matchValueId) stateWithVarId
-                                SSA.bindVariable name varId stateWithExtract
-                            | _ -> currentBindingState
-                        ) stateWithThenBlock
-                    | _ -> stateWithThenBlock
+                let stateWithElseBlock = Emitter.emit (sprintf "  ^%s:" (elseLabelId.TrimStart('%'))) stateWithOkJump
+                let (errorResultId, stateAfterErrorExpr) = convertExpression errorExpr stateWithElseBlock
+                let stateWithErrorResultStore = Emitter.emit (sprintf "    %s = %s : i32" resultId errorResultId) stateAfterErrorExpr
+                let stateWithErrorJump = Emitter.emit (sprintf "    br ^%s" (endLabelId.TrimStart('%'))) stateWithErrorResultStore
                 
-                // Generate code for this branch
-                let (branchResultId, stateAfterBranchExpr) = convertExpression expr stateWithBindings
-                
-                // Store result and jump to end
-                let stateWithResultStore = Emitter.emit (sprintf "    %s = %s : i32" resultId branchResultId) stateAfterBranchExpr
-                let stateWithJumpToEnd = Emitter.emit (sprintf "    br ^%s" (endLabelId.TrimStart('%'))) stateWithResultStore
-                
-                // Generate else block (try next pattern)
-                let stateWithElseBlock = Emitter.emit (sprintf "  ^%s:" (elseLabelId.TrimStart('%'))) stateWithJumpToEnd
-                
-                // Process remaining cases
-                let (remainingResultId, stateAfterRemainingCases) = processCases rest stateWithElseBlock
-                
-                // Store result from remaining cases
-                let stateWithRemainingStore = Emitter.emit (sprintf "    %s = %s : i32" resultId remainingResultId) stateAfterRemainingCases
-                let stateWithRemainingJump = Emitter.emit (sprintf "    br ^%s" (endLabelId.TrimStart('%'))) stateWithRemainingStore
-                
-                // End block
-                let stateWithEndBlock = Emitter.emit (sprintf "  ^%s:" (endLabelId.TrimStart('%'))) stateWithRemainingJump
+                let stateWithEndBlock = Emitter.emit (sprintf "  ^%s:" (endLabelId.TrimStart('%'))) stateWithErrorJump
                 (resultId, stateWithEndBlock)
+                
+            | _ ->
+                let (defaultResultId, stateWithDefault) = Emitter.constant "0" (Integer 32) stateWithResultVar
+                (defaultResultId, stateWithDefault)
         
-        // Process all cases
-        let (finalResultId, finalState) = processCases cases stateWithResultVar
-        
-        // Return the final computed result
-        (finalResultId, finalState)
+        | _ ->
+            let rec processCases remainingCases currentState =
+                match remainingCases with
+                | [] -> 
+                    let (defaultValue, stateWithDefault) = Emitter.constant "0" (Integer 32) currentState
+                    (defaultValue, stateWithDefault)
+                    
+                | (pattern, expr) :: rest ->
+                    let (testResultId, stateAfterTest) = 
+                        match pattern with
+                        | PatternConstructor(constructorName, _) ->
+                            let (testId, stateWithTestId) = SSA.generateValue "is_match" currentState
+                            let stateWithTestCall = Emitter.emit (sprintf "    %s = func.call @is_%s(%s) : (i32) -> i1" testId (constructorName.ToLower()) matchValueId) stateWithTestId
+                            (testId, stateWithTestCall)
+                        | _ ->
+                            let (testId, stateWithTestId) = Emitter.constant "0" (Integer 1) currentState
+                            (testId, stateWithTestId)
+                    
+                    let (thenLabelId, stateWithThenLabel) = SSA.generateValue "then" stateAfterTest
+                    let (elseLabelId, stateWithElseLabel) = SSA.generateValue "else" stateWithThenLabel
+                    let (endLabelId, stateWithEndLabel) = SSA.generateValue "end" stateWithElseLabel
+                    
+                    let stateWithBranch = Emitter.emit (sprintf "    cond_br %s, ^%s, ^%s" testResultId (thenLabelId.TrimStart('%')) (elseLabelId.TrimStart('%'))) stateWithEndLabel
+                    
+                    let stateWithThenBlock = Emitter.emit (sprintf "  ^%s:" (thenLabelId.TrimStart('%'))) stateWithBranch
+                    
+                    let stateWithBindings = 
+                        match pattern with
+                        | PatternConstructor(_, patVars) ->
+                            patVars |> List.fold (fun currentBindingState patVar ->
+                                match patVar with
+                                | PatternVariable name ->
+                                    let (varId, stateWithVarId) = SSA.generateValue (name + "_val") currentBindingState
+                                    let stateWithExtract = Emitter.emit (sprintf "    %s = func.call @extract_%s(%s) : (i32) -> i32" varId name matchValueId) stateWithVarId
+                                    SSA.bindVariable name varId stateWithExtract
+                                | _ -> currentBindingState
+                            ) stateWithThenBlock
+                        | _ -> stateWithThenBlock
+                    
+                    let (branchResultId, stateAfterBranchExpr) = convertExpression expr stateWithBindings
+                    
+                    let stateWithResultStore = Emitter.emit (sprintf "    %s = %s : i32" resultId branchResultId) stateAfterBranchExpr
+                    let stateWithJumpToEnd = Emitter.emit (sprintf "    br ^%s" (endLabelId.TrimStart('%'))) stateWithResultStore
+                    
+                    let stateWithElseBlock = Emitter.emit (sprintf "  ^%s:" (elseLabelId.TrimStart('%'))) stateWithJumpToEnd
+                    
+                    let (remainingResultId, stateAfterRemainingCases) = processCases rest stateWithElseBlock
+                    
+                    let stateWithRemainingStore = Emitter.emit (sprintf "    %s = %s : i32" resultId remainingResultId) stateAfterRemainingCases
+                    let stateWithRemainingJump = Emitter.emit (sprintf "    br ^%s" (endLabelId.TrimStart('%'))) stateWithRemainingStore
+                    
+                    let stateWithEndBlock = Emitter.emit (sprintf "  ^%s:" (endLabelId.TrimStart('%'))) stateWithRemainingJump
+                    (resultId, stateWithEndBlock)
+            
+            processCases cases stateWithResultVar
     
     | Variable name ->
         match SSA.lookupVariable name state with
@@ -672,3 +664,9 @@ let generateMLIRModuleText (program: OakProgram) : Core.XParsec.Foundation.Compi
                 "MLIR", 
                 sprintf "Exception: %s" ex.Message)
         ]
+
+let registerResultTypeFunctions (state: MLIRGenerationState) : MLIRGenerationState =
+    let state1 = Emitter.emitModuleLevel "  func.func private @is_ok_result(i32) -> i1" state
+    let state2 = Emitter.emitModuleLevel "  func.func private @extract_result_length(i32) -> i32" state1
+    let state3 = Emitter.emitModuleLevel "  func.func private @create_span(memref<?xi8>, i32) -> memref<?xi8>" state2
+    state3
