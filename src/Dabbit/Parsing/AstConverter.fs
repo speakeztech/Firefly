@@ -5,17 +5,18 @@ open System.IO
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 open Dabbit.Parsing.OakAst
+open Core.XParsec.Foundation
 
 /// Result type for F# to Oak AST conversion with diagnostics and F# AST
 type ASTConversionResult = {
     OakProgram: OakProgram
     Diagnostics: string list
-    FSharpASTText: string  // Add F# AST text representation
+    FSharpASTText: string
+    ProcessedFiles: string list  // Track all processed files for debugging
 }
 
 /// Helper functions for extracting names and types from F# AST nodes
 module AstHelpers =
-    
     let getIdentifierName (ident: Ident) : string = ident.idText
     
     let getQualifiedName (idents: Ident list) : string =
@@ -65,7 +66,6 @@ module AstHelpers =
 
 /// Type mapping functions
 module TypeMapping =
-    
     let mapBasicType (typeName: string) : OakType =
         match typeName.ToLowerInvariant() with
         | "int" | "int32" | "system.int32" -> IntType
@@ -145,7 +145,6 @@ module ExpressionMapping =
                 mapFunctionApplication funcExpr argExpr
             
             | SynExpr.TypeApp(expr, _, typeArgs, _, _, _, _) ->
-                // Handle generic function applications like NativePtr.stackalloc<byte>
                 mapTypeApplication expr typeArgs
             
             | SynExpr.LetOrUse(_, _, bindings, bodyExpr, _, _) ->
@@ -171,17 +170,14 @@ module ExpressionMapping =
                 let idents = longIdent |> AstHelpers.extractLongIdent
                 let qualifiedName = AstHelpers.getQualifiedName idents
                 
-                // Handle Alloy library functions
                 match qualifiedName with
                 | "NativePtr.stackalloc" ->
-                    // This is a stack allocation - convert to Alloy operation
                     Variable "NativePtr.stackalloc"
                 | "Console.readLine" ->
                     Variable "Console.readLine"
                 | "Span" ->
                     Variable "Span.create"
                 | _ ->
-                    // Generic type application
                     Variable qualifiedName
             | _ ->
                 mapExpression expr
@@ -203,13 +199,10 @@ module ExpressionMapping =
                 | Literal(StringLiteral formatStr) -> IOOperation(Printfn(formatStr), [])
                 | _ -> Application(func, [arg])
             | Variable "NativePtr.stackalloc" ->
-                // Stack allocation with size argument
                 Application(Variable "NativePtr.stackalloc", [arg])
             | Variable "Console.readLine" ->
-                // Console read line with buffer and size
                 Application(Variable "Console.readLine", [arg])
             | Variable "Span.create" ->
-                // Span creation with buffer and length
                 Application(Variable "Span.create", [arg])
             | _ -> Application(func, [arg])
         with
@@ -257,17 +250,14 @@ module ExpressionMapping =
             
             match func with
             | Variable "Console.readLine" when mappedArgs.Length = 2 ->
-                // Console.readLine buffer size -> Console.readLine(buffer, size)
                 Application(Variable "Console.readLine", mappedArgs)
             | Variable "Span.create" when mappedArgs.Length = 2 ->
-                // Span.create buffer length -> Span.create(buffer, length)
                 Application(Variable "Span.create", mappedArgs)
             | _ ->
                 Application(func, mappedArgs)
         with
         | _ -> Literal(UnitLiteral)
     
-    // Add this helper to detect and properly handle chained applications
     and mapExpressionChain (expr: SynExpr) : OakExpression =
         let rec collectApplications expr args =
             match expr with
@@ -364,7 +354,6 @@ module DeclarationMapping =
 
 /// Module mapping functions
 module ModuleMapping =
-    
     let mapModule (mdl: SynModuleOrNamespace) : OakModule =
         try
             let (SynModuleOrNamespace(ids, _, _, decls, _, _, _, _, _)) = mdl
@@ -384,124 +373,293 @@ module ModuleMapping =
             | ParsedInput.ImplFile(implFile) ->
                 try
                     let (ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) = implFile
+                    
+                    // Debug: print all module names during extraction
+                    let moduleNames = modules |> List.map (fun mdl -> 
+                        match mdl with
+                        | SynModuleOrNamespace(ids, _, _, _, _, _, _, _, _) -> 
+                            ids |> List.map (fun id -> id.idText) |> String.concat "."
+                    )
+                    
                     if modules.IsEmpty then []
-                    else modules |> List.map mapModule
+                    else 
+                        modules 
+                        |> List.map mapModule
+                        // Important: Don't filter modules here
                 with
-                | _ -> []
+                | ex -> 
+                    let errorModule = { 
+                        Name = sprintf "ERROR_MODULE: %s" ex.Message
+                        Declarations = [] 
+                    }
+                    [errorModule]
             | ParsedInput.SigFile(_) -> []
         with
-        | _ -> []
+        | ex -> 
+            let errorModule = { 
+                Name = sprintf "PARSE_ERROR_MODULE: %s" ex.Message
+                Declarations = [] 
+            }
+            [errorModule]
 
 /// Helper function to generate F# AST text representation
 let generateFSharpASTText (parseTree: ParsedInput) : string =
     try
-        // Create a simplified text representation of the F# AST
+        // For debugging, create a simple representation that captures the structure
         sprintf "%A" parseTree
     with
     | ex -> sprintf "Error generating F# AST text: %s" ex.Message
 
-/// Helper function to extract dependencies from open declarations only (simplified)
-let extractDependenciesFromAST (parseTree: ParsedInput) : string list =
-    match parseTree with
-    | ParsedInput.ImplFile(implFile) ->
-        let (ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) = implFile
-        
-        // Skip hash directives for now - just focus on open statements
-        // Define known libraries
-        let knownLibraries = [
-            "Alloy.Memory", "Memory.fs"
-            "Alloy.IO", "IO.fs"
-            "Alloy.IO.Console", "Console.fs"
-        ]
-        
-        // Process modules for open statements
-        let openPaths =
-            modules
-            |> List.collect (fun mdl ->
-                match mdl with 
-                | SynModuleOrNamespace(_, _, _, decls, _, _, _, _, _) ->
-                    decls |> List.choose (function
+/// Dependency extraction and resolution system
+/// Dependency extraction and resolution system
+module DependencyResolution =
+    /// Represents a dependency with source information
+    type Dependency = {
+        Path: string
+        SourceFile: string
+        IsDirective: bool  // True for #load, false for open
+    }
+    
+    /// Extracts all dependencies from a parse tree
+    let extractAllDependencies (parseTree: ParsedInput) (sourceFile: string) (baseDirectory: string) : Dependency list =
+        match parseTree with
+        | ParsedInput.ImplFile(implFile) ->
+            let (ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) = implFile
+            
+            // Process open statements (we'll handle #load directives separately)
+            let openDependencies =
+                modules |> List.collect (fun mdl ->
+                    let (SynModuleOrNamespace(_, _, _, decls, _, _, _, _, _)) = mdl
+                    decls |> List.choose (fun decl ->
+                        match decl with
                         | SynModuleDecl.Open(target, _) ->
                             match target with
                             | SynOpenDeclTarget.ModuleOrNamespace(SynLongIdent(idents, _, _), _) ->
                                 let moduleName = idents |> List.map (fun id -> id.idText) |> String.concat "."
-                                knownLibraries 
-                                |> List.tryPick (fun (lib, path) -> 
-                                    if lib.StartsWith(moduleName) then Some path 
-                                    else None)
+                                let filePath = moduleName.Replace(".", Path.DirectorySeparatorChar.ToString()) + ".fs"
+                                Some { Path = filePath; SourceFile = sourceFile; IsDirective = false }
                             | _ -> None
                         | _ -> None))
-        
-        // Return just the open paths for now
-        openPaths
-    | _ -> []
+            
+            // Since we can't easily get directives from the parse tree in a version-independent way,
+            // we'll fall back to parsing the source file directly for #load and #I directives
+            let sourceCode = 
+                try
+                    File.ReadAllLines(sourceFile) 
+                with _ -> [||]
+            
+            // Extract #load directives
+            let loadDependencies =
+                sourceCode
+                |> Array.choose (fun line -> 
+                    let trimmed = line.Trim()
+                    if trimmed.StartsWith("#load") then
+                        let quotedPath = 
+                            try
+                                let startIdx = trimmed.IndexOf("\"") + 1
+                                let endIdx = trimmed.LastIndexOf("\"")
+                                if startIdx > 0 && endIdx > startIdx then
+                                    Some(trimmed.Substring(startIdx, endIdx - startIdx))
+                                else None
+                            with _ -> None
+                        
+                        match quotedPath with
+                        | Some path -> Some { Path = path; SourceFile = sourceFile; IsDirective = true }
+                        | None -> None
+                    else None)
+                |> Array.toList
+            
+            // Extract #I directives
+            let includeDirectives =
+                sourceCode
+                |> Array.choose (fun line -> 
+                    let trimmed = line.Trim()
+                    if trimmed.StartsWith("#I") then
+                        let quotedPath = 
+                            try
+                                let startIdx = trimmed.IndexOf("\"") + 1
+                                let endIdx = trimmed.LastIndexOf("\"")
+                                if startIdx > 0 && endIdx > startIdx then
+                                    Some(trimmed.Substring(startIdx, endIdx - startIdx))
+                                else None
+                            with _ -> None
+                        
+                        quotedPath
+                    else None)
+                |> Array.toList
+            
+            // Normalize and resolve search paths
+            let searchDirectories = 
+                includeDirectives
+                |> List.map (fun path -> 
+                    if Path.IsPathRooted(path) then path
+                    else Path.Combine(baseDirectory, path.TrimStart('\\').TrimStart('/')))
+                |> fun dirs -> dirs @ [baseDirectory]
+            
+            // Resolve all dependency paths
+            let resolveDepPath (dep: Dependency) : Dependency =
+                if dep.IsDirective then
+                    // For #load directives, try direct path first
+                    let directPath = Path.Combine(Path.GetDirectoryName(dep.SourceFile), dep.Path)
+                    if File.Exists(directPath) then
+                        { dep with Path = directPath }
+                    else
+                        // Try search paths
+                        let resolvedPath = 
+                            searchDirectories
+                            |> List.tryPick (fun dir -> 
+                                let fullPath = Path.Combine(dir, dep.Path)
+                                if File.Exists(fullPath) then Some fullPath else None)
+                        
+                        match resolvedPath with
+                        | Some path -> { dep with Path = path }
+                        | None -> dep
+                else
+                    // For open statements
+                    let resolvedPath = 
+                        searchDirectories
+                        |> List.tryPick (fun dir -> 
+                            let fullPath = Path.Combine(dir, dep.Path)
+                            if File.Exists(fullPath) then Some fullPath else None)
+                    
+                    match resolvedPath with
+                    | Some path -> { dep with Path = path }
+                    | None -> dep
+            
+            // Combine and resolve all dependencies
+            let allDependencies = loadDependencies @ openDependencies
+            allDependencies |> List.map resolveDepPath
+            
+        | ParsedInput.SigFile(_) -> []
 
-/// Single unified conversion function with minimal output
+    /// Resolves all dependencies recursively
+    let rec resolveAllDependencies 
+            (sourceFile: string) 
+            (checker: FSharp.Compiler.CodeAnalysis.FSharpChecker) 
+            (parsingOptions: FSharp.Compiler.CodeAnalysis.FSharpParsingOptions)
+            (visited: Set<string>)
+            (baseDirectory: string) : CompilerResult<ParsedInput list * string list> =
+        
+        if Set.contains sourceFile visited then
+            Success ([], [])  // Already processed
+        else
+            try
+                // Parse the current file
+                if not (File.Exists(sourceFile)) then
+                    CompilerFailure [
+                        ConversionError(
+                            "dependency resolution", 
+                            sourceFile, 
+                            "parsed file", 
+                            sprintf "File not found: %s" sourceFile)
+                    ]
+                else
+                    let source = File.ReadAllText(sourceFile)
+                    let sourceText = SourceText.ofString source
+                    let parseResults = checker.ParseFile(sourceFile, sourceText, parsingOptions) |> Async.RunSynchronously
+                    
+                    // Extract all dependencies
+                    let dependencies = extractAllDependencies parseResults.ParseTree sourceFile baseDirectory
+                    
+                    // Filter to only valid dependencies
+                    let validDependencies = 
+                        dependencies 
+                        |> List.filter (fun dep -> File.Exists(dep.Path))
+                    
+                    // Log any invalid dependencies as diagnostics
+                    let invalidDependencies = 
+                        dependencies 
+                        |> List.filter (fun dep -> not (File.Exists(dep.Path)))
+                        |> List.map (fun dep -> 
+                            sprintf "Warning: Could not resolve dependency '%s' from '%s'" 
+                                dep.Path dep.SourceFile)
+                    
+                    // Mark current file as visited
+                    let newVisited = Set.add sourceFile visited
+                    
+                    // Recursively process all dependencies
+                    let depResults = 
+                        validDependencies
+                        |> List.map (fun dep -> 
+                            resolveAllDependencies dep.Path checker parsingOptions newVisited baseDirectory)
+                    
+                    // Combine all results
+                    match ResultHelpers.combineResults depResults with
+                    | Success results ->
+                        let depParseTrees = results |> List.map fst |> List.concat
+                        let depDiagnostics = results |> List.map snd |> List.concat
+                        
+                        Success (parseResults.ParseTree :: depParseTrees, 
+                                 sourceFile :: (List.concat [invalidDependencies; depDiagnostics]))
+                    | CompilerFailure errors -> CompilerFailure errors
+            with ex ->
+                CompilerFailure [
+                    ConversionError(
+                        "dependency resolution", 
+                        sourceFile, 
+                        "parsed file", 
+                        sprintf "Exception: %s" ex.Message)
+                ]
+
+/// Unified conversion function with complete dependency resolution
 let parseAndConvertToOakAst (inputPath: string) (sourceCode: string) : ASTConversionResult =
     try
+        // Parse the main file
         let sourceText = SourceText.ofString sourceCode
-        
-        // Get directory for resolving relative paths
         let baseDirectory = Path.GetDirectoryName(inputPath)
         
-        // Create checker instance that maintains state between files
+        // Create checker instance
         let checker = FSharp.Compiler.CodeAnalysis.FSharpChecker.Create(keepAssemblyContents = true)
         let parsingOptions = { 
             FSharp.Compiler.CodeAnalysis.FSharpParsingOptions.Default with
                 SourceFiles = [|Path.GetFileName(inputPath)|]
-                ConditionalDefines = ["INTERACTIVE"] // Add INTERACTIVE define to match .fsx behavior
+                ConditionalDefines = ["INTERACTIVE"]
                 ApplyLineDirectives = false
         }
         
-        // Parse main file
-        let parseResults = checker.ParseFile(inputPath, sourceText, parsingOptions) |> Async.RunSynchronously
+        // Parse the main file
+        let mainParseResults = checker.ParseFile(inputPath, sourceText, parsingOptions) |> Async.RunSynchronously
         
-        // Process diagnostics
-        let diagnostics = 
-            if parseResults.Diagnostics.Length = 0 then []
-            else parseResults.Diagnostics |> Array.map (fun diag -> diag.Message) |> Array.toList
+        // Resolve and parse all dependencies
+        let dependencyFiles = 
+            try
+                // Get the dependent files from sourceCode
+                let deps = DependencyResolution.extractAllDependencies mainParseResults.ParseTree inputPath baseDirectory
+                deps |> List.map (fun dep -> dep.Path) |> List.filter File.Exists
+            with _ -> []
         
-        // Extract potential dependencies from open declarations
-        let dependencies = extractDependenciesFromAST parseResults.ParseTree
+        // Parse each dependency file
+        let dependencyResults =
+            dependencyFiles |> List.map (fun depFile ->
+                let depSource = File.ReadAllText(depFile)
+                let depSourceText = SourceText.ofString depSource
+                let depResult = checker.ParseFile(depFile, depSourceText, parsingOptions) |> Async.RunSynchronously
+                (depFile, depResult.ParseTree))
         
-        // Parse dependencies and combine modules
-        let allModules = 
-            // Get modules from main file
-            let mainModules = ModuleMapping.extractModulesFromParseTree parseResults.ParseTree
-            
-            // Process dependencies
-            let dependencyModules =
-                dependencies
-                |> List.choose (fun depPath ->
-                    try
-                        let fullPath = 
-                            if Path.IsPathRooted(depPath) then depPath
-                            else Path.Combine(baseDirectory, depPath)
-                            
-                        if File.Exists(fullPath) then
-                            let depSourceText = SourceText.ofString (File.ReadAllText(fullPath))
-                            let depParseResults = checker.ParseFile(fullPath, depSourceText, parsingOptions) |> Async.RunSynchronously
-                            Some (ModuleMapping.extractModulesFromParseTree depParseResults.ParseTree)
-                        else None
-                    with _ -> None)
-                |> List.collect id
-            
-            // Combine all modules
-            mainModules @ dependencyModules
+        // Generate complete AST text - including main file and ALL dependencies
+        let fullAstText = 
+            let mainAstText = sprintf "// Main file: %s\n%A\n\n" inputPath mainParseResults.ParseTree
+            let depAstTexts = 
+                dependencyResults 
+                |> List.map (fun (file, ast) -> sprintf "// Dependency: %s\n%A\n\n" file ast)
+                |> String.concat ""
+            mainAstText + depAstTexts
         
-        let fsharpAstText = generateFSharpASTText parseResults.ParseTree
-        let oakProgram = { Modules = allModules }
+        // Process modules from all parse trees
+        let allParseTrees = mainParseResults.ParseTree :: (dependencyResults |> List.map snd)
+        let allModules = allParseTrees |> List.collect ModuleMapping.extractModulesFromParseTree
         
+        // Build final result
         { 
-            OakProgram = oakProgram
-            Diagnostics = diagnostics
-            FSharpASTText = fsharpAstText
+            OakProgram = { Modules = allModules }
+            Diagnostics = ["Parsed main file and " + string dependencyResults.Length + " dependencies"]
+            FSharpASTText = fullAstText  // This is the critical field for the .fcs file
+            ProcessedFiles = inputPath :: dependencyFiles
         }
-    
-    with parseEx ->
-        let parseError = sprintf "F# parsing failed: %s" parseEx.Message
+    with ex ->
         { 
             OakProgram = { Modules = [] }
-            Diagnostics = [parseError]
-            FSharpASTText = sprintf "Parse error: %s" parseError
+            Diagnostics = [sprintf "Error in parsing: %s" ex.Message]
+            FSharpASTText = sprintf "Error: %s" ex.Message
+            ProcessedFiles = []
         }

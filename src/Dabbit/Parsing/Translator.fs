@@ -112,23 +112,22 @@ module Transformations =
         try
             let result = AstConverter.parseAndConvertToOakAst sourceFile sourceCode
             
-            // Immediately write intermediate files
+            // Add additional diagnostic logging for processed files
             intermediatesDir |> Option.iter (fun dir ->
                 try
                     let baseName = Path.GetFileNameWithoutExtension(sourceFile)
-                    let fcsPath = Path.Combine(dir, baseName + ".fcs")
-                    let oakPath = Path.Combine(dir, baseName + ".oak")
+                    let dependenciesPath = Path.Combine(dir, baseName + ".deps")
                     
                     Directory.CreateDirectory(dir) |> ignore
-                    File.WriteAllText(fcsPath, result.FSharpASTText)
-                    File.WriteAllText(oakPath, sprintf "%A" result.OakProgram)
+                    File.WriteAllText(dependenciesPath, 
+                        sprintf "Processed Files:\n%s" (String.concat "\n" result.ProcessedFiles))
                     
-                    printfn "  Wrote F# AST to: %s" (Path.GetFileName(fcsPath))
-                    printfn "  Wrote Oak AST to: %s" (Path.GetFileName(oakPath))
+                    printfn "  Wrote dependency info to: %s" (Path.GetFileName(dependenciesPath))
                 with ex ->
-                    printfn "  Warning: Could not write parsing outputs: %s" ex.Message
+                    printfn "  Warning: Could not write dependency info: %s" ex.Message
             )
             
+            // Rest of function remains unchanged
             if result.OakProgram.Modules.IsEmpty && result.Diagnostics.Length > 0 then
                 CompilerFailure [SyntaxError(
                     { Line = 1; Column = 1; File = sourceFile; Offset = 0 },
@@ -273,8 +272,7 @@ module Transformations =
             Success loweredText
         | CompilerFailure errors -> CompilerFailure errors
 
-/// Main translation pipeline - clean, focused version
-/// Main translation pipeline - clean, focused version
+/// Main translation pipeline with complete dependency resolution 
 let executeTranslationPipeline (sourceFile: string) (sourceCode: string) (intermediatesDir: string option) : CompilerResult<TranslationPipelineOutput> =
     printfn "=== Firefly Translation Pipeline ==="
     printfn "Source: %s (%d chars)" (Path.GetFileName(sourceFile)) sourceCode.Length
@@ -290,7 +288,7 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) (interm
     let initialPhaseOutputs = Map.empty<string, string>
     
     try
-        // Step 1: Parse F# source to Oak AST
+        // Step 1: Parse F# source to Oak AST with complete dependency resolution
         match PipelineExecution.runPhase "parsing" 
             (fun sc -> Transformations.sourceToOak sourceFile sc intermediatesDir) 
             sourceCode 
@@ -299,10 +297,35 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) (interm
         | Success (parseResult, diagnostics1) ->
             
             let (oakProgram, oakAstText, fsharpAstText) = parseResult
+            
+            // Count modules and display dependency information
+            let moduleCount = oakProgram.Modules.Length
+            let moduleInfo = 
+                oakProgram.Modules 
+                |> List.map (fun m -> m.Name)
+                |> String.concat ", "
+            
+            printfn "  Found %d modules: %s" moduleCount 
+                (if moduleCount > 3 then 
+                    String.concat ", " (List.take 3 (oakProgram.Modules |> List.map (fun m -> m.Name))) + "..." 
+                 else moduleInfo)
+            
+            // Extract dependency warnings if any
+            let dependencyWarnings = 
+                diagnostics1 
+                |> List.filter (fun (phase, message) -> 
+                    phase = "parsing" && message.Contains("dependency"))
+            
+            if not dependencyWarnings.IsEmpty then
+                printfn "  Dependency resolution: %d warning(s)" dependencyWarnings.Length
+            
+            // Save all outputs to phase map
             let phaseOutputs1 = 
                 initialPhaseOutputs
                 |> Map.add "fsharp-ast" fsharpAstText
                 |> Map.add "oak-ast" oakAstText
+                |> Map.add "module-info" moduleInfo
+            
             printfn "✓ Parsing completed"
             
             // Step 2: Apply tree-shaking
@@ -317,7 +340,11 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) (interm
                 let phaseOutputs2 = 
                     phaseOutputs1
                     |> Map.add "tree-shaking-stats" treeDiagnostics
-                    |> Map.add "ra-oak" prunedOakText  // The ra.oak file
+                    |> Map.add "ra-oak" prunedOakText
+                
+                // Add count of reachable modules after tree shaking
+                let prunedModuleCount = prunedProgram.Modules.Length
+                printfn "  Retained %d of %d modules after tree shaking" prunedModuleCount moduleCount
                 printfn "✓ Tree shaking completed"
                 
                 // Step 3: Apply closure elimination
@@ -399,21 +426,75 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) (interm
                                     SuccessfulPhases = successfulPhases
                                 }
                             | CompilerFailure errors -> 
+                                // Save diagnostics about what succeeded before the failure
+                                intermediatesDir |> Option.iter (fun dir ->
+                                    try
+                                        let errorFile = Path.Combine(dir, "mlir-lowering.error.txt")
+                                        File.WriteAllText(errorFile, 
+                                            sprintf "MLIR lowering failed:\n%s" 
+                                                (String.concat "\n" (errors |> List.map (fun e -> e.ToString()))))
+                                    with _ -> ()
+                                )
                                 printfn "✗ MLIR lowering failed"
                                 CompilerFailure errors
                         | CompilerFailure errors -> 
+                            // Save diagnostics about what succeeded before the failure
+                            intermediatesDir |> Option.iter (fun dir ->
+                                try
+                                    let errorFile = Path.Combine(dir, "mlir-generation.error.txt")
+                                    File.WriteAllText(errorFile, 
+                                        sprintf "MLIR generation failed:\n%s" 
+                                            (String.concat "\n" (errors |> List.map (fun e -> e.ToString()))))
+                                with _ -> ()
+                            )
                             printfn "✗ MLIR generation failed"
                             CompilerFailure errors
                     | CompilerFailure errors -> 
+                        // Save diagnostics about what succeeded before the failure
+                        intermediatesDir |> Option.iter (fun dir ->
+                            try
+                                let errorFile = Path.Combine(dir, "union-layout.error.txt")
+                                File.WriteAllText(errorFile, 
+                                    sprintf "Union layout failed:\n%s" 
+                                        (String.concat "\n" (errors |> List.map (fun e -> e.ToString()))))
+                            with _ -> ()
+                        )
                         printfn "✗ Union layout failed"
                         CompilerFailure errors
                 | CompilerFailure errors -> 
+                    // Save diagnostics about what succeeded before the failure
+                    intermediatesDir |> Option.iter (fun dir ->
+                        try
+                            let errorFile = Path.Combine(dir, "closure-elimination.error.txt")
+                            File.WriteAllText(errorFile, 
+                                sprintf "Closure elimination failed:\n%s" 
+                                    (String.concat "\n" (errors |> List.map (fun e -> e.ToString()))))
+                        with _ -> ()
+                    )
                     printfn "✗ Closure elimination failed"
                     CompilerFailure errors
             | CompilerFailure errors -> 
+                // Save diagnostics about what succeeded before the failure
+                intermediatesDir |> Option.iter (fun dir ->
+                    try
+                        let errorFile = Path.Combine(dir, "tree-shaking.error.txt")
+                        File.WriteAllText(errorFile, 
+                            sprintf "Tree shaking failed:\n%s" 
+                                (String.concat "\n" (errors |> List.map (fun e -> e.ToString()))))
+                    with _ -> ()
+                )
                 printfn "✗ Tree shaking failed"
                 CompilerFailure errors
         | CompilerFailure errors -> 
+            // Save all dependency resolution errors to file
+            intermediatesDir |> Option.iter (fun dir ->
+                try
+                    let errorFile = Path.Combine(dir, "dependency-resolution.error.txt")
+                    File.WriteAllText(errorFile, 
+                        sprintf "Dependency resolution failed:\n%s" 
+                            (String.concat "\n" (errors |> List.map (fun e -> e.ToString()))))
+                with _ -> ()
+            )
             printfn "✗ Parsing failed"
             CompilerFailure errors
     with ex ->
@@ -423,7 +504,8 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) (interm
         intermediatesDir |> Option.iter (fun dir ->
             try
                 let errorFile = Path.Combine(dir, "pipeline-error.txt")
-                File.WriteAllText(errorFile, sprintf "Pipeline exception: %s\n\nStack trace:\n%s" ex.Message ex.StackTrace)
+                File.WriteAllText(errorFile, 
+                    sprintf "Pipeline exception: %s\n\nStack trace:\n%s" ex.Message ex.StackTrace)
                 printfn "✓ Saved error details to %s" (Path.GetFileName(errorFile))
             with _ -> ()
         )
