@@ -153,76 +153,83 @@ module MatchHandling =
     
     /// Handles pattern matching for Result type
     let handleResultMatch (matchExpr: OakExpression) (cases: (OakPattern * OakExpression) list) 
-                         (matchValueId: string) (resultId: string) (state: MLIRGenerationState) 
-                         (convertExpressionFn: OakExpression -> MLIRGenerationState -> string * MLIRGenerationState) 
-                         : string * MLIRGenerationState =
+                        (matchValueId: string) (resultId: string) (state: MLIRGenerationState) 
+                        (convertExpressionFn: OakExpression -> MLIRGenerationState -> string * MLIRGenerationState) 
+                        : string * MLIRGenerationState =
         // Extract buffer from readInto application
         let bufferName = 
             match matchExpr with
             | Application(Variable "readInto", [Variable name]) -> name
-            | _ -> "buffer"  // Default name if we can't extract
+            | _ -> "buffer"
         
         let bufferValue = 
             match SSA.lookupVariable bufferName state with
             | Some value -> value
             | None -> "%unknown_buffer"
         
-        // Add buffer to active symbols in registry
+        // Add utility functions for Result type handling if needed
         let state1 = 
-            { state with 
-                SymbolRegistry = 
-                    { state.SymbolRegistry with
-                        State = 
-                            { state.SymbolRegistry.State with
-                                ActiveSymbols = bufferValue :: state.SymbolRegistry.State.ActiveSymbols } } }
+            state
+            |> Emitter.emitModuleLevel "  func.func private @is_ok_result(i32) -> i1"
+            |> Emitter.emitModuleLevel "  func.func private @extract_result_length(i32) -> i32"
+            |> Emitter.emitModuleLevel "  func.func private @create_span(memref<?xi8>, i32) -> memref<?xi8>"
         
         // Generate condition check for Result type
         let (isOkId, state2) = SSA.generateValue "is_ok" state1
         let state3 = Emitter.emit (sprintf "    %s = func.call @is_ok_result(%s) : (i32) -> i1" 
-                                  isOkId matchValueId) state2
+                                isOkId matchValueId) state2
         
         // Generate branch labels and conditional branch
         let (thenLabel, elseLabel, endLabel, state4) = generateBranchLabels state3
         let state5 = Emitter.emit (sprintf "    cond_br %s, ^%s, ^%s" 
-                                  isOkId thenLabel elseLabel) state4
+                                isOkId thenLabel elseLabel) state4
         
         // Process Ok branch
         let okCase = 
-            cases 
-            |> List.tryFind (fun (pattern, _) -> 
-                match pattern with 
-                | PatternConstructor("Ok", _) -> true 
-                | _ -> false)
+            cases |> List.tryFind (fun (pattern, _) -> 
+                match pattern with | PatternConstructor("Ok", _) -> true | _ -> false)
         
         let state6 = Emitter.emit (sprintf "  ^%s:" thenLabel) state5
         
         let state7 = 
             match okCase with
-                | Some(PatternConstructor("Ok", [PatternVariable lengthName]), okExpr) ->
-                    // Extract length parameter
-                    let (lengthId, stateWithLength) = SSA.generateValue "length" state6
-                    let stateWithLengthExtract = 
-                        Emitter.emit (sprintf "    %s = func.call @extract_result_length(%s) : (i32) -> i32" 
-                                    lengthId matchValueId) stateWithLength
-                    
-                    // Bind length variable in scope
-                    let stateWithBinding = SSA.bindVariable lengthName lengthId stateWithLengthExtract
-                    
-                    // Special handling for spanToString with UnitLiteral
+            | Some(PatternConstructor("Ok", [PatternVariable lengthName]), okExpr) ->
+                // Extract length parameter
+                let (lengthId, stateWithLength) = SSA.generateValue "length" state6
+                let stateWithLengthExtract = 
+                    Emitter.emit (sprintf "    %s = func.call @extract_result_length(%s) : (i32) -> i32" 
+                                lengthId matchValueId) stateWithLength
+                
+                // Bind length variable in scope
+                let stateWithBinding = SSA.bindVariable lengthName lengthId stateWithLengthExtract
+                
+                // Check for spanToString with UnitLiteral pattern
+                let (okResultId, stateAfterExpr) =
                     match okExpr with
                     | Application(Variable "spanToString", [Literal UnitLiteral]) ->
-                        // Generate span from buffer and length
+                        // For spanToString with UnitLiteral, create span from buffer and length
                         let (spanId, stateWithSpan) = SSA.generateValue "span" stateWithBinding
                         let stateWithSpanCreate = 
                             Emitter.emit (sprintf "    %s = func.call @create_span(%s, %s) : (memref<?xi8>, i32) -> memref<?xi8>" 
                                         spanId bufferValue lengthId) stateWithSpan
-                        
-                        // Store result
-                        let stateWithResultStore = 
-                            Emitter.emit (sprintf "    %s = %s : i32" resultId spanId) stateWithSpanCreate
-                        
-                        // Jump to end
-                        Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
+                        (spanId, stateWithSpanCreate)
+                    
+                    | _ -> 
+                        // For other expressions, use the standard conversion
+                        convertExpressionFn okExpr stateWithBinding
+                
+                // Store result and jump to end
+                let stateWithResultStore = 
+                    Emitter.emit (sprintf "    %s = %s : memref<?xi8>" resultId okResultId) stateAfterExpr
+                
+                Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
+                
+            | _ ->
+                // Default case if Ok pattern doesn't match expected structure
+                let (defaultValue, stateWithDefault) = Emitter.constant "0" (Integer 32) state6
+                let stateWithStore = 
+                    Emitter.emit (sprintf "    %s = %s : i32" resultId defaultValue) stateWithDefault
+                Emitter.emit (sprintf "    br ^%s" endLabel) stateWithStore
         
         // Process Error branch
         let errorCase = 
