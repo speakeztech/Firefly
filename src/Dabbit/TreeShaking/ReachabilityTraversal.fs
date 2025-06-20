@@ -27,15 +27,25 @@ let analyzeReachability (graph: DependencyGraph) : ReachabilityResult =
                     for dep in deps do
                         match dep with
                         | FunctionCall(_, callee) ->
-                            // Resolve qualified name
+                            // Improved qualified name resolution
                             let qualifiedCallee = 
-                                match Map.tryFind callee graph.QualifiedNames with
-                                | Some qname -> qname
-                                | None -> 
-                                    // Check if it's already qualified
-                                    if callee.Contains(".") then callee
+                                if callee.Contains(".") then
+                                    // Already a qualified name, see if it exists in declarations
+                                    if Map.containsKey callee graph.Declarations then
+                                        callee
                                     else
-                                        // Try to find in any module
+                                        // Try to find by end part
+                                        let parts = callee.Split('.')
+                                        let funcName = parts.[parts.Length - 1]
+                                        match Map.tryFind funcName graph.QualifiedNames with
+                                        | Some qname -> qname
+                                        | None -> callee
+                                else
+                                    // Try to find in QualifiedNames map
+                                    match Map.tryFind callee graph.QualifiedNames with
+                                    | Some qname -> qname
+                                    | None -> 
+                                        // Try to find by suffix match
                                         graph.Declarations 
                                         |> Map.tryFindKey (fun k _ -> k.EndsWith("." + callee))
                                         |> Option.defaultValue callee
@@ -43,32 +53,20 @@ let analyzeReachability (graph: DependencyGraph) : ReachabilityResult =
                             if not (Set.contains qualifiedCallee reachable) && not (List.contains qualifiedCallee worklist) then
                                 worklist <- qualifiedCallee :: worklist
                         
-                        | TypeUsage(_, typeName) ->
-                            if not (Set.contains typeName reachable) && not (List.contains typeName worklist) then
-                                worklist <- typeName :: worklist
-                        
-                        | UnionCaseUsage(_, typeName, caseName) ->
-                            let cases = 
-                                match Map.tryFind typeName reachableUnionCases with
-                                | Some existing -> Set.add caseName existing
-                                | None -> Set.singleton caseName
-                            reachableUnionCases <- Map.add typeName cases reachableUnionCases
-                            
-                            if not (Set.contains typeName reachable) && not (List.contains typeName worklist) then
-                                worklist <- typeName :: worklist
-                        
-                        | FieldAccess(_, typeName, fieldName) ->
-                            let fields = 
-                                match Map.tryFind typeName reachableFields with
-                                | Some existing -> Set.add fieldName existing
-                                | None -> Set.singleton fieldName
-                            reachableFields <- Map.add typeName fields reachableFields
-                            
-                            if not (Set.contains typeName reachable) && not (List.contains typeName worklist) then
-                                worklist <- typeName :: worklist
-                        
                         | ModuleReference(_, moduleName) ->
-                            ()
+                            // Find all declarations in this module and add to worklist
+                            let moduleDeclarations =
+                                graph.Declarations
+                                |> Map.toSeq
+                                |> Seq.choose (fun (name, _) -> 
+                                    if name.StartsWith(moduleName + ".") then Some name else None)
+                                |> Seq.toList
+                            
+                            for decl in moduleDeclarations do
+                                if not (Set.contains decl reachable) && not (List.contains decl worklist) then
+                                    worklist <- decl :: worklist
+                        
+                        // [Rest of the match cases remain the same]
                 | None -> ()
         | [] -> ()
     

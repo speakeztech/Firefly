@@ -88,7 +88,32 @@ module TypeMapping =
 /// Expression conversion functions - COMPLETE MODULE WITH PROPER ORDERING
 module ExpressionMapping =
     
-    let rec mapExpression (expr: SynExpr) : OakExpression =
+    // Forward declaration for mutual recursion
+    let rec mapExpression (expr: SynExpr) : OakExpression = 
+        mapExpressionImpl expr
+        
+    and mapPattern (pat: SynPat) : OakPattern =
+        match pat with
+        | SynPat.Named(synIdent, _, _, _) ->
+            let ident = AstHelpers.extractIdent synIdent
+            PatternVariable(AstHelpers.getIdentifierName ident)
+        | SynPat.Wild(_) ->
+            PatternWildcard
+        | SynPat.Const(constant, _) ->
+            PatternLiteral(TypeMapping.mapLiteral constant)
+        | SynPat.LongIdent(longDotId, _, _, args, _, _) ->
+            let idents = longDotId |> AstHelpers.extractLongIdent
+            let name = AstHelpers.getQualifiedName idents
+            match args with
+            | SynArgPats.Pats pats ->
+                let patterns = pats |> List.map mapPattern
+                PatternConstructor(name, patterns)
+            | _ ->
+                PatternConstructor(name, [])
+        | _ ->
+            PatternWildcard
+            
+    and mapExpressionImpl (expr: SynExpr) : OakExpression =
         try
             match expr with
             | SynExpr.Match(_, expr, clauses, _, _) ->
@@ -257,27 +282,6 @@ module ExpressionMapping =
         else
             mapExpression expr
 
-    and mapPattern (pat: SynPat) : OakPattern =
-        match pat with
-        | SynPat.Named(synIdent, _, _, _) ->
-            let ident = AstHelpers.extractIdent synIdent
-            PatternVariable(AstHelpers.getIdentifierName ident)
-        | SynPat.Wild(_) ->
-            PatternWildcard
-        | SynPat.Const(constant, _) ->
-            PatternLiteral(TypeMapping.mapLiteral constant)
-        | SynPat.LongIdent(longDotId, _, _, args, _, _) ->
-            let idents = longDotId |> AstHelpers.extractLongIdent
-            let name = AstHelpers.getQualifiedName idents
-            match args with
-            | SynArgPats.Pats pats ->
-                let patterns = pats |> List.map mapPattern
-                PatternConstructor(name, patterns)
-            | _ ->
-                PatternConstructor(name, [])
-        | _ ->
-            PatternWildcard
-
 /// Declaration mapping functions  
 module DeclarationMapping =
     
@@ -374,65 +378,126 @@ module ModuleMapping =
         with
         | _ -> { Name = "_module_"; Declarations = [] }
     
-    let extractModulesFromParseTree (parseTree: ParsedInput option) : OakModule list =
+    let extractModulesFromParseTree (parseTree: ParsedInput) : OakModule list =
         try
             match parseTree with
-            | Some(ParsedInput.ImplFile(implFile)) ->
+            | ParsedInput.ImplFile(implFile) ->
                 try
                     let (ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) = implFile
                     if modules.IsEmpty then []
                     else modules |> List.map mapModule
                 with
                 | _ -> []
-            | Some(ParsedInput.SigFile(_)) -> []
-            | None -> []
+            | ParsedInput.SigFile(_) -> []
         with
         | _ -> []
 
 /// Helper function to generate F# AST text representation
-let generateFSharpASTText (parseTree: ParsedInput option) : string =
+let generateFSharpASTText (parseTree: ParsedInput) : string =
     try
-        match parseTree with
-        | Some tree ->
-            // Create a simplified text representation of the F# AST
-            sprintf "%A" tree
-        | None -> "No F# AST available"
+        // Create a simplified text representation of the F# AST
+        sprintf "%A" parseTree
     with
     | ex -> sprintf "Error generating F# AST text: %s" ex.Message
+
+/// Helper function to extract dependencies from open declarations only (simplified)
+let extractDependenciesFromAST (parseTree: ParsedInput) : string list =
+    match parseTree with
+    | ParsedInput.ImplFile(implFile) ->
+        let (ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) = implFile
+        
+        // Skip hash directives for now - just focus on open statements
+        // Define known libraries
+        let knownLibraries = [
+            "Alloy.Memory", "Memory.fs"
+            "Alloy.IO", "IO.fs"
+            "Alloy.IO.Console", "Console.fs"
+        ]
+        
+        // Process modules for open statements
+        let openPaths =
+            modules
+            |> List.collect (fun mdl ->
+                match mdl with 
+                | SynModuleOrNamespace(_, _, _, decls, _, _, _, _, _) ->
+                    decls |> List.choose (function
+                        | SynModuleDecl.Open(target, _) ->
+                            match target with
+                            | SynOpenDeclTarget.ModuleOrNamespace(SynLongIdent(idents, _, _), _) ->
+                                let moduleName = idents |> List.map (fun id -> id.idText) |> String.concat "."
+                                knownLibraries 
+                                |> List.tryPick (fun (lib, path) -> 
+                                    if lib.StartsWith(moduleName) then Some path 
+                                    else None)
+                            | _ -> None
+                        | _ -> None))
+        
+        // Return just the open paths for now
+        openPaths
+    | _ -> []
 
 /// Single unified conversion function with minimal output
 let parseAndConvertToOakAst (inputPath: string) (sourceCode: string) : ASTConversionResult =
     try
         let sourceText = SourceText.ofString sourceCode
         
+        // Get directory for resolving relative paths
+        let baseDirectory = Path.GetDirectoryName(inputPath)
+        
+        // Create checker instance that maintains state between files
         let checker = FSharp.Compiler.CodeAnalysis.FSharpChecker.Create(keepAssemblyContents = true)
         let parsingOptions = { 
             FSharp.Compiler.CodeAnalysis.FSharpParsingOptions.Default with
                 SourceFiles = [|Path.GetFileName(inputPath)|]
-                ConditionalDefines = []
+                ConditionalDefines = ["INTERACTIVE"] // Add INTERACTIVE define to match .fsx behavior
                 ApplyLineDirectives = false
         }
         
+        // Parse main file
         let parseResults = checker.ParseFile(inputPath, sourceText, parsingOptions) |> Async.RunSynchronously
         
-        // Process diagnostics quietly
+        // Process diagnostics
         let diagnostics = 
             if parseResults.Diagnostics.Length = 0 then []
             else parseResults.Diagnostics |> Array.map (fun diag -> diag.Message) |> Array.toList
         
-        // Generate F# AST text representation
-        let fsharpAstText = generateFSharpASTText (Some parseResults.ParseTree)
+        // Extract potential dependencies from open declarations
+        let dependencies = extractDependenciesFromAST parseResults.ParseTree
         
-        // Extract modules and create Oak AST
-        let modules = ModuleMapping.extractModulesFromParseTree (Some parseResults.ParseTree)
-        let oakProgram = { Modules = modules }
+        // Parse dependencies and combine modules
+        let allModules = 
+            // Get modules from main file
+            let mainModules = ModuleMapping.extractModulesFromParseTree parseResults.ParseTree
+            
+            // Process dependencies
+            let dependencyModules =
+                dependencies
+                |> List.choose (fun depPath ->
+                    try
+                        let fullPath = 
+                            if Path.IsPathRooted(depPath) then depPath
+                            else Path.Combine(baseDirectory, depPath)
+                            
+                        if File.Exists(fullPath) then
+                            let depSourceText = SourceText.ofString (File.ReadAllText(fullPath))
+                            let depParseResults = checker.ParseFile(fullPath, depSourceText, parsingOptions) |> Async.RunSynchronously
+                            Some (ModuleMapping.extractModulesFromParseTree depParseResults.ParseTree)
+                        else None
+                    with _ -> None)
+                |> List.collect id
+            
+            // Combine all modules
+            mainModules @ dependencyModules
+        
+        let fsharpAstText = generateFSharpASTText parseResults.ParseTree
+        let oakProgram = { Modules = allModules }
         
         { 
             OakProgram = oakProgram
             Diagnostics = diagnostics
             FSharpASTText = fsharpAstText
         }
-        
+    
     with parseEx ->
         let parseError = sprintf "F# parsing failed: %s" parseEx.Message
         { 

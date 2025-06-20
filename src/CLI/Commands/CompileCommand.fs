@@ -45,6 +45,7 @@ type CompilationContext = {
     KeepIntermediates: bool
     Verbose: bool
     NoExternalTools: bool
+    LibraryPaths: string list  // New field for library paths
 }
 
 /// Gets the default target for the current platform
@@ -321,6 +322,12 @@ let private createCompilationContext (args: ParseResults<CompileArgs>) : Compile
         let verbose = args.Contains Verbose
         let noExternalTools = args.Contains No_External_Tools
         
+        // Add library paths to search for dependencies
+        let libraryPaths = [
+            Path.GetDirectoryName(inputPath);  // Same directory as input file
+            Path.Combine(Path.GetDirectoryName(inputPath), "lib", "Alloy")  // Alloy library path
+        ]
+        
         // Validate inputs
         let! _ = validateInputFile inputPath
         let! _ = validateOutputPath outputPath
@@ -336,6 +343,7 @@ let private createCompilationContext (args: ParseResults<CompileArgs>) : Compile
             printfn "Input: %s → Output: %s" (Path.GetFileName(inputPath)) (Path.GetFileName(outputPath))
             printfn "Target: %s, Optimize: %s" target optimizeStr
             printfn "Configuration: %s v%s" config.PackageName config.Version
+            printfn "Library search paths: %s" (String.concat ", " libraryPaths)
         
         let ctx = {
             InputPath = inputPath
@@ -347,6 +355,7 @@ let private createCompilationContext (args: ParseResults<CompileArgs>) : Compile
             KeepIntermediates = keepIntermediates
             Verbose = verbose
             NoExternalTools = noExternalTools
+            LibraryPaths = libraryPaths  // Add this field to CompilationContext
         }
         
         return (ctx, sourceCode)
@@ -358,7 +367,17 @@ let compile (args: ParseResults<CompileArgs>) =
     
     match createCompilationContext args with
     | Success (ctx, sourceCode) ->
-        match runCompilationPipeline ctx sourceCode with
+        // Create intermediates directory if keeping intermediates
+        let intermediatesDir = 
+            if ctx.KeepIntermediates then
+                let dir = Path.Combine(Path.GetDirectoryName(ctx.OutputPath), "intermediates")
+                if not (Directory.Exists(dir)) then
+                    Directory.CreateDirectory(dir) |> ignore
+                Some dir
+            else
+                None
+        
+        match runCompilationPipeline ctx sourceCode intermediatesDir with
         | Success exitCode -> exitCode
         | CompilerFailure errors ->
             errors |> List.iter (fun error -> printfn "Error: %s" (error.ToString()))

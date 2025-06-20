@@ -46,7 +46,8 @@ module PipelineExecution =
                 (phaseName: string) 
                 (transform: 'Input -> CompilerResult<'Output>) 
                 (input: 'Input)
-                (diagnostics: (string * string) list) : CompilerResult<'Output * (string * string) list> =
+                (diagnostics: (string * string) list)
+                (intermediatesDir: string option) : CompilerResult<'Output * (string * string) list> =
         
         let startDiagnostic = (phaseName, sprintf "Starting %s phase" phaseName)
         let updatedDiagnostics = startDiagnostic :: diagnostics
@@ -59,6 +60,17 @@ module PipelineExecution =
         | CompilerFailure errors ->
             let errorMessages = errors |> List.map (fun e -> e.ToString())
             let errorDiagnostic = (phaseName, sprintf "Failed in %s phase: %s" phaseName (String.concat "; " errorMessages))
+            
+            // Even on failure, save any input that can be serialized for debugging
+            intermediatesDir |> Option.iter (fun dir ->
+                try
+                    // Create a file with the error details
+                    let errorFile = Path.Combine(dir, sprintf "%s.error.txt" phaseName)
+                    File.WriteAllText(errorFile, String.concat Environment.NewLine errorMessages)
+                    printfn "✓ Saved error details to %s" (Path.GetFileName(errorFile))
+                with _ -> ()
+            )
+            
             CompilerFailure errors
     
     /// Saves intermediate output for debugging
@@ -66,17 +78,56 @@ module PipelineExecution =
                     (phaseName: string) 
                     (output: 'Output) 
                     (toString: 'Output -> string)
-                    (phaseOutputs: Map<string, string>) : Map<string, string> =
+                    (phaseOutputs: Map<string, string>)
+                    (intermediatesDir: string option) : Map<string, string> =
         
         let outputStr = toString output
+        
+        // Immediately write the output to a file if intermediatesDir is provided
+        intermediatesDir |> Option.iter (fun dir ->
+            try
+                let filename = sprintf "%s.%s" 
+                                (match phaseName with
+                                 | "parsing" -> "fcs"
+                                 | "tree-shaking" -> "ra.oak"
+                                 | "closure-elimination" -> "closures.oak"
+                                 | "union-layout" -> "unions.oak"
+                                 | "mlir-generation" -> "mlir"
+                                 | "mlir-lowering" -> "lowered.mlir"
+                                 | _ -> phaseName)
+                                phaseName
+                let outputPath = Path.Combine(dir, filename)
+                File.WriteAllText(outputPath, outputStr)
+                printfn "  Wrote intermediate file: %s" (Path.GetFileName(outputPath))
+            with ex -> 
+                printfn "  Warning: Could not write intermediate file for %s: %s" phaseName ex.Message
+        )
+        
         Map.add phaseName outputStr phaseOutputs
 
 /// Core transformations using unified pipeline
 module Transformations =
     /// Converts F# source to Oak AST using the unified function
-    let sourceToOak (sourceFile: string) (sourceCode: string) : CompilerResult<OakProgram * string * string> =
+    let sourceToOak (sourceFile: string) (sourceCode: string) (intermediatesDir: string option) : CompilerResult<OakProgram * string * string> =
         try
             let result = AstConverter.parseAndConvertToOakAst sourceFile sourceCode
+            
+            // Immediately write intermediate files
+            intermediatesDir |> Option.iter (fun dir ->
+                try
+                    let baseName = Path.GetFileNameWithoutExtension(sourceFile)
+                    let fcsPath = Path.Combine(dir, baseName + ".fcs")
+                    let oakPath = Path.Combine(dir, baseName + ".oak")
+                    
+                    Directory.CreateDirectory(dir) |> ignore
+                    File.WriteAllText(fcsPath, result.FSharpASTText)
+                    File.WriteAllText(oakPath, sprintf "%A" result.OakProgram)
+                    
+                    printfn "  Wrote F# AST to: %s" (Path.GetFileName(fcsPath))
+                    printfn "  Wrote Oak AST to: %s" (Path.GetFileName(oakPath))
+                with ex ->
+                    printfn "  Warning: Could not write parsing outputs: %s" ex.Message
+            )
             
             if result.OakProgram.Modules.IsEmpty && result.Diagnostics.Length > 0 then
                 CompilerFailure [SyntaxError(
@@ -93,19 +144,47 @@ module Transformations =
                 ["parsing"; ex.StackTrace])]
     
     /// Apply tree-shaking to Oak AST
-    let applyTreeShaking (program: OakProgram) : CompilerResult<OakProgram * string> =
+    let applyTreeShaking (program: OakProgram) (intermediatesDir: string option) : CompilerResult<OakProgram * string> =
         try
+            // Debug output for module information
+            printfn "Tree shaking analysis: Found %d modules" program.Modules.Length
+            for m in program.Modules do
+                printfn "  Module: %s with %d declarations" m.Name m.Declarations.Length
+            
             // Build dependency graph
             let graph = buildDependencyGraph program
             
+            // Debug output for dependency graph
+            printfn "Dependency graph built: %d declarations, %d qualified names" 
+                graph.Declarations.Count graph.QualifiedNames.Count
+            
             // Perform reachability analysis
             let reachabilityResult = analyzeReachability graph
+            
+            // Debug output for reachability
+            printfn "Reachability analysis: %d of %d declarations reachable" 
+                reachabilityResult.ReachableDeclarations.Count graph.Declarations.Count
             
             // Prune unreachable code
             let prunedProgram = pruneUnreachableCode program reachabilityResult
             
             // Generate diagnostic report
             let diagnostics = generateDiagnosticReport reachabilityResult.EliminationStats
+            
+            // Immediately write intermediate files
+            intermediatesDir |> Option.iter (fun dir ->
+                try
+                    let treeshakePath = Path.Combine(dir, "treeshake.log")
+                    let raOakPath = Path.Combine(dir, "ra.oak")
+                    
+                    File.WriteAllText(treeshakePath, diagnostics)
+                    File.WriteAllText(raOakPath, sprintf "%A" prunedProgram)
+                    
+                    printfn "  Wrote tree shaking log to: %s" (Path.GetFileName(treeshakePath))
+                    printfn "  Wrote pruned Oak AST to: %s" (Path.GetFileName(raOakPath))
+                with ex ->
+                    printfn "  Warning: Could not write tree shaking outputs: %s" ex.Message
+            )
             
             printfn "%s" diagnostics
             Success (prunedProgram, diagnostics)
@@ -114,25 +193,47 @@ module Transformations =
             CompilerFailure [ConversionError("tree-shaking", "Oak AST", "pruned Oak AST", ex.Message)]
     
     /// Applies closure elimination transformation
-    let applyClosure (program: OakProgram) : CompilerResult<OakProgram> =
+    let applyClosure (program: OakProgram) (intermediatesDir: string option) : CompilerResult<OakProgram> =
         match eliminateClosures program with
         | Success transformedProgram ->
             // Add diagnostic info about what was transformed
             printfn "  Closure analysis: No closures found to eliminate"
+            
+            // Immediately write intermediate file
+            intermediatesDir |> Option.iter (fun dir ->
+                try
+                    let closuresPath = Path.Combine(dir, "closures.oak")
+                    File.WriteAllText(closuresPath, sprintf "%A" transformedProgram)
+                    printfn "  Wrote closure-transformed Oak AST to: %s" (Path.GetFileName(closuresPath))
+                with ex ->
+                    printfn "  Warning: Could not write closure elimination output: %s" ex.Message
+            )
+            
             Success transformedProgram
         | CompilerFailure errors -> CompilerFailure errors
     
     /// Applies union layout transformation
-    let applyUnionLayout (program: OakProgram) : CompilerResult<OakProgram> =
+    let applyUnionLayout (program: OakProgram) (intermediatesDir: string option) : CompilerResult<OakProgram> =
         match compileFixedLayouts program with
         | Success transformedProgram ->
             // Add diagnostic info about what was transformed
             printfn "  Union analysis: No discriminated unions found to optimize"
+            
+            // Immediately write intermediate file
+            intermediatesDir |> Option.iter (fun dir ->
+                try
+                    let unionsPath = Path.Combine(dir, "unions.oak")
+                    File.WriteAllText(unionsPath, sprintf "%A" transformedProgram)
+                    printfn "  Wrote union-transformed Oak AST to: %s" (Path.GetFileName(unionsPath))
+                with ex ->
+                    printfn "  Warning: Could not write union layout output: %s" ex.Message
+            )
+            
             Success transformedProgram
         | CompilerFailure errors -> CompilerFailure errors
     
     /// Generates MLIR from Oak AST
-    let generateMLIR (program: OakProgram) : CompilerResult<string> =
+    let generateMLIR (program: OakProgram) (intermediatesDir: string option) : CompilerResult<string> =
         match generateMLIRModuleText program with
         | Success mlirText ->
             // Count functions generated
@@ -141,17 +242,48 @@ module Transformations =
                 |> Array.filter (fun line -> line.Trim().StartsWith("func.func @"))
                 |> Array.length
             printfn "  Generated MLIR: %d functions" functionCount
+            
+            // Immediately write intermediate file
+            intermediatesDir |> Option.iter (fun dir ->
+                try
+                    let mlirPath = Path.Combine(dir, "output.mlir")
+                    File.WriteAllText(mlirPath, mlirText)
+                    printfn "  Wrote MLIR to: %s" (Path.GetFileName(mlirPath))
+                with ex ->
+                    printfn "  Warning: Could not write MLIR output: %s" ex.Message
+            )
+            
             Success mlirText
         | CompilerFailure errors -> CompilerFailure errors
     
     /// Lowers MLIR to LLVM dialect
-    let lowerMLIR (mlirText: string) : CompilerResult<string> =
-        Core.Conversion.LoweringPipeline.applyLoweringPipeline mlirText
+    let lowerMLIR (mlirText: string) (intermediatesDir: string option) : CompilerResult<string> =
+        match Core.Conversion.LoweringPipeline.applyLoweringPipeline mlirText with
+        | Success loweredText ->
+            // Immediately write intermediate file
+            intermediatesDir |> Option.iter (fun dir ->
+                try
+                    let loweredPath = Path.Combine(dir, "lowered.mlir")
+                    File.WriteAllText(loweredPath, loweredText)
+                    printfn "  Wrote lowered MLIR to: %s" (Path.GetFileName(loweredPath))
+                with ex ->
+                    printfn "  Warning: Could not write lowered MLIR output: %s" ex.Message
+            )
+            
+            Success loweredText
+        | CompilerFailure errors -> CompilerFailure errors
 
 /// Main translation pipeline - clean, focused version
-let executeTranslationPipeline (sourceFile: string) (sourceCode: string) : CompilerResult<TranslationPipelineOutput> =
+let executeTranslationPipeline (sourceFile: string) (sourceCode: string) (intermediatesDir: string option) : CompilerResult<TranslationPipelineOutput> =
     printfn "=== Firefly Translation Pipeline ==="
     printfn "Source: %s (%d chars)" (Path.GetFileName(sourceFile)) sourceCode.Length
+    
+    // Create intermediates directory if specified
+    intermediatesDir |> Option.iter (fun dir ->
+        if not (Directory.Exists(dir)) then
+            Directory.CreateDirectory(dir) |> ignore
+            printfn "Created intermediates directory: %s" dir
+    )
     
     let initialDiagnostics = [("pipeline", "Starting unified translation pipeline")]
     let initialPhaseOutputs = Map.empty<string, string>
@@ -159,9 +291,10 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) : Compi
     try
         // Step 1: Parse F# source to Oak AST
         match PipelineExecution.runPhase "parsing" 
-            (Transformations.sourceToOak sourceFile) 
+            (Transformations.sourceToOak sourceFile intermediatesDir) 
             sourceCode 
-            initialDiagnostics with
+            initialDiagnostics
+            intermediatesDir with
         | Success (parseResult, diagnostics1) ->
             
             let (oakProgram, oakAstText, fsharpAstText) = parseResult
@@ -171,11 +304,12 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) : Compi
                 |> Map.add "oak-ast" oakAstText
             printfn "✓ Parsing completed"
             
-            // Step 2: Apply tree-shaking (NEW)
+            // Step 2: Apply tree-shaking
             match PipelineExecution.runPhase "tree-shaking" 
-                Transformations.applyTreeShaking 
+                (fun prog -> Transformations.applyTreeShaking prog intermediatesDir) 
                 oakProgram 
-                diagnostics1 with
+                diagnostics1
+                intermediatesDir with
             | Success ((prunedProgram, treeDiagnostics), diagnostics2) ->
                 
                 let prunedOakText = sprintf "%A" prunedProgram
@@ -187,44 +321,68 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) : Compi
                 
                 // Step 3: Apply closure elimination
                 match PipelineExecution.runPhase "closure-elimination" 
-                    Transformations.applyClosure 
+                    (fun prog -> Transformations.applyClosure prog intermediatesDir) 
                     prunedProgram 
-                    diagnostics2 with
+                    diagnostics2
+                    intermediatesDir with
                 | Success (transformedProgram1, diagnostics3) ->
                     
                     let closureTransformedText = sprintf "%A" transformedProgram1
-                    let phaseOutputs3 = PipelineExecution.savePhaseOutput "closure-transformed" closureTransformedText id phaseOutputs2
+                    let phaseOutputs3 = PipelineExecution.savePhaseOutput 
+                                            "closure-transformed" 
+                                            closureTransformedText 
+                                            id 
+                                            phaseOutputs2
+                                            intermediatesDir
                     printfn "✓ Closure elimination completed"
                     
                     // Step 4: Apply union layout transformation
                     match PipelineExecution.runPhase "union-layout" 
-                        Transformations.applyUnionLayout 
+                        (fun prog -> Transformations.applyUnionLayout prog intermediatesDir) 
                         transformedProgram1 
-                        diagnostics3 with
+                        diagnostics3
+                        intermediatesDir with
                     | Success (transformedProgram2, diagnostics4) ->
                         
                         let layoutTransformedText = sprintf "%A" transformedProgram2
-                        let phaseOutputs4 = PipelineExecution.savePhaseOutput "layout-transformed" layoutTransformedText id phaseOutputs3
+                        let phaseOutputs4 = PipelineExecution.savePhaseOutput 
+                                                "layout-transformed" 
+                                                layoutTransformedText 
+                                                id 
+                                                phaseOutputs3
+                                                intermediatesDir
                         printfn "✓ Union layout completed"
                         
                         // Step 5: Generate MLIR
                         match PipelineExecution.runPhase "mlir-generation" 
-                            Transformations.generateMLIR 
+                            (fun prog -> Transformations.generateMLIR prog intermediatesDir) 
                             transformedProgram2 
-                            diagnostics4 with
+                            diagnostics4
+                            intermediatesDir with
                         | Success (mlirText, diagnostics5) ->
                             
-                            let phaseOutputs5 = PipelineExecution.savePhaseOutput "mlir" mlirText id phaseOutputs4
+                            let phaseOutputs5 = PipelineExecution.savePhaseOutput 
+                                                    "mlir" 
+                                                    mlirText 
+                                                    id 
+                                                    phaseOutputs4
+                                                    intermediatesDir
                             printfn "✓ MLIR generated (%d chars)" mlirText.Length
                             
                             // Step 6: Lower MLIR to LLVM dialect
                             match PipelineExecution.runPhase "mlir-lowering" 
-                                Transformations.lowerMLIR 
+                                (fun text -> Transformations.lowerMLIR text intermediatesDir) 
                                 mlirText 
-                                diagnostics5 with
+                                diagnostics5
+                                intermediatesDir with
                             | Success (loweredMlir, diagnostics6) ->
                                 
-                                let phaseOutputs6 = PipelineExecution.savePhaseOutput "lowered-mlir" loweredMlir id phaseOutputs5
+                                let phaseOutputs6 = PipelineExecution.savePhaseOutput 
+                                                        "lowered-mlir" 
+                                                        loweredMlir 
+                                                        id 
+                                                        phaseOutputs5
+                                                        intermediatesDir
                                 printfn "✓ MLIR lowering completed (%d chars)" loweredMlir.Length
                                 
                                 let successfulPhases = 
@@ -259,6 +417,16 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) : Compi
             CompilerFailure errors
     with ex ->
         printfn "✗ Pipeline exception: %s" ex.Message
+        
+        // Try to save exception details to file
+        intermediatesDir |> Option.iter (fun dir ->
+            try
+                let errorFile = Path.Combine(dir, "pipeline-error.txt")
+                File.WriteAllText(errorFile, sprintf "Pipeline exception: %s\n\nStack trace:\n%s" ex.Message ex.StackTrace)
+                printfn "✓ Saved error details to %s" (Path.GetFileName(errorFile))
+            with _ -> ()
+        )
+        
         CompilerFailure [ConversionError(
             "pipeline-execution", 
             "translation pipeline", 
@@ -267,10 +435,10 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) : Compi
 
 /// Simple entry point for translation (maintains backward compatibility)
 let translateFsToMLIR (sourceFile: string) (sourceCode: string) : CompilerResult<string> =
-    match executeTranslationPipeline sourceFile sourceCode with
+    match executeTranslationPipeline sourceFile sourceCode None with
     | Success pipelineOutput -> Success pipelineOutput.FinalMLIR
     | CompilerFailure errors -> CompilerFailure errors
 
 /// Entry point with full diagnostic information (primary interface)
-let translateFsToMLIRWithDiagnostics (sourceFile: string) (sourceCode: string) : CompilerResult<TranslationPipelineOutput> =
-    executeTranslationPipeline sourceFile sourceCode
+let translateFsToMLIRWithDiagnostics (sourceFile: string) (sourceCode: string) (intermediatesDir: string option) : CompilerResult<TranslationPipelineOutput> =
+    executeTranslationPipeline sourceFile sourceCode intermediatesDir

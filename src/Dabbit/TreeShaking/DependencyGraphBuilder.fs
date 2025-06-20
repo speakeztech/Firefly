@@ -15,8 +15,30 @@ let rec analyzeDependencies (expr: OakExpression) (state: GraphBuilderState) : S
     match expr with
     | Variable name ->
         match state.CurrentDeclaration with
-        | Some currentDecl -> Set.singleton (FunctionCall(currentDecl, name))
+        | Some currentDecl -> 
+            // Check if this is a qualified name with a module prefix
+            if name.Contains(".") then
+                // Handle module.function references
+                let parts = name.Split('.')
+                if parts.Length >= 2 then
+                    let moduleName = parts |> Array.take (parts.Length - 1) |> Array.toList |> String.concat "."
+                    let funcName = parts.[parts.Length - 1]
+                    Set.singleton (FunctionCall(currentDecl, name))
+                    |> Set.add (ModuleReference(currentDecl, moduleName))
+                else
+                    Set.singleton (FunctionCall(currentDecl, name))
+            else
+                // Try to resolve via QualifiedNames map or direct call
+                Set.singleton (FunctionCall(currentDecl, name))
         | None -> Set.empty
+
+    | Match(matchExpr, cases) ->
+        let exprDeps = analyzeDependencies matchExpr state
+        let casesDeps = 
+            cases 
+            |> List.map (fun (pattern, caseExpr) -> analyzeDependencies caseExpr state)
+            |> Set.unionMany
+        Set.union exprDeps casesDeps
     
     | Application(func, args) ->
         let funcDeps = analyzeDependencies func state
@@ -120,6 +142,26 @@ let analyzeDeclaration (decl: OakDeclaration) (state: GraphBuilderState) : Graph
         }
         { state with Graph = newGraph }
 
+/// Helper function to register all declarations first
+/// Note: This MUST be defined BEFORE buildDependencyGraph since it's used by it
+let registerDeclarations (graph: DependencyGraph) (oakModule: OakModule) =
+    oakModule.Declarations
+    |> List.fold (fun g decl ->
+        match decl with
+        | FunctionDecl(name, _, _, _) | ExternalDecl(name, _, _, _) | TypeDecl(name, _) -> 
+            let qualifiedName = sprintf "%s.%s" oakModule.Name name
+            { g with 
+                Declarations = Map.add qualifiedName decl g.Declarations
+                QualifiedNames = Map.add name qualifiedName g.QualifiedNames
+            }
+        | EntryPoint(_) -> 
+            let qualifiedName = sprintf "%s.main" oakModule.Name
+            { g with 
+                Declarations = Map.add qualifiedName decl g.Declarations
+                EntryPoints = Set.add qualifiedName g.EntryPoints 
+            }
+    ) graph
+
 /// Builds dependency graph for entire program
 let buildDependencyGraph (program: OakProgram) : DependencyGraph =
     let initialGraph = {
@@ -129,14 +171,26 @@ let buildDependencyGraph (program: OakProgram) : DependencyGraph =
         QualifiedNames = Map.empty
     }
 
+    // Add Alloy dependencies (expanded version with more comprehensive mappings)
     let addAlloyDependencies (graph: DependencyGraph) : DependencyGraph =
-        // Add common Alloy functions that might be called
+        // More comprehensive list of Alloy functions that might be called
         let alloyFunctions = [
+            // Memory module
             "stackBuffer", "Alloy.Memory"
             "spanToString", "Alloy.Memory"
+            "NativePtr.stackalloc", "Alloy.Memory"
+            "Span", "Alloy.Memory"
+            "Span.create", "Alloy.Memory"
+            "INativeBuffer", "Alloy.Memory"
+            "StackBuffer", "Alloy.Memory"
+            "StackBuffer.AsSpan", "Alloy.Memory"
+            
+            // IO module
             "prompt", "Alloy.IO.Console"
             "readInto", "Alloy.IO.Console"
+            "readLine", "Alloy.IO.Console"
             "writeLine", "Alloy.IO.Console"
+            "format", "Alloy.IO.String"
             "String.format", "Alloy.IO.String"
         ]
     
@@ -151,6 +205,7 @@ let buildDependencyGraph (program: OakProgram) : DependencyGraph =
         
         updatedGraph
     
+    // Improve module processing to better handle qualified names
     let processModule (graph: DependencyGraph) (oakModule: OakModule) =
         let initialState = {
             CurrentDeclaration = None
@@ -158,10 +213,25 @@ let buildDependencyGraph (program: OakProgram) : DependencyGraph =
             Graph = graph
         }
         
+        // Phase 1: First pass to register all declarations for proper qualified name resolution
+        let preregisteredGraph = registerDeclarations graph oakModule
+        
+        // Phase 2: Analyze dependencies after all declarations are registered
         let finalState = 
             oakModule.Declarations
-            |> List.fold (fun state decl -> analyzeDeclaration decl state) initialState
+            |> List.fold (fun state decl -> analyzeDeclaration decl { state with Graph = preregisteredGraph }) initialState
         
         finalState.Graph
     
-    program.Modules |> List.fold processModule initialGraph |> addAlloyDependencies
+    // First register all modules to build a complete declaration map
+    let graphWithDeclarations = 
+        program.Modules
+        |> List.fold (fun g m -> registerDeclarations g m) initialGraph
+    
+    // Then process dependencies
+    let graphWithDependencies =
+        program.Modules
+        |> List.fold processModule graphWithDeclarations
+    
+    // Add Alloy library dependencies
+    addAlloyDependencies graphWithDependencies
