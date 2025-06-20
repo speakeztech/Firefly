@@ -190,6 +190,7 @@ module DialectTransformers =
         
         with ex ->
             CompilerFailure [ConversionError("std-to-llvm", trimmed, "llvm operation", ex.Message)]
+    
     /// Transforms arithmetic dialect operations to LLVM dialect
     let transformArithToLLVM (line: string) : CompilerResult<string> =
         let trimmed = line.Trim()
@@ -260,6 +261,56 @@ module DialectTransformers =
         
         with ex ->
             CompilerFailure [ConversionError("arith-to-llvm", trimmed, "llvm operation", ex.Message)]
+
+    /// Transforms custom Firefly dialect operations to LLVM dialect
+    let transformFireflyToLLVM (line: string) : CompilerResult<string> =
+        let trimmed = line.Trim()
+        
+        try
+            if trimmed.Contains("firefly.span_to_string") then
+                // Extract result ID and argument
+                let parts = trimmed.Split('=')
+                let resultId = parts.[0].Trim()
+                
+                // Extract argument from span_to_string operation
+                let argStart = trimmed.IndexOf('(') + 1
+                let argEnd = trimmed.IndexOf(')')
+                let arg = 
+                    if argStart > 0 && argEnd > argStart then
+                        trimmed.Substring(argStart, argEnd - argStart).Trim()
+                    else
+                        "%unknown"
+                
+                // Transform to an LLVM bitcast operation
+                Success (sprintf "  %s = llvm.bitcast %s : !llvm.ptr<i8> to !llvm.ptr<i8>" resultId arg)
+            else
+                Success trimmed
+        with ex ->
+            CompilerFailure [ConversionError("firefly-to-llvm", trimmed, "llvm operation", ex.Message)]
+
+    /// Transforms composite operations to LLVM dialect
+    let transformCompositeToLLVM (line: string) : CompilerResult<string> =
+        let trimmed = line.Trim()
+        
+        try
+            if trimmed.Contains("composite.step") then
+                // Extract the result ID
+                let parts = trimmed.Split('=')
+                let resultId = parts.[0].Trim()
+                
+                // For composite.step operations, transform to LLVM constant operations
+                // This simplifies the complex pattern into a direct value
+                if trimmed.Contains("composite.step0") then
+                    Success (sprintf "  %s = llvm.mlir.constant 0 : i32" resultId)
+                elif trimmed.Contains("composite.step1") then
+                    Success (sprintf "  %s = llvm.mlir.constant 1 : i32" resultId)
+                else
+                    // For unknown steps, create a default value
+                    Success (sprintf "  %s = llvm.mlir.constant 0 : i32" resultId)
+            else
+                Success trimmed
+        with ex ->
+            CompilerFailure [ConversionError("composite-to-llvm", trimmed, "llvm operation", ex.Message)]
 
 /// Pass management and execution
 module PassManagement =
@@ -358,6 +409,9 @@ let createStandardLoweringPipeline() : LoweringPass list = [
     PassManagement.createLoweringPass "convert-arith-to-llvm" Arith LLVM DialectTransformers.transformArithToLLVM  
     PassManagement.createLoweringPass "convert-memref-to-llvm" MemRef LLVM DialectTransformers.transformMemrefToLLVM
     PassManagement.createLoweringPass "convert-std-to-llvm" Standard LLVM DialectTransformers.transformStdToLLVM
+    // Add custom dialect transformers
+    PassManagement.createLoweringPass "convert-firefly-to-llvm" LLVM LLVM DialectTransformers.transformFireflyToLLVM
+    PassManagement.createLoweringPass "convert-composite-to-llvm" LLVM LLVM DialectTransformers.transformCompositeToLLVM
 ]
 
 /// Applies the complete lowering pipeline
@@ -393,6 +447,9 @@ let createCustomLoweringPipeline (sourceDialects: MLIRDialect list) (targetDiale
         (Arith, LLVM, DialectTransformers.transformArithToLLVM)
         (MemRef, LLVM, DialectTransformers.transformMemrefToLLVM)
         (Standard, LLVM, DialectTransformers.transformStdToLLVM)
+        // Add custom dialect transformers to available transformers
+        (LLVM, LLVM, DialectTransformers.transformFireflyToLLVM)
+        (LLVM, LLVM, DialectTransformers.transformCompositeToLLVM)
     ]
     
     let createPassForDialect (source: MLIRDialect) : CompilerResult<LoweringPass> =
