@@ -57,3 +57,4 @@ nunit-*.xml
 .idea/encodings.xml
 .idea/indexLayout.xml
 .idea/vcs.xml
+src/directory_structure.txt
