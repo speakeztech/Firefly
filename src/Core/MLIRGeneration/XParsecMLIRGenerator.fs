@@ -3,6 +3,7 @@
 open System
 open System.Text
 open Dabbit.Parsing.OakAst
+open Dabbit.SymbolResolution.SymbolRegistry
 open Core.MLIRGeneration.TypeSystem
 open Core.MLIRGeneration.Operations
 open Core.MLIRGeneration.Dialect
@@ -18,6 +19,7 @@ type MLIRGenerationState = {
     StringConstants: Map<string, string>
     CurrentDialect: MLIRDialect
     ErrorContext: string list
+    SymbolRegistry: SymbolRegistry 
 }
 
 /// MLIR module output with complete module information
@@ -31,17 +33,22 @@ type MLIRModuleOutput = {
 
 /// Creates a clean initial state for MLIR generation
 let createInitialState () : MLIRGenerationState = 
-    {
-        SSACounter = 0
-        CurrentScope = Map.empty
-        ScopeStack = []
-        GeneratedOperations = []
-        ModuleLevelDeclarations = []
-        CurrentFunction = Option.None
-        StringConstants = Map.empty
-        CurrentDialect = Func
-        ErrorContext = []
-    }
+    match PublicInterface.createStandardRegistry() with
+    | Success registry -> 
+        {
+            SSACounter = 0
+            CurrentScope = Map.empty
+            ScopeStack = []
+            GeneratedOperations = []
+            ModuleLevelDeclarations = []
+            CurrentFunction = Option.None
+            StringConstants = Map.empty
+            CurrentDialect = Func
+            ErrorContext = []
+            SymbolRegistry = registry
+        }
+    | CompilerFailure _ ->
+        failwith "Failed to initialize symbol registry"
 
 /// Core SSA value and scope management functions
 module SSA = 
@@ -372,7 +379,7 @@ and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : strin
     
     | Application(func, args) ->
         match func with
-        // Handle pipe operator: x |> f becomes f(x)
+        // Handle pipe operator: x |> f becomes f(x) - Keep this as-is since it's F# language feature
         | Variable "op_PipeRight" ->
             match args with
             | [value; funcExpr] ->
@@ -386,43 +393,77 @@ and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : strin
                 let (dummyValue, state1) = SSA.generateValue "invalid_pipe" state
                 (dummyValue, state1)
         
-        // Handle various special functions
-        | Variable "Console.readLine" ->
-            convertConsoleReadLine args state
+        | Variable funcName ->
+            // Use registry-based resolution for all function calls
+            // First convert arguments
+            let rec processArgs (remainingArgs: OakExpression list) (currentState: MLIRGenerationState) (accArgs: string list) =
+                match remainingArgs with
+                | [] -> (List.rev accArgs, currentState)
+                | arg :: rest ->
+                    let (argValue, newState) = convertExpression arg currentState
+                    processArgs rest newState (argValue :: accArgs)
             
-        | Variable "NativePtr.stackalloc" ->
-            convertStackAllocation args state
+            let (argValues, state1) = processArgs args state []
             
-        | Variable "Span.create" | Variable "Span<byte>" ->
-            convertSpanCreation args state
+            // Generate result ID for the function call
+            let (resultId, state2) = SSA.generateValue "call" state1
             
-        | Variable "spanToString" ->
-            // Properly handle spanToString for the match expression
-            match args with
-            | [Literal UnitLiteral] ->
-                // This is a placeholder from AST conversion, likely from the match expression
-                // Look for span in current scope
-                match SSA.lookupVariable "span" state with
-                | Some spanValue -> (spanValue, state)
-                | None ->
-                    // Try to find a buffer in scope
-                    match SSA.lookupVariable "buffer" state with
-                    | Some bufferValue -> (bufferValue, state)
-                    | None ->
-                        let (dummyValue, state1) = SSA.generateValue "span_to_string" state
-                        (dummyValue, state1)
-            | _ ->
-                let (argValue, state1) = 
+            // Attempt registry-based resolution
+            match PublicInterface.resolveFunctionCall funcName argValues resultId state2.SymbolRegistry with
+            | Success (operations, updatedRegistry) ->
+                // Apply all generated operations to the state
+                let finalState = 
+                    operations
+                    |> List.fold (fun accState op -> Emitter.emit op accState) state2
+                    |> fun s -> { s with SymbolRegistry = updatedRegistry }
+                (resultId, finalState)
+                
+            | CompilerFailure errors ->
+                // Registry resolution failed - try legacy special case handling for transition period
+                match funcName with
+                | "Console.readLine" ->
+                    convertConsoleReadLine args state
+                    
+                | "NativePtr.stackalloc" ->
+                    convertStackAllocation args state
+                    
+                | "Span.create" | "Span<byte>" ->
+                    convertSpanCreation args state
+                    
+                | "spanToString" ->
+                    // Handle spanToString special case
                     match args with
-                    | [arg] -> convertExpression arg state
-                    | _ -> 
-                        let (dummyValue, dummyState) = SSA.generateValue "invalid_args" state
-                        (dummyValue, dummyState)
-                        
-                (argValue, state1)
+                    | [Literal UnitLiteral] ->
+                        // Look for span in current scope
+                        match SSA.lookupVariable "span" state with
+                        | Some spanValue -> (spanValue, state)
+                        | None ->
+                            // Try to find a buffer in scope
+                            match SSA.lookupVariable "buffer" state with
+                            | Some bufferValue -> (bufferValue, state)
+                            | None ->
+                                let (dummyValue, state1) = SSA.generateValue "span_to_string" state
+                                (dummyValue, state1)
+                    | _ ->
+                        let (argValue, state1) = 
+                            match args with
+                            | [arg] -> convertExpression arg state
+                            | _ -> 
+                                let (dummyValue, dummyState) = SSA.generateValue "invalid_args" state
+                                (dummyValue, dummyState)
+                        (argValue, state1)
+                
+                | _ ->
+                    // Generic function application fallback
+                    let (funcValue, state3) = convertExpression func state2
+                    let argStr = String.concat ", " argValues
+                    let state4 = Emitter.emit (sprintf "    %s = func.call @%s(%s) : (i32) -> i32" resultId funcValue argStr) state3
+                    // Add error context for unknown function
+                    let stateWithError = { state4 with ErrorContext = sprintf "Unknown function: %s" funcName :: state4.ErrorContext }
+                    (resultId, stateWithError)
         
         | _ ->
-            // Generic function application
+            // Non-variable function expressions (lambdas, complex expressions)
             let (funcValue, state1) = convertExpression func state
             
             let rec processArgs (remainingArgs: OakExpression list) (currentState: MLIRGenerationState) (accArgs: string list) =
@@ -434,7 +475,7 @@ and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : strin
             
             let (argValues, state2) = processArgs args state1 []
             
-            // Create function call
+            // Create function call for complex expressions
             let (resultId, state3) = SSA.generateValue "app" state2
             let argStr = String.concat ", " argValues
             let state4 = Emitter.emit (sprintf "    %s = func.call @%s(%s) : (i32) -> i32" resultId funcValue argStr) state3

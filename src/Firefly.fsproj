@@ -31,6 +31,9 @@
     <Compile Include="Core/MLIRGeneration/TypeSystem.fs" />
     <Compile Include="Core/MLIRGeneration/Operations.fs" />
 
+    <!-- Symbol Resolution System -->
+    <Compile Include="Dabbit/SymbolResolution/SymbolRegistry.fs" />
+
     <!-- XParsec-based MLIR Generation -->
     <Compile Include="Core/MLIRGeneration/XParsecMLIRGenerator.fs" />
 
