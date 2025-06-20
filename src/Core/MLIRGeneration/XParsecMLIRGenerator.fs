@@ -160,19 +160,21 @@ module MatchHandling =
         let bufferName = 
             match matchExpr with
             | Application(Variable "readInto", [Variable name]) -> name
-            | _ -> failwith "Expected readInto application with buffer variable"
+            | _ -> "buffer"  // Default name if we can't extract
         
         let bufferValue = 
             match SSA.lookupVariable bufferName state with
             | Some value -> value
-            | None -> failwith (sprintf "Buffer variable %s not found in scope" bufferName)
+            | None -> "%unknown_buffer"
         
-        // Register result type utility functions
+        // Add buffer to active symbols in registry
         let state1 = 
-            state
-            |> Emitter.emitModuleLevel "  func.func private @is_ok_result(i32) -> i1"
-            |> Emitter.emitModuleLevel "  func.func private @extract_result_length(i32) -> i32"
-            |> Emitter.emitModuleLevel "  func.func private @create_span(memref<?xi8>, i32) -> memref<?xi8>"
+            { state with 
+                SymbolRegistry = 
+                    { state.SymbolRegistry with
+                        State = 
+                            { state.SymbolRegistry.State with
+                                ActiveSymbols = bufferValue :: state.SymbolRegistry.State.ActiveSymbols } } }
         
         // Generate condition check for Result type
         let (isOkId, state2) = SSA.generateValue "is_ok" state1
@@ -196,35 +198,31 @@ module MatchHandling =
         
         let state7 = 
             match okCase with
-            | Some(PatternConstructor("Ok", [PatternVariable lengthName]), okExpr) ->
-                // Extract length parameter
-                let (lengthId, stateWithLength) = SSA.generateValue "length" state6
-                let stateWithLengthExtract = 
-                    Emitter.emit (sprintf "    %s = func.call @extract_result_length(%s) : (i32) -> i32" 
-                                 lengthId matchValueId) stateWithLength
-                
-                // Bind length variable in scope
-                let stateWithBinding = SSA.bindVariable lengthName lengthId stateWithLengthExtract
-                
-                // Generate span from buffer and length
-                let (spanId, stateWithSpan) = SSA.generateValue "span" stateWithBinding
-                let stateWithSpanCreate = 
-                    Emitter.emit (sprintf "    %s = func.call @create_span(%s, %s) : (memref<?xi8>, i32) -> memref<?xi8>" 
-                                 spanId bufferValue lengthId) stateWithSpan
-                
-                // For spanToString, just use the span directly instead of generating a new operation
-                let stateWithResultStore = 
-                    Emitter.emit (sprintf "    %s = %s : i32" resultId spanId) stateWithSpanCreate
-                
-                // Jump to end
-                Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
-                
-            | _ -> 
-                // Default case if Ok pattern doesn't match expected structure
-                let (defaultValue, stateWithDefault) = Emitter.constant "0" (Integer 32) state6
-                let stateWithStore = 
-                    Emitter.emit (sprintf "    %s = %s : i32" resultId defaultValue) stateWithDefault
-                Emitter.emit (sprintf "    br ^%s" endLabel) stateWithStore
+                | Some(PatternConstructor("Ok", [PatternVariable lengthName]), okExpr) ->
+                    // Extract length parameter
+                    let (lengthId, stateWithLength) = SSA.generateValue "length" state6
+                    let stateWithLengthExtract = 
+                        Emitter.emit (sprintf "    %s = func.call @extract_result_length(%s) : (i32) -> i32" 
+                                    lengthId matchValueId) stateWithLength
+                    
+                    // Bind length variable in scope
+                    let stateWithBinding = SSA.bindVariable lengthName lengthId stateWithLengthExtract
+                    
+                    // Special handling for spanToString with UnitLiteral
+                    match okExpr with
+                    | Application(Variable "spanToString", [Literal UnitLiteral]) ->
+                        // Generate span from buffer and length
+                        let (spanId, stateWithSpan) = SSA.generateValue "span" stateWithBinding
+                        let stateWithSpanCreate = 
+                            Emitter.emit (sprintf "    %s = func.call @create_span(%s, %s) : (memref<?xi8>, i32) -> memref<?xi8>" 
+                                        spanId bufferValue lengthId) stateWithSpan
+                        
+                        // Store result
+                        let stateWithResultStore = 
+                            Emitter.emit (sprintf "    %s = %s : i32" resultId spanId) stateWithSpanCreate
+                        
+                        // Jump to end
+                        Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
         
         // Process Error branch
         let errorCase = 

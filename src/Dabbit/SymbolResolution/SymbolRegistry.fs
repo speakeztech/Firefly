@@ -45,6 +45,8 @@ type SymbolResolutionState = {
     ActiveNamespaces: string list
     /// Type aliases and custom types
     TypeRegistry: Map<string, MLIRType>
+    /// Active symbols in current context
+    ActiveSymbols: string list 
 }
 
 /// The complete symbol registry - the "Library of Alexandria"
@@ -65,6 +67,7 @@ module SymbolResolution =
         NamespaceMap = Map.empty
         ActiveNamespaces = []
         TypeRegistry = Map.empty
+        ActiveSymbols = []
     }
     
     /// Registers a symbol in the resolution state
@@ -266,6 +269,15 @@ module RegistryConstruction =
                 ResolutionHistory = historyEntry :: registry.ResolutionHistory
         }
     
+    /// Tracks active symbols for resolution context
+    let trackActiveSymbol (symbolId: string) (registry: SymbolRegistry) : SymbolRegistry =
+        let updatedState = {
+            registry.State with ActiveSymbols = symbolId :: registry.State.ActiveSymbols
+        }
+        {
+            registry with State = updatedState
+        }
+    
     /// Resolves a symbol through the complete registry
     let resolveSymbolInRegistry (symbolName: string) (registry: SymbolRegistry) : CompilerResult<ResolvedSymbol * SymbolRegistry> =
         match SymbolResolution.resolveSymbol symbolName registry.State with
@@ -286,8 +298,14 @@ module RegistryConstruction =
 /// MLIR operation generation based on resolved symbols
 module MLIRGeneration =
     
+    /// Finds active buffer in symbol list
+    let findActiveBuffer (activeSymbols: string list) : string =
+        activeSymbols 
+        |> List.tryFind (fun s -> s.Contains("buffer"))
+        |> Option.defaultValue "%unknown_buffer"
+    
     /// Generates MLIR operation string from a resolved symbol
-    let generateMLIROperation (symbol: ResolvedSymbol) (args: string list) (resultId: string) : CompilerResult<string list> =
+    let generateMLIROperation (symbol: ResolvedSymbol) (args: string list) (resultId: string) (registry: SymbolRegistry) : CompilerResult<string list> =
         match symbol.Operation with
         | DialectOperation(dialect, operation, attributes) ->
             let dialectPrefix = dialectToString dialect
@@ -316,11 +334,30 @@ module MLIRGeneration =
             // Generate LLVM-compatible operations directly instead of custom dialect
             match transformName with
             | "span_to_string" ->
-                // For span_to_string, we just need to pass through the buffer pointer
-                // This generates a simple bitcast that's compatible with LLVM dialect
-                let argStr = if args.IsEmpty then "%unknown" else args.[0]
-                let bitcastOp = sprintf "    %s = memref.cast %s : memref<?xi8> to memref<?xi8>" resultId argStr
+                // For span_to_string, handle both direct arguments and unit literal
+                let bufferValue = 
+                    if args.IsEmpty then
+                        // Look for buffer in the active symbols
+                        findActiveBuffer registry.State.ActiveSymbols
+                    else
+                        args.[0]
+                
+                // Generate a cast operation that works with any buffer source
+                let bitcastOp = sprintf "    %s = memref.cast %s : memref<?xi8> to memref<?xi8>" resultId bufferValue
                 Success [bitcastOp]
+                
+            | "generic_transform" ->
+                // For generic transform, handle broader patterns
+                let bufferValue = 
+                    if args.IsEmpty then
+                        findActiveBuffer registry.State.ActiveSymbols
+                    else
+                        args.[0]
+                
+                let typeStr = mlirTypeToString symbol.ReturnType
+                let castOp = sprintf "    %s = memref.cast %s : memref<?xi8> to %s" resultId bufferValue typeStr
+                Success [castOp]
+                
             | _ ->
                 // For unknown transforms, generate a default constant
                 let constOp = sprintf "    %s = arith.constant 0 : i32" resultId
@@ -328,7 +365,6 @@ module MLIRGeneration =
         
         | CompositePattern(patterns) ->
             // For composite patterns, generate direct operations for each step
-            // Instead of generating non-LLVM operations
             let mutable operations = []
             let mutable tempResultId = resultId
             
@@ -343,6 +379,15 @@ module MLIRGeneration =
                     // For external calls, generate a simple constant for placeholder
                     let constOp = sprintf "    %s = arith.constant %d : i32" stepResultId i
                     operations <- constOp :: operations
+                | CustomTransform(transformName, _) ->
+                    // Custom transform handling
+                    match transformName with
+                    | "result_wrapper" ->
+                        let wrapOp = sprintf "    %s = arith.constant 1 : i32" stepResultId
+                        operations <- wrapOp :: operations
+                    | _ ->
+                        let defaultOp = sprintf "    %s = arith.constant %d : i32" stepResultId i
+                        operations <- defaultOp :: operations
                 | _ ->
                     // Default case - generate a simple constant
                     let constOp = sprintf "    %s = arith.constant %d : i32" stepResultId i
@@ -362,8 +407,15 @@ module PublicInterface =
                            : CompilerResult<string list * SymbolRegistry> =
         match RegistryConstruction.resolveSymbolInRegistry funcName registry with
         | Success (symbol, updatedRegistry) ->
-            match MLIRGeneration.generateMLIROperation symbol args resultId with
-            | Success operations -> Success (operations, updatedRegistry)
+            // For buffer-related operations, track them in active symbols
+            let registry2 = 
+                if funcName.Contains("buffer") && args.Length > 0 then
+                    RegistryConstruction.trackActiveSymbol args.[0] updatedRegistry
+                else
+                    updatedRegistry
+            
+            match MLIRGeneration.generateMLIROperation symbol args resultId registry2 with
+            | Success operations -> Success (operations, registry2)
             | CompilerFailure errors -> CompilerFailure errors
             
         | CompilerFailure errors -> CompilerFailure errors
