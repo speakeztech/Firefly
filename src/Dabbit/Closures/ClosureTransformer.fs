@@ -37,6 +37,14 @@ module ClosureAnalysis =
         | Variable name ->
             if Set.contains name scope then Set.empty
             else Set.singleton name
+
+        | Match(matchExpr, cases) ->
+            let matchExprFree = findFreeVariables scope matchExpr
+            let casesFree = 
+                cases 
+                |> List.map (fun (_, caseExpr) -> findFreeVariables scope caseExpr)
+                |> Set.unionMany
+            Set.union matchExprFree casesFree
         
         | Application(func, args) ->
             let funcFree = findFreeVariables scope func
@@ -122,6 +130,22 @@ module ClosureTransformation =
     /// Transforms an expression by eliminating closures
     let rec transformExpression (expr: OakExpression) (state: ClosureState) : (OakExpression * ClosureState) =
         match expr with
+        | Match(matchExpr, cases) ->
+            let (transformedMatchExpr, state1) = transformExpression matchExpr state
+            
+            let transformCase (pattern, caseExpr) (accState: ClosureState) =
+                let (transformedCaseExpr, newState) = transformExpression caseExpr accState
+                ((pattern, transformedCaseExpr), newState)
+                
+            let (transformedCases, finalState) = 
+                List.fold 
+                    (fun (accCases, accState) case -> 
+                        let (transformedCase, newState) = transformCase case accState
+                        (transformedCase :: accCases, newState)) 
+                    ([], state1) 
+                    cases
+                    
+            (Match(transformedMatchExpr, List.rev transformedCases), finalState)
         | Lambda(params', body) ->
             let (closureName, state1) = liftLambda expr state
             let freeVars = ClosureAnalysis.findFreeVariables state.CurrentScope expr |> Set.toList
@@ -267,6 +291,19 @@ module ClosureValidation =
     /// Validates that no closures remain in an expression
     let rec validateNoClosures (expr: OakExpression) : CompilerResult<unit> =
         match expr with
+        | Match(matchExpr, cases) ->
+            match validateNoClosures matchExpr with
+            | Success () ->
+                let caseResults = 
+                    cases 
+                    |> List.map (fun (_, caseExpr) -> validateNoClosures caseExpr)
+
+                let combinedResult = ResultHelpers.combineResults caseResults
+                match combinedResult with
+                | Success _ -> Success ()
+                | CompilerFailure errors -> CompilerFailure errors
+            | CompilerFailure errors -> CompilerFailure errors
+
         | Lambda(_, _) ->
             CompilerFailure [ConversionError("closure-validation", "lambda expression", "eliminated closure", "Lambda expression found after closure elimination")]
         

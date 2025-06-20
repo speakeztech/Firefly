@@ -45,7 +45,8 @@ type CompilationContext = {
     KeepIntermediates: bool
     Verbose: bool
     NoExternalTools: bool
-    LibraryPaths: string list  // New field for library paths
+    LibraryPaths: string list
+    IntermediatesDir: string option // Added field for intermediates directory
 }
 
 /// Gets the default target for the current platform
@@ -62,7 +63,7 @@ let private getDefaultTarget() =
 /// Converts optimization level string to enum
 let private parseOptimizationLevel (optimizeStr: string) : OptimizationLevel =
     match optimizeStr.ToLowerInvariant() with
-    | "none" -> OptimizationLevel.None
+    | "none" -> OptimizationLevel.Zero
     | "less" -> OptimizationLevel.Less
     | "aggressive" -> OptimizationLevel.Aggressive
     | "size" -> OptimizationLevel.Size
@@ -151,50 +152,49 @@ let private saveIntermediateFiles (compilationCtx: CompilationContext) (pipeline
     if compilationCtx.KeepIntermediates then
         printfn "Saving intermediate files..."
         try
-            let basePath = Path.GetDirectoryName(compilationCtx.OutputPath)
-            let baseName = Path.GetFileNameWithoutExtension(compilationCtx.OutputPath)
-            let intermediatesDir = Path.Combine(basePath, "intermediates")
-            
-            if not (Directory.Exists(intermediatesDir)) then
-                Directory.CreateDirectory(intermediatesDir) |> ignore
-            
-            let fileExtensions = [
-                ("fsharp-ast", ".fcs")
-                ("oak-ast", ".oak")
-                ("tree-shaking-stats", ".treeshake.log")
-                ("ra-oak", ".ra.oak")
-                ("closure-transformed", ".closures") 
-                ("layout-transformed", ".unions")
-                ("mlir", ".mlir")
-                ("lowered-mlir", ".lowered")
-            ]
-            
-            // Process each phase output file
-            for (phaseName, extension) in fileExtensions do
-                match Map.tryFind phaseName pipelineOutput.PhaseOutputs with
-                | Some content ->
-                    let filePath = Path.Combine(intermediatesDir, baseName + extension)
-                    File.WriteAllText(filePath, content, System.Text.Encoding.UTF8)
-                    printfn "  %s → %s" phaseName (Path.GetFileName(filePath))
-                | Option.None ->  // Explicitly use Option.None to avoid conflict with OptimizationLevel.None
-                    printfn "  %s (not found)" phaseName
-            
-            let diagPath = Path.Combine(intermediatesDir, baseName + ".diag")
-            let diagContent = 
-                pipelineOutput.Diagnostics
-                |> List.map (fun (phase, message) -> sprintf "[%s] %s" phase message)
-                |> String.concat "\n"
-            File.WriteAllText(diagPath, diagContent)
-            
-            let symbolsPath = Path.Combine(intermediatesDir, baseName + ".symbols")
-            let symbolsContent = 
-                pipelineOutput.SymbolMappings
-                |> Map.toList
-                |> List.map (fun (orig, trans) -> sprintf "%s → %s" orig trans)
-                |> String.concat "\n"
-            File.WriteAllText(symbolsPath, symbolsContent)
-            
-            printfn "Intermediate files saved to: %s" (Path.GetFileName(intermediatesDir))
+            match compilationCtx.IntermediatesDir with
+            | Some intermediatesDir ->
+                let baseName = Path.GetFileNameWithoutExtension(compilationCtx.OutputPath)
+                
+                let fileExtensions = [
+                    ("fsharp-ast", ".fcs")
+                    ("oak-ast", ".oak")
+                    ("tree-shaking-stats", ".treeshake.log")
+                    ("ra-oak", ".ra.oak")
+                    ("closure-transformed", ".closures") 
+                    ("layout-transformed", ".unions")
+                    ("mlir", ".mlir")
+                    ("lowered-mlir", ".lowered")
+                ]
+                
+                // Process each phase output file
+                for (phaseName, extension) in fileExtensions do
+                    match Map.tryFind phaseName pipelineOutput.PhaseOutputs with
+                    | Some content ->
+                        let filePath = Path.Combine(intermediatesDir, baseName + extension)
+                        File.WriteAllText(filePath, content, System.Text.Encoding.UTF8)
+                        printfn "  %s → %s" phaseName (Path.GetFileName(filePath))
+                    | None ->
+                        printfn "  %s (not found)" phaseName
+                
+                let diagPath = Path.Combine(intermediatesDir, baseName + ".diag")
+                let diagContent = 
+                    pipelineOutput.Diagnostics
+                    |> List.map (fun (phase, message) -> sprintf "[%s] %s" phase message)
+                    |> String.concat "\n"
+                File.WriteAllText(diagPath, diagContent)
+                
+                let symbolsPath = Path.Combine(intermediatesDir, baseName + ".symbols")
+                let symbolsContent = 
+                    pipelineOutput.SymbolMappings
+                    |> Map.toList
+                    |> List.map (fun (orig, trans) -> sprintf "%s → %s" orig trans)
+                    |> String.concat "\n"
+                File.WriteAllText(symbolsPath, symbolsContent)
+                
+                printfn "Intermediate files saved to: %s" (Path.GetFileName(intermediatesDir))
+            | None ->
+                printfn "Warning: No intermediates directory set"
         with
         | ex ->
             printfn "Warning: Failed to save intermediate files: %s" ex.Message
@@ -202,23 +202,26 @@ let private saveIntermediateFiles (compilationCtx: CompilationContext) (pipeline
 /// Saves LLVM IR file to intermediates
 let private saveLLVMFile (ctx: CompilationContext) (suffix: string) (llvmText: string) : unit =
     if ctx.KeepIntermediates then
-        let intermediatesDir = Path.Combine(Path.GetDirectoryName(ctx.OutputPath), "intermediates")
-        let baseName = Path.GetFileNameWithoutExtension(ctx.OutputPath)
-        let fileName = if String.IsNullOrEmpty(suffix) then sprintf "%s.ll" baseName else sprintf "%s.%s.ll" baseName suffix
-        let llvmPath = Path.Combine(intermediatesDir, fileName)
-        File.WriteAllText(llvmPath, llvmText, System.Text.UTF8Encoding(false))
-        printfn "  llvm-ir → %s" fileName
+        match ctx.IntermediatesDir with
+        | Some intermediatesDir ->
+            let baseName = Path.GetFileNameWithoutExtension(ctx.OutputPath)
+            let fileName = if String.IsNullOrEmpty(suffix) then sprintf "%s.ll" baseName else sprintf "%s.%s.ll" baseName suffix
+            let llvmPath = Path.Combine(intermediatesDir, fileName)
+            File.WriteAllText(llvmPath, llvmText, System.Text.UTF8Encoding(false))
+            printfn "  llvm-ir → %s" fileName
+        | None ->
+            printfn "Warning: No intermediates directory set"
 
 /// Compiles to native executable
 let private compileToNative (ctx: CompilationContext) (llvmOutput: LLVMOutput) : CompilerResult<int> =
     if ctx.NoExternalTools then
         printfn "Warning: --no-external-tools specified, but native compilation requires external LLVM toolchain"
         let llvmPath = 
-            if ctx.KeepIntermediates then
-                let intermediatesDir = Path.Combine(Path.GetDirectoryName(ctx.OutputPath), "intermediates")
+            match ctx.IntermediatesDir with
+            | Some intermediatesDir ->
                 let baseName = Path.GetFileNameWithoutExtension(ctx.OutputPath)
                 Path.Combine(intermediatesDir, baseName + ".ll")
-            else
+            | None ->
                 Path.ChangeExtension(ctx.OutputPath, ".ll")
         
         File.WriteAllText(llvmPath, llvmOutput.LLVMIRText, System.Text.UTF8Encoding(false))
@@ -267,7 +270,7 @@ let result = CompilerResultBuilder()
 let private runCompilationPipeline (ctx: CompilationContext) (sourceCode: string) : CompilerResult<int> =
     result {
         // Phase 1: F# to MLIR
-        let! pipelineOutput = translateFsToMLIRWithDiagnostics ctx.InputPath sourceCode
+        let! pipelineOutput = translateFsToMLIRWithDiagnostics ctx.InputPath sourceCode ctx.IntermediatesDir
         
         // Save intermediate files
         saveIntermediateFiles ctx pipelineOutput
@@ -322,6 +325,16 @@ let private createCompilationContext (args: ParseResults<CompileArgs>) : Compile
         let verbose = args.Contains Verbose
         let noExternalTools = args.Contains No_External_Tools
         
+        // Set up intermediates directory
+        let intermediatesDir = 
+            if keepIntermediates then
+                let dir = Path.Combine(Path.GetDirectoryName(outputPath), "intermediates")
+                if not (Directory.Exists(dir)) then
+                    Directory.CreateDirectory(dir) |> ignore
+                Some dir
+            else
+                None
+        
         // Add library paths to search for dependencies
         let libraryPaths = [
             Path.GetDirectoryName(inputPath);  // Same directory as input file
@@ -344,6 +357,8 @@ let private createCompilationContext (args: ParseResults<CompileArgs>) : Compile
             printfn "Target: %s, Optimize: %s" target optimizeStr
             printfn "Configuration: %s v%s" config.PackageName config.Version
             printfn "Library search paths: %s" (String.concat ", " libraryPaths)
+            if keepIntermediates then
+                printfn "Intermediates directory: %s" (intermediatesDir |> Option.defaultValue "None")
         
         let ctx = {
             InputPath = inputPath
@@ -355,7 +370,8 @@ let private createCompilationContext (args: ParseResults<CompileArgs>) : Compile
             KeepIntermediates = keepIntermediates
             Verbose = verbose
             NoExternalTools = noExternalTools
-            LibraryPaths = libraryPaths  // Add this field to CompilationContext
+            LibraryPaths = libraryPaths
+            IntermediatesDir = intermediatesDir  // Added to context
         }
         
         return (ctx, sourceCode)
@@ -367,17 +383,7 @@ let compile (args: ParseResults<CompileArgs>) =
     
     match createCompilationContext args with
     | Success (ctx, sourceCode) ->
-        // Create intermediates directory if keeping intermediates
-        let intermediatesDir = 
-            if ctx.KeepIntermediates then
-                let dir = Path.Combine(Path.GetDirectoryName(ctx.OutputPath), "intermediates")
-                if not (Directory.Exists(dir)) then
-                    Directory.CreateDirectory(dir) |> ignore
-                Some dir
-            else
-                None
-        
-        match runCompilationPipeline ctx sourceCode intermediatesDir with
+        match runCompilationPipeline ctx sourceCode with
         | Success exitCode -> exitCode
         | CompilerFailure errors ->
             errors |> List.iter (fun error -> printfn "Error: %s" (error.ToString()))

@@ -65,7 +65,7 @@ module SSA =
             | scope :: rest ->
                 match Map.tryFind name scope with
                 | Some value -> Some value
-                | Option.None -> lookup rest
+                | None -> lookup rest
         
         lookup (state.CurrentScope :: state.ScopeStack)
 
@@ -84,7 +84,7 @@ module Emitter =
         match Map.tryFind value state.StringConstants with
         | Some existingName -> 
             (existingName, state)
-        | Option.None ->
+        | None ->
             let constName = sprintf "@str_%d" state.StringConstants.Count
             let newState = { 
                 state with 
@@ -229,6 +229,126 @@ and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : strin
     match expr with
     | Literal literal ->
         convertLiteral literal state
+
+    | Match(matchExpr, cases) ->
+        printfn "DEBUG: Converting match expression with %d cases" cases.Length
+        
+        // First evaluate the expression being matched
+        let (matchValueId, stateAfterMatchExpr) = convertExpression matchExpr state
+        printfn "DEBUG: Match value converted, result: %s" matchValueId
+        
+        // Create a unique result variable to hold the final result
+        let (resultId, stateWithResultVar) = SSA.generateValue "match_result" stateAfterMatchExpr
+        
+        // Process each case with pattern matching
+        let rec processCases remainingCases currentState =
+            match remainingCases with
+            | [] -> 
+                // No cases left, provide a default value (should not happen with exhaustive matches)
+                printfn "DEBUG: No remaining cases in match expression"
+                let (defaultValue, stateWithDefault) = Emitter.constant "0" (Integer 32) currentState
+                let stateWithWarning = Emitter.emit "    // Warning: Match not exhaustive, using default value" stateWithDefault
+                (defaultValue, stateWithWarning)
+                
+            | [(PatternConstructor("Ok", [PatternVariable paramName]), okExpr)] ->
+                // Handle the special case for Result.Ok with a parameter
+                printfn "DEBUG: Processing Ok case with parameter: %s" paramName
+                
+                // Extract the Ok value (length in this case)
+                let (valueId, stateWithValueId) = SSA.generateValue "ok_value" currentState
+                let stateWithExtractCall = Emitter.emit (sprintf "    %s = func.call @extract_ok_value(%s) : (i32) -> i32" 
+                                                        valueId matchValueId) stateWithValueId
+                
+                // Bind the extracted value to the pattern variable
+                let stateWithBinding = SSA.bindVariable paramName valueId stateWithExtractCall
+                
+                // Generate code for the Ok branch
+                let (okResultId, stateAfterOkExpr) = convertExpression okExpr stateWithBinding
+                (okResultId, stateAfterOkExpr)
+                
+            | [(PatternConstructor("Error", _), errorExpr)] ->
+                // Handle the Error case with wildcard pattern
+                printfn "DEBUG: Processing Error case"
+                
+                // Generate code for the Error branch
+                let (errorResultId, stateAfterErrorExpr) = convertExpression errorExpr currentState
+                (errorResultId, stateAfterErrorExpr)
+                
+            | (pattern, expr) :: rest ->
+                // Handle general case with test and branch
+                printfn "DEBUG: Processing general case with pattern: %A" pattern
+                
+                // Generate a test for this pattern
+                let (testResultId, stateAfterTest) = 
+                    match pattern with
+                    | PatternConstructor(constructorName, _) ->
+                        // Test if the value matches this constructor
+                        let (testId, stateWithTestId) = SSA.generateValue "is_match" currentState
+                        let stateWithTestCall = Emitter.emit (sprintf "    %s = func.call @is_%s(%s) : (i32) -> i1" 
+                                                        testId (constructorName.ToLower()) matchValueId) stateWithTestId
+                        (testId, stateWithTestCall)
+                    | _ ->
+                        // Default test (always false for unknown patterns)
+                        let (testId, stateWithTestId) = Emitter.constant "0" (Integer 1) currentState
+                        (testId, stateWithTestId)
+                
+                // Create block labels for branching
+                let (thenLabelId, stateWithThenLabel) = SSA.generateValue "then" stateAfterTest
+                let (elseLabelId, stateWithElseLabel) = SSA.generateValue "else" stateWithThenLabel
+                let (endLabelId, stateWithEndLabel) = SSA.generateValue "end" stateWithElseLabel
+                
+                // Create conditional branch
+                let stateWithBranch = Emitter.emit (sprintf "    cond_br %s, ^%s, ^%s" 
+                                                testResultId 
+                                                (thenLabelId.TrimStart('%')) 
+                                                (elseLabelId.TrimStart('%'))) stateWithEndLabel
+                
+                // Generate then block (this pattern matches)
+                let stateWithThenBlock = Emitter.emit (sprintf "  ^%s:" (thenLabelId.TrimStart('%'))) stateWithBranch
+                
+                // Bind pattern variables if any
+                let stateWithBindings = 
+                    match pattern with
+                    | PatternConstructor(_, patVars) ->
+                        // Bind each pattern variable
+                        patVars |> List.fold (fun currentBindingState patVar ->
+                            match patVar with
+                            | PatternVariable name ->
+                                // Extract and bind the variable
+                                let (varId, stateWithVarId) = SSA.generateValue (name + "_val") currentBindingState
+                                let stateWithExtract = Emitter.emit (sprintf "    %s = func.call @extract_%s(%s) : (i32) -> i32" 
+                                                                varId name matchValueId) stateWithVarId
+                                SSA.bindVariable name varId stateWithExtract
+                            | _ -> currentBindingState
+                        ) stateWithThenBlock
+                    | _ -> stateWithThenBlock
+                
+                // Generate code for this branch
+                let (branchResultId, stateAfterBranchExpr) = convertExpression expr stateWithBindings
+                
+                // Store result and jump to end
+                let stateWithResultStore = Emitter.emit (sprintf "    %s = %s : i32" resultId branchResultId) stateAfterBranchExpr
+                let stateWithJumpToEnd = Emitter.emit (sprintf "    br ^%s" (endLabelId.TrimStart('%'))) stateWithResultStore
+                
+                // Generate else block (try next pattern)
+                let stateWithElseBlock = Emitter.emit (sprintf "  ^%s:" (elseLabelId.TrimStart('%'))) stateWithJumpToEnd
+                
+                // Process remaining cases
+                let (remainingResultId, stateAfterRemainingCases) = processCases rest stateWithElseBlock
+                
+                // Store result from remaining cases
+                let stateWithRemainingStore = Emitter.emit (sprintf "    %s = %s : i32" resultId remainingResultId) stateAfterRemainingCases
+                let stateWithRemainingJump = Emitter.emit (sprintf "    br ^%s" (endLabelId.TrimStart('%'))) stateWithRemainingStore
+                
+                // End block
+                let stateWithEndBlock = Emitter.emit (sprintf "  ^%s:" (endLabelId.TrimStart('%'))) stateWithRemainingJump
+                (resultId, stateWithEndBlock)
+        
+        // Process all cases
+        let (finalResultId, finalState) = processCases cases stateWithResultVar
+        
+        // Return the final computed result
+        (finalResultId, finalState)
     
     | Variable name ->
         match SSA.lookupVariable name state with

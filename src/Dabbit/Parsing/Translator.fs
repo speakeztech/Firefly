@@ -274,6 +274,7 @@ module Transformations =
         | CompilerFailure errors -> CompilerFailure errors
 
 /// Main translation pipeline - clean, focused version
+/// Main translation pipeline - clean, focused version
 let executeTranslationPipeline (sourceFile: string) (sourceCode: string) (intermediatesDir: string option) : CompilerResult<TranslationPipelineOutput> =
     printfn "=== Firefly Translation Pipeline ==="
     printfn "Source: %s (%d chars)" (Path.GetFileName(sourceFile)) sourceCode.Length
@@ -291,7 +292,7 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) (interm
     try
         // Step 1: Parse F# source to Oak AST
         match PipelineExecution.runPhase "parsing" 
-            (Transformations.sourceToOak sourceFile intermediatesDir) 
+            (fun sc -> Transformations.sourceToOak sourceFile sc intermediatesDir) 
             sourceCode 
             initialDiagnostics
             intermediatesDir with
@@ -432,7 +433,7 @@ let executeTranslationPipeline (sourceFile: string) (sourceCode: string) (interm
             "translation pipeline", 
             "MLIR", 
             sprintf "Exception: %s" ex.Message)]
-
+            
 /// Simple entry point for translation (maintains backward compatibility)
 let translateFsToMLIR (sourceFile: string) (sourceCode: string) : CompilerResult<string> =
     match executeTranslationPipeline sourceFile sourceCode None with

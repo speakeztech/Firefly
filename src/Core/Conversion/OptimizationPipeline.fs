@@ -7,7 +7,7 @@ open Core.Conversion.LLVMTranslator
 
 /// Optimization level for LLVM code generation
 type OptimizationLevel =
-    | None        // -O0
+    | Zero        // -O0
     | Less        // -O1  
     | Default     // -O2
     | Aggressive  // -O3
@@ -83,7 +83,7 @@ let applySinglePass (pass: OptimizationPass) (llvmIR: string) : string =
 /// Creates optimization pipeline based on level
 let createOptimizationPipeline (level: OptimizationLevel) : OptimizationPass list =
     match level with
-    | None -> []
+    | Zero -> []
     | Less -> [MemoryToReg]
     | Default -> [MemoryToReg; ConstantFold]
     | Aggressive -> [MemoryToReg; ConstantFold; DeadCodeElim; InstCombine]

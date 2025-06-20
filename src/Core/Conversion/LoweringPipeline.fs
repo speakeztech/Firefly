@@ -318,10 +318,6 @@ module PassManagement =
         match transformAllLines lines with
         | Success transformedLines -> Success (String.concat "\n" transformedLines)
         | CompilerFailure errors -> CompilerFailure errors
-        
-        match transformAllLines lines with
-        | Success transformedLines -> Success (String.concat "\n" transformedLines)
-        | CompilerFailure errors -> CompilerFailure errors
     
     /// Validates that transformed MLIR is in target dialect
     let validateDialectPurity (targetDialect: MLIRDialect) (mlirText: string) : CompilerResult<unit> =

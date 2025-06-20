@@ -274,6 +274,27 @@ module Transformation =
     /// Transforms expressions (placeholder for layout-aware transformations)
     and transformExpression (expr: OakExpression) (state: LayoutAnalysisState) : CompilerResult<OakExpression * LayoutAnalysisState> =
         match expr with
+
+        | Match(matchExpr, cases) ->
+            match transformExpression matchExpr state with
+            | Success (transformedExpr, state1) ->
+                // Helper function to transform a single case
+                let rec transformCases remaining accCases currentState =
+                    match remaining with
+                    | [] -> Success (List.rev accCases, currentState)
+                    | (pattern, caseExpr) :: rest ->
+                        match transformExpression caseExpr currentState with
+                        | Success (transformedCaseExpr, newState) ->
+                            transformCases rest ((pattern, transformedCaseExpr) :: accCases) newState
+                        | CompilerFailure errors -> CompilerFailure errors
+                
+                // Transform all cases
+                match transformCases cases [] state1 with
+                | Success (transformedCases, finalState) ->
+                    Success (Match(transformedExpr, transformedCases), finalState)
+                | CompilerFailure errors -> CompilerFailure errors
+            | CompilerFailure errors -> CompilerFailure errors
+            
         | Variable _ | Literal _ ->
             Success (expr, state)
         
