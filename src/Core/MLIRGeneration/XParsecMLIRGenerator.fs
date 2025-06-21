@@ -238,7 +238,7 @@ module Emitter =
             | IntegerCategory, MemoryRefCategory ->
                 // Integer to memory reference (unusual but handled)
                 // This typically involves creating a string representation
-                let (strGlobal, state2) = registerString (sprintf "%%d" 0) state1
+                let (strGlobal, state2) = Emitter.registerString "%d" state1
                 let (ptrResult, state3) = SSA.generateValue "str_ptr" state2
                 let state4 = emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" ptrResult strGlobal) state3
                 let memRefType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
@@ -617,10 +617,13 @@ and convertStackAllocation (args: OakExpression list) (state: MLIRGenerationStat
         let state3 = TypeTracking.recordSSAType bufferResult bufferType state2
         (bufferResult, state3)
     | _ ->
-        let (dummyValue, state1) = SSA.generateValue "invalid_alloca" state
-        let intType = MLIRTypes.createInteger 32
-        let state2 = TypeTracking.recordSSAType dummyValue intType state1
-        (dummyValue, state2)
+        // Default to a small buffer if size isn't a literal
+        let (bufferResult, state1) = SSA.generateValue "buffer" state
+        let defaultSize = 64 // Default small buffer size
+        let state2 = Emitter.emit (sprintf "    %s = memref.alloca() : memref<%dxi8>" bufferResult defaultSize) state1
+        let bufferType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [defaultSize]
+        let state3 = TypeTracking.recordSSAType bufferResult bufferType state2
+        (bufferResult, state3)
 
 and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : string * MLIRGenerationState =
     // Get expected type from context (if any)

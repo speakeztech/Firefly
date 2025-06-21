@@ -372,17 +372,17 @@ module MLIRGeneration =
         // Check if we have the right number of arguments
         if argSSAValues.Length <> symbol.ParameterTypes.Length then
             (false, [sprintf "Expected %d arguments for %s, got %d" 
-                     symbol.ParameterTypes.Length symbol.QualifiedName argSSAValues.Length])
+                    symbol.ParameterTypes.Length symbol.QualifiedName argSSAValues.Length])
         else
             // Check type compatibility for each argument
             let typeChecks = 
                 List.zip3 argSSAValues argTypes symbol.ParameterTypes
                 |> List.map (fun (argVal, actualType, expectedType) ->
-                    if canUseTypeInContext actualType (Some expectedType) then
+                    if TypeAnalysis.canConvertTo actualType expectedType then
                         (true, "")
                     else
                         (false, sprintf "Type mismatch for %s: expected %s, got %s" 
-                               argVal (mlirTypeToString expectedType) (mlirTypeToString actualType)))
+                            argVal (mlirTypeToString expectedType) (mlirTypeToString actualType)))
             
             let allValid = typeChecks |> List.forall fst
             let errors = typeChecks |> List.filter (not << fst) |> List.map snd
