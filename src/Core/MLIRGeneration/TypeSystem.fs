@@ -345,3 +345,20 @@ let getMemRefElementType (mlirType: MLIRType) : MLIRType option =
         mlirType.ElementType
     else
         None
+
+/// Determines if a type can be used in a specific context based on expected type
+let canUseTypeInContext (actualType: MLIRType) (expectedType: MLIRType option) : bool =
+    match expectedType with
+    | None -> true  // No expectation, any type is acceptable
+    | Some expected -> 
+        actualType = expected || TypeAnalysis.canConvertTo actualType expected
+
+/// Creates an appropriate default value for a given type
+let defaultValueForType (mlirType: MLIRType) : string =
+    match mlirType.Category with
+    | IntegerCategory -> "0"
+    | FloatCategory -> "0.0"
+    | VoidCategory -> ""
+    | MemoryRefCategory -> "null" // Placeholder, would require proper MLIR null pointer
+    | FunctionCategory -> "null" // Placeholder
+    | StructCategory -> "null" // Placeholder

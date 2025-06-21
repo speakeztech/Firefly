@@ -160,6 +160,21 @@ module AlloySymbols =
             SourceLibrary = "Alloy"
             RequiresExternal = false
         }
+        
+        {
+            QualifiedName = "Alloy.Memory.stackalloc"
+            ShortName = "stackalloc"
+            ParameterTypes = [MLIRTypes.createInteger 32] // size
+            ReturnType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [] // byte pointer
+            Operation = DialectOperation(
+                MLIRDialect.MemRef,
+                "memref.alloca",
+                Map.ofList [("element_type", "i8")]
+            )
+            Namespace = "Alloy.Memory"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
     ]
     
     /// Creates the Alloy I/O console symbols with external dependencies
@@ -179,7 +194,7 @@ module AlloySymbols =
             QualifiedName = "Alloy.IO.Console.readInto"
             ShortName = "readInto"
             ParameterTypes = [MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []] // buffer parameter  
-            ReturnType = MLIRTypes.createInteger 32 // Result<int, string> simplified to i32
+            ReturnType = MLIRTypes.createInteger 32  // Result<int, string> mapped to i32
             Operation = CompositePattern([
                 ExternalCall("scanf", Some "libc");
                 CustomTransform("result_wrapper", ["success_check"])
@@ -199,6 +214,20 @@ module AlloySymbols =
             SourceLibrary = "Alloy"
             RequiresExternal = true
         }
+        
+        {
+            QualifiedName = "Alloy.IO.Console.readLine"
+            ShortName = "readLine"
+            ParameterTypes = [
+                MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []; // buffer
+                MLIRTypes.createInteger 32 // max length
+            ]
+            ReturnType = MLIRTypes.createInteger 32  // length read
+            Operation = ExternalCall("fgets", Some "libc")
+            Namespace = "Alloy.IO.Console"
+            SourceLibrary = "Alloy"
+            RequiresExternal = true
+        }
     ]
     
     /// Creates Alloy string manipulation symbols
@@ -206,9 +235,37 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.IO.String.format"
             ShortName = "format"
-            ParameterTypes = [MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []; MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []] // format, value
+            ParameterTypes = [
+                MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []; // format string
+                MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [] // value
+            ] 
             ReturnType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
             Operation = ExternalCall("sprintf", Some "libc")
+            Namespace = "Alloy.IO.String"
+            SourceLibrary = "Alloy"
+            RequiresExternal = true
+        }
+        
+        {
+            QualifiedName = "Alloy.IO.String.concat"
+            ShortName = "concat"
+            ParameterTypes = [
+                MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []; // first string
+                MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [] // second string
+            ]
+            ReturnType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
+            Operation = ExternalCall("strcat", Some "libc")
+            Namespace = "Alloy.IO.String"
+            SourceLibrary = "Alloy"
+            RequiresExternal = true
+        }
+        
+        {
+            QualifiedName = "Alloy.IO.String.length"
+            ShortName = "length"
+            ParameterTypes = [MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []] // string
+            ReturnType = MLIRTypes.createInteger 32 // length
+            Operation = ExternalCall("strlen", Some "libc")
             Namespace = "Alloy.IO.String"
             SourceLibrary = "Alloy"
             RequiresExternal = true
@@ -304,8 +361,43 @@ module MLIRGeneration =
         |> List.tryFind (fun s -> s.Contains("buffer"))
         |> Option.defaultValue "%unknown_buffer"
     
+    /// Validates argument types against expected parameter types
+    let validateArgumentTypes 
+            (symbol: ResolvedSymbol) 
+            (argSSAValues: string list) 
+            (argTypes: MLIRType list) 
+            (state: MLIRGenerationState) 
+            : bool * string list =
+        
+        // Check if we have the right number of arguments
+        if argSSAValues.Length <> symbol.ParameterTypes.Length then
+            (false, [sprintf "Expected %d arguments for %s, got %d" 
+                     symbol.ParameterTypes.Length symbol.QualifiedName argSSAValues.Length])
+        else
+            // Check type compatibility for each argument
+            let typeChecks = 
+                List.zip3 argSSAValues argTypes symbol.ParameterTypes
+                |> List.map (fun (argVal, actualType, expectedType) ->
+                    if canUseTypeInContext actualType (Some expectedType) then
+                        (true, "")
+                    else
+                        (false, sprintf "Type mismatch for %s: expected %s, got %s" 
+                               argVal (mlirTypeToString expectedType) (mlirTypeToString actualType)))
+            
+            let allValid = typeChecks |> List.forall fst
+            let errors = typeChecks |> List.filter (not << fst) |> List.map snd
+            
+            (allValid, errors)
+    
     /// Generates MLIR operation string from a resolved symbol
-    let generateMLIROperation (symbol: ResolvedSymbol) (args: string list) (resultId: string) (registry: SymbolRegistry) : CompilerResult<string list> =
+    let generateMLIROperation 
+            (symbol: ResolvedSymbol) 
+            (args: string list) 
+            (argTypes: MLIRType list)
+            (resultId: string) 
+            (registry: SymbolRegistry) 
+            : CompilerResult<string list * MLIRType> =
+        
         match symbol.Operation with
         | DialectOperation(dialect, operation, attributes) ->
             let dialectPrefix = dialectToString dialect
@@ -321,14 +413,14 @@ module MLIRGeneration =
             let argStr = if args.IsEmpty then "" else sprintf "(%s)" (String.concat ", " args)
             let typeStr = mlirTypeToString symbol.ReturnType
             let operationStr = sprintf "    %s = %s.%s%s : %s%s" resultId dialectPrefix operation argStr typeStr attrStr
-            Success [operationStr]
+            Success ([operationStr], symbol.ReturnType)
         
         | ExternalCall(funcName, library) ->
             let argStr = String.concat ", " args
             let paramTypes = symbol.ParameterTypes |> List.map mlirTypeToString |> String.concat ", "
             let returnType = mlirTypeToString symbol.ReturnType
             let callOp = sprintf "    %s = func.call @%s(%s) : (%s) -> %s" resultId funcName argStr paramTypes returnType
-            Success [callOp]
+            Success ([callOp], symbol.ReturnType)
         
         | CustomTransform(transformName, parameters) ->
             // Generate LLVM-compatible operations directly instead of custom dialect
@@ -344,7 +436,7 @@ module MLIRGeneration =
                 
                 // Generate a cast operation that works with any buffer source
                 let bitcastOp = sprintf "    %s = memref.cast %s : memref<?xi8> to memref<?xi8>" resultId bufferValue
-                Success [bitcastOp]
+                Success ([bitcastOp], MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [])
                 
             | "generic_transform" ->
                 // For generic transform, handle broader patterns
@@ -356,12 +448,12 @@ module MLIRGeneration =
                 
                 let typeStr = mlirTypeToString symbol.ReturnType
                 let castOp = sprintf "    %s = memref.cast %s : memref<?xi8> to %s" resultId bufferValue typeStr
-                Success [castOp]
+                Success ([castOp], symbol.ReturnType)
                 
             | _ ->
                 // For unknown transforms, generate a default constant
                 let constOp = sprintf "    %s = arith.constant 0 : i32" resultId
-                Success [constOp]
+                Success ([constOp], MLIRTypes.createInteger 32)
         
         | CompositePattern(patterns) ->
             // For composite patterns, generate direct operations for each step
@@ -393,7 +485,7 @@ module MLIRGeneration =
                     let constOp = sprintf "    %s = arith.constant %d : i32" stepResultId i
                     operations <- constOp :: operations
             
-            Success (List.rev operations)
+            Success (List.rev operations, symbol.ReturnType)
 
 /// External interface for integration with existing MLIR generation
 module PublicInterface =
@@ -402,9 +494,20 @@ module PublicInterface =
     let createStandardRegistry () : CompilerResult<SymbolRegistry> =
         RegistryConstruction.buildAlloyRegistry ()
     
-    /// Resolves a function call and generates appropriate MLIR
-    let resolveFunctionCall (funcName: string) (args: string list) (resultId: string) (registry: SymbolRegistry) 
-                           : CompilerResult<string list * SymbolRegistry> =
+    /// Gets the type for a resolved symbol
+    let getSymbolType (funcName: string) (registry: SymbolRegistry) : MLIRType option =
+        match RegistryConstruction.resolveSymbolInRegistry funcName registry with
+        | Success (symbol, _) -> Some symbol.ReturnType
+        | CompilerFailure _ -> None
+    
+    /// Resolves a function call and generates appropriate MLIR with type checking
+    let resolveFunctionCall 
+            (funcName: string) 
+            (args: string list) 
+            (resultId: string) 
+            (registry: SymbolRegistry) 
+            : CompilerResult<string list * SymbolRegistry> =
+        
         match RegistryConstruction.resolveSymbolInRegistry funcName registry with
         | Success (symbol, updatedRegistry) ->
             // For buffer-related operations, track them in active symbols
@@ -414,8 +517,16 @@ module PublicInterface =
                 else
                     updatedRegistry
             
-            match MLIRGeneration.generateMLIROperation symbol args resultId registry2 with
-            | Success operations -> Success (operations, registry2)
+            // Get types for arguments if possible
+            let argTypes = 
+                args |> List.mapi (fun i _ ->
+                    if i < symbol.ParameterTypes.Length then
+                        symbol.ParameterTypes.[i]
+                    else
+                        MLIRTypes.createInteger 32)  // Default for excess args
+            
+            match MLIRGeneration.generateMLIROperation symbol args argTypes resultId registry2 with
+            | Success (operations, _) -> Success (operations, registry2)
             | CompilerFailure errors -> CompilerFailure errors
             
         | CompilerFailure errors -> CompilerFailure errors
