@@ -392,8 +392,13 @@ module MatchHandling =
                 let spanType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
                 let stateWithSpanType = TypeTracking.recordSSAType spanId spanType stateWithCreateSpan
                 
-                // Process Ok expression with span bound
-                let okExprStateWithBuffer = SSA.bindVariable "span" spanId stateWithSpanType
+                // Process Ok expression with span bound - THIS IS THE BUG FIX SECTION
+                // Pass expectedType to guide the expression conversion
+                let okExprStateWithBuffer = 
+                    stateWithSpanType 
+                    |> SSA.bindVariable "span" spanId
+                    |> TypeTracking.setExpectedType expectedType  // Set expected type explicitly
+                
                 let (okResultId, stateAfterExpr) = convertExpressionFn okExpr okExprStateWithBuffer
                 
                 // Get type of result for potential conversion
@@ -402,12 +407,12 @@ module MatchHandling =
                     | Some typ -> typ
                     | None -> MLIRTypes.createInteger 32  // Default if unknown
                 
-                // Apply type conversion if needed
+                // Apply type conversion if needed - FIX: This ensures integer values are converted to memory references
                 let (finalResultId, stateAfterConversion) =
                     if isMemRefType okResultType then
                         (okResultId, stateAfterExpr)  // Already the right type
                     else
-                        // Need to convert to memref
+                        // Need to convert to memref - THIS IS THE KEY FIX for the %const13 bug
                         Emitter.convertType okResultId okResultType expectedType stateAfterExpr
                 
                 // Store result and branch to end
@@ -418,8 +423,10 @@ module MatchHandling =
                 Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultType
                 
             | Some (_, okExpr) ->
-                // Handle Ok case without pattern variable
-                let (okResultId, stateAfterExpr) = convertExpressionFn okExpr state8
+                // Handle Ok case without pattern variable - with type awareness
+                // Set expected type for the expression
+                let okExprState = TypeTracking.setExpectedType expectedType state8
+                let (okResultId, stateAfterExpr) = convertExpressionFn okExpr okExprState
                 
                 // Get type of result for potential conversion
                 let okResultType = 
@@ -427,7 +434,7 @@ module MatchHandling =
                     | Some typ -> typ
                     | None -> MLIRTypes.createInteger 32  // Default if unknown
                 
-                // Apply type conversion if needed
+                // Apply type conversion if needed - ensures proper type matching
                 let (finalResultId, stateAfterConversion) =
                     if isMemRefType okResultType then
                         (okResultId, stateAfterExpr)  // Already the right type
@@ -465,8 +472,9 @@ module MatchHandling =
         let state11 = 
             match errorCase with
             | Some(_, errorExpr) ->
-                // Process Error expression
-                let (errorResultId, stateAfterErrorExpr) = convertExpressionFn errorExpr state10
+                // Process Error expression with expected type
+                let errorExprState = TypeTracking.setExpectedType expectedType state10
+                let (errorResultId, stateAfterErrorExpr) = convertExpressionFn errorExpr errorExprState
                 
                 // Get type of result for potential conversion
                 let errorResultType = 
@@ -513,14 +521,18 @@ module MatchHandling =
         // Create branch labels
         let (_, elseLabel, endLabel, state1) = generateBranchLabels state
         
-        // Default to integer result type
-        let intType = MLIRTypes.createInteger 32
-        let (defaultValue, state2) = Emitter.constant "0" intType state1
+        // Get expected result type from state, or default to integer
+        let resultType = 
+            match state.ExpectedResultType with
+            | Some expectedType -> expectedType
+            | None -> MLIRTypes.createInteger 32
+        
+        let (defaultValue, state2) = Emitter.constant "0" resultType state1
         
         if cases.IsEmpty then
             // No cases - use default value
-            let state3 = Emitter.emit (sprintf "    %s = %s : %s" resultId defaultValue (mlirTypeToString intType)) state2
-            let state4 = TypeTracking.recordSSAType resultId intType state3
+            let state3 = Emitter.emit (sprintf "    %s = %s : %s" resultId defaultValue (mlirTypeToString resultType)) state2
+            let state4 = TypeTracking.recordSSAType resultId resultType state3
             (resultId, state4)
         else
             // Process each case
@@ -529,8 +541,8 @@ module MatchHandling =
                 | [] -> 
                     // No more cases - handle default fallback
                     let fallbackState = Emitter.emit (sprintf "  ^%s:" elseLabel) currentState
-                    let storeState = Emitter.emit (sprintf "    %s = %s : %s" resultId defaultValue (mlirTypeToString intType)) fallbackState
-                    let typeState = TypeTracking.recordSSAType resultId intType storeState
+                    let storeState = Emitter.emit (sprintf "    %s = %s : %s" resultId defaultValue (mlirTypeToString resultType)) fallbackState
+                    let typeState = TypeTracking.recordSSAType resultId resultType storeState
                     let finalState = Emitter.emit (sprintf "    br ^%s" endLabel) typeState
                     finalState
                 | (pattern, expr) :: rest ->
@@ -539,29 +551,25 @@ module MatchHandling =
                     let caseLabelStr = caseLabel.TrimStart('%')
                     
                     let conditionState = Emitter.emit (sprintf "  ^%s:" caseLabelStr) currentState1
-                    let (exprResultId, exprState) = convertExpressionFn expr conditionState
+                    // Set expected type for the expression
+                    let exprState = TypeTracking.setExpectedType resultType conditionState
+                    let (exprResultId, stateAfterExpr) = convertExpressionFn expr exprState
                     
                     // Get expression type for potential conversion
                     let exprType = 
-                        match TypeTracking.getSSAType exprResultId exprState with
+                        match TypeTracking.getSSAType exprResultId stateAfterExpr with
                         | Some typ -> typ
-                        | None -> intType
-                    
-                    // Get expected type (default to int if not specified)
-                    let expectedType = 
-                        match TypeTracking.getExpectedType exprState with
-                        | Some typ -> typ
-                        | None -> intType
+                        | None -> resultType
                     
                     // Apply type conversion if needed
                     let (finalResultId, afterConvState) =
-                        if exprType = expectedType then
-                            (exprResultId, exprState)
+                        if exprType = resultType then
+                            (exprResultId, stateAfterExpr)
                         else
-                            Emitter.convertType exprResultId exprType expectedType exprState
+                            Emitter.convertType exprResultId exprType resultType stateAfterExpr
                     
-                    let storeState = Emitter.emit (sprintf "    %s = %s : %s" resultId finalResultId (mlirTypeToString expectedType)) afterConvState
-                    let typeState = TypeTracking.recordSSAType resultId expectedType storeState
+                    let storeState = Emitter.emit (sprintf "    %s = %s : %s" resultId finalResultId (mlirTypeToString resultType)) afterConvState
+                    let typeState = TypeTracking.recordSSAType resultId resultType storeState
                     let branchState = Emitter.emit (sprintf "    br ^%s" endLabel) typeState
                     
                     processCases rest branchState

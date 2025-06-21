@@ -486,7 +486,7 @@ module MLIRGeneration =
             
             Success (List.rev operations, symbol.ReturnType)
 
-/// External interface for integration with existing MLIR generation
+/// Type-aware external interface for integration with existing MLIR generation
 module PublicInterface =
     
     /// Creates the standard Alloy registry for use in compilation
@@ -524,9 +524,28 @@ module PublicInterface =
                     else
                         MLIRTypes.createInteger 32)  // Default for excess args
             
-            match MLIRGeneration.generateMLIROperation symbol args argTypes resultId registry2 with
-            | Success (operations, _) -> Success (operations, registry2)
-            | CompilerFailure errors -> CompilerFailure errors
+            // Validate argument types against expected types
+            let (typesValid, typeErrors) = MLIRGeneration.validateArgumentTypes symbol args argTypes
+            
+            if not typesValid then
+                let errorMsg = sprintf "Type validation failed for %s: %s" 
+                                funcName (String.concat "; " typeErrors)
+                
+                // We'll proceed with coercion rather than failing
+                let historyEntry = ("type_warning", errorMsg)
+                let registry3 = { registry2 with ResolutionHistory = historyEntry :: registry2.ResolutionHistory }
+                
+                // Generate operations with built-in coercion
+                match MLIRGeneration.generateMLIROperation symbol args argTypes resultId registry3 with
+                | Success (operations, resultType) -> 
+                    Success (operations, registry3)
+                | CompilerFailure errors -> CompilerFailure errors
+            else
+                // Types are valid, generate operations
+                match MLIRGeneration.generateMLIROperation symbol args argTypes resultId registry2 with
+                | Success (operations, resultType) -> 
+                    Success (operations, registry2)
+                | CompilerFailure errors -> CompilerFailure errors
             
         | CompilerFailure errors -> CompilerFailure errors
     
@@ -554,3 +573,25 @@ module PublicInterface =
                 "available symbols",
                 sprintf "Missing required symbols: %s" (String.concat ", " missingSymbols)
             )]
+            
+    /// Gets parameter types for a function
+    let getParameterTypes (funcName: string) (registry: SymbolRegistry) : MLIRType list option =
+        match RegistryConstruction.resolveSymbolInRegistry funcName registry with
+        | Success (symbol, _) -> Some symbol.ParameterTypes
+        | CompilerFailure _ -> None
+        
+    /// Checks if argument types are compatible with a function's parameter types
+    let areArgumentTypesCompatible 
+            (funcName: string) 
+            (argTypes: MLIRType list) 
+            (registry: SymbolRegistry) : bool =
+        
+        match getParameterTypes funcName registry with
+        | Some paramTypes ->
+            if paramTypes.Length <> argTypes.Length then
+                false
+            else
+                List.zip paramTypes argTypes
+                |> List.forall (fun (paramType, argType) -> 
+                    TypeAnalysis.canConvertTo argType paramType)
+        | None -> false
