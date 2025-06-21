@@ -32,35 +32,6 @@ type MLIRModuleOutput = {
     Diagnostics: string list
 }
 
-/// Creates a clean initial state for MLIR generation
-let createInitialState () : MLIRGenerationState = 
-    match PublicInterface.createStandardRegistry() with
-    | Core.XParsec.Foundation.Success registry -> 
-        let state = {
-            SSACounter = 0
-            CurrentScope = Map.empty
-            ScopeStack = []
-            GeneratedOperations = []
-            ModuleLevelDeclarations = []
-            CurrentFunction = Option.None
-            StringConstants = Map.empty
-            CurrentDialect = Func
-            ErrorContext = []
-            SymbolRegistry = registry
-        }
-        
-        // Add some default string constants that will be needed
-        let state1 = 
-            let (_, state1) = Emitter.registerString "Unknown Person" state
-            let (_, state2) = Emitter.registerString "Hello, %s!" state1
-            let (_, state3) = Emitter.registerString "Ok-fallback" state2
-            let (_, state4) = Emitter.registerString "Error-fallback" state3
-            state4
-            
-        state1
-    | Core.XParsec.Foundation.CompilerFailure _ -> 
-        failwith "Failed to initialize symbol registry"
-
 /// Core SSA value and scope management functions
 module SSA = 
     /// Generates a new SSA value with optional prefix
@@ -147,9 +118,47 @@ module Emitter =
             let (dummyId, state2) = SSA.generateValue "void" state1
             (dummyId, state2)
 
-/// Match expression handling functions
+/// Creates a clean initial state for MLIR generation
+let createInitialState () : MLIRGenerationState = 
+    match PublicInterface.createStandardRegistry() with
+    | Core.XParsec.Foundation.Success registry -> 
+        let state = {
+            SSACounter = 0
+            CurrentScope = Map.empty
+            ScopeStack = []
+            GeneratedOperations = []
+            ModuleLevelDeclarations = []
+            CurrentFunction = Option.None
+            StringConstants = Map.empty
+            CurrentDialect = Func
+            ErrorContext = []
+            SymbolRegistry = registry
+        }
+        
+        // Add some default string constants that will be needed
+        let state1 = 
+            let (_, state1) = Emitter.registerString "Unknown Person" state
+            let (_, state2) = Emitter.registerString "Hello, %s!" state1
+            let (_, state3) = Emitter.registerString "Ok-fallback" state2
+            let (_, state4) = Emitter.registerString "Error-fallback" state3
+            state4
+            
+        state1
+    | Core.XParsec.Foundation.CompilerFailure _ -> 
+        failwith "Failed to initialize symbol registry"
+
+
 /// Match expression handling functions
 module MatchHandling =
+
+    /// Helper for creating string constants in match handling
+    let createStringConstant (value: string) (state: MLIRGenerationState) : string * MLIRGenerationState =
+        // Create a string constant global and return its reference
+        let (globalName, state1) = Emitter.registerString (value.Trim('"')) state
+        let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
+        let state3 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" ptrResult globalName) state2
+        (ptrResult, state3)
+
     /// Generates branch labels for control flow
     let generateBranchLabels (state: MLIRGenerationState) : string * string * string * MLIRGenerationState =
         let (thenId, state1) = SSA.generateValue "then" state
@@ -234,7 +243,7 @@ module MatchHandling =
                 
             | None ->
                 // No Ok case found - use default value and create a fallback string
-                let (defaultConstant, stateWithDefault) = Emitter.constant "\"Ok-fallback\"" (MemRef(Integer 8, [])) state6
+                let (defaultConstant, stateWithDefault) = createStringConstant "Ok-fallback" state6
                 let stateWithStore = 
                     Emitter.emit (sprintf "    %s = %s : memref<?xi8>" resultId defaultConstant) stateWithDefault
                 Emitter.emit (sprintf "    br ^%s" endLabel) stateWithStore
@@ -262,7 +271,7 @@ module MatchHandling =
                 
             | None -> 
                 // No Error case found - use default string
-                let (errorConstant, stateWithDefault) = Emitter.constant "\"Error-fallback\"" (MemRef(Integer 8, [])) state8
+                let (errorConstant, stateWithDefault) = createStringConstant "Error-fallback" state8
                 let stateWithStore = 
                     Emitter.emit (sprintf "    %s = %s : memref<?xi8>" resultId errorConstant) stateWithDefault
                 Emitter.emit (sprintf "    br ^%s" endLabel) stateWithStore
