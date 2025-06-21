@@ -225,8 +225,15 @@ module MatchHandling =
                 // Bind length variable in scope
                 let stateWithBinding = SSA.bindVariable lengthName lengthId stateWithLengthExtract
                 
-                // Convert the Ok expression
-                let (okResultId, stateAfterExpr) = convertExpressionFn okExpr stateWithBinding
+                // Create a span using the buffer and length - use a new SSA variable
+                let (spanId, stateWithSpan) = SSA.generateValue "span" stateWithBinding
+                let stateWithCreateSpan = 
+                    Emitter.emit (sprintf "    %s = func.call @create_span(%s, %s) : (memref<?xi8>, i32) -> memref<?xi8>" 
+                                spanId bufferValue lengthId) stateWithSpan
+                
+                // Convert the Ok expression with the span buffer in context
+                let okExprStateWithBuffer = SSA.bindVariable "span" spanId stateWithCreateSpan
+                let (okResultId, stateAfterExpr) = convertExpressionFn okExpr okExprStateWithBuffer
                 
                 // Store result and jump to end
                 let stateWithResultStore = 
@@ -235,17 +242,17 @@ module MatchHandling =
                 Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
                 
             | Some (_, okExpr) ->
-                // Other Ok patterns - just convert the expression
+                // Other Ok patterns - just convert the expression but ensure we maintain buffer reference
                 let (okResultId, stateAfterExpr) = convertExpressionFn okExpr state6
                 let stateWithResultStore = 
                     Emitter.emit (sprintf "    %s = %s : memref<?xi8>" resultId okResultId) stateAfterExpr
                 Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
                 
             | None ->
-                // No Ok case found - use default value and create a fallback string
-                let (defaultConstant, stateWithDefault) = createStringConstant "Ok-fallback" state6
+                // No Ok case found - use default value and create a fallback string constant
+                let (defaultStr, stateWithStr) = createStringConstant "Ok-fallback" state6
                 let stateWithStore = 
-                    Emitter.emit (sprintf "    %s = %s : memref<?xi8>" resultId defaultConstant) stateWithDefault
+                    Emitter.emit (sprintf "    %s = %s : memref<?xi8>" resultId defaultStr) stateWithStr
                 Emitter.emit (sprintf "    br ^%s" endLabel) stateWithStore
         
         // Process Error branch
@@ -270,17 +277,17 @@ module MatchHandling =
                 Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
                 
             | None -> 
-                // No Error case found - use default string
-                let (errorConstant, stateWithDefault) = createStringConstant "Error-fallback" state8
+                // No Error case found - use default string constant
+                let (errorStr, stateWithStr) = createStringConstant "Error-fallback" state8
                 let stateWithStore = 
-                    Emitter.emit (sprintf "    %s = %s : memref<?xi8>" resultId errorConstant) stateWithDefault
+                    Emitter.emit (sprintf "    %s = %s : memref<?xi8>" resultId errorStr) stateWithStr
                 Emitter.emit (sprintf "    br ^%s" endLabel) stateWithStore
         
         // End block
         let state10 = Emitter.emit (sprintf "  ^%s:" endLabel) state9
         
         (resultId, state10)
-    
+
     /// Handles generic match expression with better fallback handling
     let handleGenericMatch (matchExpr: OakExpression) (cases: (OakPattern * OakExpression) list) 
                           (matchValueId: string) (resultId: string) (state: MLIRGenerationState)
