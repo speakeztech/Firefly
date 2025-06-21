@@ -13,6 +13,7 @@ type ASTConversionResult = {
     Diagnostics: string list
     FSharpASTText: string
     ProcessedFiles: string list  // Track all processed files for debugging
+    SourceModules: (string * OakModule list) list // Track source file for each module
 }
 
 /// Helper functions for extracting names and types from F# AST nodes
@@ -85,7 +86,7 @@ module TypeMapping =
         | SynConst.Unit -> UnitLiteral
         | _ -> UnitLiteral
 
-/// Expression conversion functions - COMPLETE MODULE WITH PROPER ORDERING
+/// Expression conversion functions
 module ExpressionMapping =
     
     // Forward declaration for mutual recursion
@@ -272,7 +273,7 @@ module ExpressionMapping =
         else
             mapExpression expr
 
-/// Declaration mapping functions  
+/// Declaration mapping functions - Enhanced with better module handling  
 module DeclarationMapping =
     
     let mapUnionCase (case: SynUnionCase) : string * OakType option =
@@ -319,7 +320,7 @@ module DeclarationMapping =
     
     let mapBinding (binding: SynBinding) : OakDeclaration option =
         try
-            let (SynBinding(_, _, _, _, attrs, _, _, headPat, _, expr, _, _, _)) = binding
+            let (SynBinding(_, _, _, _, attrs, _, _, headPat, returnTy, expr, _, _, _)) = binding
             let name = AstHelpers.extractPatternName headPat
             
             if AstHelpers.hasEntryPointAttribute attrs then
@@ -339,78 +340,157 @@ module DeclarationMapping =
         with
         | _ -> None
     
-    let mapModuleDeclaration (decl: SynModuleDecl) : OakDeclaration list =
+    // Enhanced to handle more declaration types
+    let rec mapModuleDeclaration (decl: SynModuleDecl) : OakDeclaration list =
         try
             match decl with
             | SynModuleDecl.Let(_, bindings, _) ->
                 if bindings.IsEmpty then []
-                else bindings |> List.choose mapBinding
+                else 
+                    let mappedBindings = bindings |> List.choose mapBinding
+                    printfn "  Mapped %d bindings from Let" mappedBindings.Length
+                    mappedBindings
+                    
             | SynModuleDecl.Types(typeDefns, _) ->
                 if typeDefns.IsEmpty then []
-                else typeDefns |> List.choose mapTypeDefinition
-            | _ -> []
+                else 
+                    let mappedTypes = typeDefns |> List.choose mapTypeDefinition
+                    printfn "  Mapped %d type definitions" mappedTypes.Length
+                    mappedTypes
+                    
+            | SynModuleDecl.NestedModule(componentInfo, isRecursive, decls, range, accessibility, synAttrs) ->
+                // Handle nested modules by recursively processing their declarations
+                let (SynComponentInfo(attributes, typeParams, constraints, longId, xmlDoc, preferPostfix, access, range)) = componentInfo
+                let moduleName = 
+                    if longId.IsEmpty then "_nested_module_"
+                    else AstHelpers.getQualifiedName longId
+                
+                printfn "  Processing nested module: %s with %d declarations" moduleName decls.Length
+                
+                // Map all declarations in the nested module
+                let nestedDecls = decls |> List.collect mapModuleDeclaration
+                printfn "  Mapped %d declarations from nested module %s" nestedDecls.Length moduleName
+                
+                // For now, just return the declarations directly
+                // A more complex approach would create a module structure
+                nestedDecls
+                
+            | SynModuleDecl.Expr(expression, range) ->
+                // Map do expressions to function declarations with generated names
+                let doFuncName = sprintf "_do_%d" (DateTime.Now.Ticks % 10000L)
+                let mappedExpr = ExpressionMapping.mapExpression expression
+                [FunctionDecl(doFuncName, [], UnitType, mappedExpr)]
+                
+            | SynModuleDecl.Open(target, _) ->
+                // For open statements, we don't generate declarations but log them
+                match target with
+                | SynOpenDeclTarget.ModuleOrNamespace(longIdent, _) ->
+                    let idents = AstHelpers.extractLongIdent longIdent
+                    let targetName = AstHelpers.getQualifiedName idents
+                    printfn "  Found open statement: %s" targetName
+                | _ -> 
+                    printfn "  Found unknown open target"
+                []
+                
+            | _ -> 
+                printfn "  Unhandled module declaration type: %A" decl
+                []
         with
-        | _ -> []
+        | ex -> 
+            printfn "  Error mapping module declaration: %s" ex.Message
+            []
 
-/// Module mapping functions
+/// Module mapping functions - Enhanced with better diagnostics
 module ModuleMapping =
-    let mapModule (mdl: SynModuleOrNamespace) : OakModule =
+    let mapModule (mdl: SynModuleOrNamespace) (sourceFile: string) : OakModule =
         try
             let (SynModuleOrNamespace(ids, _, _, decls, _, _, _, _, _)) = mdl
             let moduleName = 
                 if ids.IsEmpty then "Module"
                 else AstHelpers.getQualifiedName ids
+                
+            printfn "Mapping module %s from %s with %d declarations" 
+                moduleName (Path.GetFileName(sourceFile)) decls.Length
+                
             let declarations = 
-                if decls.IsEmpty then []
-                else decls |> List.collect DeclarationMapping.mapModuleDeclaration
+                if decls.IsEmpty then
+                    printfn "  Module %s has empty declarations list" moduleName
+                    []
+                else
+                    let mappedDecls = decls |> List.collect DeclarationMapping.mapModuleDeclaration
+                    printfn "  Mapped %d declarations for module %s" mappedDecls.Length moduleName
+                    mappedDecls
+                    
             { Name = moduleName; Declarations = declarations }
         with
-        | _ -> { Name = "_module_"; Declarations = [] }
+        | ex -> 
+            printfn "Error mapping module: %s" ex.Message
+            { Name = "_error_module_"; Declarations = [] }
     
-    let extractModulesFromParseTree (parseTree: ParsedInput) : OakModule list =
+    // Improved to include source file information and better error handling
+    let extractModulesFromParseTree (parseTree: ParsedInput) (sourceFile: string) : OakModule list =
         try
             match parseTree with
             | ParsedInput.ImplFile(implFile) ->
                 try
                     let (ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) = implFile
                     
-                    // Debug: print all module names during extraction
-                    let moduleNames = modules |> List.map (fun mdl -> 
-                        match mdl with
-                        | SynModuleOrNamespace(ids, _, _, _, _, _, _, _, _) -> 
-                            ids |> List.map (fun id -> id.idText) |> String.concat "."
-                    )
+                    printfn "Extracting modules from %s (%d modules found)" 
+                        (Path.GetFileName(sourceFile)) modules.Length
                     
+                    // Map each module with source file information for better debugging
                     if modules.IsEmpty then []
                     else 
                         modules 
-                        |> List.map mapModule
-                        // Important: Don't filter modules here
-                with
-                | ex -> 
+                        |> List.map (fun mdl -> mapModule mdl sourceFile)
+                        |> List.filter (fun m -> not m.Declarations.IsEmpty)
+                        
+                with ex -> 
+                    printfn "Error extracting modules from %s: %s" 
+                        (Path.GetFileName(sourceFile)) ex.Message
                     let errorModule = { 
-                        Name = sprintf "ERROR_MODULE: %s" ex.Message
+                        Name = sprintf "ERROR_MODULE_%s" (Path.GetFileName(sourceFile))
                         Declarations = [] 
                     }
                     [errorModule]
-            | ParsedInput.SigFile(_) -> []
-        with
-        | ex -> 
+            | ParsedInput.SigFile(_) -> 
+                printfn "Signature file not supported: %s" (Path.GetFileName(sourceFile))
+                []
+        with ex -> 
+            printfn "Parse error in %s: %s" (Path.GetFileName(sourceFile)) ex.Message
             let errorModule = { 
-                Name = sprintf "PARSE_ERROR_MODULE: %s" ex.Message
+                Name = sprintf "PARSE_ERROR_%s" (Path.GetFileName(sourceFile))
                 Declarations = [] 
             }
             [errorModule]
 
-/// Helper function to generate F# AST text representation
-let generateFSharpASTText (parseTree: ParsedInput) : string =
-    try
-        // For debugging, create a simple representation that captures the structure
-        sprintf "%A" parseTree
-    with
-    | ex -> sprintf "Error generating F# AST text: %s" ex.Message
+/// Module merging for handling multiple modules with the same name
+module ModuleMerger =
+    // Merges modules with the same name from multiple files
+    let mergeModules (modules: OakModule list) : OakModule list =
+        // Group modules by name
+        let modulesByName = 
+            modules
+            |> List.groupBy (fun m -> m.Name)
+        
+        // For each group, merge all declarations
+        modulesByName
+        |> List.map (fun (name, modulesWithSameName) ->
+            if modulesWithSameName.Length = 1 then
+                // Only one module with this name, no need to merge
+                modulesWithSameName.[0]
+            else
+                // Multiple modules with the same name, merge their declarations
+                let allDeclarations = 
+                    modulesWithSameName
+                    |> List.collect (fun m -> m.Declarations)
+                
+                printfn "Merging %d modules named '%s' with total of %d declarations" 
+                    modulesWithSameName.Length name allDeclarations.Length
+                
+                { Name = name; Declarations = allDeclarations }
+        )
 
-/// Dependency extraction and resolution system
 /// Dependency extraction and resolution system
 module DependencyResolution =
     /// Represents a dependency with source information
@@ -446,7 +526,9 @@ module DependencyResolution =
             let sourceCode = 
                 try
                     File.ReadAllLines(sourceFile) 
-                with _ -> [||]
+                with ex -> 
+                    printfn "Error reading source file %s: %s" sourceFile ex.Message
+                    [||]
             
             // Extract #load directives
             let loadDependencies =
@@ -464,7 +546,9 @@ module DependencyResolution =
                             with _ -> None
                         
                         match quotedPath with
-                        | Some path -> Some { Path = path; SourceFile = sourceFile; IsDirective = true }
+                        | Some path -> 
+                            printfn "Found #load directive: %s in %s" path (Path.GetFileName(sourceFile))
+                            Some { Path = path; SourceFile = sourceFile; IsDirective = true }
                         | None -> None
                     else None)
                 |> Array.toList
@@ -528,7 +612,23 @@ module DependencyResolution =
             
             // Combine and resolve all dependencies
             let allDependencies = loadDependencies @ openDependencies
-            allDependencies |> List.map resolveDepPath
+            let resolvedDeps = allDependencies |> List.map resolveDepPath
+            
+            // Filter to only valid dependencies and log them
+            let validDeps = resolvedDeps |> List.filter (fun dep -> File.Exists(dep.Path))
+            let invalidDeps = resolvedDeps |> List.filter (fun dep -> not (File.Exists(dep.Path)))
+            
+            if not invalidDeps.IsEmpty then
+                printfn "Warning: %d dependencies could not be resolved:" invalidDeps.Length
+                invalidDeps |> List.iter (fun dep -> 
+                    printfn "  - %s (referenced from %s)" dep.Path (Path.GetFileName(dep.SourceFile)))
+                    
+            if not validDeps.IsEmpty then
+                printfn "Found %d valid dependencies for %s:" validDeps.Length (Path.GetFileName(sourceFile))
+                validDeps |> List.iter (fun dep -> 
+                    printfn "  - %s" (Path.GetFileName(dep.Path)))
+                    
+            validDeps
             
         | ParsedInput.SigFile(_) -> []
 
@@ -601,9 +701,11 @@ module DependencyResolution =
                         sprintf "Exception: %s" ex.Message)
                 ]
 
-/// Unified conversion function with complete dependency resolution
+/// Unified conversion function with complete dependency resolution and module merging
 let parseAndConvertToOakAst (inputPath: string) (sourceCode: string) : ASTConversionResult =
     try
+        printfn "=== Starting compilation for %s ===" (Path.GetFileName(inputPath))
+        
         // Parse the main file
         let sourceText = SourceText.ofString sourceCode
         let baseDirectory = Path.GetDirectoryName(inputPath)
@@ -626,7 +728,11 @@ let parseAndConvertToOakAst (inputPath: string) (sourceCode: string) : ASTConver
                 // Get the dependent files from sourceCode
                 let deps = DependencyResolution.extractAllDependencies mainParseResults.ParseTree inputPath baseDirectory
                 deps |> List.map (fun dep -> dep.Path) |> List.filter File.Exists
-            with _ -> []
+            with ex -> 
+                printfn "Error extracting dependencies: %s" ex.Message
+                []
+        
+        printfn "Found %d dependencies" dependencyFiles.Length
         
         // Parse each dependency file
         let dependencyResults =
@@ -634,6 +740,7 @@ let parseAndConvertToOakAst (inputPath: string) (sourceCode: string) : ASTConver
                 let depSource = File.ReadAllText(depFile)
                 let depSourceText = SourceText.ofString depSource
                 let depResult = checker.ParseFile(depFile, depSourceText, parsingOptions) |> Async.RunSynchronously
+                printfn "Parsed dependency: %s" (Path.GetFileName(depFile))
                 (depFile, depResult.ParseTree))
         
         // Generate complete AST text - including main file and ALL dependencies
@@ -645,21 +752,71 @@ let parseAndConvertToOakAst (inputPath: string) (sourceCode: string) : ASTConver
                 |> String.concat ""
             mainAstText + depAstTexts
         
-        // Process modules from all parse trees
-        let allParseTrees = mainParseResults.ParseTree :: (dependencyResults |> List.map snd)
-        let allModules = allParseTrees |> List.collect ModuleMapping.extractModulesFromParseTree
+        // Process modules from all parse trees with source file tracking
+        let mainModules = ModuleMapping.extractModulesFromParseTree mainParseResults.ParseTree inputPath
+        let depModules = 
+            dependencyResults 
+            |> List.collect (fun (file, ast) -> 
+                let modules = ModuleMapping.extractModulesFromParseTree ast file
+                printfn "Extracted %d modules from %s" modules.Length (Path.GetFileName(file))
+                modules)
         
-        // Build final result
+        // Track all modules by source file
+        let sourceModules = 
+            (inputPath, mainModules) :: 
+            (dependencyResults |> List.map (fun (file, ast) -> 
+                (file, ModuleMapping.extractModulesFromParseTree ast file)))
+            
+        // Extract all modules
+        let allModules = mainModules @ depModules
+            
+        printfn "Extracted %d total modules before merging" allModules.Length
+        for m in allModules do
+            printfn "  Module: %s with %d declarations" m.Name m.Declarations.Length
+            
+        // Merge modules with the same name
+        let mergedModules = ModuleMerger.mergeModules allModules
+        
+        printfn "After merging: %d modules" mergedModules.Length
+        for m in mergedModules do
+            printfn "  Module: %s with %d declarations" m.Name m.Declarations.Length
+            for d in m.Declarations do
+                match d with
+                | FunctionDecl(name, _, _, _) ->
+                    printfn "    Function: %s" name
+                | TypeDecl(name, _) ->
+                    printfn "    Type: %s" name
+                | EntryPoint(_) ->
+                    printfn "    EntryPoint"
+                | ExternalDecl(name, _, _, _) ->
+                    printfn "    External: %s" name
+        
+        // Create program with all modules
+        let program = { Modules = mergedModules }
+        
+        // Validate completeness
+        let declCount = mergedModules |> List.sumBy (fun m -> m.Declarations.Length)
+        printfn "Final Oak AST contains %d modules with %d total declarations" 
+            mergedModules.Length declCount
+        
+        // Build final result with detailed tracking
         { 
-            OakProgram = { Modules = allModules }
-            Diagnostics = ["Parsed main file and " + string dependencyResults.Length + " dependencies"]
+            OakProgram = program
+            Diagnostics = [
+                sprintf "Parsed main file and %d dependencies" dependencyResults.Length;
+                sprintf "Found %d modules with %d declarations" mergedModules.Length declCount
+            ]
             FSharpASTText = fullAstText  // This is the critical field for the .fcs file
             ProcessedFiles = inputPath :: dependencyFiles
+            SourceModules = sourceModules
         }
     with ex ->
+        printfn "CRITICAL ERROR in parsing: %s" ex.Message
+        printfn "Stack trace: %s" ex.StackTrace
         { 
             OakProgram = { Modules = [] }
             Diagnostics = [sprintf "Error in parsing: %s" ex.Message]
             FSharpASTText = sprintf "Error: %s" ex.Message
             ProcessedFiles = []
+            SourceModules = []
         }
