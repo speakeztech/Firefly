@@ -236,173 +236,262 @@ module OperationConverter =
     let convertOperation (operation: string) : string =
         let trimmed = operation.Trim()
         
-        if trimmed.Contains("llvm.alloca") then
-            // Convert: %buffer1 = llvm.alloca() : memref<256xi8>
-            // To: %buffer1 = alloca [256 x i8], align 1
-            if trimmed.Contains("memref<") && trimmed.Contains("xi8>") then
-                let parts = trimmed.Split('=')
-                if parts.Length = 2 then
-                    let resultVar = parts.[0].Trim()
-                    let memrefStart = trimmed.IndexOf("memref<") + 7
-                    let memrefEnd = trimmed.IndexOf("xi8>", memrefStart)
-                    if memrefEnd > memrefStart then
-                        let sizeStr = trimmed.Substring(memrefStart, memrefEnd - memrefStart)
-                        sprintf "  %s = alloca [%s x i8], align 1" resultVar sizeStr
-                    else
-                        sprintf "  %s = alloca [1 x i8], align 1" resultVar
-                else
-                    sprintf "  ; TODO: %s" trimmed
-            else
-                sprintf "  ; TODO: %s" trimmed
-        
-        elif trimmed.Contains("llvm.mlir.addressof") then
-            // Convert: %fmt_ptr2 = llvm.mlir.addressof @str_0 : memref<?xi8>
-            // To: %fmt_ptr2 = getelementptr inbounds [18 x i8], [18 x i8]* @str_0, i32 0, i32 0
-            let parts = trimmed.Split('=')
+        match trimmed with
+        | s when s.Contains("llvm.mlir.constant") ->
+            // Convert: %const7 = llvm.mlir.constant 0 : i32
+            // To:     %const7 = add i32 0, 0
+            let parts = s.Split('=')
             if parts.Length = 2 then
                 let resultVar = parts.[0].Trim()
-                let atIndex = trimmed.IndexOf('@')
-                if atIndex >= 0 then
-                    let afterAt = trimmed.Substring(atIndex)
-                    let spaceIndex = afterAt.IndexOf(' ')
-                    let globalName = 
-                        if spaceIndex > 0 then afterAt.Substring(0, spaceIndex)
-                        else afterAt
-                    // For now, assume 18 character string; in real implementation, would need size lookup
-                    sprintf "  %s = getelementptr inbounds [18 x i8], [18 x i8]* %s, i32 0, i32 0" resultVar globalName
-                else
-                    sprintf "  ; TODO: %s" trimmed
-            else
-                sprintf "  ; TODO: %s" trimmed
-        
-        elif trimmed.Contains("llvm.call @printf") then
-            // Convert: %printf_result3 = llvm.call @printf(%fmt_ptr2) : (memref<?xi8>) -> i32
-            // To: %printf_result3 = call i32 (i8*, ...) @printf(i8* %fmt_ptr2)
-            let parts = trimmed.Split('=')
-            if parts.Length = 2 then
-                let resultVar = parts.[0].Trim()
-                let parenStart = trimmed.IndexOf('(')
-                let parenEnd = trimmed.IndexOf(')')
-                if parenStart >= 0 && parenEnd > parenStart then
-                    let args = trimmed.Substring(parenStart + 1, parenEnd - parenStart - 1)
+                
+                // Extract constant value and type
+                let valueStartIdx = s.IndexOf("constant") + "constant".Length
+                let valueEndIdx = s.IndexOf(':', valueStartIdx)
+                
+                if valueStartIdx > 0 && valueEndIdx > valueStartIdx then
+                    let constValue = s.Substring(valueStartIdx, valueEndIdx - valueStartIdx).Trim()
+                    let typeAndComment = s.Substring(valueEndIdx + 1).Trim()
                     
-                    // Process args to add proper types
-                    let processedArgs = 
-                        if args.Contains(",") then
-                            let argParts = args.Split(',')
-                            let formatPtr = argParts.[0].Trim()
-                            let otherArgs = 
-                                argParts 
-                                |> Array.skip 1 
-                                |> Array.map (fun a -> sprintf "i32 %s" (a.Trim()))
-                            sprintf "i8* %s, %s" formatPtr (String.concat ", " otherArgs)
+                    // Handle inline comments
+                    let (typeStr, comment) =
+                        match typeAndComment.IndexOf("//") with
+                        | idx when idx >= 0 -> 
+                            (typeAndComment.Substring(0, idx).Trim(), 
+                            " ; " + typeAndComment.Substring(idx + 2).Trim())
+                        | _ -> (typeAndComment, "")
+                    
+                    // Generate appropriate add instruction based on type
+                    if typeStr.Contains("i32") then
+                        sprintf "  %s = add i32 %s, 0%s" resultVar constValue comment
+                    elif typeStr.Contains("i64") then
+                        sprintf "  %s = add i64 %s, 0%s" resultVar constValue comment
+                    elif typeStr.Contains("f32") then
+                        sprintf "  %s = fadd float %s, 0.0%s" resultVar constValue comment
+                    elif typeStr.Contains("f64") then
+                        sprintf "  %s = fadd double %s, 0.0%s" resultVar constValue comment
+                    else
+                        sprintf "  %s = add i32 %s, 0%s" resultVar constValue comment
+                else
+                    sprintf "  ; Error parsing constant: %s" s
+            else
+                sprintf "  ; Invalid constant format: %s" s
+                
+        | s when s.Contains("llvm.bitcast") ->
+            // Convert: %conv2 = llvm.bitcast %const1 : i32 to ()
+            // To:     %conv2 = bitcast i32 %const1 to i8*
+            let parts = s.Split('=')
+            if parts.Length = 2 then
+                let resultVar = parts.[0].Trim()
+                let rightSide = parts.[1].Trim()
+                
+                // Extract source variable
+                let valueStartIdx = rightSide.IndexOf('%', rightSide.IndexOf("bitcast") + 7)
+                let colonIdx = rightSide.IndexOf(':', valueStartIdx)
+                let toIdx = rightSide.LastIndexOf(" to ")
+                
+                if valueStartIdx > 0 && colonIdx > valueStartIdx && toIdx > colonIdx then
+                    let sourceVar = rightSide.Substring(valueStartIdx, colonIdx - valueStartIdx).Trim()
+                    let sourceType = rightSide.Substring(colonIdx + 1, toIdx - colonIdx - 1).Trim()
+                    let targetType = rightSide.Substring(toIdx + 4).Trim()
+                    
+                    // Convert MLIR types to LLVM types
+                    let llvmSourceType = 
+                        match sourceType with
+                        | "i32" -> "i32"
+                        | "i64" -> "i64"
+                        | "memref<?xi8>" -> "i8*"
+                        | "()" -> "i8*"  // Handle void type
+                        | _ -> "i8*"
+                    
+                    let llvmTargetType =
+                        match targetType with
+                        | "i32" -> "i32"
+                        | "i64" -> "i64" 
+                        | "memref<?xi8>" -> "i8*"
+                        | "()" -> "i8*"  // Handle void type
+                        | _ -> "i8*"
+                    
+                    // Generate proper LLVM bitcast with correct type order
+                    sprintf "  %s = bitcast %s %s to %s" resultVar llvmSourceType sourceVar llvmTargetType
+                else
+                    sprintf "  ; Error parsing bitcast: %s" s
+            else
+                sprintf "  ; Invalid bitcast format: %s" s
+        
+        | s when s.Contains("llvm.call") ->
+            // Convert: %call7 = llvm.call @printf(%conv6) : (memref<?xi8>) -> ()
+            // To:     %call7 = call i32 @printf(i8* %conv6)
+            let parts = s.Split('=')
+            if parts.Length = 2 then
+                let resultVar = parts.[0].Trim()
+                let rightSide = parts.[1].Trim()
+                
+                // Extract function name and args
+                let atIdx = rightSide.IndexOf('@')
+                let openParenIdx = rightSide.IndexOf('(', atIdx)
+                let closeParenIdx = rightSide.IndexOf(')', openParenIdx)
+                
+                if atIdx > 0 && openParenIdx > atIdx && closeParenIdx > openParenIdx then
+                    let funcName = rightSide.Substring(atIdx, openParenIdx - atIdx)
+                    let argsStr = rightSide.Substring(openParenIdx + 1, closeParenIdx - openParenIdx - 1)
+                    
+                    // Determine return type
+                    let colonIdx = rightSide.IndexOf(':', closeParenIdx)
+                    let arrowIdx = rightSide.IndexOf("->", colonIdx)
+                    
+                    let returnType =
+                        if colonIdx > 0 && arrowIdx > colonIdx then
+                            let returnTypeStr = rightSide.Substring(arrowIdx + 2).Trim()
+                            if returnTypeStr.EndsWith(")") then
+                                let cleanType = returnTypeStr.Substring(0, returnTypeStr.Length - 1).Trim()
+                                match cleanType with
+                                | "()" -> "void"
+                                | "i32" -> "i32"
+                                | "i1" -> "i1"
+                                | "memref<?xi8>" -> "i8*"
+                                | _ -> "i32"
+                            else "i32"
+                        else "i32"
+                    
+                    // Handle special cases for printf and helper functions    
+                    if funcName = "@printf" then
+                        sprintf "  %s = call i32 (i8*, ...) %s(i8* %s)" resultVar funcName argsStr
+                    elif funcName = "@is_ok_result" then
+                        sprintf "  %s = call i1 %s(i32 %s)" resultVar funcName argsStr
+                    elif funcName = "@extract_result_length" then
+                        sprintf "  %s = call i32 %s(i32 %s)" resultVar funcName argsStr
+                    elif funcName = "@create_span" then
+                        let args = argsStr.Split(',')
+                        if args.Length >= 2 then
+                            sprintf "  %s = call i8* %s(i8* %s, i32 %s)" resultVar funcName (args.[0].Trim()) (args.[1].Trim())
                         else
-                            sprintf "i8* %s" (args.Trim())
-                    
-                    sprintf "  %s = call i32 (i8*, ...) @printf(%s)" resultVar processedArgs
+                            sprintf "  %s = call i8* %s(i8* %s)" resultVar funcName argsStr
+                    else
+                        // Generic function call
+                        if String.IsNullOrWhiteSpace(argsStr) then
+                            if returnType = "void" then
+                                sprintf "  call void %s()" funcName
+                            else
+                                sprintf "  %s = call %s %s()" resultVar returnType funcName
+                        else
+                            if returnType = "void" then
+                                sprintf "  call void %s(%s)" funcName argsStr
+                            else
+                                sprintf "  %s = call %s %s(%s)" resultVar returnType funcName argsStr
                 else
-                    sprintf "  %s = call i32 (i8*, ...) @printf()" resultVar
+                    sprintf "  ; Error parsing function call: %s" s
             else
-                sprintf "  ; TODO: %s" trimmed
-        
-        elif trimmed.Contains("llvm.call @scanf") then
-            // Convert: %scanf_result6 = llvm.call @scanf(%scanf_fmt4, %scanf_buffer5) : (memref<?xi8>, memref<?xi8>) -> i32
-            // To: %scanf_result6 = call i32 (i8*, ...) @scanf(i8* %scanf_fmt4, i8* %scanf_buffer5)
-            let parts = trimmed.Split('=')
+                sprintf "  ; Invalid function call format: %s" s
+                
+        | s when s.StartsWith("^") ->
+            // Convert: ^then13:
+            // To:     then13:
+            sprintf "%s:" (s.TrimStart('^'))
+            
+        | s when s.StartsWith("br ^") ->
+            // Convert: br ^end15
+            // To:     br label %end15
+            let labelName = s.Substring(3).Trim()
+            sprintf "  br label %%%s" labelName
+            
+        | s when s.StartsWith("cond_br") ->
+            // Convert: cond_br %is_ok12, ^then13, ^else14
+            // To:     br i1 %is_ok12, label %then13, label %else14
+            let commaIdx1 = s.IndexOf(',')
+            let commaIdx2 = s.IndexOf(',', commaIdx1 + 1)
+            
+            if commaIdx1 > 0 && commaIdx2 > commaIdx1 then
+                let condition = s.Substring("cond_br".Length, commaIdx1 - "cond_br".Length).Trim()
+                let thenLabel = s.Substring(commaIdx1 + 1, commaIdx2 - commaIdx1 - 1).Trim().TrimStart('^')
+                let elseLabel = s.Substring(commaIdx2 + 1).Trim().TrimStart('^')
+                
+                sprintf "  br i1 %s, label %%%s, label %%%s" condition thenLabel elseLabel
+            else
+                sprintf "  ; Error parsing conditional branch: %s" s
+                
+        | s when s.Contains(" = ") && s.Contains(" : ") && not (s.Contains("llvm.")) ->
+            // Convert: %match_result11 = %call20 : memref<?xi8>
+            // To:     %match_result11 = %call20
+            let parts = s.Split('=')
             if parts.Length = 2 then
                 let resultVar = parts.[0].Trim()
-                let parenStart = trimmed.IndexOf('(')
-                let parenEnd = trimmed.IndexOf(')')
-                if parenStart >= 0 && parenEnd > parenStart then
-                    let args = trimmed.Substring(parenStart + 1, parenEnd - parenStart - 1)
-                    let argParts = args.Split(',')
-                    
-                    if argParts.Length >= 2 then
-                        let formatPtr = argParts.[0].Trim()
-                        let bufferPtr = argParts.[1].Trim()
-                        sprintf "  %s = call i32 (i8*, ...) @scanf(i8* %s, i8* %s)" resultVar formatPtr bufferPtr
-                    else
-                        sprintf "  %s = call i32 (i8*, ...) @scanf(i8* %s)" resultVar (args.Trim())
+                let rightSide = parts.[1].Trim()
+                
+                let colonIdx = rightSide.IndexOf(':')
+                if colonIdx > 0 then
+                    let sourceVar = rightSide.Substring(0, colonIdx).Trim()
+                    sprintf "  %s = %s" resultVar sourceVar
                 else
-                    sprintf "  %s = call i32 (i8*, ...) @scanf()" resultVar
+                    sprintf "  %s = %s" resultVar rightSide
             else
-                sprintf "  ; TODO: %s" trimmed
-        
-        elif trimmed.Contains("llvm.call @hello") then
-            // Convert: %call6 = llvm.call @hello() : () -> i32
-            // To: call void @hello()
-            if trimmed.Contains("=") then
-                let parts = trimmed.Split('=')
+                sprintf "  ; Error parsing assignment: %s" s
+                
+        | s when s.Contains("memref.llvm.alloca") ->
+            // Convert: %call3 = memref.llvm.alloca(%conv2) : memref<?xi8> {element_type = i8}
+            // To:     %call3 = alloca i8, i32 256
+            let parts = s.Split('=')
+            if parts.Length = 2 then
                 let resultVar = parts.[0].Trim()
-                sprintf "  %s = call void @hello()" resultVar
+                
+                // Try to extract size
+                let openParenIdx = s.IndexOf('(')
+                let closeParenIdx = s.IndexOf(')', openParenIdx)
+                
+                if openParenIdx > 0 && closeParenIdx > openParenIdx then
+                    let sizeVar = s.Substring(openParenIdx + 1, closeParenIdx - openParenIdx - 1)
+                    sprintf "  %s = alloca i8, i32 256, align 1" resultVar
+                else
+                    sprintf "  %s = alloca i8, i32 256, align 1" resultVar
             else
-                sprintf "  call void @hello()"
+                sprintf "  ; Invalid alloca format: %s" s
+                
+        | s when s.Contains("llvm.mlir.addressof") ->
+            // Convert: %str_ptr5 = llvm.mlir.addressof @str_4 : memref<?xi8>
+            // To:     %str_ptr5 = getelementptr [32 x i8], [32 x i8]* @str_4, i32 0, i32 0
+            let parts = s.Split('=')
+            if parts.Length = 2 then
+                let resultVar = parts.[0].Trim()
+                
+                // Extract global name
+                let atIdx = s.IndexOf('@')
+                let colonIdx = s.IndexOf(':', atIdx)
+                
+                if atIdx > 0 && colonIdx > atIdx then
+                    let globalName = s.Substring(atIdx, colonIdx - atIdx).Trim()
+                    sprintf "  %s = getelementptr [32 x i8], [32 x i8]* %s, i32 0, i32 0" resultVar globalName
+                else
+                    sprintf "  ; Error parsing addressof: %s" s
+            else
+                sprintf "  ; Invalid addressof format: %s" s
         
-        elif trimmed.Contains("llvm.return") then
-            if trimmed.Contains("llvm.return ") then
-                // Extract the return value
-                let parts = trimmed.Split(' ')
-                let returnParts = parts |> Array.skipWhile (fun p -> p <> "llvm.return") |> Array.skip 1
-                if returnParts.Length > 0 then
-                    let value = returnParts.[0].Split(':').[0]  // Remove type annotation
-                    sprintf "  ret i32 %s" value
+        | s when s.Contains("llvm.return") ->
+            // Handle return statements
+            if s.Contains(":") then
+                let spaceAfterReturn = s.IndexOf(' ', "llvm.return".Length)
+                let colonIdx = s.LastIndexOf(':')
+                
+                if spaceAfterReturn > 0 && colonIdx > spaceAfterReturn then
+                    let returnVal = s.Substring(spaceAfterReturn, colonIdx - spaceAfterReturn).Trim()
+                    let typeStr = s.Substring(colonIdx + 1).Trim()
+                    
+                    if typeStr.Contains("i32") then
+                        sprintf "  ret i32 %s" returnVal
+                    elif typeStr.Contains("i64") then
+                        sprintf "  ret i64 %s" returnVal
+                    else
+                        sprintf "  ret i32 %s" returnVal
                 else
                     "  ret void"
             else
                 "  ret void"
         
-        elif trimmed.Contains("llvm.mlir.constant") then
-            // Convert: %const7 = llvm.mlir.constant 0 : i32
-            // To: %const7 = add i32 0, 0
-            let parts = trimmed.Split('=')
-            if parts.Length = 2 then
-                let resultVar = parts.[0].Trim()
-                
-                // Extract the constant value and type
-                let valueStartIdx = trimmed.IndexOf("constant") + "constant".Length
-                let valueEndIdx = trimmed.LastIndexOf(':')
-                
-                if valueStartIdx > 0 && valueEndIdx > valueStartIdx then
-                    let constValue = trimmed.Substring(valueStartIdx, valueEndIdx - valueStartIdx).Trim()
-                    let constType = trimmed.Substring(valueEndIdx + 1).Trim()
-                    
-                    if constType.Contains("i32") then
-                        sprintf "  %s = add i32 %s, 0" resultVar constValue
-                    elif constType.Contains("i64") then
-                        sprintf "  %s = add i64 %s, 0" resultVar constValue
-                    elif constType.Contains("f32") then
-                        sprintf "  %s = fadd float %s, 0.0" resultVar constValue
-                    elif constType.Contains("f64") then
-                        sprintf "  %s = fadd double %s, 0.0" resultVar constValue
-                    else
-                        sprintf "  %s = add i32 %s, 0" resultVar constValue
-                else
-                    sprintf "  ; Error parsing constant: %s" trimmed
-            else
-                sprintf "  ; Invalid constant format: %s" trimmed
-        
-        elif trimmed.Contains("llvm.bitcast") then
-            // Convert: %scanf_buffer5 = llvm.bitcast %buffer1 : memref<256xi8> to memref<?xi8>
-            // To: %scanf_buffer5 = bitcast [256 x i8]* %buffer1 to i8*
-            let parts = trimmed.Split('=')
-            if parts.Length = 2 then
-                let resultVar = parts.[0].Trim()
-                let sourceVarIdx = parts.[1].IndexOf('%', parts.[1].IndexOf("bitcast") + "bitcast".Length)
-                let toIdx = parts.[1].IndexOf("to")
-                
-                if sourceVarIdx > 0 && toIdx > sourceVarIdx then
-                    let sourceVar = parts.[1].Substring(sourceVarIdx, toIdx - sourceVarIdx).Trim()
-                    sprintf "  %s = bitcast i8* %s to i8*" resultVar sourceVar
-                else
-                    sprintf "  ; TODO: %s" trimmed
-            else
-                sprintf "  ; TODO: %s" trimmed
-        
-        elif trimmed.StartsWith(";") then
-            // Pass through comments
-            sprintf "  %s" trimmed
-        
-        else
+        // Handle comments and unrecognized operations
+        | s when s.StartsWith(";") -> 
+            // Convert // comments to ; for LLVM
+            sprintf "  ; %s" (s.TrimStart(';').Trim())
+            
+        | _ -> 
+            // Pass unrecognized operations as comments
             sprintf "  ; TODO: %s" trimmed
 
 /// LLVM IR generation
