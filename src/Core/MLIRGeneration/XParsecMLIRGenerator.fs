@@ -52,7 +52,7 @@ module SSA =
     let lookupVariable (name: string) (state: MLIRGenerationState) : string option =
         let rec lookup scopes =
             match scopes with
-            | [] -> Option.None
+            | [] -> None
             | scope :: rest ->
                 match Map.tryFind name scope with
                 | Some value -> Some value
@@ -91,45 +91,8 @@ module TypeTracking =
         | StringLiteral _ -> MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
         | UnitLiteral -> MLIRTypes.createVoid ()
         | ArrayLiteral _ -> MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
-    
-    /// Infers the type of a variable from the current scope
-    let inferVariableType (name: string) (state: MLIRGenerationState) : MLIRType option =
-        match SSA.lookupVariable name state with
-        | Some valueId -> getSSAType valueId state
-        | None -> None
-    
-    /// Infers the return type of a function from the symbol registry
-    let inferFunctionReturnType (funcName: string) (state: MLIRGenerationState) : MLIRType option =
-        match PublicInterface.resolveFunctionCall funcName [] "" state.SymbolRegistry with
-        | Core.XParsec.Foundation.Success (_, updatedRegistry) ->
-            // Try to find the function in the registry and get its return type
-            let lookupName = 
-                if funcName.Contains(".") then funcName
-                else 
-                    // Check common Alloy functions
-                    if funcName = "stackBuffer" then "Alloy.Memory.stackBuffer"
-                    elif funcName = "spanToString" then "Alloy.Memory.spanToString"
-                    elif funcName = "readInto" then "Alloy.IO.Console.readInto"
-                    elif funcName = "writeLine" then "Alloy.IO.Console.writeLine"
-                    elif funcName = "format" then "Alloy.IO.String.format"
-                    else funcName
-                    
-            // Default types for common functions
-            match lookupName with
-            | "Alloy.Memory.stackBuffer" -> Some (MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [])
-            | "Alloy.Memory.spanToString" -> Some (MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [])
-            | "Alloy.IO.Console.readInto" -> Some (MLIRTypes.createInteger 32)  // Result<int, string> mapped to i32
-            | "Alloy.IO.Console.writeLine" -> Some (MLIRTypes.createVoid ())
-            | "Alloy.IO.String.format" -> Some (MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [])
-            | _ -> Some (MLIRTypes.createInteger 32) // Default to i32 for unknown functions
-        | _ -> Some (MLIRTypes.createInteger 32) // Default to i32 if resolution fails
-    
-    /// Checks if two types are compatible for the current operation
-    let areTypesCompatibleInContext (sourceType: MLIRType) (targetType: MLIRType) (state: MLIRGenerationState) : bool =
-        areTypesCompatible sourceType targetType ||
-        TypeAnalysis.canConvertTo sourceType targetType
 
-/// Core MLIR operation emission functions
+/// Core operation emission with type tracking
 module Emitter =
     /// Emits a raw MLIR operation string to function body
     let emit (operation: string) (state: MLIRGenerationState) : MLIRGenerationState =
@@ -160,40 +123,7 @@ module Emitter =
         let state3 = TypeTracking.recordSSAType resultId mlirType state2
         (resultId, state3)
     
-    /// Creates a function call in MLIR with type tracking
-    let call (funcName: string) (args: string list) (resultType: MLIRType option) (state: MLIRGenerationState) : string * MLIRGenerationState =
-        let argStr = if args.IsEmpty then "" else String.concat ", " args
-        let paramTypeStr = if args.IsEmpty then "" else String.concat ", " (List.replicate args.Length "i32")
-        
-        match resultType with
-        | Some returnType when returnType.Category <> VoidCategory ->
-            let (resultId, state1) = SSA.generateValue "call" state
-            let typeStr = mlirTypeToString returnType
-            
-            let callStr = 
-                if args.IsEmpty then
-                    sprintf "    %s = func.call @%s() : () -> %s" resultId funcName typeStr
-                else
-                    sprintf "    %s = func.call @%s(%s) : (%s) -> %s" 
-                            resultId funcName argStr paramTypeStr typeStr
-            
-            let state2 = emit callStr state1
-            let state3 = TypeTracking.recordSSAType resultId returnType state2
-            (resultId, state3)
-        | _ ->
-            let callStr = 
-                if args.IsEmpty then
-                    sprintf "    func.call @%s() : () -> ()" funcName
-                else
-                    sprintf "    func.call @%s(%s) : (%s) -> ()" funcName argStr paramTypeStr
-            
-            let state1 = emit callStr state
-            let (dummyId, state2) = SSA.generateValue "void" state1
-            let voidType = MLIRTypes.createVoid ()
-            let state3 = TypeTracking.recordSSAType dummyId voidType state2
-            (dummyId, state3)
-    
-    /// Creates a basic type conversion operation
+    /// Creates a type conversion operation
     let convertType (sourceValue: string) (sourceType: MLIRType) (targetType: MLIRType) (state: MLIRGenerationState) : string * MLIRGenerationState =
         // Skip conversion if types are already compatible
         if sourceType = targetType then
@@ -236,14 +166,27 @@ module Emitter =
                 (resultId, state3)
                 
             | IntegerCategory, MemoryRefCategory ->
-                // Integer to memory reference (unusual but handled)
+                // Integer to memory reference conversion
                 // This typically involves creating a string representation
                 let (strGlobal, state2) = registerString "%d" state1
-                let (ptrResult, state3) = SSA.generateValue "str_ptr" state2
-                let state4 = emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" ptrResult strGlobal) state3
+                let (formatPtr, state3) = SSA.generateValue "fmt_ptr" state2
+                let state4 = emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" formatPtr strGlobal) state3
+                
+                // Allocate buffer for result
+                let (resultBuffer, state5) = SSA.generateValue "str_buf" state4
+                let state6 = emit (sprintf "    %s = memref.alloca() : memref<32xi8>" resultBuffer) state5
+                
+                // Register sprintf declaration
+                let state7 = emitModuleLevel "  func.func private @sprintf(memref<?xi8>, memref<?xi8>, i32) -> i32" state6
+                
+                // Generate sprintf call
+                let (sprintfResult, state8) = SSA.generateValue "sprintf_result" state7
+                let state9 = emit (sprintf "    %s = func.call @sprintf(%s, %s, %s) : (memref<?xi8>, memref<?xi8>, i32) -> i32" 
+                                     sprintfResult resultBuffer formatPtr sourceValue) state8
+                
                 let memRefType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
-                let state5 = TypeTracking.recordSSAType ptrResult memRefType state4
-                (ptrResult, state5)
+                let state10 = TypeTracking.recordSSAType resultBuffer memRefType state9
+                (resultBuffer, state10)
                 
             | MemoryRefCategory, MemoryRefCategory ->
                 // Memory reference conversion
@@ -255,14 +198,1156 @@ module Emitter =
                 (resultId, state3)
                 
             | _ ->
-                // Default to a simple bitcast for other conversions
-                // In a real implementation, this would be more sophisticated
+                // Default to a bitcast for other conversions
                 let sourceTypeStr = mlirTypeToString sourceType
                 let targetTypeStr = mlirTypeToString targetType
                 let opStr = sprintf "    %s = llvm.bitcast %s : %s to %s" resultId sourceValue sourceTypeStr targetTypeStr
                 let state2 = emit opStr state1
                 let state3 = TypeTracking.recordSSAType resultId targetType state2
                 (resultId, state3)
+
+/// Defines a type-aware pattern-matching system for MLIR generation
+module TypedPatterns =
+    /// Represents a type-aware MLIR generation pattern
+    type MLIRPattern = {
+        /// Pattern name for diagnostic purposes
+        Name: string
+        /// Description of what the pattern matches
+        Description: string
+        /// Function to check if an expression matches this pattern
+        Matcher: OakExpression -> bool
+        /// Generator function that produces MLIR with type awareness
+        Generator: OakExpression -> MLIRType option -> MLIRGenerationState -> string * MLIRType * MLIRGenerationState
+    }
+
+       
+    /// Determines if a function is a known Alloy function that returns a Result type
+    let isResultReturningFunction (funcName: string) : bool =
+        match funcName with
+        | "readInto" 
+        | "readFile"
+        | "parseInput"
+        | "tryParse" -> true
+        | _ -> funcName.Contains("OrNone") || 
+               funcName.Contains("OrError") || 
+               funcName.StartsWith("try") ||
+               funcName.Contains("Result")
+    
+    /// Create a Result match pattern that properly handles Ok/Error pattern matching
+    let resultMatchPattern : MLIRPattern = {
+        Name = "result-match-pattern"
+        Description = "Match expression on Result type with Ok/Error cases"
+        Matcher = function
+            | Match(Application(Variable funcName, _), cases) when isResultReturningFunction funcName ->
+                // Check if it has Ok/Error patterns
+                cases |> List.exists (fun (pattern, _) ->
+                    match pattern with
+                    | PatternConstructor("Ok", _) -> true
+                    | _ -> false) &&
+                cases |> List.exists (fun (pattern, _) ->
+                    match pattern with
+                    | PatternConstructor("Error", _) -> true
+                    | _ -> false)
+            | _ -> false
+        Generator = fun expr expectedType state ->
+            match expr with
+            | Match(matchExpr, cases) ->
+                // Process the match expression
+                let rec processExpression (expr: OakExpression) (state: MLIRGenerationState) =
+                    // Dispatch to appropriate pattern handler based on expression type
+                    let pattern = 
+                        patternRegistry 
+                        |> List.tryFind (fun p -> p.Matcher expr)
+                    
+                    match pattern with
+                    | Some p -> p.Generator expr (TypeTracking.getExpectedType state) state
+                    | None -> 
+                        // Fallback for expressions without specific patterns
+                        processExpressionFallback expr state
+                
+                and processExpressionFallback (expr: OakExpression) (state: MLIRGenerationState) =
+                    match expr with
+                    | Literal lit ->
+                        let literalType = TypeTracking.inferLiteralType lit
+                        match lit with
+                        | IntLiteral value ->
+                            let (resultId, newState) = Emitter.constant (string value) literalType state
+                            (resultId, literalType, newState)
+                        | StringLiteral value ->
+                            let (globalName, state1) = Emitter.registerString value state
+                            let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
+                            let state3 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" 
+                                                      ptrResult globalName) state2
+                            (ptrResult, literalType, state3)
+                        | _ -> 
+                            let (resultId, newState) = Emitter.constant "0" literalType state
+                            (resultId, literalType, newState)
+                    
+                    | Variable name ->
+                        match SSA.lookupVariable name state with
+                        | Some value -> 
+                            // Get type if available
+                            let valueType = 
+                                match TypeTracking.getSSAType value state with
+                                | Some t -> t
+                                | None -> MLIRTypes.createInteger 32 // Default if unknown
+                            (value, valueType, state)
+                        | None -> 
+                            // Unknown variable
+                            let (dummyValue, state1) = SSA.generateValue "unknown" state
+                            let intType = MLIRTypes.createInteger 32
+                            let state2 = TypeTracking.recordSSAType dummyValue intType state1
+                            (dummyValue, intType, state2)
+                    
+                    | _ ->
+                        // Default fallback
+                        let (dummyValue, state1) = SSA.generateValue "fallback" state
+                        let intType = MLIRTypes.createInteger 32
+                        let state2 = TypeTracking.recordSSAType dummyValue intType state1
+                        (dummyValue, intType, state2)
+                
+                // Process the match expression
+                let (matchValueId, matchValueType, stateAfterMatchExpr) = processExpression matchExpr state
+                let (resultId, stateWithResultVar) = SSA.generateValue "match_result" stateAfterMatchExpr
+                
+                // Determine the result type - either expected type or memref by default
+                let resultType = 
+                    match expectedType with
+                    | Some t -> t
+                    | None -> MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
+                
+                // Extract buffer name for better code generation
+                let bufferName = 
+                    match matchExpr with
+                    | Application(Variable "readInto", [Variable name]) -> name
+                    | _ -> "buffer"
+                
+                // Find buffer value in scope
+                let bufferValue = 
+                    match SSA.lookupVariable bufferName state with
+                    | Some value -> value
+                    | None -> "%unknown_buffer"
+                
+                // Register helper functions for Result handling
+                let state1 = 
+                    stateWithResultVar
+                    |> Emitter.emitModuleLevel "  func.func private @is_ok_result(i32) -> i1"
+                    |> Emitter.emitModuleLevel "  func.func private @extract_result_length(i32) -> i32"
+                    |> Emitter.emitModuleLevel "  func.func private @create_span(memref<?xi8>, i32) -> memref<?xi8>"
+                
+                // Check if result is Ok or Error
+                let (isOkId, state2) = SSA.generateValue "is_ok" state1
+                let state3 = Emitter.emit (sprintf "    %s = func.call @is_ok_result(%s) : (i32) -> i1" 
+                                        isOkId matchValueId) state2
+                let boolType = MLIRTypes.createInteger 1
+                let state4 = TypeTracking.recordSSAType isOkId boolType state3
+                
+                // Create branch labels
+                let (thenId, state5) = SSA.generateValue "then" state4
+                let (elseId, state6) = SSA.generateValue "else" state5
+                let (endId, state7) = SSA.generateValue "end" state6
+                
+                let thenLabel = thenId.TrimStart('%')
+                let elseLabel = elseId.TrimStart('%')
+                let endLabel = endId.TrimStart('%')
+                
+                let state8 = Emitter.emit (sprintf "    cond_br %s, ^%s, ^%s" 
+                                        isOkId thenLabel elseLabel) state7
+                
+                // Find Ok case pattern
+                let okCase = 
+                    cases |> List.tryFind (fun (pattern, _) -> 
+                        match pattern with 
+                        | PatternConstructor("Ok", _) -> true
+                        | _ -> false)
+                
+                // Handle Ok branch
+                let state9 = Emitter.emit (sprintf "  ^%s:" thenLabel) state8
+                
+                let state10 = 
+                    match okCase with
+                    | Some (PatternConstructor("Ok", [PatternVariable lengthName]), okExpr) ->
+                        // Extract length from result
+                        let (lengthId, stateWithLength) = SSA.generateValue "length" state9
+                        let stateWithLengthExtract = 
+                            Emitter.emit (sprintf "    %s = func.call @extract_result_length(%s) : (i32) -> i32" 
+                                        lengthId matchValueId) stateWithLength
+                        let intType = MLIRTypes.createInteger 32
+                        let stateWithLengthType = TypeTracking.recordSSAType lengthId intType stateWithLengthExtract
+                        
+                        // Bind length variable
+                        let stateWithBinding = SSA.bindVariable lengthName lengthId stateWithLengthType
+                        
+                        // Create span from buffer and length
+                        let (spanId, stateWithSpan) = SSA.generateValue "span" stateWithBinding
+                        let stateWithCreateSpan = 
+                            Emitter.emit (sprintf "    %s = func.call @create_span(%s, %s) : (memref<?xi8>, i32) -> memref<?xi8>" 
+                                        spanId bufferValue lengthId) stateWithSpan
+                        let spanType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
+                        let stateWithSpanType = TypeTracking.recordSSAType spanId spanType stateWithCreateSpan
+                        
+                        // Process Ok expression with span bound
+                        // Set expected type for the expression
+                        let okExprStateWithBuffer = 
+                            stateWithSpanType 
+                            |> SSA.bindVariable "span" spanId
+                            |> TypeTracking.setExpectedType resultType
+                        
+                        // Process the Ok expression
+                        let (okResultId, okResultType, stateAfterExpr) = 
+                            processExpression okExpr okExprStateWithBuffer
+                        
+                        // Apply type conversion if needed to ensure result type matches expected
+                        let (finalResultId, stateAfterConversion) =
+                            if okResultType <> resultType then
+                                let (convertedId, convertedState) = 
+                                    Emitter.convertType okResultId okResultType resultType stateAfterExpr
+                                (convertedId, convertedState)
+                            else
+                                (okResultId, stateAfterExpr)
+                        
+                        // Store result and branch to end
+                        let stateWithResultStore = 
+                            Emitter.emit (sprintf "    %s = %s : %s" 
+                                        resultId finalResultId (mlirTypeToString resultType)) stateAfterConversion
+                        
+                        Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
+                        
+                    | Some (_, okExpr) ->
+                        // Handle Ok case without pattern variable
+                        // Set expected type for the expression
+                        let okExprState = TypeTracking.setExpectedType resultType state9
+                        
+                        // Process the Ok expression
+                        let (okResultId, okResultType, stateAfterExpr) = 
+                            processExpression okExpr okExprState
+                        
+                        // Apply type conversion if needed
+                        let (finalResultId, stateAfterConversion) =
+                            if okResultType <> resultType then
+                                let (convertedId, convertedState) = 
+                                    Emitter.convertType okResultId okResultType resultType stateAfterExpr
+                                (convertedId, convertedState)
+                            else
+                                (okResultId, stateAfterExpr)
+                        
+                        // Store result and branch to end
+                        let stateWithResultStore = 
+                            Emitter.emit (sprintf "    %s = %s : %s" 
+                                        resultId finalResultId (mlirTypeToString resultType)) stateAfterConversion
+                        
+                        Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
+                        
+                    | None ->
+                        // No Ok case found, use fallback
+                        let (defaultStr, stateWithStr) = 
+                            let (globalName, state1) = Emitter.registerString "Ok-fallback" state9
+                            let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
+                            let state3 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" 
+                                                     ptrResult globalName) state2
+                            (ptrResult, state3)
+                            
+                        let stateWithStore = 
+                            Emitter.emit (sprintf "    %s = %s : %s" 
+                                         resultId defaultStr (mlirTypeToString resultType)) stateWithStr
+                        
+                        Emitter.emit (sprintf "    br ^%s" endLabel) stateWithStore
+                
+                // Find Error case pattern
+                let errorCase = 
+                    cases 
+                    |> List.tryFind (fun (pattern, _) -> 
+                        match pattern with 
+                        | PatternConstructor("Error", _) -> true 
+                        | _ -> false)
+                
+                // Handle Error branch
+                let state11 = Emitter.emit (sprintf "  ^%s:" elseLabel) state10
+                
+                let state12 = 
+                    match errorCase with
+                    | Some(_, errorExpr) ->
+                        // Process Error expression with expected type
+                        let errorExprState = TypeTracking.setExpectedType resultType state11
+                        
+                        // Process the Error expression
+                        let (errorResultId, errorResultType, stateAfterErrorExpr) = 
+                            processExpression errorExpr errorExprState
+                        
+                        // Apply type conversion if needed
+                        let (finalErrorId, stateAfterConversion) =
+                            if errorResultType <> resultType then
+                                let (convertedId, convertedState) = 
+                                    Emitter.convertType errorResultId errorResultType resultType stateAfterErrorExpr
+                                (convertedId, convertedState)
+                            else
+                                (errorResultId, stateAfterErrorExpr)
+                        
+                        // Store result and branch to end
+                        let stateWithResultStore = 
+                            Emitter.emit (sprintf "    %s = %s : %s" 
+                                        resultId finalErrorId (mlirTypeToString resultType)) stateAfterConversion
+                        
+                        Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
+                        
+                    | None -> 
+                        // No Error case found, use fallback
+                        let (errorStr, stateWithStr) = 
+                            let (globalName, state1) = Emitter.registerString "Error-fallback" state11
+                            let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
+                            let state3 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" 
+                                                     ptrResult globalName) state2
+                            (ptrResult, state3)
+                            
+                        let stateWithStore = 
+                            Emitter.emit (sprintf "    %s = %s : %s" 
+                                         resultId errorStr (mlirTypeToString resultType)) stateWithStr
+                        
+                        Emitter.emit (sprintf "    br ^%s" endLabel) stateWithStore
+                
+                // Add end label and clear expected type
+                let state13 = Emitter.emit (sprintf "  ^%s:" endLabel) state12
+                let finalState = TypeTracking.recordSSAType resultId resultType state13
+                
+                (resultId, resultType, finalState)
+            | _ ->
+                // Should never happen due to pattern check
+                let (dummyId, state1) = SSA.generateValue "invalid" state
+                let dummyType = MLIRTypes.createInteger 32
+                let state2 = TypeTracking.recordSSAType dummyId dummyType state1
+                (dummyId, dummyType, state2)
+    }
+    
+    /// Stack allocation pattern
+    let stackAllocPattern : MLIRPattern = {
+        Name = "stack-alloc-pattern"
+        Description = "Stack allocation of fixed-size buffer using NativePtr.stackalloc or stackBuffer"
+        Matcher = function
+            | Application(Variable fname, [Literal(IntLiteral _)]) 
+                when fname = "NativePtr.stackalloc" || fname = "stackBuffer" -> true
+            | _ -> false
+        Generator = fun expr expectedType state ->
+            match expr with
+            | Application(_, [Literal(IntLiteral size)]) ->
+                let (bufferResult, state1) = SSA.generateValue "buffer" state
+                let state2 = Emitter.emit (sprintf "    %s = memref.alloca() : memref<%dxi8>" 
+                                         bufferResult size) state1
+                let bufferType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [size]
+                let state3 = TypeTracking.recordSSAType bufferResult bufferType state2
+                (bufferResult, bufferType, state3)
+            | _ ->
+                // Should never happen due to pattern check
+                let (dummyId, state1) = SSA.generateValue "invalid" state
+                let dummyType = MLIRTypes.createInteger 32
+                let state2 = TypeTracking.recordSSAType dummyId dummyType state1
+                (dummyId, dummyType, state2)
+    }
+    
+    /// String format pattern
+    let stringFormatPattern : MLIRPattern = {
+        Name = "string-format-pattern"
+        Description = "String formatting with String.format or format function"
+        Matcher = function
+            | Application(Variable fname, [Literal(StringLiteral _); _])
+                when fname = "format" || fname = "String.format" -> true
+            | _ -> false
+        Generator = fun expr expectedType state ->
+            match expr with
+            | Application(_, [Literal(StringLiteral formatStr); value]) ->
+                let rec processExpression (expr: OakExpression) (state: MLIRGenerationState) =
+                    let pattern = 
+                        patternRegistry 
+                        |> List.tryFind (fun p -> p.Matcher expr)
+                    
+                    match pattern with
+                    | Some p -> p.Generator expr (TypeTracking.getExpectedType state) state
+                    | None -> 
+                        processExpressionFallback expr state
+                
+                and processExpressionFallback (expr: OakExpression) (state: MLIRGenerationState) =
+                    match expr with
+                    | Literal lit ->
+                        let literalType = TypeTracking.inferLiteralType lit
+                        match lit with
+                        | IntLiteral value ->
+                            let (resultId, newState) = Emitter.constant (string value) literalType state
+                            (resultId, literalType, newState)
+                        | StringLiteral value ->
+                            let (globalName, state1) = Emitter.registerString value state
+                            let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
+                            let state3 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" 
+                                                      ptrResult globalName) state2
+                            (ptrResult, literalType, state3)
+                        | _ -> 
+                            let (resultId, newState) = Emitter.constant "0" literalType state
+                            (resultId, literalType, newState)
+                    
+                    | Variable name ->
+                        match SSA.lookupVariable name state with
+                        | Some value -> 
+                            let valueType = 
+                                match TypeTracking.getSSAType value state with
+                                | Some t -> t
+                                | None -> MLIRTypes.createInteger 32
+                            (value, valueType, state)
+                        | None -> 
+                            let (dummyValue, state1) = SSA.generateValue "unknown" state
+                            let intType = MLIRTypes.createInteger 32
+                            let state2 = TypeTracking.recordSSAType dummyValue intType state1
+                            (dummyValue, intType, state2)
+                    
+                    | _ ->
+                        let (dummyValue, state1) = SSA.generateValue "fallback" state
+                        let intType = MLIRTypes.createInteger 32
+                        let state2 = TypeTracking.recordSSAType dummyValue intType state1
+                        (dummyValue, intType, state2)
+                
+                // Process the value to format - ensure it's a memory reference if string format contains %s
+                let valueExpectedType = 
+                    if formatStr.Contains("%s") then
+                        MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
+                    elif formatStr.Contains("%d") then
+                        MLIRTypes.createInteger 32
+                    elif formatStr.Contains("%f") then
+                        MLIRTypes.createFloat 32
+                    else
+                        MLIRTypes.createInteger 32
+                
+                let valueState = TypeTracking.setExpectedType valueExpectedType state
+                let (valueResult, valueType, stateAfterValue) = processExpression value valueState
+                
+                // Apply type conversion if needed
+                let (finalValueId, stateAfterConversion) =
+                    if valueType <> valueExpectedType then
+                        let (convertedId, convertedState) = 
+                            Emitter.convertType valueResult valueType valueExpectedType stateAfterValue
+                        (convertedId, convertedState)
+                    else
+                        (valueResult, stateAfterValue)
+                
+                // Register sprintf declaration
+                let state1 = Emitter.emitModuleLevel "  func.func private @sprintf(memref<?xi8>, memref<?xi8>, ...) -> i32" stateAfterConversion
+                
+                // Create format string global
+                let (formatGlobal, state2) = Emitter.registerString formatStr state1
+                let (formatPtr, state3) = SSA.generateValue "fmt_ptr" state2
+                let state4 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" 
+                                          formatPtr formatGlobal) state3
+                
+                // Allocate buffer for result
+                let bufferSize = 256 // Default reasonable size for formatted strings
+                let (resultBuffer, state5) = SSA.generateValue "format_buffer" state4
+                let state6 = Emitter.emit (sprintf "    %s = memref.alloca() : memref<%dxi8>" 
+                                          resultBuffer bufferSize) state5
+                
+                // Call sprintf
+                let (sprintfResult, state7) = SSA.generateValue "sprintf_result" state6
+                let state8 = Emitter.emit (sprintf "    %s = func.call @sprintf(%s, %s, %s) : (memref<?xi8>, memref<?xi8>, %s) -> i32" 
+                                          sprintfResult resultBuffer formatPtr finalValueId 
+                                          (mlirTypeToString valueExpectedType)) state7
+                
+                // Return the buffer as result
+                let resultType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
+                let state9 = TypeTracking.recordSSAType resultBuffer resultType state8
+                
+                (resultBuffer, resultType, state9)
+                
+            | _ ->
+                // Should never happen due to pattern check
+                let (dummyId, state1) = SSA.generateValue "invalid" state
+                let dummyType = MLIRTypes.createInteger 32
+                let state2 = TypeTracking.recordSSAType dummyId dummyType state1
+                (dummyId, dummyType, state2)
+    }
+  
+    /// Console writeLine pattern
+    let writeLinePattern : MLIRPattern = {
+        Name = "writeline-pattern"
+        Description = "Console.writeLine function for output"
+        Matcher = function
+            | Application(Variable "writeLine", [_]) -> true
+            | _ -> false
+        Generator = fun expr expectedType state ->
+            match expr with
+            | Application(_, [message]) ->
+                let rec processExpression (expr: OakExpression) (state: MLIRGenerationState) =
+                    let pattern = 
+                        patternRegistry 
+                        |> List.tryFind (fun p -> p.Matcher expr)
+                    
+                    match pattern with
+                    | Some p -> p.Generator expr (TypeTracking.getExpectedType state) state
+                    | None -> 
+                        processExpressionFallback expr state
+                
+                and processExpressionFallback (expr: OakExpression) (state: MLIRGenerationState) =
+                    match expr with
+                    | Literal lit ->
+                        let literalType = TypeTracking.inferLiteralType lit
+                        match lit with
+                        | IntLiteral value ->
+                            let (resultId, newState) = Emitter.constant (string value) literalType state
+                            (resultId, literalType, newState)
+                        | StringLiteral value ->
+                            let (globalName, state1) = Emitter.registerString value state
+                            let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
+                            let state3 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" 
+                                                      ptrResult globalName) state2
+                            (ptrResult, literalType, state3)
+                        | _ -> 
+                            let (resultId, newState) = Emitter.constant "0" literalType state
+                            (resultId, literalType, newState)
+                    
+                    | Variable name ->
+                        match SSA.lookupVariable name state with
+                        | Some value -> 
+                            let valueType = 
+                                match TypeTracking.getSSAType value state with
+                                | Some t -> t
+                                | None -> MLIRTypes.createInteger 32
+                            (value, valueType, state)
+                        | None -> 
+                            let (dummyValue, state1) = SSA.generateValue "unknown" state
+                            let intType = MLIRTypes.createInteger 32
+                            let state2 = TypeTracking.recordSSAType dummyValue intType state1
+                            (dummyValue, intType, state2)
+                    
+                    | _ ->
+                        let (dummyValue, state1) = SSA.generateValue "fallback" state
+                        let intType = MLIRTypes.createInteger 32
+                        let state2 = TypeTracking.recordSSAType dummyValue intType state1
+                        (dummyValue, intType, state2)
+                        
+                // Ensure message is a string type
+                let memRefType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
+                let messageState = TypeTracking.setExpectedType memRefType state
+                let (messageResult, messageType, stateAfterMessage) = processExpression message messageState
+                
+                // Apply type conversion if needed
+                let (finalMessageId, stateAfterConversion) =
+                    if messageType <> memRefType then
+                        let (convertedId, convertedState) = 
+                            Emitter.convertType messageResult messageType memRefType stateAfterMessage
+                        (convertedId, convertedState)
+                    else
+                        (messageResult, stateAfterMessage)
+                
+                // Register printf declaration
+                let state1 = Emitter.emitModuleLevel "  func.func private @printf(memref<?xi8>, ...) -> i32" stateAfterConversion
+                
+                // Call printf
+                let (printfResult, state2) = SSA.generateValue "printf_result" state1
+                let state3 = Emitter.emit (sprintf "    %s = func.call @printf(%s) : (memref<?xi8>) -> i32" 
+                                          printfResult finalMessageId) state2
+                
+                // Record result type
+                let resultType = MLIRTypes.createInteger 32
+                let state4 = TypeTracking.recordSSAType printfResult resultType state3
+                
+                (printfResult, resultType, state4)
+                
+            | _ ->
+                // Should never happen due to pattern check
+                let (dummyId, state1) = SSA.generateValue "invalid" state
+                let dummyType = MLIRTypes.createInteger 32
+                let state2 = TypeTracking.recordSSAType dummyId dummyType state1
+                (dummyId, dummyType, state2)
+    }
+    
+    /// readInto pattern - Result-returning function for reading into buffer
+    let readIntoPattern : MLIRPattern = {
+        Name = "readinto-pattern"
+        Description = "readInto function that returns Result<int, string>"
+        Matcher = function
+            | Application(Variable "readInto", [_]) -> true
+            | _ -> false
+        Generator = fun expr expectedType state ->
+            match expr with
+            | Application(_, [buffer]) ->
+                let rec processExpression (expr: OakExpression) (state: MLIRGenerationState) =
+                    let pattern = 
+                        patternRegistry 
+                        |> List.tryFind (fun p -> p.Matcher expr)
+                    
+                    match pattern with
+                    | Some p -> p.Generator expr (TypeTracking.getExpectedType state) state
+                    | None -> 
+                        processExpressionFallback expr state
+                
+                and processExpressionFallback (expr: OakExpression) (state: MLIRGenerationState) =
+                    match expr with
+                    | Literal lit ->
+                        let literalType = TypeTracking.inferLiteralType lit
+                        match lit with
+                        | IntLiteral value ->
+                            let (resultId, newState) = Emitter.constant (string value) literalType state
+                            (resultId, literalType, newState)
+                        | StringLiteral value ->
+                            let (globalName, state1) = Emitter.registerString value state
+                            let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
+                            let state3 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" 
+                                                      ptrResult globalName) state2
+                            (ptrResult, literalType, state3)
+                        | _ -> 
+                            let (resultId, newState) = Emitter.constant "0" literalType state
+                            (resultId, literalType, newState)
+                    
+                    | Variable name ->
+                        match SSA.lookupVariable name state with
+                        | Some value -> 
+                            let valueType = 
+                                match TypeTracking.getSSAType value state with
+                                | Some t -> t
+                                | None -> MLIRTypes.createInteger 32
+                            (value, valueType, state)
+                        | None -> 
+                            let (dummyValue, state1) = SSA.generateValue "unknown" state
+                            let intType = MLIRTypes.createInteger 32
+                            let state2 = TypeTracking.recordSSAType dummyValue intType state1
+                            (dummyValue, intType, state2)
+                    
+                    | _ ->
+                        let (dummyValue, state1) = SSA.generateValue "fallback" state
+                        let intType = MLIRTypes.createInteger 32
+                        let state2 = TypeTracking.recordSSAType dummyValue intType state1
+                        (dummyValue, intType, state2)
+                
+                // Process buffer argument
+                let memRefType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
+                let bufferState = TypeTracking.setExpectedType memRefType state
+                let (bufferResult, bufferType, stateAfterBuffer) = processExpression buffer bufferState
+                
+                // Apply type conversion if needed
+                let (finalBufferId, stateAfterConversion) =
+                    if bufferType <> memRefType then
+                        let (convertedId, convertedState) = 
+                            Emitter.convertType bufferResult bufferType memRefType stateAfterBuffer
+                        (convertedId, convertedState)
+                    else
+                        (bufferResult, stateAfterBuffer)
+                
+                // Register scanf/fgets declarations
+                let state1 = 
+                    stateAfterConversion
+                    |> Emitter.emitModuleLevel "  func.func private @fgets(memref<?xi8>, i32, memref<?xi8>) -> memref<?xi8>"
+                    |> Emitter.emitModuleLevel "  func.func private @strlen(memref<?xi8>) -> i32"
+                    |> Emitter.emitModuleLevel "  func.func private @__stdinp() -> memref<?xi8>"
+                
+                // Get stdin handle
+                let (stdinPtr, state2) = SSA.generateValue "stdin_ptr" state1
+                let state3 = Emitter.emit (sprintf "    %s = func.call @__stdinp() : () -> memref<?xi8>" stdinPtr) state2
+                
+                // Default max length
+                let (maxLengthId, state4) = SSA.generateValue "max_len" state3
+                let state5 = Emitter.emit (sprintf "    %s = arith.constant 256 : i32" maxLengthId) state4
+                
+                // Call fgets
+                let (fgetsResult, state6) = SSA.generateValue "fgets_result" state5
+                let state7 = Emitter.emit (sprintf "    %s = func.call @fgets(%s, %s, %s) : (memref<?xi8>, i32, memref<?xi8>) -> memref<?xi8>" 
+                                          fgetsResult finalBufferId maxLengthId stdinPtr) state6
+                
+                // Get string length
+                let (lenResult, state8) = SSA.generateValue "read_length" state7
+                let state9 = Emitter.emit (sprintf "    %s = func.call @strlen(%s) : (memref<?xi8>) -> i32" 
+                                         lenResult finalBufferId) state8
+                
+                // Create Result wrapper - typically 1 (success) plus the length
+                let (resultId, state10) = SSA.generateValue "result" state9
+                let state11 = Emitter.emit (sprintf "    %s = arith.addi %s, 0x10000 : i32" 
+                                          resultId lenResult) state10
+                
+                // Return the Result value (i32 encoding both success status and length)
+                let resultType = MLIRTypes.createInteger 32
+                let state12 = TypeTracking.recordSSAType resultId resultType state11
+                
+                (resultId, resultType, state12)
+                
+            | _ ->
+                // Should never happen due to pattern check
+                let (dummyId, state1) = SSA.generateValue "invalid" state
+                let dummyType = MLIRTypes.createInteger 32
+                let state2 = TypeTracking.recordSSAType dummyId dummyType state1
+                (dummyId, dummyType, state2)
+    }
+    
+    /// Variable pattern for basic variable lookup with type awareness
+    let variablePattern : MLIRPattern = {
+        Name = "variable-pattern"
+        Description = "Basic variable reference with type tracking"
+        Matcher = function
+            | Variable _ -> true
+            | _ -> false
+        Generator = fun expr expectedType state ->
+            match expr with
+            | Variable name ->
+                match SSA.lookupVariable name state with
+                | Some value -> 
+                    // Get type if available
+                    let valueType = 
+                        match TypeTracking.getSSAType value state with
+                        | Some t -> t
+                        | None -> MLIRTypes.createInteger 32 // Default if unknown
+                    
+                    // Check if we need to apply type conversion for expected type
+                    match expectedType with
+                    | Some expected when expected <> valueType ->
+                        let (convertedId, convertedState) = 
+                            Emitter.convertType value valueType expected state
+                        (convertedId, expected, convertedState)
+                    | _ ->
+                        (value, valueType, state)
+                | None -> 
+                    // Unknown variable
+                    let (dummyValue, state1) = SSA.generateValue "unknown" state
+                    let intType = MLIRTypes.createInteger 32
+                    let state2 = TypeTracking.recordSSAType dummyValue intType state1
+                    
+                    // Apply conversion if needed
+                    match expectedType with
+                    | Some expected when expected <> intType ->
+                        let (convertedId, convertedState) = 
+                            Emitter.convertType dummyValue intType expected state2
+                        (convertedId, expected, convertedState)
+                    | _ ->
+                        (dummyValue, intType, state2)
+            | _ ->
+                // Should never happen due to pattern check
+                let (dummyId, state1) = SSA.generateValue "invalid" state
+                let dummyType = MLIRTypes.createInteger 32
+                let state2 = TypeTracking.recordSSAType dummyId dummyType state1
+                (dummyId, dummyType, state2)
+    }
+    
+    /// Literal pattern for handling literals with proper types
+    let literalPattern : MLIRPattern = {
+        Name = "literal-pattern"
+        Description = "Literal values with type awareness"
+        Matcher = function
+            | Literal _ -> true
+            | _ -> false
+        Generator = fun expr expectedType state ->
+            match expr with
+            | Literal lit ->
+                let literalType = TypeTracking.inferLiteralType lit
+                
+                match lit with
+                | IntLiteral value ->
+                    let (resultId, state1) = Emitter.constant (string value) literalType state
+                    
+                    // Apply conversion if needed
+                    match expectedType with
+                    | Some expected when expected <> literalType ->
+                        let (convertedId, convertedState) = 
+                            Emitter.convertType resultId literalType expected state1
+                        (convertedId, expected, convertedState)
+                    | _ ->
+                        (resultId, literalType, state1)
+                
+                | FloatLiteral value ->
+                    let (resultId, state1) = Emitter.constant (sprintf "%f" value) literalType state
+                    
+                    // Apply conversion if needed
+                    match expectedType with
+                    | Some expected when expected <> literalType ->
+                        let (convertedId, convertedState) = 
+                            Emitter.convertType resultId literalType expected state1
+                        (convertedId, expected, convertedState)
+                    | _ ->
+                        (resultId, literalType, state1)
+                
+                | BoolLiteral value ->
+                    let (resultId, state1) = Emitter.constant (if value then "1" else "0") literalType state
+                    
+                    // Apply conversion if needed
+                    match expectedType with
+                    | Some expected when expected <> literalType ->
+                        let (convertedId, convertedState) = 
+                            Emitter.convertType resultId literalType expected state1
+                        (convertedId, expected, convertedState)
+                    | _ ->
+                        (resultId, literalType, state1)
+                
+                | StringLiteral value ->
+                    let (globalName, state1) = Emitter.registerString value state
+                    let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
+                    let state3 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" 
+                                              ptrResult globalName) state2
+                    let state4 = TypeTracking.recordSSAType ptrResult literalType state3
+                    
+                    // Apply conversion if needed
+                    match expectedType with
+                    | Some expected when expected <> literalType ->
+                        let (convertedId, convertedState) = 
+                            Emitter.convertType ptrResult literalType expected state4
+                        (convertedId, expected, convertedState)
+                    | _ ->
+                        (ptrResult, literalType, state4)
+                
+                | UnitLiteral ->
+                    let (resultId, state1) = Emitter.constant "0" (MLIRTypes.createInteger 32) state
+                    
+                    // Apply conversion if needed
+                    match expectedType with
+                    | Some expected when expected <> MLIRTypes.createInteger 32 ->
+                        let (convertedId, convertedState) = 
+                            Emitter.convertType resultId (MLIRTypes.createInteger 32) expected state1
+                        (convertedId, expected, convertedState)
+                    | _ ->
+                        (resultId, MLIRTypes.createInteger 32, state1)
+                
+                | ArrayLiteral _ ->
+                    // Not fully implemented - create a dummy array
+                    let (resultId, state1) = SSA.generateValue "array" state
+                    let state2 = TypeTracking.recordSSAType resultId literalType state1
+                    
+                    // Apply conversion if needed
+                    match expectedType with
+                    | Some expected when expected <> literalType ->
+                        let (convertedId, convertedState) = 
+                            Emitter.convertType resultId literalType expected state2
+                        (convertedId, expected, convertedState)
+                    | _ ->
+                        (resultId, literalType, state2)
+            
+            | _ ->
+                // Should never happen due to pattern check
+                let (dummyId, state1) = SSA.generateValue "invalid" state
+                let dummyType = MLIRTypes.createInteger 32
+                let state2 = TypeTracking.recordSSAType dummyId dummyType state1
+                (dummyId, dummyType, state2)
+    }
+    
+    /// Register all patterns in the "Library of Alexandria"
+    let patternRegistry : MLIRPattern list = [
+        resultMatchPattern
+        stackAllocPattern
+        stringFormatPattern
+        writeLinePattern
+        readIntoPattern
+        variablePattern
+        literalPattern
+    ]
+    
+    /// Finds a matching pattern for an expression
+    let findMatchingPattern (expr: OakExpression) : MLIRPattern option =
+        patternRegistry |> List.tryFind (fun pattern -> pattern.Matcher expr)
+    
+    /// Processes an expression using the pattern library
+    let rec processExpression (expr: OakExpression) (state: MLIRGenerationState) : string * MLIRType * MLIRGenerationState =
+        // Get expected type from context (if any)
+        let expectedType = TypeTracking.getExpectedType state
+        
+        // Find matching pattern
+        let pattern = findMatchingPattern expr
+        
+        match pattern with
+        | Some p -> 
+            // Use the pattern's generator
+            p.Generator expr expectedType state
+        | None -> 
+            // Handle expressions without specific patterns
+            processExpressionFallback expr state
+    
+    /// Fallback for expressions without specific patterns
+    and processExpressionFallback (expr: OakExpression) (state: MLIRGenerationState) : string * MLIRType * MLIRGenerationState =
+        // Get expected type from context (if any)
+        let expectedType = TypeTracking.getExpectedType state
+        
+        match expr with
+        | Literal lit ->
+            let literalType = TypeTracking.inferLiteralType lit
+            match lit with
+            | IntLiteral value ->
+                let (resultId, newState) = Emitter.constant (string value) literalType state
+                
+                // Apply conversion if needed
+                match expectedType with
+                | Some expected when expected <> literalType ->
+                    let (convertedId, convertedState) = 
+                        Emitter.convertType resultId literalType expected newState
+                    (convertedId, expected, convertedState)
+                | _ ->
+                    (resultId, literalType, newState)
+                    
+            | StringLiteral value ->
+                let (globalName, state1) = Emitter.registerString value state
+                let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
+                let state3 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" 
+                                          ptrResult globalName) state2
+                
+                // Apply conversion if needed
+                match expectedType with
+                | Some expected when expected <> literalType ->
+                    let (convertedId, convertedState) = 
+                        Emitter.convertType ptrResult literalType expected state3
+                    (convertedId, expected, convertedState)
+                | _ ->
+                    (ptrResult, literalType, state3)
+                    
+            | _ -> 
+                let (resultId, newState) = Emitter.constant "0" literalType state
+                
+                // Apply conversion if needed
+                match expectedType with
+                | Some expected when expected <> literalType ->
+                    let (convertedId, convertedState) = 
+                        Emitter.convertType resultId literalType expected newState
+                    (convertedId, expected, convertedState)
+                | _ ->
+                    (resultId, literalType, newState)
+        
+        | Variable name ->
+            match SSA.lookupVariable name state with
+            | Some value -> 
+                let valueType = 
+                    match TypeTracking.getSSAType value state with
+                    | Some t -> t
+                    | None -> MLIRTypes.createInteger 32
+                    
+                // Apply conversion if needed
+                match expectedType with
+                | Some expected when expected <> valueType ->
+                    let (convertedId, convertedState) = 
+                        Emitter.convertType value valueType expected state
+                    (convertedId, expected, convertedState)
+                | _ ->
+                    (value, valueType, state)
+                    
+            | None -> 
+                let (dummyValue, state1) = SSA.generateValue "unknown" state
+                let intType = MLIRTypes.createInteger 32
+                let state2 = TypeTracking.recordSSAType dummyValue intType state1
+                
+                // Apply conversion if needed
+                match expectedType with
+                | Some expected when expected <> intType ->
+                    let (convertedId, convertedState) = 
+                        Emitter.convertType dummyValue intType expected state2
+                    (convertedId, expected, convertedState)
+                | _ ->
+                    (dummyValue, intType, state2)
+        
+        | Let(name, value, body) ->
+            // Process value
+            let valueState = TypeTracking.clearExpectedType state
+            let (valueId, valueType, state1) = processExpression value valueState
+            
+            // Bind variable
+            let state2 = SSA.bindVariable name valueId state1
+            let state3 = TypeTracking.recordSSAType valueId valueType state2
+            
+            // Process body
+            let (bodyId, bodyType, state4) = processExpression body state3
+            
+            // Apply conversion if needed
+            match expectedType with
+            | Some expected when expected <> bodyType ->
+                let (convertedId, convertedState) = 
+                    Emitter.convertType bodyId bodyType expected state4
+                (convertedId, expected, convertedState)
+            | _ ->
+                (bodyId, bodyType, state4)
+        
+        | Sequential(first, second) ->
+            // Process first expression (ignore result)
+            let (_, _, state1) = processExpression first state
+            
+            // Process second expression
+            let (secondId, secondType, state2) = processExpression second state1
+            
+            // Apply conversion if needed
+            match expectedType with
+            | Some expected when expected <> secondType ->
+                let (convertedId, convertedState) = 
+                    Emitter.convertType secondId secondType expected state2
+                (convertedId, expected, convertedState)
+            | _ ->
+                (secondId, secondType, state2)
+        
+        | Application(func, args) ->
+            match func with
+            | Variable funcName ->
+                // Process arguments
+                let processArg (accState, accArgs, accTypes) arg =
+                    let (argId, argType, newState) = processExpression arg accState
+                    (newState, argId :: accArgs, argType :: accTypes)
+                
+                let (state1, argIds, argTypes) = 
+                    List.fold processArg (state, [], []) args
+                
+                let argIds = List.rev argIds
+                let argTypes = List.rev argTypes
+                
+                // Create result variable
+                let (resultId, state2) = SSA.generateValue "call" state1
+                
+                // Generate call through symbol registry
+                match PublicInterface.resolveFunctionCall funcName argIds resultId state2.SymbolRegistry with
+                | Core.XParsec.Foundation.Success (operations, updatedRegistry) ->
+                    // Determine result type
+                    let resultType = 
+                        match PublicInterface.getSymbolType funcName state2.SymbolRegistry with
+                        | Some rtype -> rtype
+                        | None -> MLIRTypes.createInteger 32
+                    
+                    // Generate operations
+                    let state3 = 
+                        operations
+                        |> List.fold (fun accState op -> Emitter.emit op accState) state2
+                    
+                    let state4 = { state3 with SymbolRegistry = updatedRegistry }
+                    let state5 = TypeTracking.recordSSAType resultId resultType state4
+                    
+                    // Apply conversion if needed
+                    match expectedType with
+                    | Some expected when expected <> resultType ->
+                        let (convertedId, convertedState) = 
+                            Emitter.convertType resultId resultType expected state5
+                        (convertedId, expected, convertedState)
+                    | _ ->
+                        (resultId, resultType, state5)
+                    
+                | Core.XParsec.Foundation.CompilerFailure _ ->
+                    // Fallback for unknown functions
+                    let resultType = MLIRTypes.createInteger 32
+                    let state3 = Emitter.emit (sprintf "    %s = arith.constant 0 : i32 // Unknown function %s" 
+                                             resultId funcName) state2
+                    let state4 = TypeTracking.recordSSAType resultId resultType state3
+                    
+                    // Apply conversion if needed
+                    match expectedType with
+                    | Some expected when expected <> resultType ->
+                        let (convertedId, convertedState) = 
+                            Emitter.convertType resultId resultType expected state4
+                        (convertedId, expected, convertedState)
+                    | _ ->
+                        (resultId, resultType, state4)
+            
+            | _ ->
+                // Handle non-variable function application
+                let (funcId, funcType, state1) = processExpression func state
+                
+                // Process arguments
+                let processArg (accState, accArgs, accTypes) arg =
+                    let (argId, argType, newState) = processExpression arg accState
+                    (newState, argId :: accArgs, argType :: accTypes)
+                
+                let (state2, argIds, argTypes) = 
+                    List.fold processArg (state1, [], []) args
+                
+                let argIds = List.rev argIds
+                let argTypes = List.rev argTypes
+                
+                // Create result
+                let (resultId, state3) = SSA.generateValue "app" state2
+                let resultType = MLIRTypes.createInteger 32
+                
+                // Generate a generic call
+                let argStr = String.concat ", " argIds
+                let state4 = Emitter.emit (sprintf "    %s = func.call %s(%s) : (i32) -> i32" 
+                                          resultId funcId argStr) state3
+                let state5 = TypeTracking.recordSSAType resultId resultType state4
+                
+                // Apply conversion if needed
+                match expectedType with
+                | Some expected when expected <> resultType ->
+                    let (convertedId, convertedState) = 
+                        Emitter.convertType resultId resultType expected state5
+                    (convertedId, expected, convertedState)
+                | _ ->
+                    (resultId, resultType, state5)
+        
+        | IfThenElse(cond, thenExpr, elseExpr) ->
+            // Process condition
+            let condState = TypeTracking.setExpectedType (MLIRTypes.createInteger 1) state
+            let (condId, condType, state1) = processExpression cond condState
+            
+            // Apply conversion to i1 if needed
+            let (finalCondId, state2) =
+                if condType <> MLIRTypes.createInteger 1 then
+                    let (convertedId, convertedState) = 
+                        Emitter.convertType condId condType (MLIRTypes.createInteger 1) state1
+                    (convertedId, convertedState)
+                else
+                    (condId, state1)
+            
+            // Create branch labels
+            let (thenId, state3) = SSA.generateValue "then" state2
+            let (elseId, state4) = SSA.generateValue "else" state3
+            let (endId, state5) = SSA.generateValue "end" state4
+            
+            let thenLabel = thenId.TrimStart('%')
+            let elseLabel = elseId.TrimStart('%')
+            let endLabel = endId.TrimStart('%')
+            
+            let state6 = Emitter.emit (sprintf "    cond_br %s, ^%s, ^%s" 
+                                      finalCondId thenLabel elseLabel) state5
+            
+            // Create result variable
+            let (resultId, state7) = SSA.generateValue "if_result" state6
+            
+            // Determine result type
+            let resultType = 
+                match expectedType with
+                | Some t -> t
+                | None -> MLIRTypes.createInteger 32
+            
+            // Process then branch
+            let state8 = Emitter.emit (sprintf "  ^%s:" thenLabel) state7
+            let thenState = TypeTracking.setExpectedType resultType state8
+            let (thenResultId, thenType, state9) = processExpression thenExpr thenState
+            
+            // Apply conversion if needed
+            let (finalThenId, state10) =
+                if thenType <> resultType then
+                    let (convertedId, convertedState) = 
+                        Emitter.convertType thenResultId thenType resultType state9
+                    (convertedId, convertedState)
+                else
+                    (thenResultId, state9)
+            
+            let state11 = Emitter.emit (sprintf "    %s = %s : %s" 
+                                       resultId finalThenId (mlirTypeToString resultType)) state10
+            let state12 = Emitter.emit (sprintf "    br ^%s" endLabel) state11
+            
+            // Process else branch
+            let state13 = Emitter.emit (sprintf "  ^%s:" elseLabel) state12
+            let elseState = TypeTracking.setExpectedType resultType state13
+            let (elseResultId, elseType, state14) = processExpression elseExpr elseState
+            
+            // Apply conversion if needed
+            let (finalElseId, state15) =
+                if elseType <> resultType then
+                    let (convertedId, convertedState) = 
+                        Emitter.convertType elseResultId elseType resultType state14
+                    (convertedId, convertedState)
+                else
+                    (elseResultId, state14)
+            
+            let state16 = Emitter.emit (sprintf "    %s = %s : %s" 
+                                       resultId finalElseId (mlirTypeToString resultType)) state15
+            let state17 = Emitter.emit (sprintf "    br ^%s" endLabel) state16
+            
+            // Add end label
+            let state18 = Emitter.emit (sprintf "  ^%s:" endLabel) state17
+            let state19 = TypeTracking.recordSSAType resultId resultType state18
+            
+            (resultId, resultType, state19)
+        
+        | _ ->
+            // Fallback for other expression types
+            let (dummyId, state1) = SSA.generateValue "unknown_expr" state
+            let dummyType = MLIRTypes.createInteger 32
+            let state2 = TypeTracking.recordSSAType dummyId dummyType state1
+            
+            // Apply conversion if needed
+            match expectedType with
+            | Some expected when expected <> dummyType ->
+                let (convertedId, convertedState) = 
+                    Emitter.convertType dummyId dummyType expected state2
+                (convertedId, expected, convertedState)
+            | _ ->
+                (dummyId, dummyType, state2)
 
 /// Creates a clean initial state for MLIR generation with type tracking
 let createInitialState () : MLIRGenerationState = 
@@ -295,770 +1380,7 @@ let createInitialState () : MLIRGenerationState =
     | Core.XParsec.Foundation.CompilerFailure _ -> 
         failwith "Failed to initialize symbol registry"
 
-/// Match expression handling functions with type awareness
-module MatchHandling =
-
-    /// Helper for creating string constants in match handling with type tracking
-    let createStringConstant (value: string) (state: MLIRGenerationState) : string * MLIRGenerationState =
-        let (globalName, state1) = Emitter.registerString (value.Trim('"')) state
-        let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
-        let state3 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" ptrResult globalName) state2
-        let memRefType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
-        let state4 = TypeTracking.recordSSAType ptrResult memRefType state3
-        (ptrResult, state4)
-
-    /// Generates branch labels for control flow
-    let generateBranchLabels (state: MLIRGenerationState) : string * string * string * MLIRGenerationState =
-        let (thenId, state1) = SSA.generateValue "then" state
-        let (elseId, state2) = SSA.generateValue "else" state1
-        let (endId, state3) = SSA.generateValue "end" state2
-        
-        let thenLabel = thenId.TrimStart('%')
-        let elseLabel = elseId.TrimStart('%')
-        let endLabel = endId.TrimStart('%')
-        
-        (thenLabel, elseLabel, endLabel, state3)
-    
-    /// Handles pattern matching for Result type with type awareness
-    let handleResultMatch (matchExpr: OakExpression) (cases: (OakPattern * OakExpression) list) 
-                        (matchValueId: string) (resultId: string) (state: MLIRGenerationState) 
-                        (convertExpressionFn: OakExpression -> MLIRGenerationState -> string * MLIRGenerationState) 
-                        : string * MLIRGenerationState =
-        
-        // Set expected return type for result pattern match (always a string/memref)
-        let expectedType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
-        let state1 = TypeTracking.setExpectedType expectedType state
-        
-        // Extract buffer name from pattern for better code generation
-        let bufferName = 
-            match matchExpr with
-            | Application(Variable "readInto", [Variable name]) -> name
-            | _ -> "buffer"
-        
-        // Find actual buffer value in scope
-        let bufferValue = 
-            match SSA.lookupVariable bufferName state1 with
-            | Some value -> value
-            | None -> "%unknown_buffer"
-        
-        // Register helper functions for working with Result type
-        let state2 = 
-            state1
-            |> Emitter.emitModuleLevel "  func.func private @is_ok_result(i32) -> i1"
-            |> Emitter.emitModuleLevel "  func.func private @extract_result_length(i32) -> i32"
-            |> Emitter.emitModuleLevel "  func.func private @create_span(memref<?xi8>, i32) -> memref<?xi8>"
-        
-        // Check if result is Ok or Error
-        let (isOkId, state3) = SSA.generateValue "is_ok" state2
-        let state4 = Emitter.emit (sprintf "    %s = func.call @is_ok_result(%s) : (i32) -> i1" 
-                                isOkId matchValueId) state3
-        let boolType = MLIRTypes.createInteger 1
-        let state5 = TypeTracking.recordSSAType isOkId boolType state4
-        
-        // Create branch labels
-        let (thenLabel, elseLabel, endLabel, state6) = generateBranchLabels state5
-        let state7 = Emitter.emit (sprintf "    cond_br %s, ^%s, ^%s" 
-                                isOkId thenLabel elseLabel) state6
-        
-        // Find Ok case pattern
-        let okCase = 
-            cases |> List.tryFind (fun (pattern, _) -> 
-                match pattern with 
-                | PatternConstructor("Ok", _) -> true
-                | _ -> false)
-        
-        // Handle Ok branch
-        let state8 = Emitter.emit (sprintf "  ^%s:" thenLabel) state7
-        
-        let state9 = 
-            match okCase with
-            | Some (PatternConstructor("Ok", [PatternVariable lengthName]), okExpr) ->
-                // Extract length from result
-                let (lengthId, stateWithLength) = SSA.generateValue "length" state8
-                let stateWithLengthExtract = 
-                    Emitter.emit (sprintf "    %s = func.call @extract_result_length(%s) : (i32) -> i32" 
-                                lengthId matchValueId) stateWithLength
-                let intType = MLIRTypes.createInteger 32
-                let stateWithLengthType = TypeTracking.recordSSAType lengthId intType stateWithLengthExtract
-                
-                // Bind length variable
-                let stateWithBinding = SSA.bindVariable lengthName lengthId stateWithLengthType
-                
-                // Create span from buffer and length
-                let (spanId, stateWithSpan) = SSA.generateValue "span" stateWithBinding
-                let stateWithCreateSpan = 
-                    Emitter.emit (sprintf "    %s = func.call @create_span(%s, %s) : (memref<?xi8>, i32) -> memref<?xi8>" 
-                                spanId bufferValue lengthId) stateWithSpan
-                let spanType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
-                let stateWithSpanType = TypeTracking.recordSSAType spanId spanType stateWithCreateSpan
-                
-                // Process Ok expression with span bound - THIS IS THE BUG FIX SECTION
-                // Pass expectedType to guide the expression conversion
-                let okExprStateWithBuffer = 
-                    stateWithSpanType 
-                    |> SSA.bindVariable "span" spanId
-                    |> TypeTracking.setExpectedType expectedType  // Set expected type explicitly
-                
-                let (okResultId, stateAfterExpr) = convertExpressionFn okExpr okExprStateWithBuffer
-                
-                // Get type of result for potential conversion
-                let okResultType = 
-                    match TypeTracking.getSSAType okResultId stateAfterExpr with
-                    | Some typ -> typ
-                    | None -> MLIRTypes.createInteger 32  // Default if unknown
-                
-                // Apply type conversion if needed - FIX: This ensures integer values are converted to memory references
-                let (finalResultId, stateAfterConversion) =
-                    if isMemRefType okResultType then
-                        (okResultId, stateAfterExpr)  // Already the right type
-                    else
-                        // Need to convert to memref - THIS IS THE KEY FIX for the %const13 bug
-                        Emitter.convertType okResultId okResultType expectedType stateAfterExpr
-                
-                // Store result and branch to end
-                let stateWithResultStore = 
-                    Emitter.emit (sprintf "    %s = %s : %s" resultId finalResultId (mlirTypeToString expectedType)) stateAfterConversion
-                let stateWithResultType = TypeTracking.recordSSAType resultId expectedType stateWithResultStore
-                
-                Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultType
-                
-            | Some (_, okExpr) ->
-                // Handle Ok case without pattern variable - with type awareness
-                // Set expected type for the expression
-                let okExprState = TypeTracking.setExpectedType expectedType state8
-                let (okResultId, stateAfterExpr) = convertExpressionFn okExpr okExprState
-                
-                // Get type of result for potential conversion
-                let okResultType = 
-                    match TypeTracking.getSSAType okResultId stateAfterExpr with
-                    | Some typ -> typ
-                    | None -> MLIRTypes.createInteger 32  // Default if unknown
-                
-                // Apply type conversion if needed - ensures proper type matching
-                let (finalResultId, stateAfterConversion) =
-                    if isMemRefType okResultType then
-                        (okResultId, stateAfterExpr)  // Already the right type
-                    else
-                        // Need to convert to memref
-                        Emitter.convertType okResultId okResultType expectedType stateAfterExpr
-                
-                // Store result and branch to end
-                let stateWithResultStore = 
-                    Emitter.emit (sprintf "    %s = %s : %s" resultId finalResultId (mlirTypeToString expectedType)) stateAfterConversion
-                let stateWithResultType = TypeTracking.recordSSAType resultId expectedType stateWithResultStore
-                
-                Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultType
-                
-            | None ->
-                // No Ok case found, use fallback
-                let (defaultStr, stateWithStr) = createStringConstant "Ok-fallback" state8
-                let stateWithStore = 
-                    Emitter.emit (sprintf "    %s = %s : %s" resultId defaultStr (mlirTypeToString expectedType)) stateWithStr
-                let stateWithResultType = TypeTracking.recordSSAType resultId expectedType stateWithStore
-                
-                Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultType
-        
-        // Find Error case pattern
-        let errorCase = 
-            cases 
-            |> List.tryFind (fun (pattern, _) -> 
-                match pattern with 
-                | PatternConstructor("Error", _) -> true 
-                | _ -> false)
-        
-        // Handle Error branch
-        let state10 = Emitter.emit (sprintf "  ^%s:" elseLabel) state9
-        
-        let state11 = 
-            match errorCase with
-            | Some(_, errorExpr) ->
-                // Process Error expression with expected type
-                let errorExprState = TypeTracking.setExpectedType expectedType state10
-                let (errorResultId, stateAfterErrorExpr) = convertExpressionFn errorExpr errorExprState
-                
-                // Get type of result for potential conversion
-                let errorResultType = 
-                    match TypeTracking.getSSAType errorResultId stateAfterErrorExpr with
-                    | Some typ -> typ
-                    | None -> MLIRTypes.createInteger 32  // Default if unknown
-                
-                // Apply type conversion if needed
-                let (finalErrorId, stateAfterConversion) =
-                    if isMemRefType errorResultType then
-                        (errorResultId, stateAfterErrorExpr)  // Already the right type
-                    else
-                        // Need to convert to memref
-                        Emitter.convertType errorResultId errorResultType expectedType stateAfterErrorExpr
-                
-                // Store result and branch to end
-                let stateWithResultStore = 
-                    Emitter.emit (sprintf "    %s = %s : %s" resultId finalErrorId (mlirTypeToString expectedType)) stateAfterConversion
-                let stateWithResultType = TypeTracking.recordSSAType resultId expectedType stateWithResultStore
-                
-                Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultType
-                
-            | None -> 
-                // No Error case found, use fallback
-                let (errorStr, stateWithStr) = createStringConstant "Error-fallback" state10
-                let stateWithStore = 
-                    Emitter.emit (sprintf "    %s = %s : %s" resultId errorStr (mlirTypeToString expectedType)) stateWithStr
-                let stateWithResultType = TypeTracking.recordSSAType resultId expectedType stateWithStore
-                
-                Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultType
-        
-        // Add end label and clear expected type
-        let state12 = Emitter.emit (sprintf "  ^%s:" endLabel) state11
-        let finalState = TypeTracking.clearExpectedType state12
-        
-        (resultId, finalState)
-
-    /// Handles generic match expression with type awareness
-    let handleGenericMatch (matchExpr: OakExpression) (cases: (OakPattern * OakExpression) list) 
-                          (matchValueId: string) (resultId: string) (state: MLIRGenerationState)
-                          (convertExpressionFn: OakExpression -> MLIRGenerationState -> string * MLIRGenerationState) 
-                          : string * MLIRGenerationState =
-        
-        // Create branch labels
-        let (_, elseLabel, endLabel, state1) = generateBranchLabels state
-        
-        // Get expected result type from state, or default to integer
-        let resultType = 
-            match state.ExpectedResultType with
-            | Some expectedType -> expectedType
-            | None -> MLIRTypes.createInteger 32
-        
-        let (defaultValue, state2) = Emitter.constant "0" resultType state1
-        
-        if cases.IsEmpty then
-            // No cases - use default value
-            let state3 = Emitter.emit (sprintf "    %s = %s : %s" resultId defaultValue (mlirTypeToString resultType)) state2
-            let state4 = TypeTracking.recordSSAType resultId resultType state3
-            (resultId, state4)
-        else
-            // Process each case
-            let rec processCases (remainingCases: (OakPattern * OakExpression) list) (currentState: MLIRGenerationState) =
-                match remainingCases with
-                | [] -> 
-                    // No more cases - handle default fallback
-                    let fallbackState = Emitter.emit (sprintf "  ^%s:" elseLabel) currentState
-                    let storeState = Emitter.emit (sprintf "    %s = %s : %s" resultId defaultValue (mlirTypeToString resultType)) fallbackState
-                    let typeState = TypeTracking.recordSSAType resultId resultType storeState
-                    let finalState = Emitter.emit (sprintf "    br ^%s" endLabel) typeState
-                    finalState
-                | (pattern, expr) :: rest ->
-                    // Create case label and process expression
-                    let (caseLabel, currentState1) = SSA.generateValue "case" currentState
-                    let caseLabelStr = caseLabel.TrimStart('%')
-                    
-                    let conditionState = Emitter.emit (sprintf "  ^%s:" caseLabelStr) currentState1
-                    // Set expected type for the expression
-                    let exprState = TypeTracking.setExpectedType resultType conditionState
-                    let (exprResultId, stateAfterExpr) = convertExpressionFn expr exprState
-                    
-                    // Get expression type for potential conversion
-                    let exprType = 
-                        match TypeTracking.getSSAType exprResultId stateAfterExpr with
-                        | Some typ -> typ
-                        | None -> resultType
-                    
-                    // Apply type conversion if needed
-                    let (finalResultId, afterConvState) =
-                        if exprType = resultType then
-                            (exprResultId, stateAfterExpr)
-                        else
-                            Emitter.convertType exprResultId exprType resultType stateAfterExpr
-                    
-                    let storeState = Emitter.emit (sprintf "    %s = %s : %s" resultId finalResultId (mlirTypeToString resultType)) afterConvState
-                    let typeState = TypeTracking.recordSSAType resultId resultType storeState
-                    let branchState = Emitter.emit (sprintf "    br ^%s" endLabel) typeState
-                    
-                    processCases rest branchState
-            
-            // Process all cases and add final end label
-            let firstCaseState = processCases cases state2
-            let finalState = Emitter.emit (sprintf "  ^%s:" endLabel) firstCaseState
-            
-            (resultId, finalState)
-
-/// Determines if a function is a known Alloy function that returns a Result type
-let isResultReturningFunction (funcName: string) : bool =
-    match funcName with
-    | "readInto" 
-    | "readFile"
-    | "parseInput"
-    | "tryParse" -> true
-    | _ -> funcName.Contains("OrNone") || 
-           funcName.Contains("OrError") || 
-           funcName.StartsWith("try") ||
-           funcName.Contains("Result")
-
-/// Core expression conversion functions with proper mutual recursion and type tracking
-let rec convertLiteral (literal: OakLiteral) (state: MLIRGenerationState) : string * MLIRGenerationState =
-    let literalType = TypeTracking.inferLiteralType literal
-    match literal with
-    | IntLiteral value ->
-        Emitter.constant (string value) literalType state
-    | FloatLiteral value ->
-        Emitter.constant (sprintf "%f" value) literalType state
-    | BoolLiteral value ->
-        Emitter.constant (if value then "1" else "0") literalType state
-    | StringLiteral value ->
-        let (globalName, state1) = Emitter.registerString value state
-        let (ptrResult, state2) = SSA.generateValue "str_ptr" state1
-        let state3 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" ptrResult globalName) state2
-        let state4 = TypeTracking.recordSSAType ptrResult literalType state3
-        (ptrResult, state4)
-    | UnitLiteral ->
-        let intType = MLIRTypes.createInteger 32
-        Emitter.constant "0" intType state
-    | ArrayLiteral _ ->
-        let (arrayResult, state1) = SSA.generateValue "array" state
-        let state2 = TypeTracking.recordSSAType arrayResult literalType state1
-        (arrayResult, state2)
-
-and convertStackAllocation (args: OakExpression list) (state: MLIRGenerationState) : string * MLIRGenerationState =
-    match args with
-    | [Literal (IntLiteral size)] ->
-        let (bufferResult, state1) = SSA.generateValue "buffer" state
-        let state2 = Emitter.emit (sprintf "    %s = memref.alloca() : memref<%dxi8>" bufferResult size) state1
-        let bufferType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [size]
-        let state3 = TypeTracking.recordSSAType bufferResult bufferType state2
-        (bufferResult, state3)
-    | _ ->
-        // Default to a small buffer if size isn't a literal
-        let (bufferResult, state1) = SSA.generateValue "buffer" state
-        let defaultSize = 64 // Default small buffer size
-        let state2 = Emitter.emit (sprintf "    %s = memref.alloca() : memref<%dxi8>" bufferResult defaultSize) state1
-        let bufferType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [defaultSize]
-        let state3 = TypeTracking.recordSSAType bufferResult bufferType state2
-        (bufferResult, state3)
-
-and convertExpression (expr: OakExpression) (state: MLIRGenerationState) : string * MLIRGenerationState =
-    // Get expected type from context (if any)
-    let expectedType = TypeTracking.getExpectedType state
-    
-    // Match expression and convert based on type
-    match expr with
-    | Literal literal ->
-        let (resultId, state1) = convertLiteral literal state
-        
-        // Check if we need type conversion
-        let literalType = TypeTracking.inferLiteralType literal
-        match expectedType with
-        | Some expected when expected <> literalType && requiresCoercion literalType expected ->
-            // Convert the literal to expected type
-            Emitter.convertType resultId literalType expected state1
-        | _ ->
-            (resultId, state1)
-
-    | Match(matchExpr, cases) ->
-        let (matchValueId, stateAfterMatchExpr) = convertExpression matchExpr state
-        let (resultId, stateWithResultVar) = SSA.generateValue "match_result" stateAfterMatchExpr
-        
-        // Check matchExpr to determine what kind of match pattern to use
-        match matchExpr with
-        | Application(Variable funcName, _) when isResultReturningFunction funcName ->
-            // Use Result match handling for Result-returning functions
-            MatchHandling.handleResultMatch matchExpr cases matchValueId resultId stateWithResultVar convertExpression
-            
-        | _ ->
-            // Use generic match for other patterns
-            MatchHandling.handleGenericMatch matchExpr cases matchValueId resultId stateWithResultVar convertExpression
-
-    | Variable name ->
-        match SSA.lookupVariable name state with
-        | Some value -> 
-            // Look up the type of this variable
-            let valueType = 
-                match TypeTracking.getSSAType value state with
-                | Some t -> t
-                | None -> MLIRTypes.createInteger 32 // Default if unknown
-            
-            // Check if we need to convert the type
-            match expectedType with
-            | Some expected when expected <> valueType && requiresCoercion valueType expected ->
-                // Convert variable to expected type
-                Emitter.convertType value valueType expected state
-            | _ ->
-                (value, state)
-                
-        | None -> 
-            // Unknown variable - create a dummy value
-            let (dummyValue, state1) = SSA.generateValue "unknown" state
-            let intType = MLIRTypes.createInteger 32
-            let state2 = TypeTracking.recordSSAType dummyValue intType state1
-            
-            // Check if we need to convert the type
-            match expectedType with
-            | Some expected when expected <> intType && requiresCoercion intType expected ->
-                Emitter.convertType dummyValue intType expected state2
-            | _ ->
-                (dummyValue, state2)
-    
-    | Application(func, args) ->
-        match func with
-        | Variable "op_PipeRight" ->
-            match args with
-            | [value; funcExpr] ->
-                match funcExpr with
-                | Variable fname -> convertExpression (Application(Variable fname, [value])) state
-                | Application(f, existingArgs) -> 
-                    convertExpression (Application(f, value :: existingArgs)) state
-                | _ -> convertExpression (Application(funcExpr, [value])) state
-            | _ ->
-                let (dummyValue, state1) = SSA.generateValue "invalid_pipe" state
-                let intType = MLIRTypes.createInteger 32
-                let state2 = TypeTracking.recordSSAType dummyValue intType state1
-                (dummyValue, state2)
-        
-        | Variable funcName ->
-            // Process arguments with appropriate type context
-            let rec processArgs (remainingArgs: OakExpression list) (currentState: MLIRGenerationState) (accArgs: string list) =
-                match remainingArgs with
-                | [] -> (List.rev accArgs, currentState)
-                | arg :: rest ->
-                    // Process each argument, potentially using expected type from function signature
-                    let (argValue, newState) = convertExpression arg currentState
-                    processArgs rest newState (argValue :: accArgs)
-            
-            let (argValues, state1) = processArgs args state []
-            
-            // Generate result variable
-            let (resultId, state2) = SSA.generateValue "call" state1
-            
-            // Get expected return type for this function
-            let returnType = TypeTracking.inferFunctionReturnType funcName state
-            
-            // Special case for Result-returning functions
-            if isResultReturningFunction funcName then
-                let intType = MLIRTypes.createInteger 32
-                let state3 = Emitter.emit (sprintf "    %s = arith.constant 1 : i32 // Result marker for %s" 
-                                    resultId funcName) state2
-                let state4 = TypeTracking.recordSSAType resultId intType state3
-                
-                // Check if we need type conversion
-                match expectedType with
-                | Some expected when expected <> intType && requiresCoercion intType expected ->
-                    Emitter.convertType resultId intType expected state4
-                | _ ->
-                    (resultId, state4)
-            else
-                // Regular function call via symbol registry
-                match PublicInterface.resolveFunctionCall funcName argValues resultId state2.SymbolRegistry with
-                | Core.XParsec.Foundation.Success (operations, updatedRegistry) -> 
-                    // Determine result type from return type or registry
-                    let resultType = 
-                        match returnType with
-                        | Some rt -> rt
-                        | None -> MLIRTypes.createInteger 32
-                    
-                    // Generate the operation and record the type
-                    let finalState = 
-                        operations
-                        |> List.fold (fun accState op -> Emitter.emit op accState) state2
-                        |> fun s -> { s with SymbolRegistry = updatedRegistry }
-                        |> TypeTracking.recordSSAType resultId resultType
-                    
-                    // Check if we need type conversion
-                    match expectedType with
-                    | Some expected when expected <> resultType && requiresCoercion resultType expected ->
-                        Emitter.convertType resultId resultType expected finalState
-                    | _ ->
-                        (resultId, finalState)
-                    
-                | Core.XParsec.Foundation.CompilerFailure errors -> 
-                    // Handle special functions not in registry
-                    match funcName with
-                    | "NativePtr.stackalloc" ->
-                        let (allocResult, allocState) = convertStackAllocation args state
-                        
-                        // Check if we need type conversion
-                        let allocType = 
-                            match TypeTracking.getSSAType allocResult allocState with
-                            | Some t -> t
-                            | None -> MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
-                        
-                        match expectedType with
-                        | Some expected when expected <> allocType && requiresCoercion allocType expected ->
-                            Emitter.convertType allocResult allocType expected allocState
-                        | _ ->
-                            (allocResult, allocState)
-                        
-                    | _ ->
-                        // Unknown function - create a placeholder
-                        let (resultId, state1) = SSA.generateValue "unknown_call" state
-                        let intType = MLIRTypes.createInteger 32
-                        let state2 = Emitter.emit (sprintf "    %s = arith.constant 0 : i32 // Unknown function %s" 
-                                                resultId funcName) state1
-                        let state3 = TypeTracking.recordSSAType resultId intType state2
-                        
-                        // Check if we need type conversion
-                        match expectedType with
-                        | Some expected when expected <> intType && requiresCoercion intType expected ->
-                            Emitter.convertType resultId intType expected state3
-                        | _ ->
-                            (resultId, state3)
-
-        | _ ->
-            // Function application with non-variable function
-            let (funcValue, state1) = convertExpression func state
-            
-            // Process arguments
-            let rec processArgs (remainingArgs: OakExpression list) (currentState: MLIRGenerationState) (accArgs: string list) =
-                match remainingArgs with
-                | [] -> (List.rev accArgs, currentState)
-                | arg :: rest ->
-                    let (argValue, newState) = convertExpression arg currentState
-                    processArgs rest newState (argValue :: accArgs)
-            
-            let (argValues, state2) = processArgs args state1 []
-            
-            // Generate result with type tracking
-            let (resultId, state3) = SSA.generateValue "app" state2
-            let argStr = String.concat ", " argValues
-            let intType = MLIRTypes.createInteger 32
-            
-            let state4 = Emitter.emit (sprintf "    %s = func.call %s(%s) : (i32) -> i32" resultId funcValue argStr) state3
-            let state5 = TypeTracking.recordSSAType resultId intType state4
-            
-            // Check if we need type conversion
-            match expectedType with
-            | Some expected when expected <> intType && requiresCoercion intType expected ->
-                Emitter.convertType resultId intType expected state5
-            | _ ->
-                (resultId, state5)
-    
-    | Let(name, value, body) ->
-        // Process value expression
-        let (valueResult, state1) = convertExpression value state
-        
-        // Get value type for proper binding
-        let valueType = 
-            match TypeTracking.getSSAType valueResult state1 with
-            | Some t -> t
-            | None -> MLIRTypes.createInteger 32
-        
-        // Bind variable and record its type
-        let state2 = 
-            state1 
-            |> SSA.bindVariable name valueResult
-            |> TypeTracking.recordSSAType valueResult valueType
-            
-        // Process body with proper type context
-        let (bodyResult, state3) = convertExpression body state2
-        
-        // Check if we need type conversion
-        let bodyType = 
-            match TypeTracking.getSSAType bodyResult state3 with
-            | Some t -> t
-            | None -> MLIRTypes.createInteger 32
-            
-        match expectedType with
-        | Some expected when expected <> bodyType && requiresCoercion bodyType expected ->
-            Emitter.convertType bodyResult bodyType expected state3
-        | _ ->
-            (bodyResult, state3)
-    
-    | Sequential(first, second) ->
-        // Process first expression (ignore its result)
-        let (_, state1) = convertExpression first state
-        
-        // Process second expression with proper type context
-        let (secondResult, state2) = convertExpression second state1
-        
-        // Check if we need type conversion
-        let secondType = 
-            match TypeTracking.getSSAType secondResult state2 with
-            | Some t -> t
-            | None -> MLIRTypes.createInteger 32
-            
-        match expectedType with
-        | Some expected when expected <> secondType && requiresCoercion secondType expected ->
-            Emitter.convertType secondResult secondType expected state2
-        | _ ->
-            (secondResult, state2)
-    
-    | IfThenElse(cond, thenExpr, elseExpr) ->
-        // Process condition
-        let (condResult, state1) = convertExpression cond state
-        
-        // Create branch labels
-        let (thenLabel, elseLabel, endLabel, state2) = MatchHandling.generateBranchLabels state1
-        let state3 = Emitter.emit (sprintf "    cond_br %s, ^%s, ^%s" condResult thenLabel elseLabel) state2
-        
-        // Create result variable
-        let (resultId, state4) = SSA.generateValue "if_result" state3
-        
-        // Determine result type - use expected type if available, otherwise i32
-        let resultType = 
-            match expectedType with
-            | Some typ -> typ
-            | None -> MLIRTypes.createInteger 32
-            
-        // Process then branch with type context
-        let state5 = Emitter.emit (sprintf "  ^%s:" thenLabel) state4
-        let thenState = TypeTracking.setExpectedType resultType state5
-        let (thenResult, state6) = convertExpression thenExpr thenState
-        
-        // Get actual type of then result
-        let thenType = 
-            match TypeTracking.getSSAType thenResult state6 with
-            | Some t -> t
-            | None -> MLIRTypes.createInteger 32
-            
-        // Apply type conversion if needed
-        let (finalThenResult, state7) =
-            if thenType <> resultType && requiresCoercion thenType resultType then
-                Emitter.convertType thenResult thenType resultType state6
-            else
-                (thenResult, state6)
-                
-        let state8 = Emitter.emit (sprintf "    %s = %s : %s" 
-                                  resultId finalThenResult (mlirTypeToString resultType)) state7
-        let state9 = Emitter.emit (sprintf "    br ^%s" endLabel) state8
-        
-        // Process else branch with type context
-        let state10 = Emitter.emit (sprintf "  ^%s:" elseLabel) state9
-        let elseState = TypeTracking.setExpectedType resultType state10
-        let (elseResult, state11) = convertExpression elseExpr elseState
-        
-        // Get actual type of else result
-        let elseType = 
-            match TypeTracking.getSSAType elseResult state11 with
-            | Some t -> t
-            | None -> MLIRTypes.createInteger 32
-            
-        // Apply type conversion if needed
-        let (finalElseResult, state12) =
-            if elseType <> resultType && requiresCoercion elseType resultType then
-                Emitter.convertType elseResult elseType resultType state11
-            else
-                (elseResult, state11)
-                
-        let state13 = Emitter.emit (sprintf "    %s = %s : %s" 
-                                   resultId finalElseResult (mlirTypeToString resultType)) state12
-        let state14 = Emitter.emit (sprintf "    br ^%s" endLabel) state13
-        
-        // Add end label and record result type
-        let state15 = Emitter.emit (sprintf "  ^%s:" endLabel) state14
-        let state16 = TypeTracking.recordSSAType resultId resultType state15
-        let finalState = TypeTracking.clearExpectedType state16
-        
-        (resultId, finalState)
-    
-    | FieldAccess(target, fieldName) ->
-        // Process target expression
-        let (targetResult, state1) = convertExpression target state
-        
-        // Basic implementation - pass through target value
-        // In a real implementation, would need to extract field from struct
-        (targetResult, state1)
-    
-    | MethodCall(target, methodName, args) ->
-        // Process target expression
-        let (targetResult, state1) = convertExpression target state
-        
-        // Process arguments
-        let convertArg (accState, accArgs) arg =
-            let (argValue, newState) = convertExpression arg accState
-            (newState, argValue :: accArgs)
-        
-        let (state2, argValues) = List.fold convertArg (state1, []) args
-        
-        // Basic implementation - pass through target value
-        // In a real implementation, would generate method call
-        (targetResult, state2)
-    
-    | IOOperation(ioType, args) ->
-        match ioType with
-        | Printf formatStr | Printfn formatStr ->
-            // Register printf declaration
-            let state1 = Emitter.emitModuleLevel "  func.func private @printf(memref<?xi8>, ...) -> i32" state
-            
-            // Create format string global
-            let (formatGlobal, state2) = Emitter.registerString formatStr state1
-            let (formatPtr, state3) = SSA.generateValue "fmt_ptr" state2
-            let state4 = Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" formatPtr formatGlobal) state3
-            
-            // Process arguments
-            let rec processArgs (remainingArgs: OakExpression list) (currentState: MLIRGenerationState) (accArgs: string list) =
-                match remainingArgs with
-                | [] -> (List.rev accArgs, currentState)
-                | arg :: rest ->
-                    // Set expected type based on format string (basic implementation)
-                    let argState = 
-                        if formatStr.Contains("%d") then
-                            TypeTracking.setExpectedType (MLIRTypes.createInteger 32) currentState
-                        elif formatStr.Contains("%f") then
-                            TypeTracking.setExpectedType (MLIRTypes.createFloat 32) currentState
-                        elif formatStr.Contains("%s") then
-                            TypeTracking.setExpectedType (MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []) currentState
-                        else
-                            currentState
-                            
-                    let (argValue, newState) = convertExpression arg argState
-                    let clearedState = TypeTracking.clearExpectedType newState
-                    processArgs rest clearedState (argValue :: accArgs)
-            
-            let (argValues, state5) = processArgs args state4 []
-            
-            // Generate printf call
-            let allArgs = formatPtr :: argValues
-            let (printfResult, state6) = SSA.generateValue "printf_result" state5
-            let argStr = String.concat ", " allArgs
-            
-            let state7 = 
-                if args.IsEmpty then
-                    Emitter.emit (sprintf "    %s = func.call @printf(%s) : (memref<?xi8>) -> i32" 
-                                 printfResult formatPtr) state6
-                else
-                    let types = "memref<?xi8>" :: List.replicate argValues.Length "i32"
-                    let typeStr = String.concat ", " types
-                    Emitter.emit (sprintf "    %s = func.call @printf(%s) : (%s) -> i32" 
-                                 printfResult argStr typeStr) state6
-            
-            // Record result type
-            let intType = MLIRTypes.createInteger 32
-            let state8 = TypeTracking.recordSSAType printfResult intType state7
-            
-            // Check if we need type conversion
-            match expectedType with
-            | Some expected when expected <> intType && requiresCoercion intType expected ->
-                Emitter.convertType printfResult intType expected state8
-            | _ ->
-                (printfResult, state8)
-        
-        | _ ->
-            // Handle other IO operations
-            let (dummyValue, state1) = SSA.generateValue "io_op" state
-            let intType = MLIRTypes.createInteger 32
-            let state2 = TypeTracking.recordSSAType dummyValue intType state1
-            
-            // Check if we need type conversion
-            match expectedType with
-            | Some expected when expected <> intType && requiresCoercion intType expected ->
-                Emitter.convertType dummyValue intType expected state2
-            | _ ->
-                (dummyValue, state2)
-    
-    | Lambda(params', body) ->
-        // Basic implementation - evaluate body directly
-        // In a real implementation, would need to handle closure conversion
-        let (bodyResult, state1) = convertExpression body state
-        
-        // Check if we need type conversion
-        let bodyType = 
-            match TypeTracking.getSSAType bodyResult state1 with
-            | Some t -> t
-            | None -> MLIRTypes.createInteger 32
-            
-        match expectedType with
-        | Some expected when expected <> bodyType && requiresCoercion bodyType expected ->
-            Emitter.convertType bodyResult bodyType expected state1
-        | _ ->
-            (bodyResult, state1)
-
-/// Function and module level conversion functions
+/// Converts a function declaration using pattern-based approach
 let convertFunction (name: string) (parameters: (string * OakType) list) (returnType: OakType) (body: OakExpression) (state: MLIRGenerationState) : MLIRGenerationState =
     let returnMLIRType = mapOakTypeToMLIR returnType
     let returnTypeStr = mlirTypeToString returnMLIRType
@@ -1088,19 +1410,15 @@ let convertFunction (name: string) (parameters: (string * OakType) list) (return
     // Set expected return type for body
     let state3 = TypeTracking.setExpectedType returnMLIRType state2
     
-    // Process body with type awareness
-    let (bodyResult, state4) = convertExpression body state3
+    // Process body with pattern-based approach
+    let (bodyResult, bodyType, state4) = TypedPatterns.processExpression body state3
     
-    // Get body result type
-    let bodyType = 
-        match TypeTracking.getSSAType bodyResult state4 with
-        | Some t -> t
-        | None -> MLIRTypes.createInteger 32
-        
     // Apply type conversion if needed
     let (finalBodyResult, state5) =
-        if bodyType <> returnMLIRType && requiresCoercion bodyType returnMLIRType then
-            Emitter.convertType bodyResult bodyType returnMLIRType state4
+        if bodyType <> returnMLIRType then
+            let (convertedId, convertedState) = 
+                Emitter.convertType bodyResult bodyType returnMLIRType state4
+            (convertedId, convertedState)
         else
             (bodyResult, state4)
             
@@ -1115,7 +1433,7 @@ let convertFunction (name: string) (parameters: (string * OakType) list) (return
     let state7 = TypeTracking.clearExpectedType state6
     Emitter.emit "  }" state7
 
-/// MLIR module generation with type tracking
+/// MLIR module generation with pattern-based type-aware approach
 let generateMLIR (program: OakProgram) : MLIRModuleOutput =
     let initialState = createInitialState ()
     
@@ -1187,7 +1505,7 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
         Diagnostics = finalState.ErrorContext
     }
 
-/// Generates complete MLIR module text from Oak AST with type tracking
+/// Generates complete MLIR module text from Oak AST with pattern-based type tracking
 let generateMLIRModuleText (program: OakProgram) : Core.XParsec.Foundation.CompilerResult<string> =
     try
         let mlirOutput = generateMLIR program
