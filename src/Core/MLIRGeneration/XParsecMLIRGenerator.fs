@@ -187,14 +187,16 @@ module MatchHandling =
         // Process Ok branch
         let okCase = 
             cases |> List.tryFind (fun (pattern, _) -> 
-                match pattern with | PatternConstructor("Ok", _) -> true | _ -> false)
+                match pattern with 
+                | PatternConstructor("Ok", _) -> true
+                | _ -> false)
         
         let state6 = Emitter.emit (sprintf "  ^%s:" thenLabel) state5
         
         let state7 = 
             match okCase with
-            | Some(PatternConstructor("Ok", [PatternVariable lengthName]), okExpr) ->
-                // Extract length parameter
+            | Some (PatternConstructor("Ok", [PatternVariable lengthName]), okExpr) ->
+                // Standard Ok case with length parameter
                 let (lengthId, stateWithLength) = SSA.generateValue "length" state6
                 let stateWithLengthExtract = 
                     Emitter.emit (sprintf "    %s = func.call @extract_result_length(%s) : (i32) -> i32" 
@@ -203,20 +205,8 @@ module MatchHandling =
                 // Bind length variable in scope
                 let stateWithBinding = SSA.bindVariable lengthName lengthId stateWithLengthExtract
                 
-                // Check for spanToString with UnitLiteral pattern
-                let (okResultId, stateAfterExpr) =
-                    match okExpr with
-                    | Application(Variable "spanToString", [Literal UnitLiteral]) ->
-                        // For spanToString with UnitLiteral, create span from buffer and length
-                        let (spanId, stateWithSpan) = SSA.generateValue "span" stateWithBinding
-                        let stateWithSpanCreate = 
-                            Emitter.emit (sprintf "    %s = func.call @create_span(%s, %s) : (memref<?xi8>, i32) -> memref<?xi8>" 
-                                        spanId bufferValue lengthId) stateWithSpan
-                        (spanId, stateWithSpanCreate)
-                    
-                    | _ -> 
-                        // For other expressions, use the standard conversion
-                        convertExpressionFn okExpr stateWithBinding
+                // Convert the Ok expression
+                let (okResultId, stateAfterExpr) = convertExpressionFn okExpr stateWithBinding
                 
                 // Store result and jump to end
                 let stateWithResultStore = 
@@ -224,8 +214,15 @@ module MatchHandling =
                 
                 Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
                 
-            | _ ->
-                // Default case if Ok pattern doesn't match expected structure
+            | Some (_, okExpr) ->
+                // Other Ok patterns - just convert the expression
+                let (okResultId, stateAfterExpr) = convertExpressionFn okExpr state6
+                let stateWithResultStore = 
+                    Emitter.emit (sprintf "    %s = %s : memref<?xi8>" resultId okResultId) stateAfterExpr
+                Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
+                
+            | None ->
+                // No Ok case found - use default
                 let (defaultValue, stateWithDefault) = Emitter.constant "0" (Integer 32) state6
                 let stateWithStore = 
                     Emitter.emit (sprintf "    %s = %s : i32" resultId defaultValue) stateWithDefault
@@ -244,33 +241,16 @@ module MatchHandling =
         let state9 = 
             match errorCase with
             | Some(_, errorExpr) ->
-                // For Error case, typically we want to return a string constant
-                match errorExpr with
-                | Literal(StringLiteral value) ->
-                    // For string literals, get the global string reference
-                    let (strPtrId, stateWithStr) = SSA.generateValue "str_ptr" state8
-                    let (strGlobal, stateWithGlobal) = Emitter.registerString value stateWithStr
-                    let stateWithGetGlobal = 
-                        Emitter.emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" 
-                                     strPtrId strGlobal) stateWithGlobal
-                    
-                    // Store the string pointer in the result
-                    let stateWithResultStore = 
-                        Emitter.emit (sprintf "    %s = %s : i32" resultId strPtrId) stateWithGetGlobal
-                    
-                    // Jump to end
-                    Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
-                | _ ->
-                    // For other expressions, convert normally
-                    let (errorResultId, stateAfterErrorExpr) = convertExpressionFn errorExpr state8
-                    
-                    // Store result and jump to end
-                    let stateWithResultStore = 
-                        Emitter.emit (sprintf "    %s = %s : i32" resultId errorResultId) stateAfterErrorExpr
-                    Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
+                // Convert the error expression
+                let (errorResultId, stateAfterErrorExpr) = convertExpressionFn errorExpr state8
+                
+                // Store result and jump to end
+                let stateWithResultStore = 
+                    Emitter.emit (sprintf "    %s = %s : memref<?xi8>" resultId errorResultId) stateAfterErrorExpr
+                Emitter.emit (sprintf "    br ^%s" endLabel) stateWithResultStore
                 
             | None -> 
-                // Default case if Error pattern doesn't match expected structure
+                // No Error case found - use default
                 let (defaultValue, stateWithDefault) = 
                     Emitter.constant "0" (Integer 32) state8
                 let stateWithStore = 
@@ -287,7 +267,6 @@ module MatchHandling =
                           (matchValueId: string) (resultId: string) (state: MLIRGenerationState)
                           (convertExpressionFn: OakExpression -> MLIRGenerationState -> string * MLIRGenerationState) 
                           : string * MLIRGenerationState =
-        // Implement generic match handling using similar branch structure
         // For now, just return a default value
         let (defaultValue, state1) = Emitter.constant "0" (Integer 32) state
         let state2 = Emitter.emit (sprintf "    %s = %s : i32" resultId defaultValue) state1
