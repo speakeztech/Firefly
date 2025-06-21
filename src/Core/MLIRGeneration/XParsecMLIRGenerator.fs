@@ -238,7 +238,7 @@ module Emitter =
             | IntegerCategory, MemoryRefCategory ->
                 // Integer to memory reference (unusual but handled)
                 // This typically involves creating a string representation
-                let (strGlobal, state2) = Emitter.registerString "%d" state1
+                let (strGlobal, state2) = registerString "%d" state1
                 let (ptrResult, state3) = SSA.generateValue "str_ptr" state2
                 let state4 = emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" ptrResult strGlobal) state3
                 let memRefType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []

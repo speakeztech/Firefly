@@ -366,7 +366,6 @@ module MLIRGeneration =
             (symbol: ResolvedSymbol) 
             (argSSAValues: string list) 
             (argTypes: MLIRType list) 
-            (state: MLIRGenerationState) 
             : bool * string list =
         
         // Check if we have the right number of arguments
