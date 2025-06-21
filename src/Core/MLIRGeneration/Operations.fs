@@ -26,17 +26,29 @@ let buildArithmeticOp (op: string) (lhs: string) (rhs: string) (resultType: MLIR
 /// Creates function definition operation
 let buildFuncOp (name: string) (args: (string * MLIRType) list) (returnType: MLIRType) =
     let argTypeStrs = args |> List.map (fun (_, argType) -> 
-        match argType with
-        | Integer width -> sprintf "i%d" width
-        | Float width -> sprintf "f%d" width
-        | Void -> "()"
+        match argType.Category with
+        | IntegerCategory -> 
+            match argType.Width with 
+            | Some width -> sprintf "i%d" width
+            | None -> "i32"
+        | FloatCategory -> 
+            match argType.Width with 
+            | Some width -> sprintf "f%d" width
+            | None -> "f32"
+        | VoidCategory -> "()"
         | _ -> "i32")
     
     let returnTypeStr = 
-        match returnType with
-        | Integer width -> sprintf "i%d" width
-        | Float width -> sprintf "f%d" width
-        | Void -> "()"
+        match returnType.Category with
+        | IntegerCategory -> 
+            match returnType.Width with 
+            | Some width -> sprintf "i%d" width
+            | None -> "i32"
+        | FloatCategory -> 
+            match returnType.Width with 
+            | Some width -> sprintf "f%d" width
+            | None -> "f32"
+        | VoidCategory -> "()"
         | _ -> "i32"
     
     let functionTypeStr = sprintf "(%s) -> %s" (String.concat ", " argTypeStrs) returnTypeStr
@@ -78,9 +90,15 @@ let buildReturnOp (values: string list) =
 let buildConstantOp (value: string) (mlirType: MLIRType) =
     let resultId = "%const"
     let typeStr = 
-        match mlirType with
-        | Integer width -> sprintf "i%d" width
-        | Float width -> sprintf "f%d" width
+        match mlirType.Category with
+        | IntegerCategory -> 
+            match mlirType.Width with 
+            | Some width -> sprintf "i%d" width
+            | None -> "i32"
+        | FloatCategory -> 
+            match mlirType.Width with 
+            | Some width -> sprintf "f%d" width
+            | None -> "f32"
         | _ -> "i32"
     
     {
@@ -116,9 +134,15 @@ let buildStoreOp (value: string) (memref: string) =
 let buildAllocaOp (elementType: MLIRType) (size: int option) =
     let resultId = "%alloca"
     let sizeStr = match size with Some s -> sprintf "%d x " s | None -> ""
-    let typeStr = match elementType with
-                  | Integer width -> sprintf "i%d" width
-                  | Float width -> sprintf "f%d" width
+    let typeStr = match elementType.Category with
+                  | IntegerCategory -> 
+                      match elementType.Width with 
+                      | Some width -> sprintf "i%d" width
+                      | None -> "i32"
+                  | FloatCategory -> 
+                      match elementType.Width with 
+                      | Some width -> sprintf "f%d" width
+                      | None -> "f32"
                   | _ -> "i32"
     
     {
@@ -126,7 +150,7 @@ let buildAllocaOp (elementType: MLIRType) (size: int option) =
         Operands = []
         Results = [resultId]
         Attributes = Map.ofList ["element_type", sprintf "%s%s" sizeStr typeStr]
-        ResultTypes = [MemRef(elementType, [])]
+        ResultTypes = [MLIRTypes.createMemRef elementType []]
     }
 
 /// Converts MLIROperation to string representation

@@ -138,8 +138,8 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.Memory.stackBuffer"
             ShortName = "stackBuffer"
-            ParameterTypes = [MLIRType.Integer 32] // size parameter
-            ReturnType = MLIRType.MemRef(MLIRType.Integer 8, []) // memref<?xi8>
+            ParameterTypes = [MLIRTypes.createInteger 32] // size parameter
+            ReturnType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [] // memref<?xi8>
             Operation = DialectOperation(
                 MLIRDialect.MemRef, 
                 "memref.alloca", 
@@ -153,8 +153,8 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.Memory.spanToString"
             ShortName = "spanToString"
-            ParameterTypes = [MLIRType.MemRef(MLIRType.Integer 8, [])] // span parameter
-            ReturnType = MLIRType.MemRef(MLIRType.Integer 8, []) // string as memref
+            ParameterTypes = [MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []] // span parameter
+            ReturnType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [] // string as memref
             Operation = CustomTransform("span_to_string", ["utf8_conversion"])
             Namespace = "Alloy.Memory"
             SourceLibrary = "Alloy"
@@ -167,8 +167,8 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.IO.Console.prompt"
             ShortName = "prompt"
-            ParameterTypes = [MLIRType.MemRef(MLIRType.Integer 8, [])] // message parameter
-            ReturnType = MLIRType.Void
+            ParameterTypes = [MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []] // message parameter
+            ReturnType = MLIRTypes.createVoid ()
             Operation = ExternalCall("printf", Some "libc")
             Namespace = "Alloy.IO.Console"
             SourceLibrary = "Alloy"
@@ -178,8 +178,8 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.IO.Console.readInto"
             ShortName = "readInto"
-            ParameterTypes = [MLIRType.MemRef(MLIRType.Integer 8, [])] // buffer parameter  
-            ReturnType = MLIRType.Integer 32 // Result<int, string> simplified to i32
+            ParameterTypes = [MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []] // buffer parameter  
+            ReturnType = MLIRTypes.createInteger 32 // Result<int, string> simplified to i32
             Operation = CompositePattern([
                 ExternalCall("scanf", Some "libc");
                 CustomTransform("result_wrapper", ["success_check"])
@@ -192,8 +192,8 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.IO.Console.writeLine"
             ShortName = "writeLine"
-            ParameterTypes = [MLIRType.MemRef(MLIRType.Integer 8, [])] // message parameter
-            ReturnType = MLIRType.Void
+            ParameterTypes = [MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []] // message parameter
+            ReturnType = MLIRTypes.createVoid ()
             Operation = ExternalCall("printf", Some "libc")
             Namespace = "Alloy.IO.Console"
             SourceLibrary = "Alloy"
@@ -206,8 +206,8 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.IO.String.format"
             ShortName = "format"
-            ParameterTypes = [MLIRType.MemRef(MLIRType.Integer 8, []); MLIRType.MemRef(MLIRType.Integer 8, [])] // format, value
-            ReturnType = MLIRType.MemRef(MLIRType.Integer 8, [])
+            ParameterTypes = [MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []; MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []] // format, value
+            ReturnType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
             Operation = ExternalCall("sprintf", Some "libc")
             Namespace = "Alloy.IO.String"
             SourceLibrary = "Alloy"

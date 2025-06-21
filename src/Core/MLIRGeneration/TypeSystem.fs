@@ -2,113 +2,346 @@
 
 open Dabbit.Parsing.OakAst
 
-/// Represents MLIR types used in code generation
-type MLIRType =
-    | Integer of width: int
-    | Float of width: int
-    | Void
-    | MemRef of elementType: MLIRType * shape: int list
-    | Function of inputs: MLIRType list * output: MLIRType
-    | Struct of elements: MLIRType list
+/// Represents the cost of converting between types
+type ConversionCost =
+    | NoCost        // Same types
+    | Widening      // Safe widening conversion (i32 -> i64)
+    | Narrowing     // Potentially unsafe narrowing (i64 -> i32)
+    | IntToFloat    // Integer to floating point
+    | FloatToInt    // Floating point to integer (potentially lossy)
+    | Coercion      // Complex coercion (int -> string)
+    | Impossible    // Cannot convert
 
-/// Maps Oak AST types to corresponding MLIR types
+/// Core type categories for MLIR
+type MLIRTypeCategory =
+    | IntegerCategory
+    | FloatCategory
+    | VoidCategory
+    | MemoryRefCategory
+    | FunctionCategory
+    | StructCategory
+
+/// Represents MLIR types with explicit structure
+type MLIRType = {
+    Category: MLIRTypeCategory
+    Width: int option
+    ElementType: MLIRType option
+    Shape: int list
+    Parameters: MLIRType list
+    ReturnType: MLIRType option
+    Fields: MLIRType list
+}
+
+/// Type creation functions that replace discriminated union constructors
+module MLIRTypes =
+    
+    /// Creates an integer type with specified bit width
+    let createInteger (width: int) : MLIRType = {
+        Category = IntegerCategory
+        Width = Some width
+        ElementType = None
+        Shape = []
+        Parameters = []
+        ReturnType = None
+        Fields = []
+    }
+    
+    /// Creates a floating point type with specified bit width
+    let createFloat (width: int) : MLIRType = {
+        Category = FloatCategory
+        Width = Some width
+        ElementType = None
+        Shape = []
+        Parameters = []
+        ReturnType = None
+        Fields = []
+    }
+    
+    /// Creates a void type
+    let createVoid () : MLIRType = {
+        Category = VoidCategory
+        Width = None
+        ElementType = None
+        Shape = []
+        Parameters = []
+        ReturnType = None
+        Fields = []
+    }
+    
+    /// Creates a memory reference type
+    let createMemRef (elementType: MLIRType) (shape: int list) : MLIRType = {
+        Category = MemoryRefCategory
+        Width = None
+        ElementType = Some elementType
+        Shape = shape
+        Parameters = []
+        ReturnType = None
+        Fields = []
+    }
+    
+    /// Creates a function type
+    let createFunction (parameters: MLIRType list) (returnType: MLIRType) : MLIRType = {
+        Category = FunctionCategory
+        Width = None
+        ElementType = None
+        Shape = []
+        Parameters = parameters
+        ReturnType = Some returnType
+        Fields = []
+    }
+    
+    /// Creates a struct type
+    let createStruct (fields: MLIRType list) : MLIRType = {
+        Category = StructCategory
+        Width = None
+        ElementType = None
+        Shape = []
+        Parameters = []
+        ReturnType = None
+        Fields = fields
+    }
+
+/// Core type conversion and analysis functions - declared as mutually recursive
 let rec mapOakTypeToMLIR (oakType: OakType) : MLIRType =
     match oakType with
-    | IntType -> Integer 32
-    | FloatType -> Float 32
-    | BoolType -> Integer 1
-    | UnitType -> Void
-    | StringType -> MemRef(Integer 8, []) // Treated as byte array
-    | ArrayType elemType -> MemRef(mapOakTypeToMLIR elemType, [])
+    | IntType -> MLIRTypes.createInteger 32
+    | FloatType -> MLIRTypes.createFloat 32
+    | BoolType -> MLIRTypes.createInteger 1
+    | UnitType -> MLIRTypes.createVoid ()
+    | StringType -> MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
+    | ArrayType elemType -> MLIRTypes.createMemRef (mapOakTypeToMLIR elemType) []
     | FunctionType(paramTypes, returnType) ->
         let mappedParams = paramTypes |> List.map mapOakTypeToMLIR
         let mappedReturn = mapOakTypeToMLIR returnType
-        Function(mappedParams, mappedReturn)
+        MLIRTypes.createFunction mappedParams mappedReturn
     | StructType fields ->
         let fieldTypes = fields |> List.map (snd >> mapOakTypeToMLIR)
-        Struct fieldTypes
+        MLIRTypes.createStruct fieldTypes
     | UnionType cases ->
-        // For unions, we need a tag (i8) and the largest possible payload
-        // This is simplified; real implementation would calculate proper layout
-        Struct [Integer 8; Integer 64] // Placeholder size
+        // For unions, use a tag (i8) and the largest possible payload
+        MLIRTypes.createStruct [MLIRTypes.createInteger 8; MLIRTypes.createInteger 64]
 
 /// Converts MLIR type to string representation
 and mlirTypeToString (mlirType: MLIRType) : string =
-    match mlirType with
-    | Integer width -> sprintf "i%d" width
-    | Float width -> sprintf "f%d" width
-    | Void -> "()"
-    | MemRef(elementType, shape) ->
-        let elementStr = mlirTypeToString elementType
-        if shape.IsEmpty then
-            sprintf "memref<?x%s>" elementStr
-        else
-            let shapeStr = shape |> List.map string |> String.concat "x"
-            sprintf "memref<%sx%s>" shapeStr elementStr
-    | Function(inputs, output) ->
-        let inputStrs = inputs |> List.map mlirTypeToString |> String.concat ", "
-        let outputStr = mlirTypeToString output
+    match mlirType.Category with
+    | IntegerCategory ->
+        match mlirType.Width with
+        | Some width -> sprintf "i%d" width
+        | None -> "i32"
+    | FloatCategory ->
+        match mlirType.Width with
+        | Some width -> sprintf "f%d" width
+        | None -> "f32"
+    | VoidCategory -> "()"
+    | MemoryRefCategory ->
+        match mlirType.ElementType with
+        | Some elementType ->
+            let elementStr = mlirTypeToString elementType
+            if mlirType.Shape.IsEmpty then
+                sprintf "memref<?x%s>" elementStr
+            else
+                let shapeStr = mlirType.Shape |> List.map string |> String.concat "x"
+                sprintf "memref<%sx%s>" shapeStr elementStr
+        | None -> "memref<?xi8>"
+    | FunctionCategory ->
+        let inputStrs = mlirType.Parameters |> List.map mlirTypeToString |> String.concat ", "
+        let outputStr = 
+            match mlirType.ReturnType with
+            | Some returnType -> mlirTypeToString returnType
+            | None -> "()"
         sprintf "(%s) -> %s" inputStrs outputStr
-    | Struct elements ->
-        let elementStrs = elements |> List.map mlirTypeToString |> String.concat ", "
-        sprintf "!llvm.struct<(%s)>" elementStrs
+    | StructCategory ->
+        let fieldStrs = mlirType.Fields |> List.map mlirTypeToString |> String.concat ", "
+        sprintf "!llvm.struct<(%s)>" fieldStrs
 
 /// Gets the size in bytes of an MLIR type (for layout calculations)
 and getTypeSize (mlirType: MLIRType) : int =
-    match mlirType with
-    | Integer 1 -> 1  // i1 (bool)
-    | Integer 8 -> 1  // i8
-    | Integer 16 -> 2 // i16
-    | Integer 32 -> 4 // i32
-    | Integer 64 -> 8 // i64
-    | Integer width -> (width + 7) / 8 // Round up to nearest byte
-    | Float 32 -> 4   // f32
-    | Float 64 -> 8   // f64
-    | Float width -> (width + 7) / 8
-    | Void -> 0
-    | MemRef(_, _) -> 8 // Pointer size on 64-bit systems
-    | Function(_, _) -> 8 // Function pointer
-    | Struct elements -> elements |> List.sumBy getTypeSize
+    match mlirType.Category with
+    | IntegerCategory ->
+        match mlirType.Width with
+        | Some 1 -> 1
+        | Some 8 -> 1
+        | Some 16 -> 2
+        | Some 32 -> 4
+        | Some 64 -> 8
+        | Some width -> (width + 7) / 8
+        | None -> 4
+    | FloatCategory ->
+        match mlirType.Width with
+        | Some 32 -> 4
+        | Some 64 -> 8
+        | Some width -> (width + 7) / 8
+        | None -> 4
+    | VoidCategory -> 0
+    | MemoryRefCategory -> 8
+    | FunctionCategory -> 8
+    | StructCategory -> mlirType.Fields |> List.sumBy getTypeSize
 
 /// Checks if a type requires heap allocation
 and requiresHeapAllocation (mlirType: MLIRType) : bool =
-    match mlirType with
-    | Integer _ | Float _ | Void -> false
-    | MemRef(_, shape) -> shape.IsEmpty // Dynamic arrays need heap
-    | Function(_, _) -> false // Function pointers are stack-allocated
-    | Struct elements -> elements |> List.exists requiresHeapAllocation
+    match mlirType.Category with
+    | IntegerCategory | FloatCategory | VoidCategory -> false
+    | MemoryRefCategory -> mlirType.Shape.IsEmpty
+    | FunctionCategory -> false
+    | StructCategory -> mlirType.Fields |> List.exists requiresHeapAllocation
 
 /// Gets the alignment requirement for a type
 and getTypeAlignment (mlirType: MLIRType) : int =
-    match mlirType with
-    | Integer 1 -> 1
-    | Integer width when width <= 8 -> 1
-    | Integer width when width <= 16 -> 2
-    | Integer width when width <= 32 -> 4
-    | Integer width -> 8
-    | Float 32 -> 4
-    | Float 64 -> 8
-    | Float _ -> 8
-    | Void -> 1
-    | MemRef(_, _) -> 8
-    | Function(_, _) -> 8
-    | Struct elements -> 
-        if elements.IsEmpty then 1
-        else elements |> List.map getTypeAlignment |> List.max
+    match mlirType.Category with
+    | IntegerCategory ->
+        match mlirType.Width with
+        | Some 1 -> 1
+        | Some width when width <= 8 -> 1
+        | Some width when width <= 16 -> 2
+        | Some width when width <= 32 -> 4
+        | Some width -> 8
+        | None -> 4
+    | FloatCategory ->
+        match mlirType.Width with
+        | Some 32 -> 4
+        | Some 64 -> 8
+        | None -> 4
+        | Some _ -> 8
+    | VoidCategory -> 1
+    | MemoryRefCategory -> 8
+    | FunctionCategory -> 8
+    | StructCategory -> 
+        if mlirType.Fields.IsEmpty then 1
+        else mlirType.Fields |> List.map getTypeAlignment |> List.max
 
-/// Determines if two MLIR types are compatible for assignment/comparison
+/// Enhanced type compatibility checking with detailed analysis
 and areTypesCompatible (type1: MLIRType) (type2: MLIRType) : bool =
-    match type1, type2 with
-    | Integer w1, Integer w2 -> w1 = w2
-    | Float w1, Float w2 -> w1 = w2
-    | Void, Void -> true
-    | MemRef(elem1, shape1), MemRef(elem2, shape2) -> 
-        areTypesCompatible elem1 elem2 && shape1 = shape2
-    | Function(in1, out1), Function(in2, out2) ->
-        List.length in1 = List.length in2 &&
-        List.forall2 areTypesCompatible in1 in2 &&
-        areTypesCompatible out1 out2
-    | Struct elems1, Struct elems2 ->
-        List.length elems1 = List.length elems2 &&
-        List.forall2 areTypesCompatible elems1 elems2
+    if type1.Category <> type2.Category then false
+    else
+        match type1.Category with
+        | IntegerCategory | FloatCategory -> type1.Width = type2.Width
+        | VoidCategory -> true
+        | MemoryRefCategory ->
+            match type1.ElementType, type2.ElementType with
+            | Some elem1, Some elem2 -> areTypesCompatible elem1 elem2 && type1.Shape = type2.Shape
+            | None, None -> type1.Shape = type2.Shape
+            | _ -> false
+        | FunctionCategory ->
+            type1.Parameters.Length = type2.Parameters.Length &&
+            List.forall2 areTypesCompatible type1.Parameters type2.Parameters &&
+            match type1.ReturnType, type2.ReturnType with
+            | Some ret1, Some ret2 -> areTypesCompatible ret1 ret2
+            | None, None -> true
+            | _ -> false
+        | StructCategory ->
+            type1.Fields.Length = type2.Fields.Length &&
+            List.forall2 areTypesCompatible type1.Fields type2.Fields
+
+/// Type analysis and conversion functions
+module TypeAnalysis =
+    
+    /// Gets compatible type conversions with their costs
+    let getCompatibleConversions (mlirType: MLIRType) : (MLIRType * ConversionCost) list =
+        match mlirType.Category with
+        | IntegerCategory ->
+            match mlirType.Width with
+            | Some width ->
+                [
+                    // Widening conversions to larger integers
+                    if width < 64 then yield (MLIRTypes.createInteger 64, Widening)
+                    if width < 32 then yield (MLIRTypes.createInteger 32, Widening)
+                    if width < 16 then yield (MLIRTypes.createInteger 16, Widening)
+                    
+                    // Float conversions
+                    yield (MLIRTypes.createFloat 32, IntToFloat)
+                    yield (MLIRTypes.createFloat 64, IntToFloat)
+                    
+                    // String coercion for display
+                    yield (MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [], Coercion)
+                ]
+            | None -> []
+        | FloatCategory ->
+            match mlirType.Width with
+            | Some width ->
+                [
+                    // Widening to larger floats
+                    if width < 64 then yield (MLIRTypes.createFloat 64, Widening)
+                    
+                    // Integer conversions (potentially lossy)
+                    yield (MLIRTypes.createInteger 32, FloatToInt)
+                    yield (MLIRTypes.createInteger 64, FloatToInt)
+                    
+                    // String coercion
+                    yield (MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [], Coercion)
+                ]
+            | None -> []
+        | VoidCategory -> []
+        | MemoryRefCategory ->
+            [
+                // Generic pointer conversions
+                yield (MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [], Coercion)
+            ]
+        | FunctionCategory -> []
+        | StructCategory -> []
+    
+    /// Checks if this type can be converted to another
+    let canConvertTo (fromType: MLIRType) (toType: MLIRType) : bool =
+        fromType = toType ||
+        getCompatibleConversions fromType
+        |> List.exists (fun (compatibleType, _) -> compatibleType = toType)
+    
+    /// Gets the cost of conversion to another type
+    let getConversionCost (fromType: MLIRType) (toType: MLIRType) : ConversionCost =
+        if fromType = toType then NoCost
+        else
+            getCompatibleConversions fromType
+            |> List.tryFind (fun (compatibleType, _) -> compatibleType = toType)
+            |> Option.map snd
+            |> Option.defaultValue Impossible
+
+/// Checks if a conversion between types is safe (no data loss)
+let isSafeConversion (fromType: MLIRType) (toType: MLIRType) : bool =
+    match TypeAnalysis.getConversionCost fromType toType with
+    | NoCost | Widening -> true
     | _ -> false
+
+/// Checks if a conversion between types requires explicit coercion
+let requiresCoercion (fromType: MLIRType) (toType: MLIRType) : bool =
+    match TypeAnalysis.getConversionCost fromType toType with
+    | NoCost -> false
+    | Widening | IntToFloat -> false
+    | _ -> true
+
+/// Gets the most specific common type between two types
+let getCommonType (type1: MLIRType) (type2: MLIRType) : MLIRType option =
+    if areTypesCompatible type1 type2 then
+        Some type1
+    else
+        match type1.Category, type2.Category with
+        | IntegerCategory, IntegerCategory ->
+            match type1.Width, type2.Width with
+            | Some w1, Some w2 -> Some (MLIRTypes.createInteger (max w1 w2))
+            | _ -> None
+        | FloatCategory, FloatCategory ->
+            match type1.Width, type2.Width with
+            | Some w1, Some w2 -> Some (MLIRTypes.createFloat (max w1 w2))
+            | _ -> None
+        | IntegerCategory, FloatCategory ->
+            type2.Width |> Option.map MLIRTypes.createFloat
+        | FloatCategory, IntegerCategory ->
+            type1.Width |> Option.map MLIRTypes.createFloat
+        | _ -> None
+
+/// Determines the best conversion path between types
+let findConversionPath (fromType: MLIRType) (toType: MLIRType) : ConversionCost =
+    TypeAnalysis.getConversionCost fromType toType
+
+/// Checks if a type is a memory reference type
+let isMemRefType (mlirType: MLIRType) : bool =
+    mlirType.Category = MemoryRefCategory
+
+/// Checks if a type is a numeric type
+let isNumericType (mlirType: MLIRType) : bool =
+    mlirType.Category = IntegerCategory || mlirType.Category = FloatCategory
+
+/// Gets the element type of a memory reference
+let getMemRefElementType (mlirType: MLIRType) : MLIRType option =
+    if mlirType.Category = MemoryRefCategory then
+        mlirType.ElementType
+    else
+        None
