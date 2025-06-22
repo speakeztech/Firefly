@@ -7,6 +7,72 @@ open Core.MLIRGeneration.TypeSystem
 open Core.MLIRGeneration.Dialect
 open Core.XParsec.Foundation
 
+module MLIROperationBuilder =
+    // Generate arithmetic operation
+    let buildArithmeticOp (op: string) (lhs: string) (rhs: string) (resultId: string) (resultType: MLIRType) : string =
+        sprintf "    %s = arith.%s %s, %s : %s" resultId op lhs rhs (mlirTypeToString resultType)
+    
+    // Generate constant operation
+    let buildConstantOp (value: string) (resultId: string) (mlirType: MLIRType) : string =
+        sprintf "    %s = arith.constant %s : %s" resultId value (mlirTypeToString mlirType)
+        
+    // Generate function call operation
+    let buildCallOp (funcName: string) (args: string list) (resultId: string option) (resultType: MLIRType option) : string =
+        let argsStr = String.concat ", " args
+        match resultId, resultType with
+        | Some id, Some typ when typ.Category <> MLIRTypeCategory.Void ->
+            sprintf "    %s = func.call @%s(%s) : (%s) -> %s" 
+                id funcName argsStr
+                (String.concat ", " (args |> List.map (fun _ -> "i32")))
+                (mlirTypeToString typ)
+        | _, _ ->
+            sprintf "    func.call @%s(%s) : (%s) -> ()" 
+                funcName argsStr
+                (String.concat ", " (args |> List.map (fun _ -> "i32")))
+    
+    // Generate return operation
+    let buildReturnOp (values: string list) : string =
+        if values.IsEmpty then
+            "    func.return"
+        else
+            sprintf "    func.return %s" (String.concat ", " values)
+            
+    // Generate memory allocation operation
+    let buildAllocaOp (size: string) (resultId: string) (elementType: MLIRType) : string =
+        sprintf "    %s = memref.alloca(%s) : memref<?x%s>" 
+            resultId size (mlirTypeToString elementType)
+            
+    // Generate memory load operation
+    let buildLoadOp (memref: string) (resultId: string) (elementType: MLIRType) : string =
+        sprintf "    %s = memref.load %s[] : memref<?x%s>" resultId memref (mlirTypeToString elementType)
+        
+    // Generate memory store operation
+    let buildStoreOp (value: string) (memref: string) (elementType: MLIRType) : string =
+        sprintf "    memref.store %s, %s[] : memref<?x%s>" value memref (mlirTypeToString elementType)
+        
+    // Generate global string constant
+    let buildGlobalStringOp (name: string) (value: string) : string =
+        let escapedValue = value.Replace("\\", "\\\\").Replace("\"", "\\\"")
+        let constSize = escapedValue.Length + 1
+        sprintf "  memref.global constant %s = dense<\"%s\\00\"> : memref<%dxi8>" 
+            name escapedValue constSize
+            
+    // Generate reference to global
+    let buildGetGlobalOp (globalName: string) (resultId: string) : string =
+        sprintf "    %s = memref.get_global %s : memref<?xi8>" resultId globalName
+        
+    // Generate conditional branch
+    let buildCondBranchOp (condition: string) (trueDest: string) (falseDest: string) : string =
+        sprintf "    cond_br %s, ^%s, ^%s" condition trueDest falseDest
+        
+    // Generate unconditional branch
+    let buildBranchOp (dest: string) : string =
+        sprintf "    br ^%s" dest
+        
+    // Generate block label
+    let buildBlockLabel (label: string) : string =
+        sprintf "  ^%s:" label
+
 /// MLIR generation state for tracking SSA values and types
 type MLIRGenerationState = {
     SSACounter: int
@@ -72,21 +138,24 @@ let processLiteral (lit: OakLiteral) (state: MLIRGenerationState) : string * MLI
     | IntLiteral value ->
         let (resultId, state1) = generateSSAValue "const" state
         let intType = MLIRTypeUtils.createInteger 32
-        let state2 = emit (sprintf "    %s = arith.constant %d : i32" resultId value) state1
+        let constOp = MLIROperationBuilder.buildConstantOp (string value) resultId intType
+        let state2 = emit constOp state1
         let state3 = recordSSAType resultId intType state2
         (resultId, intType, state3)
         
     | FloatLiteral value ->
         let (resultId, state1) = generateSSAValue "const" state
         let floatType = MLIRTypeUtils.createFloat 32
-        let state2 = emit (sprintf "    %s = arith.constant %f : f32" resultId value) state1
+        let constOp = MLIROperationBuilder.buildConstantOp (string value) resultId floatType
+        let state2 = emit constOp state1
         let state3 = recordSSAType resultId floatType state2
         (resultId, floatType, state3)
         
     | BoolLiteral value ->
         let (resultId, state1) = generateSSAValue "const" state
         let boolType = MLIRTypeUtils.createInteger 1
-        let state2 = emit (sprintf "    %s = arith.constant %d : i1" resultId (if value then 1 else 0)) state1
+        let constOp = MLIROperationBuilder.buildConstantOp (if value then "1" else "0") resultId boolType
+        let state2 = emit constOp state1
         let state3 = recordSSAType resultId boolType state2
         (resultId, boolType, state3)
         
@@ -94,7 +163,8 @@ let processLiteral (lit: OakLiteral) (state: MLIRGenerationState) : string * MLI
         let (globalName, state1) = registerString value state
         let (ptrResult, state2) = generateSSAValue "str" state1
         let memrefType = MLIRTypeUtils.createMemRef (MLIRTypeUtils.createInteger 8)
-        let state3 = emit (sprintf "    %s = memref.get_global %s : memref<?xi8>" ptrResult globalName) state2
+        let getGlobalOp = MLIROperationBuilder.buildGetGlobalOp globalName ptrResult
+        let state3 = emit getGlobalOp state2
         let state4 = recordSSAType ptrResult memrefType state3
         (ptrResult, memrefType, state4)
         
@@ -102,7 +172,8 @@ let processLiteral (lit: OakLiteral) (state: MLIRGenerationState) : string * MLI
         // Unit and other literals default to i32 constant 0
         let (resultId, state1) = generateSSAValue "const" state
         let intType = MLIRTypeUtils.createInteger 32
-        let state2 = emit (sprintf "    %s = arith.constant 0 : i32" resultId) state1
+        let constOp = MLIROperationBuilder.buildConstantOp "0" resultId intType
+        let state2 = emit constOp state1
         let state3 = recordSSAType resultId intType state2
         (resultId, intType, state3)
 
@@ -124,7 +195,8 @@ let rec processExpression (expr: OakExpression) (state: MLIRGenerationState) : s
             // Unknown variable - create a placeholder
             let (dummyId, state1) = generateSSAValue "unknown" state
             let intType = MLIRTypeUtils.createInteger 32
-            let state2 = emit (sprintf "    %s = arith.constant 0 : i32 // Unknown variable: %s" dummyId name) state1
+            let constOp = MLIROperationBuilder.buildConstantOp "0" dummyId intType
+            let state2 = emit (constOp + " // Unknown variable: " + name) state1
             let state3 = recordSSAType dummyId intType state2
             (dummyId, intType, state3)
     
@@ -148,7 +220,7 @@ let rec processExpression (expr: OakExpression) (state: MLIRGenerationState) : s
         (secondId, secondType, state2)
     
     | Application(func, args) ->
-        // Simplified function application
+        // Process function expression
         let (funcId, _, state1) = processExpression func state
         
         // Process arguments
@@ -161,13 +233,14 @@ let rec processExpression (expr: OakExpression) (state: MLIRGenerationState) : s
         
         let (processedArgs, state2) = processArgs args [] state1
         
-        // Create a basic function call
+        // Create function call
         let (resultId, state3) = generateSSAValue "call" state2
         let resultType = MLIRTypeUtils.createInteger 32 // Default return type
         
-        // Simple call operation
-        let argsStr = String.concat ", " processedArgs
-        let state4 = emit (sprintf "    %s = func.call %s(%s) : (i32) -> i32" resultId funcId argsStr) state3
+        // Generate call operation
+        let funcName = funcId.TrimStart('%')
+        let callOp = MLIROperationBuilder.buildCallOp funcName processedArgs (Some resultId) (Some resultType)
+        let state4 = emit callOp state3
         let state5 = recordSSAType resultId resultType state4
         
         (resultId, resultType, state5)
@@ -183,22 +256,25 @@ let rec processExpression (expr: OakExpression) (state: MLIRGenerationState) : s
         let endLabel = sprintf "end_%d" state2.SSACounter
         
         // Create conditional branch
-        let state3 = emit (sprintf "    cond_br %s, ^%s, ^%s" condId thenLabel elseLabel) state2
+        let branchOp = MLIROperationBuilder.buildCondBranchOp condId thenLabel elseLabel
+        let state3 = emit branchOp state2
         
         // Then block
-        let state4 = emit (sprintf "  ^%s:" thenLabel) state3
+        let state4 = emit (MLIROperationBuilder.buildBlockLabel thenLabel) state3
         let (thenResultId, thenType, state5) = processExpression thenExpr state4
-        let state6 = emit (sprintf "    %s = %s : %s" resultId thenResultId (mlirTypeToString thenType)) state5
-        let state7 = emit (sprintf "    br ^%s" endLabel) state6
+        let resultAssignOp = sprintf "    %s = %s : %s" resultId thenResultId (mlirTypeToString thenType)
+        let state6 = emit resultAssignOp state5
+        let state7 = emit (MLIROperationBuilder.buildBranchOp endLabel) state6
         
         // Else block
-        let state8 = emit (sprintf "  ^%s:" elseLabel) state7
+        let state8 = emit (MLIROperationBuilder.buildBlockLabel elseLabel) state7
         let (elseResultId, elseType, state9) = processExpression elseExpr state8
-        let state10 = emit (sprintf "    %s = %s : %s" resultId elseResultId (mlirTypeToString elseType)) state9
-        let state11 = emit (sprintf "    br ^%s" endLabel) state10
+        let resultAssignOp2 = sprintf "    %s = %s : %s" resultId elseResultId (mlirTypeToString elseType)
+        let state10 = emit resultAssignOp2 state9
+        let state11 = emit (MLIROperationBuilder.buildBranchOp endLabel) state10
         
         // End block
-        let state12 = emit (sprintf "  ^%s:" endLabel) state11
+        let state12 = emit (MLIROperationBuilder.buildBlockLabel endLabel) state11
         
         // Assume result type is the then branch type (simplified)
         let state13 = recordSSAType resultId thenType state12
@@ -206,7 +282,7 @@ let rec processExpression (expr: OakExpression) (state: MLIRGenerationState) : s
         (resultId, thenType, state13)
     
     | Match(matchExpr, cases) ->
-        // Simple implementation for match expressions
+        // Process match expression
         let (matchValueId, matchValueType, state1) = processExpression matchExpr state
         
         // Create result variable 
@@ -217,12 +293,14 @@ let rec processExpression (expr: OakExpression) (state: MLIRGenerationState) : s
         match cases with
         | (_, firstExpr) :: _ ->
             let (caseResultId, caseResultType, state3) = processExpression firstExpr state2
-            let state4 = emit (sprintf "    %s = %s : %s" resultId caseResultId (mlirTypeToString caseResultType)) state3
+            let assignOp = sprintf "    %s = %s : %s" resultId caseResultId (mlirTypeToString caseResultType)
+            let state4 = emit assignOp state3
             let state5 = recordSSAType resultId caseResultType state4
             (resultId, caseResultType, state5)
         | [] ->
             // No cases, return unit
-            let state3 = emit (sprintf "    %s = arith.constant 0 : i32 // Empty match" resultId) state2
+            let constOp = MLIROperationBuilder.buildConstantOp "0" resultId resultType
+            let state3 = emit (constOp + " // Empty match") state2
             let state4 = recordSSAType resultId resultType state3
             (resultId, resultType, state4)
     
@@ -230,7 +308,8 @@ let rec processExpression (expr: OakExpression) (state: MLIRGenerationState) : s
         // For other expressions, generate a placeholder
         let (dummyId, state1) = generateSSAValue "unhandled" state
         let intType = MLIRTypeUtils.createInteger 32
-        let state2 = emit (sprintf "    %s = arith.constant 0 : i32 // Unhandled expression type" dummyId) state1
+        let constOp = MLIROperationBuilder.buildConstantOp "0" dummyId intType
+        let state2 = emit (constOp + " // Unhandled expression type") state1
         let state3 = recordSSAType dummyId intType state2
         (dummyId, intType, state3)
 
@@ -277,9 +356,9 @@ let convertFunction (name: string) (parameters: (string * OakType) list) (return
     // Generate return
     let state4 = 
         if returnType = UnitType then
-            emit "    func.return" state3
+            emit (MLIROperationBuilder.buildReturnOp []) state3
         else
-            emit (sprintf "    func.return %s : %s" bodyId returnTypeStr) state3
+            emit (MLIROperationBuilder.buildReturnOp [bodyId]) state3
     
     // Close function
     emit "  }" state4
@@ -316,11 +395,8 @@ let generateMLIR (program: OakProgram) : MLIRModuleOutput =
             state2.StringConstants
             |> Map.toList
             |> List.fold (fun s (value, globalName) ->
-                let escapedValue = value.Replace("\\", "\\\\").Replace("\"", "\\\"")
-                let constSize = escapedValue.Length + 1
-                let declaration = sprintf "  memref.global constant %s = dense<\"%s\\00\"> : memref<%dxi8>" 
-                                        globalName escapedValue constSize
-                emit declaration s) state2
+                let globalOp = MLIROperationBuilder.buildGlobalStringOp globalName value
+                emit globalOp s) state2
         
         // Add module-level declarations
         let state4 = 

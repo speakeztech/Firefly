@@ -6,6 +6,63 @@ open Dabbit.Parsing.OakAst
 open Core.MLIRGeneration.TypeSystem
 open Core.MLIRGeneration.Dialect
 
+/// Create MLIRTypes helper module for backwards compatibility
+module MLIRTypes =
+    /// Creates an integer type with specified width
+    let createInteger (width: int) = {
+        Category = MLIRTypeCategory.Integer
+        Width = Some width
+        ElementType = None
+        Parameters = []
+        ReturnType = None
+    }
+
+    /// Creates a float type with specified width
+    let createFloat (width: int) = {
+        Category = MLIRTypeCategory.Float
+        Width = Some width
+        ElementType = None
+        Parameters = []
+        ReturnType = None
+    }
+
+    /// Creates a void type
+    let createVoid() = {
+        Category = MLIRTypeCategory.Void
+        Width = None
+        ElementType = None
+        Parameters = []
+        ReturnType = None
+    }
+
+    /// Creates a memory reference type with element type and dimensions
+    let createMemRef (elementType: MLIRType) (dimensions: int list) = {
+        Category = MLIRTypeCategory.MemRef
+        Width = None
+        ElementType = Some elementType
+        Parameters = dimensions |> List.map (fun d -> createInteger d)
+        ReturnType = None
+    }
+
+    /// Creates a function type with parameters and return type
+    let createFunction (inputTypes: MLIRType list) (returnType: MLIRType) = {
+        Category = MLIRTypeCategory.Function
+        Width = None
+        ElementType = None
+        Parameters = inputTypes
+        ReturnType = Some returnType
+    }
+
+/// Type analysis module for compatibility checking
+module TypeAnalysis =
+    /// Checks if types are compatible for conversion
+    let canConvertTo (fromType: MLIRType) (toType: MLIRType) : bool =
+        fromType = toType || 
+        (fromType.Category = MLIRTypeCategory.Integer && toType.Category = MLIRTypeCategory.Integer) ||
+        (fromType.Category = MLIRTypeCategory.Float && toType.Category = MLIRTypeCategory.Float) ||
+        (fromType.Category = MLIRTypeCategory.Integer && toType.Category = MLIRTypeCategory.Float) ||
+        (fromType.Category = MLIRTypeCategory.MemRef && toType.Category = MLIRTypeCategory.MemRef)
+
 /// MLIR operation pattern for resolved symbols
 type MLIROperationPattern =
     | DialectOperation of dialect: MLIRDialect * operation: string * attributes: Map<string, string>
@@ -203,7 +260,7 @@ module PatternLibrary =
         // spanToString pattern
         {
             Name = "span-to-string-pattern"
-            Description = "Convert Span to string with proper UTF-8 handling"
+            Description = "Convert Span to string with proper UTF8 handling"
             QualifiedNamePattern = "Alloy.Memory.spanToString"
             OperationPattern = CustomTransform("span_to_string", ["utf8_conversion"])
             TypeSignature = ([MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []], 

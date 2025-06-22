@@ -493,11 +493,11 @@ module ModuleMerger =
 
 /// Dependency extraction and resolution system
 module DependencyResolution =
-    /// Represents a dependency with source information
     type Dependency = {
         Path: string
         SourceFile: string
-        IsDirective: bool  // True for #load, false for open
+        IsDirective: bool
+        IncludePaths: string list // Add this field
     }
     
     /// Extracts all dependencies from a parse tree
@@ -517,12 +517,16 @@ module DependencyResolution =
                             | SynOpenDeclTarget.ModuleOrNamespace(SynLongIdent(idents, _, _), _) ->
                                 let moduleName = idents |> List.map (fun id -> id.idText) |> String.concat "."
                                 let filePath = moduleName.Replace(".", Path.DirectorySeparatorChar.ToString()) + ".fs"
-                                Some { Path = filePath; SourceFile = sourceFile; IsDirective = false }
+                                Some { 
+                                    Path = filePath
+                                    SourceFile = sourceFile
+                                    IsDirective = false
+                                    IncludePaths = []
+                                }
                             | _ -> None
                         | _ -> None))
             
-            // Since we can't easily get directives from the parse tree in a version-independent way,
-            // we'll fall back to parsing the source file directly for #load and #I directives
+            // Parse the source file directly for #load and #I directives
             let sourceCode = 
                 try
                     File.ReadAllLines(sourceFile) 
@@ -530,7 +534,30 @@ module DependencyResolution =
                     printfn "Error reading source file %s: %s" sourceFile ex.Message
                     [||]
             
-            // Extract #load directives
+            // Keep track of include paths from #I directives
+            let mutable currentIncludePaths = []
+            
+            // Extract #I directives first
+            for line in sourceCode do
+                let trimmed = line.Trim()
+                if trimmed.StartsWith("#I") then
+                    let quotedPath = 
+                        try
+                            let startIdx = trimmed.IndexOf("\"") + 1
+                            let endIdx = trimmed.LastIndexOf("\"")
+                            if startIdx > 0 && endIdx > startIdx then
+                                Some(trimmed.Substring(startIdx, endIdx - startIdx))
+                            else None
+                        with _ -> None
+                    
+                    match quotedPath with
+                    | Some path ->
+                        printfn "Found #I directive: %s in %s" path (Path.GetFileName(sourceFile))
+                        // Add to current include paths
+                        currentIncludePaths <- path :: currentIncludePaths
+                    | None -> ()
+            
+            // Extract #load directives, respecting current include paths
             let loadDependencies =
                 sourceCode
                 |> Array.choose (fun line -> 
@@ -548,33 +575,21 @@ module DependencyResolution =
                         match quotedPath with
                         | Some path -> 
                             printfn "Found #load directive: %s in %s" path (Path.GetFileName(sourceFile))
-                            Some { Path = path; SourceFile = sourceFile; IsDirective = true }
+                            // Try each include path when creating the dependency
+                            Some { 
+                                Path = path
+                                SourceFile = sourceFile
+                                IsDirective = true
+                                // Store include paths with this dependency
+                                IncludePaths = currentIncludePaths
+                            }
                         | None -> None
-                    else None)
-                |> Array.toList
-            
-            // Extract #I directives
-            let includeDirectives =
-                sourceCode
-                |> Array.choose (fun line -> 
-                    let trimmed = line.Trim()
-                    if trimmed.StartsWith("#I") then
-                        let quotedPath = 
-                            try
-                                let startIdx = trimmed.IndexOf("\"") + 1
-                                let endIdx = trimmed.LastIndexOf("\"")
-                                if startIdx > 0 && endIdx > startIdx then
-                                    Some(trimmed.Substring(startIdx, endIdx - startIdx))
-                                else None
-                            with _ -> None
-                        
-                        quotedPath
                     else None)
                 |> Array.toList
             
             // Normalize and resolve search paths
             let searchDirectories = 
-                includeDirectives
+                currentIncludePaths
                 |> List.map (fun path -> 
                     if Path.IsPathRooted(path) then path
                     else Path.Combine(baseDirectory, path.TrimStart('\\').TrimStart('/')))
@@ -583,21 +598,35 @@ module DependencyResolution =
             // Resolve all dependency paths
             let resolveDepPath (dep: Dependency) : Dependency =
                 if dep.IsDirective then
-                    // For #load directives, try direct path first
-                    let directPath = Path.Combine(Path.GetDirectoryName(dep.SourceFile), dep.Path)
-                    if File.Exists(directPath) then
-                        { dep with Path = directPath }
-                    else
-                        // Try search paths
-                        let resolvedPath = 
-                            searchDirectories
-                            |> List.tryPick (fun dir -> 
-                                let fullPath = Path.Combine(dir, dep.Path)
-                                if File.Exists(fullPath) then Some fullPath else None)
-                        
-                        match resolvedPath with
-                        | Some path -> { dep with Path = path }
-                        | None -> dep
+                    // For #load directives, try include paths first
+                    let resolvedPath = 
+                        dep.IncludePaths
+                        |> List.tryPick (fun includePath ->
+                            let fullIncludePath = 
+                                if Path.IsPathRooted(includePath) then includePath
+                                else Path.Combine(Path.GetDirectoryName(dep.SourceFile), includePath)
+                            
+                            let pathWithInclude = Path.Combine(fullIncludePath, dep.Path)
+                            if File.Exists(pathWithInclude) then Some pathWithInclude else None)
+                    
+                    match resolvedPath with
+                    | Some path -> { dep with Path = path }
+                    | None ->
+                        // Try direct path next
+                        let directPath = Path.Combine(Path.GetDirectoryName(dep.SourceFile), dep.Path)
+                        if File.Exists(directPath) then
+                            { dep with Path = directPath }
+                        else
+                            // Try search paths
+                            let searchPath = 
+                                searchDirectories
+                                |> List.tryPick (fun dir -> 
+                                    let fullPath = Path.Combine(dir, dep.Path)
+                                    if File.Exists(fullPath) then Some fullPath else None)
+                            
+                            match searchPath with
+                            | Some path -> { dep with Path = path }
+                            | None -> dep
                 else
                     // For open statements
                     let resolvedPath = 
@@ -629,7 +658,7 @@ module DependencyResolution =
                     printfn "  - %s" (Path.GetFileName(dep.Path)))
                     
             validDeps
-            
+                
         | ParsedInput.SigFile(_) -> []
 
     /// Resolves all dependencies recursively

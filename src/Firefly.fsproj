@@ -7,7 +7,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.1.095</Version>
+    <Version>0.1.097</Version>
     <Description>F# to Native Compiler with Zero-Allocation Guarantees using XParsec</Description>
     <Authors>Speakez LLC</Authors>
     <PackageTags>fsharp;compiler;native;zero-allocation;xparsec;mlir;llvm</PackageTags>
@@ -30,7 +30,6 @@
     <Compile Include="Core/MLIRGeneration/Dialect.fs" />
     <Compile Include="Core/MLIRGeneration/MLIRContext.fs" />
     <Compile Include="Core/MLIRGeneration/TypeSystem.fs" />
-    <Compile Include="Core/MLIRGeneration/Operations.fs" />
 
     <!-- Symbol Resolution System -->
     <Compile Include="Dabbit/SymbolResolution/SymbolRegistry.fs" />
@@ -136,6 +135,8 @@
   </PropertyGroup>
 
 </Project>
+
+
 
 
 

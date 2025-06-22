@@ -13,10 +13,11 @@ type MLIRPass = {
 
 /// Standard passes for MLIR optimization
 let standardPasses = [
-    { Name = "func-to-llvm"; PassOptions = "--convert-func-to-llvm" }
-    { Name = "arith-to-llvm"; PassOptions = "--convert-arith-to-llvm" }
-    { Name = "memref-to-llvm"; PassOptions = "--convert-memref-to-llvm" }
-    { Name = "std-to-llvm"; PassOptions = "--convert-std-to-llvm" }
+    { Name = "func-to-llvm"; PassOptions = "--convert-func-to-llvm" }    
+    { Name = "arith-to-llvm"; PassOptions = "--convert-arith-to-llvm" }  
+    { Name = "cf-to-llvm"; PassOptions = "--convert-cf-to-llvm" }          
+    { Name = "scf-to-cf"; PassOptions = "--convert-scf-to-cf" }            
+    { Name = "finalizing"; PassOptions = "--reconcile-unrealized-casts" }  
 ]
 
 /// Runs an external command and returns the result
