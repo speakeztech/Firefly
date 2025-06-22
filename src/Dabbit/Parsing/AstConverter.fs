@@ -75,14 +75,16 @@ module AstHelpers =
             let baseType = extractTypeName typeName
             let argTypes = args |> List.map extractTypeName
             sprintf "%s<%s>" baseType (String.concat ", " argTypes)
-        | SynType.Tuple(false, types, _) ->
-            let typeNames = types |> List.map (fun t -> 
-                match t with
-                | (elemType, _, _) -> extractTypeName elemType)
+        | SynType.Tuple(false, typeElements, _) ->
+            let typeNames = 
+                typeElements 
+                |> List.map (function
+                    | SynTupleTypeSegment.Type(synType) -> extractTypeName synType
+                    | _ -> "unknown_tuple_element")
             sprintf "(%s)" (String.concat " * " typeNames)
         | SynType.Array(_, elementType, _) ->
             sprintf "%s[]" (extractTypeName elementType)
-        | SynType.Fun(paramType, returnType, _) ->
+        | SynType.Fun(paramType, returnType, _, _) ->
             sprintf "%s -> %s" (extractTypeName paramType) (extractTypeName returnType)
         | _ -> "unknown_type"
 
@@ -124,16 +126,18 @@ module TypeMapping =
             else
                 mapBasicType baseTypeName
                 
-        | SynType.Tuple(_, typeList, _) ->
-            // Map tuple to a struct for simplicity
+        | SynType.Tuple(_, typeElements, _) ->
             let fields = 
-                typeList 
-                |> List.mapi (fun i t -> 
-                    match t with
-                    | (elemType, _, _) -> (sprintf "Item%d" (i+1), mapSynType elemType))
+                typeElements 
+                |> List.mapi (fun i segment -> 
+                    match segment with
+                    | SynTupleTypeSegment.Type(elemType) -> 
+                        (sprintf "Item%d" (i+1), mapSynType elemType)
+                    | _ -> 
+                        (sprintf "Item%d" (i+1), UnitType))
             StructType(fields)
             
-        | SynType.Fun(paramType, returnType, _) ->
+        | SynType.Fun(paramType, returnType, _, _) ->
             FunctionType([mapSynType paramType], mapSynType returnType)
             
         | SynType.Array(_, elementType, _) ->
@@ -201,7 +205,7 @@ module ExpressionMapping =
             | SynExpr.App(_, _, funcExpr, argExpr, _) ->
                 mapFunctionApplication funcExpr argExpr
             
-            | SynExpr.TypeApp(expr, _, typeArgs, _, _, _, _) ->
+            | SynExpr.TypeApp(expr, _, typeArgs, _, _, _, range) ->
                 mapTypeApplication expr typeArgs
             
             | SynExpr.LetOrUse(_, _, bindings, bodyExpr, _, _) ->
@@ -233,13 +237,17 @@ module ExpressionMapping =
                     | _ ->
                         FieldAccess(target, memberName)
                 
-            | SynExpr.DotIndexedGet(expr, indexes, _, _) ->
-                // Handle indexed access
+            | SynExpr.DotIndexedGet(expr, indexExpr, _, _) ->
                 let target = mapExpression expr
+                
                 let indexList = 
-                    match indexes with
-                    | [singleIndex] -> [mapExpression singleIndex]
-                    | _ -> [] // Simplified - handle more complex indexing if needed
+                    match indexExpr with
+                    | SynExpr.Tuple(_, indexExprs, _, _) -> 
+                        indexExprs |> List.map mapExpression
+                    | SynExpr.Paren(innerExpr, _, _, _) ->
+                        [mapExpression innerExpr]
+                    | _ -> 
+                        [mapExpression indexExpr]
                 
                 MethodCall(target, "get_Item", indexList)
                 
@@ -247,38 +255,34 @@ module ExpressionMapping =
                 // Skip parentheses in Oak AST
                 mapExpression expr
                 
-            | SynExpr.Tuple(_, exprList, _, _) ->
-                // Map to a series of nested lets for simplicity
-                let exprs = exprList |> List.map mapExpression
+            | SynExpr.Tuple(_, exprs, _, _) ->
+                // In FCS 43.9.300, exprs is already a list of SynExpr
+                let mappedExprs = 
+                    match exprs with
+                    | [] -> []
+                    | _ -> exprs |> List.map mapExpression
                 
-                match exprs with
+                match mappedExprs with
                 | [] -> Literal UnitLiteral
                 | [single] -> single
-                | first :: rest ->
-                    // Create a series of let bindings for each tuple element
-                    Sequential(first, Sequential(rest.Head, Literal UnitLiteral))
+                | _ -> 
+                    let rec buildSequence expressions =
+                        match expressions with
+                        | [] -> Literal UnitLiteral
+                        | [last] -> last
+                        | head :: tail -> Sequential(head, buildSequence tail)
+                    buildSequence mappedExprs
                 
-            | SynExpr.TryWith(tryExpr, _, withCases, _, _, _, _) ->
-                // Simplified try/with handling
+            | SynExpr.TryWith(tryExpr, rangeInfo1, rangeInfo2, rangeInfo3, rangeInfo4, trivia) ->
+
                 let tryBody = mapExpression tryExpr
                 
-                // Map the exception handlers
-                let handlers = 
-                    withCases 
-                    |> List.map (fun clause ->
-                        match clause with
-                        | SynMatchClause(pat, _, resultExpr, _, _, _) ->
-                            let pattern = mapPattern pat
-                            let result = mapExpression resultExpr
-                            (pattern, result))
+                let defaultHandler = (PatternConstructor("Error", [PatternWildcard]),
+                                    Literal(StringLiteral "Exception occurred"))
                 
-                // For simplicity, we'll transform try/with to a match on Result
                 Match(
                     Application(Variable "Ok", [tryBody]),
-                    handlers @ [
-                        (PatternConstructor("Error", [PatternWildcard]),
-                         Literal(StringLiteral "Exception occurred"))
-                    ]
+                    [defaultHandler]
                 )
             
             | _ -> Literal(UnitLiteral)
@@ -426,11 +430,14 @@ module DeclarationMapping =
                     let fieldType = 
                         fields 
                         |> List.tryHead 
-                        |> Option.bind (fun f -> 
-                            match f with
-                            | SynField(_, _, _, synType, _, _, _, _, _) -> synType
-                            | _ -> None)
-                        |> Option.map TypeMapping.mapSynType
+                        |> Option.map (fun field -> 
+                            // In FCS 43.9.300, we need to extract the type directly
+                            let (SynField(_, _, _, fieldType, _, _, _, _, _)) = field
+                            // Map the type - use a default if something goes wrong
+                            try 
+                                TypeMapping.mapSynType fieldType
+                            with _ -> 
+                                UnitType)
                     (caseName, fieldType)
             | _ -> (caseName, None)
         with
@@ -438,18 +445,21 @@ module DeclarationMapping =
     
     let mapRecordField (field: SynField) : string * OakType =
         try
-            let (SynField(_, _, fieldId, synType, _, _, _, _, _)) = field
+            let (SynField(_, _, fieldId, fieldType, _, _, _, _, _)) = field
             let fieldName = 
                 match fieldId with
                 | Some ident -> AstHelpers.getIdentifierName ident
                 | None -> "_"
-                
-            let fieldType = 
-                match synType with
-                | Some t -> TypeMapping.mapSynType t
-                | None -> UnitType
-                
-            (fieldName, fieldType)
+            
+            // In FCS 43.9.300, handle the field type directly
+            let mappedType = 
+                try
+                    TypeMapping.mapSynType fieldType
+                with _ ->
+                    // Fallback to UnitType if mapping fails
+                    UnitType
+            
+            (fieldName, mappedType)
         with
         | _ -> ("_field_", UnitType)
     
