@@ -34,72 +34,44 @@ type MLIRType = {
 
 /// Type creation functions that replace discriminated union constructors
 module MLIRTypes =
+    /// Private helper to create a base type with default values
+    let private createBaseType category = {
+        Category = category
+        Width = None
+        ElementType = None
+        Shape = []
+        Parameters = []
+        ReturnType = None
+        Fields = []
+    }
     
     /// Creates an integer type with specified bit width
-    let createInteger (width: int) : MLIRType = {
-        Category = IntegerCategory
-        Width = Some width
-        ElementType = None
-        Shape = []
-        Parameters = []
-        ReturnType = None
-        Fields = []
-    }
+    let createInteger (width: int) : MLIRType = 
+        { createBaseType IntegerCategory with Width = Some width }
     
     /// Creates a floating point type with specified bit width
-    let createFloat (width: int) : MLIRType = {
-        Category = FloatCategory
-        Width = Some width
-        ElementType = None
-        Shape = []
-        Parameters = []
-        ReturnType = None
-        Fields = []
-    }
+    let createFloat (width: int) : MLIRType = 
+        { createBaseType FloatCategory with Width = Some width }
     
     /// Creates a void type
-    let createVoid () : MLIRType = {
-        Category = VoidCategory
-        Width = None
-        ElementType = None
-        Shape = []
-        Parameters = []
-        ReturnType = None
-        Fields = []
-    }
+    let createVoid () : MLIRType = 
+        createBaseType VoidCategory
     
     /// Creates a memory reference type
-    let createMemRef (elementType: MLIRType) (shape: int list) : MLIRType = {
-        Category = MemoryRefCategory
-        Width = None
-        ElementType = Some elementType
-        Shape = shape
-        Parameters = []
-        ReturnType = None
-        Fields = []
-    }
+    let createMemRef (elementType: MLIRType) (shape: int list) : MLIRType = 
+        { createBaseType MemoryRefCategory with 
+            ElementType = Some elementType
+            Shape = shape }
     
     /// Creates a function type
-    let createFunction (parameters: MLIRType list) (returnType: MLIRType) : MLIRType = {
-        Category = FunctionCategory
-        Width = None
-        ElementType = None
-        Shape = []
-        Parameters = parameters
-        ReturnType = Some returnType
-        Fields = []
-    }
+    let createFunction (parameters: MLIRType list) (returnType: MLIRType) : MLIRType = 
+        { createBaseType FunctionCategory with 
+            Parameters = parameters
+            ReturnType = Some returnType }
     
     /// Creates a struct type
-    let createStruct (fields: MLIRType list) : MLIRType = {
-        Category = StructCategory
-        Width = None
-        ElementType = None
-        Shape = []
-        Parameters = []
-        ReturnType = None
-        Fields = fields
-    }
+    let createStruct (fields: MLIRType list) : MLIRType = 
+        { createBaseType StructCategory with Fields = fields }
 
 /// Core type conversion and analysis functions - declared as mutually recursive
 let rec mapOakTypeToMLIR (oakType: OakType) : MLIRType =
@@ -156,16 +128,16 @@ and mlirTypeToString (mlirType: MLIRType) : string =
 
 /// Gets the size in bytes of an MLIR type (for layout calculations)
 and getTypeSize (mlirType: MLIRType) : int =
+    let intSizeByWidth width = 
+        match width with
+        | w when w <= 8 -> 1
+        | w when w <= 16 -> 2
+        | w when w <= 32 -> 4
+        | _ -> 8
+
     match mlirType.Category with
-    | IntegerCategory ->
-        match mlirType.Width with
-        | Some 1 -> 1
-        | Some 8 -> 1
-        | Some 16 -> 2
-        | Some 32 -> 4
-        | Some 64 -> 8
-        | Some width -> (width + 7) / 8
-        | None -> 4
+    | IntegerCategory -> 
+        mlirType.Width |> Option.map intSizeByWidth |> Option.defaultValue 4
     | FloatCategory ->
         match mlirType.Width with
         | Some 32 -> 4
@@ -187,15 +159,16 @@ and requiresHeapAllocation (mlirType: MLIRType) : bool =
 
 /// Gets the alignment requirement for a type
 and getTypeAlignment (mlirType: MLIRType) : int =
+    let intAlignByWidth width =
+        match width with
+        | w when w <= 8 -> 1
+        | w when w <= 16 -> 2
+        | w when w <= 32 -> 4
+        | _ -> 8
+
     match mlirType.Category with
     | IntegerCategory ->
-        match mlirType.Width with
-        | Some 1 -> 1
-        | Some width when width <= 8 -> 1
-        | Some width when width <= 16 -> 2
-        | Some width when width <= 32 -> 4
-        | Some width -> 8
-        | None -> 4
+        mlirType.Width |> Option.map intAlignByWidth |> Option.defaultValue 4
     | FloatCategory ->
         match mlirType.Width with
         | Some 32 -> 4
@@ -234,48 +207,33 @@ and areTypesCompatible (type1: MLIRType) (type2: MLIRType) : bool =
 
 /// Type analysis and conversion functions
 module TypeAnalysis =
+    /// Common logic for compatible conversions
+    let private integerConversions width = [
+        if width < 64 then yield (MLIRTypes.createInteger 64, Widening)
+        if width < 32 then yield (MLIRTypes.createInteger 32, Widening)
+        if width < 16 then yield (MLIRTypes.createInteger 16, Widening)
+        yield (MLIRTypes.createFloat 32, IntToFloat)
+        yield (MLIRTypes.createFloat 64, IntToFloat)
+        yield (MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [], Coercion)
+    ]
+    
+    let private floatConversions width = [
+        if width < 64 then yield (MLIRTypes.createFloat 64, Widening)
+        yield (MLIRTypes.createInteger 32, FloatToInt)
+        yield (MLIRTypes.createInteger 64, FloatToInt)
+        yield (MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [], Coercion)
+    ]
     
     /// Gets compatible type conversions with their costs
     let getCompatibleConversions (mlirType: MLIRType) : (MLIRType * ConversionCost) list =
         match mlirType.Category with
         | IntegerCategory ->
-            match mlirType.Width with
-            | Some width ->
-                [
-                    // Widening conversions to larger integers
-                    if width < 64 then yield (MLIRTypes.createInteger 64, Widening)
-                    if width < 32 then yield (MLIRTypes.createInteger 32, Widening)
-                    if width < 16 then yield (MLIRTypes.createInteger 16, Widening)
-                    
-                    // Float conversions
-                    yield (MLIRTypes.createFloat 32, IntToFloat)
-                    yield (MLIRTypes.createFloat 64, IntToFloat)
-                    
-                    // String coercion for display
-                    yield (MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [], Coercion)
-                ]
-            | None -> []
+            mlirType.Width |> Option.map integerConversions |> Option.defaultValue []
         | FloatCategory ->
-            match mlirType.Width with
-            | Some width ->
-                [
-                    // Widening to larger floats
-                    if width < 64 then yield (MLIRTypes.createFloat 64, Widening)
-                    
-                    // Integer conversions (potentially lossy)
-                    yield (MLIRTypes.createInteger 32, FloatToInt)
-                    yield (MLIRTypes.createInteger 64, FloatToInt)
-                    
-                    // String coercion
-                    yield (MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [], Coercion)
-                ]
-            | None -> []
+            mlirType.Width |> Option.map floatConversions |> Option.defaultValue []
         | VoidCategory -> []
-        | MemoryRefCategory ->
-            [
-                // Generic pointer conversions
-                yield (MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [], Coercion)
-            ]
+        | MemoryRefCategory -> 
+            [(MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [], Coercion)]
         | FunctionCategory -> []
         | StructCategory -> []
     
@@ -331,27 +289,16 @@ let getCommonType (type1: MLIRType) (type2: MLIRType) : MLIRType option =
 let findConversionPath (fromType: MLIRType) (toType: MLIRType) : ConversionCost =
     TypeAnalysis.getConversionCost fromType toType
 
-/// Checks if a type is a memory reference type
-let isMemRefType (mlirType: MLIRType) : bool =
-    mlirType.Category = MemoryRefCategory
-
-/// Checks if a type is a numeric type
-let isNumericType (mlirType: MLIRType) : bool =
-    mlirType.Category = IntegerCategory || mlirType.Category = FloatCategory
-
-/// Gets the element type of a memory reference
-let getMemRefElementType (mlirType: MLIRType) : MLIRType option =
-    if mlirType.Category = MemoryRefCategory then
-        mlirType.ElementType
-    else
-        None
+/// Type check helpers - consolidated into simpler functions
+let isMemRefType (mlirType: MLIRType) : bool = mlirType.Category = MemoryRefCategory
+let isNumericType (mlirType: MLIRType) : bool = mlirType.Category = IntegerCategory || mlirType.Category = FloatCategory
+let getMemRefElementType (mlirType: MLIRType) : MLIRType option = if isMemRefType mlirType then mlirType.ElementType else None
 
 /// Determines if a type can be used in a specific context based on expected type
 let canUseTypeInContext (actualType: MLIRType) (expectedType: MLIRType option) : bool =
     match expectedType with
     | None -> true  // No expectation, any type is acceptable
-    | Some expected -> 
-        actualType = expected || TypeAnalysis.canConvertTo actualType expected
+    | Some expected -> actualType = expected || TypeAnalysis.canConvertTo actualType expected
 
 /// Creates an appropriate default value for a given type
 let defaultValueForType (mlirType: MLIRType) : string =
@@ -359,6 +306,4 @@ let defaultValueForType (mlirType: MLIRType) : string =
     | IntegerCategory -> "0"
     | FloatCategory -> "0.0"
     | VoidCategory -> ""
-    | MemoryRefCategory -> "null" // Placeholder, would require proper MLIR null pointer
-    | FunctionCategory -> "null" // Placeholder
-    | StructCategory -> "null" // Placeholder
+    | MemoryRefCategory | FunctionCategory | StructCategory -> "null" // Placeholder
