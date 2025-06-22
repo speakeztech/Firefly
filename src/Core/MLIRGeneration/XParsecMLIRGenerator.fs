@@ -16,19 +16,36 @@ module MLIROperationBuilder =
     let buildConstantOp (value: string) (resultId: string) (mlirType: MLIRType) : string =
         sprintf "    %s = arith.constant %s : %s" resultId value (mlirTypeToString mlirType)
         
-    // Generate function call operation
-    let buildCallOp (funcName: string) (args: string list) (resultId: string option) (resultType: MLIRType option) : string =
+    /// Creates call operation string
+    let buildCallOp (funcName: string) (args: string list) (resultId: string option) (resultType: MLIRType option) =
+        // Determine argument types based on name patterns
+        let argTypes = 
+            args |> List.map (fun arg ->
+                if arg.StartsWith("%str") || arg.Contains("global") then
+                    // String arguments
+                    "memref<?xi8>"
+                else
+                    // Default to integer
+                    "i32")
+        
+        // Format arguments
         let argsStr = String.concat ", " args
-        match resultId, resultType with
-        | Some id, Some typ when typ.Category <> MLIRTypeCategory.Void ->
+        let argTypesStr = String.concat ", " argTypes
+        
+        // Format return type
+        let returnTypeStr = 
+            match resultType with
+            | Some typ -> mlirTypeToString typ
+            | None -> "()"
+        
+        // Generate call
+        match resultId with
+        | Some id ->
             sprintf "    %s = func.call @%s(%s) : (%s) -> %s" 
-                id funcName argsStr
-                (String.concat ", " (args |> List.map (fun _ -> "i32")))
-                (mlirTypeToString typ)
-        | _, _ ->
-            sprintf "    func.call @%s(%s) : (%s) -> ()" 
-                funcName argsStr
-                (String.concat ", " (args |> List.map (fun _ -> "i32")))
+                id funcName argsStr argTypesStr returnTypeStr
+        | None ->
+            sprintf "    func.call @%s(%s) : (%s) -> %s" 
+                funcName argsStr argTypesStr returnTypeStr
     
     // Generate return operation
     let buildReturnOp (values: string list) : string =
@@ -185,20 +202,39 @@ let rec processExpression (expr: OakExpression) (state: MLIRGenerationState) : s
     | Variable name ->
         match lookupVariable name state with
         | Some value -> 
-            // Get variable type if known
+            // Existing logic for local variables
             let valueType = 
                 match Map.tryFind value state.SSAValueTypes with
                 | Some t -> t
-                | None -> MLIRTypeUtils.createInteger 32 // Default type if unknown
+                | None -> MLIRTypeUtils.createInteger 32
             (value, valueType, state)
         | None ->
-            // Unknown variable - create a placeholder
-            let (dummyId, state1) = generateSSAValue "unknown" state
-            let intType = MLIRTypeUtils.createInteger 32
-            let constOp = MLIROperationBuilder.buildConstantOp "0" dummyId intType
-            let state2 = emit (constOp + " // Unknown variable: " + name) state1
-            let state3 = recordSSAType dummyId intType state2
-            (dummyId, intType, state3)
+            // Check if this is an Alloy module function
+            if List.contains name ["stackBuffer"; "prompt"; "readInto"; "spanToString"; 
+                                "format"; "String.format"; "writeLine"; "readLine"] then
+                // Generate a proper function reference instead of a placeholder
+                let funcName = sprintf "@%s" name
+                let (funcId, state1) = generateSSAValue "func" state
+                let funcType = MLIRTypeUtils.createFunction [MLIRTypeUtils.createInteger 32] 
+                                                            (MLIRTypeUtils.createInteger 32)
+                // Create a reference to the function
+                let state2 = emit (sprintf "    %s = func.constant %s : %s" 
+                                    funcId funcName (mlirTypeToString funcType)) state1
+                let state3 = recordSSAType funcId funcType state2
+                
+                // Also generate a module-level function declaration
+                let state4 = emitModuleLevel (sprintf "  func.func @%s(%s) -> %s" 
+                                    name "memref<?xi8>" "i32") state3
+                                
+                (funcId, funcType, state4)
+            else
+                // Existing logic for unknown variables
+                let (dummyId, state1) = generateSSAValue "unknown" state
+                let intType = MLIRTypeUtils.createInteger 32
+                let state2 = emit (sprintf "    %s = arith.constant 0 : i32 // Unknown variable: %s" 
+                                    dummyId name) state1
+                let state3 = recordSSAType dummyId intType state2
+                (dummyId, intType, state3)
     
     | Let(name, value, body) ->
         // Process value

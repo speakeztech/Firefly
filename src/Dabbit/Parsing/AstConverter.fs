@@ -64,6 +64,27 @@ module AstHelpers =
                                 id.idText.Contains("EntryPoint"))))
         with
         | _ -> false
+    
+    /// Extract the type name from a SynType
+    let rec extractTypeName (typ: SynType) : string =
+        match typ with
+        | SynType.LongIdent(longIdent) -> 
+            let idents = extractLongIdent longIdent
+            getQualifiedName idents
+        | SynType.App(typeName, _, args, _, _, _, _) ->
+            let baseType = extractTypeName typeName
+            let argTypes = args |> List.map extractTypeName
+            sprintf "%s<%s>" baseType (String.concat ", " argTypes)
+        | SynType.Tuple(false, types, _) ->
+            let typeNames = types |> List.map (fun t -> 
+                match t with
+                | (elemType, _, _) -> extractTypeName elemType)
+            sprintf "(%s)" (String.concat " * " typeNames)
+        | SynType.Array(_, elementType, _) ->
+            sprintf "%s[]" (extractTypeName elementType)
+        | SynType.Fun(paramType, returnType, _) ->
+            sprintf "%s -> %s" (extractTypeName paramType) (extractTypeName returnType)
+        | _ -> "unknown_type"
 
 /// Type mapping functions
 module TypeMapping =
@@ -85,6 +106,40 @@ module TypeMapping =
         | SynConst.String(s, _, _) -> StringLiteral(s)
         | SynConst.Unit -> UnitLiteral
         | _ -> UnitLiteral
+    
+    /// Map SynType to OakType with improved support for complex types
+    let rec mapSynType (synType: SynType) : OakType =
+        match synType with
+        | SynType.LongIdent(longIdent) ->
+            let typeName = AstHelpers.extractLongIdent longIdent |> AstHelpers.getQualifiedName
+            mapBasicType typeName
+            
+        | SynType.App(typeName, _, args, _, _, _, _) ->
+            let baseTypeName = AstHelpers.extractTypeName typeName
+            if baseTypeName.Contains("array") || baseTypeName.EndsWith("[]") then
+                let elementType = 
+                    if args.IsEmpty then IntType
+                    else mapSynType args.Head
+                ArrayType(elementType)
+            else
+                mapBasicType baseTypeName
+                
+        | SynType.Tuple(_, typeList, _) ->
+            // Map tuple to a struct for simplicity
+            let fields = 
+                typeList 
+                |> List.mapi (fun i t -> 
+                    match t with
+                    | (elemType, _, _) -> (sprintf "Item%d" (i+1), mapSynType elemType))
+            StructType(fields)
+            
+        | SynType.Fun(paramType, returnType, _) ->
+            FunctionType([mapSynType paramType], mapSynType returnType)
+            
+        | SynType.Array(_, elementType, _) ->
+            ArrayType(mapSynType elementType)
+            
+        | _ -> UnitType // Default for unknown types
 
 /// Expression conversion functions
 module ExpressionMapping =
@@ -117,9 +172,9 @@ module ExpressionMapping =
     and mapExpressionImpl (expr: SynExpr) : OakExpression =
         try
             match expr with
-            | SynExpr.Match(_, expr, clauses, _, _) ->
-                let matchExpr = mapExpression expr
-                let cases = 
+            | SynExpr.Match(_, matchExpr, clauses, _, _) ->
+                let mappedMatchExpr = mapExpression matchExpr
+                let mappedClauses = 
                     clauses 
                     |> List.map (fun clause ->
                         match clause with
@@ -127,7 +182,8 @@ module ExpressionMapping =
                             let pattern = mapPattern pat
                             let result = mapExpression resultExpr
                             (pattern, result))
-                Match(matchExpr, cases)
+                Match(mappedMatchExpr, mappedClauses)
+            
             | SynExpr.Const(constant, _) ->
                 constant |> TypeMapping.mapLiteral |> Literal
             
@@ -159,6 +215,71 @@ module ExpressionMapping =
             
             | SynExpr.Lambda(_, _, _, body, parsedData, _, _) ->
                 mapLambda parsedData body
+                
+            | SynExpr.DotGet(expr, _, lid, _) ->
+                // Handle field/property access - extract target and member
+                let target = mapExpression expr
+                
+                match lid with
+                | SynLongIdent(idents, _, _) ->
+                    let memberName = AstHelpers.getQualifiedName idents
+                    
+                    // Handle common property patterns
+                    match target, memberName with
+                    | Variable "buffer", "AsSpan" ->
+                        Application(Variable "buffer.AsSpan", [Literal UnitLiteral])
+                    | Variable "span", "ToString" ->
+                        Application(Variable "span.ToString", [Literal UnitLiteral])
+                    | _ ->
+                        FieldAccess(target, memberName)
+                
+            | SynExpr.DotIndexedGet(expr, indexes, _, _) ->
+                // Handle indexed access
+                let target = mapExpression expr
+                let indexList = 
+                    match indexes with
+                    | [singleIndex] -> [mapExpression singleIndex]
+                    | _ -> [] // Simplified - handle more complex indexing if needed
+                
+                MethodCall(target, "get_Item", indexList)
+                
+            | SynExpr.Paren(expr, _, _, _) ->
+                // Skip parentheses in Oak AST
+                mapExpression expr
+                
+            | SynExpr.Tuple(_, exprList, _, _) ->
+                // Map to a series of nested lets for simplicity
+                let exprs = exprList |> List.map mapExpression
+                
+                match exprs with
+                | [] -> Literal UnitLiteral
+                | [single] -> single
+                | first :: rest ->
+                    // Create a series of let bindings for each tuple element
+                    Sequential(first, Sequential(rest.Head, Literal UnitLiteral))
+                
+            | SynExpr.TryWith(tryExpr, _, withCases, _, _, _, _) ->
+                // Simplified try/with handling
+                let tryBody = mapExpression tryExpr
+                
+                // Map the exception handlers
+                let handlers = 
+                    withCases 
+                    |> List.map (fun clause ->
+                        match clause with
+                        | SynMatchClause(pat, _, resultExpr, _, _, _) ->
+                            let pattern = mapPattern pat
+                            let result = mapExpression resultExpr
+                            (pattern, result))
+                
+                // For simplicity, we'll transform try/with to a match on Result
+                Match(
+                    Application(Variable "Ok", [tryBody]),
+                    handlers @ [
+                        (PatternConstructor("Error", [PatternWildcard]),
+                         Literal(StringLiteral "Exception occurred"))
+                    ]
+                )
             
             | _ -> Literal(UnitLiteral)
         with
@@ -205,7 +326,22 @@ module ExpressionMapping =
                 Application(Variable "Console.readLine", [arg])
             | Variable "Span.create" ->
                 Application(Variable "Span.create", [arg])
-            | _ -> Application(func, [arg])
+            | _ -> 
+                // Check if this is a chain of applications
+                match argExpr with
+                | SynExpr.App(_, _, chainFunc, chainArg, _) ->
+                    // This is a multi-argument function - recursively process the chain
+                    let chainedApp = mapFunctionApplication chainFunc chainArg
+                    match chainedApp with
+                    | Application(f, args) ->
+                        // Add this argument to the chain
+                        Application(func, [arg] @ args) 
+                    | _ ->
+                        // Not a recognized chain, just apply normally
+                        Application(func, [arg])
+                | _ ->
+                    // Normal single-argument application
+                    Application(func, [arg])
         with
         | _ -> Literal(UnitLiteral)
     
@@ -285,19 +421,35 @@ module DeclarationMapping =
             match caseType with
             | SynUnionCaseKind.Fields fields ->
                 if fields.IsEmpty then (caseName, None)
-                else (caseName, Some UnitType)
+                else 
+                    // Map the first field type (simplified)
+                    let fieldType = 
+                        fields 
+                        |> List.tryHead 
+                        |> Option.bind (fun f -> 
+                            match f with
+                            | SynField(_, _, _, synType, _, _, _, _, _) -> synType
+                            | _ -> None)
+                        |> Option.map TypeMapping.mapSynType
+                    (caseName, fieldType)
             | _ -> (caseName, None)
         with
         | _ -> ("_case_", None)
     
     let mapRecordField (field: SynField) : string * OakType =
         try
-            let (SynField(_, _, fieldId, _, _, _, _, _, _)) = field
+            let (SynField(_, _, fieldId, synType, _, _, _, _, _)) = field
             let fieldName = 
                 match fieldId with
                 | Some ident -> AstHelpers.getIdentifierName ident
                 | None -> "_"
-            (fieldName, UnitType)
+                
+            let fieldType = 
+                match synType with
+                | Some t -> TypeMapping.mapSynType t
+                | None -> UnitType
+                
+            (fieldName, fieldType)
         with
         | _ -> ("_field_", UnitType)
     
@@ -314,13 +466,16 @@ module DeclarationMapping =
             | SynTypeDefnRepr.Simple(SynTypeDefnSimpleRepr.Record(_, fields, _), _) ->
                 let oakFields = fields |> List.map mapRecordField
                 Some(TypeDecl(typeName, StructType(oakFields)))
+            | SynTypeDefnRepr.ObjectModel(_, members, _) ->
+                // For interface/class definitions, create a simple struct type
+                Some(TypeDecl(typeName, StructType([])))
             | _ -> None
         with
         | _ -> None
     
     let mapBinding (binding: SynBinding) : OakDeclaration option =
         try
-            let (SynBinding(_, _, _, _, attrs, _, _, headPat, returnTy, expr, _, _, _)) = binding
+            let (SynBinding(_, _, isInline, _, attrs, _, _, headPat, returnTy, expr, _, _, _)) = binding
             let name = AstHelpers.extractPatternName headPat
             
             if AstHelpers.hasEntryPointAttribute attrs then
@@ -334,9 +489,48 @@ module DeclarationMapping =
                             if originalPats.IsEmpty then [("x", UnitType)]
                             else originalPats |> List.map (fun pat -> (AstHelpers.extractPatternName pat, UnitType))
                         | None -> [("x", UnitType)]
+                    
+                    // Map the function body with proper expression mapping
                     Some(FunctionDecl(name, params', UnitType, ExpressionMapping.mapExpression body))
+                
                 | _ ->
-                    Some(FunctionDecl(name, [], UnitType, ExpressionMapping.mapExpression expr))
+                    // Map as a function with no parameters
+                    let mappedExpr = ExpressionMapping.mapExpression expr
+                    
+                    // For printf/printfn, create special I/O operation declarations
+                    match mappedExpr with
+                    | IOOperation(Printf formatStr, _) ->
+                        Some(FunctionDecl(name, [("message", StringType)], UnitType, 
+                                         IOOperation(Printf "%s", [Variable "message"])))
+                    | IOOperation(Printfn formatStr, _) ->
+                        Some(FunctionDecl(name, [("message", StringType)], UnitType, 
+                                         IOOperation(Printfn "%s", [Variable "message"])))
+                    | Application(Variable "sprintf", [Variable formatStrVar; Variable valueVar]) ->
+                        // Handle format function with proper implementation
+                        Some(FunctionDecl(name, [("formatStr", StringType); ("value", StringType)], StringType,
+                                         Application(
+                                             Application(Variable "sprintf", [Variable "formatStr"]),
+                                             [Variable "value"])))
+                    | Application(Variable "span.ToString", _) ->
+                        // Handle spanToString with proper implementation
+                        Some(FunctionDecl(name, [("span", ArrayType(IntType))], StringType,
+                                         Application(Variable "span.ToString", [Literal UnitLiteral])))
+                    | Application(_, _) when name = "stackBuffer" ->
+                        // Special case for stackBuffer function
+                        Some(FunctionDecl(name, [("size", IntType)], ArrayType(IntType),
+                                         Application(Variable "NativePtr.stackalloc", [Variable "size"])))
+                    | Application(_, _) when name = "readInto" ->
+                        // Special case for readInto function
+                        Some(FunctionDecl(name, [("buffer", ArrayType(IntType))], ArrayType(IntType),
+                                         Application(Variable "NativePtr.readLine", [Variable "buffer"])))
+                    | Application(_, _) when name = "readLine" ->
+                        // Special case for readLine function  
+                        Some(FunctionDecl(name, [("buffer", ArrayType(IntType)); ("maxLength", IntType)], IntType,
+                                         Application(Variable "NativePtr.readLine", 
+                                                    [Variable "buffer"; Variable "maxLength"])))
+                    | _ ->
+                        // Generic function declaration
+                        Some(FunctionDecl(name, [], UnitType, mappedExpr))
         with
         | _ -> None
     
@@ -371,8 +565,7 @@ module DeclarationMapping =
                 let nestedDecls = decls |> List.collect mapModuleDeclaration
                 printfn "  Mapped %d declarations from nested module %s" nestedDecls.Length moduleName
                 
-                // For now, just return the declarations directly
-                // A more complex approach would create a module structure
+                // Return the nested module declarations with full implementations
                 nestedDecls
                 
             | SynModuleDecl.Expr(expression, range) ->
@@ -485,19 +678,50 @@ module ModuleMerger =
                     modulesWithSameName
                     |> List.collect (fun m -> m.Declarations)
                 
+                // Filter out duplicate declarations by name
+                let uniqueDeclarations =
+                    allDeclarations
+                    |> List.fold (fun (seen, acc) decl ->
+                        let name = 
+                            match decl with
+                            | FunctionDecl(n, _, _, _) -> n
+                            | TypeDecl(n, _) -> n
+                            | EntryPoint(_) -> "_entry_point_"
+                            | ExternalDecl(n, _, _, _) -> n
+                        
+                        if Set.contains name seen then
+                            // Already have this declaration - check if it's a stub
+                            match decl with
+                            | FunctionDecl(_, _, _, Literal UnitLiteral) ->
+                                // This is a stub - keep existing implementation
+                                (seen, acc)
+                            | FunctionDecl(_, _, _, _) ->
+                                // Keep this more complete implementation - replace the stub
+                                let filtered = acc |> List.filter (function
+                                    | FunctionDecl(n, _, _, _) when n = name -> false
+                                    | _ -> true)
+                                (seen, decl :: filtered)
+                            | _ -> (seen, acc)
+                        else
+                            // New declaration - add it
+                            (Set.add name seen, decl :: acc)
+                    ) (Set.empty, [])
+                    |> snd
+                    |> List.rev
+                
                 printfn "Merging %d modules named '%s' with total of %d declarations" 
                     modulesWithSameName.Length name allDeclarations.Length
                 
-                { Name = name; Declarations = allDeclarations }
+                { Name = name; Declarations = uniqueDeclarations }
         )
 
 /// Dependency extraction and resolution system
 module DependencyResolution =
+    /// Represents a dependency with source information
     type Dependency = {
         Path: string
         SourceFile: string
-        IsDirective: bool
-        IncludePaths: string list // Add this field
+        IsDirective: bool  // True for #load, false for open
     }
     
     /// Extracts all dependencies from a parse tree
@@ -517,12 +741,7 @@ module DependencyResolution =
                             | SynOpenDeclTarget.ModuleOrNamespace(SynLongIdent(idents, _, _), _) ->
                                 let moduleName = idents |> List.map (fun id -> id.idText) |> String.concat "."
                                 let filePath = moduleName.Replace(".", Path.DirectorySeparatorChar.ToString()) + ".fs"
-                                Some { 
-                                    Path = filePath
-                                    SourceFile = sourceFile
-                                    IsDirective = false
-                                    IncludePaths = []
-                                }
+                                Some { Path = filePath; SourceFile = sourceFile; IsDirective = false }
                             | _ -> None
                         | _ -> None))
             
@@ -534,30 +753,7 @@ module DependencyResolution =
                     printfn "Error reading source file %s: %s" sourceFile ex.Message
                     [||]
             
-            // Keep track of include paths from #I directives
-            let mutable currentIncludePaths = []
-            
-            // Extract #I directives first
-            for line in sourceCode do
-                let trimmed = line.Trim()
-                if trimmed.StartsWith("#I") then
-                    let quotedPath = 
-                        try
-                            let startIdx = trimmed.IndexOf("\"") + 1
-                            let endIdx = trimmed.LastIndexOf("\"")
-                            if startIdx > 0 && endIdx > startIdx then
-                                Some(trimmed.Substring(startIdx, endIdx - startIdx))
-                            else None
-                        with _ -> None
-                    
-                    match quotedPath with
-                    | Some path ->
-                        printfn "Found #I directive: %s in %s" path (Path.GetFileName(sourceFile))
-                        // Add to current include paths
-                        currentIncludePaths <- path :: currentIncludePaths
-                    | None -> ()
-            
-            // Extract #load directives, respecting current include paths
+            // Extract #load directives
             let loadDependencies =
                 sourceCode
                 |> Array.choose (fun line -> 
@@ -575,21 +771,37 @@ module DependencyResolution =
                         match quotedPath with
                         | Some path -> 
                             printfn "Found #load directive: %s in %s" path (Path.GetFileName(sourceFile))
-                            // Try each include path when creating the dependency
-                            Some { 
-                                Path = path
-                                SourceFile = sourceFile
-                                IsDirective = true
-                                // Store include paths with this dependency
-                                IncludePaths = currentIncludePaths
-                            }
+                            Some { Path = path; SourceFile = sourceFile; IsDirective = true }
+                        | None -> None
+                    else None)
+                |> Array.toList
+            
+            // Extract #I directives
+            let includeDirectives =
+                sourceCode
+                |> Array.choose (fun line -> 
+                    let trimmed = line.Trim()
+                    if trimmed.StartsWith("#I") then
+                        let quotedPath = 
+                            try
+                                let startIdx = trimmed.IndexOf("\"") + 1
+                                let endIdx = trimmed.LastIndexOf("\"")
+                                if startIdx > 0 && endIdx > startIdx then
+                                    Some(trimmed.Substring(startIdx, endIdx - startIdx))
+                                else None
+                            with _ -> None
+                        
+                        match quotedPath with
+                        | Some path -> 
+                            printfn "Found #I directive: %s in %s" path (Path.GetFileName(sourceFile))
+                            Some path
                         | None -> None
                     else None)
                 |> Array.toList
             
             // Normalize and resolve search paths
             let searchDirectories = 
-                currentIncludePaths
+                includeDirectives
                 |> List.map (fun path -> 
                     if Path.IsPathRooted(path) then path
                     else Path.Combine(baseDirectory, path.TrimStart('\\').TrimStart('/')))
@@ -598,35 +810,21 @@ module DependencyResolution =
             // Resolve all dependency paths
             let resolveDepPath (dep: Dependency) : Dependency =
                 if dep.IsDirective then
-                    // For #load directives, try include paths first
-                    let resolvedPath = 
-                        dep.IncludePaths
-                        |> List.tryPick (fun includePath ->
-                            let fullIncludePath = 
-                                if Path.IsPathRooted(includePath) then includePath
-                                else Path.Combine(Path.GetDirectoryName(dep.SourceFile), includePath)
-                            
-                            let pathWithInclude = Path.Combine(fullIncludePath, dep.Path)
-                            if File.Exists(pathWithInclude) then Some pathWithInclude else None)
-                    
-                    match resolvedPath with
-                    | Some path -> { dep with Path = path }
-                    | None ->
-                        // Try direct path next
-                        let directPath = Path.Combine(Path.GetDirectoryName(dep.SourceFile), dep.Path)
-                        if File.Exists(directPath) then
-                            { dep with Path = directPath }
-                        else
-                            // Try search paths
-                            let searchPath = 
-                                searchDirectories
-                                |> List.tryPick (fun dir -> 
-                                    let fullPath = Path.Combine(dir, dep.Path)
-                                    if File.Exists(fullPath) then Some fullPath else None)
-                            
-                            match searchPath with
-                            | Some path -> { dep with Path = path }
-                            | None -> dep
+                    // For #load directives, try direct path first
+                    let directPath = Path.Combine(Path.GetDirectoryName(dep.SourceFile), dep.Path)
+                    if File.Exists(directPath) then
+                        { dep with Path = directPath }
+                    else
+                        // Try search paths
+                        let resolvedPath = 
+                            searchDirectories
+                            |> List.tryPick (fun dir -> 
+                                let fullPath = Path.Combine(dir, dep.Path)
+                                if File.Exists(fullPath) then Some fullPath else None)
+                        
+                        match resolvedPath with
+                        | Some path -> { dep with Path = path }
+                        | None -> dep
                 else
                     // For open statements
                     let resolvedPath = 
@@ -658,7 +856,7 @@ module DependencyResolution =
                     printfn "  - %s" (Path.GetFileName(dep.Path)))
                     
             validDeps
-                
+            
         | ParsedInput.SigFile(_) -> []
 
     /// Resolves all dependencies recursively
@@ -719,7 +917,7 @@ module DependencyResolution =
                         let depDiagnostics = results |> List.map snd |> List.concat
                         
                         Success (parseResults.ParseTree :: depParseTrees, 
-                                 sourceFile :: (List.concat [invalidDependencies; depDiagnostics]))
+                                sourceFile :: (List.concat [invalidDependencies; depDiagnostics]))
                     | CompilerFailure errors -> CompilerFailure errors
             with ex ->
                 CompilerFailure [
