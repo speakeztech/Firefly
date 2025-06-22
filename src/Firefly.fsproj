@@ -49,8 +49,6 @@
 
     <!-- MLIR/LLVM Conversion Pipeline -->
     <Compile Include="Core/Conversion/LoweringPipeline.fs" />
-    <Compile Include="Core/Conversion/LLVMTranslator.fs" />
-    <Compile Include="Core/Conversion/OptimizationPipeline.fs" />
 
     <!-- XParsec-based Core Translation Engine -->
     <Compile Include="Dabbit/Parsing/Translator.fs" />
