@@ -1,13 +1,13 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net9.0</TargetFramework>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.1.003-alpha</Version>
+    <Version>0.1.102</Version>
     <Description>F# to Native Compiler with Zero-Allocation Guarantees using XParsec</Description>
     <Authors>Speakez LLC</Authors>
     <PackageTags>fsharp;compiler;native;zero-allocation;xparsec;mlir;llvm</PackageTags>
@@ -16,7 +16,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Core XParsec Foundation (must be first) -->
+
+    <Compile Include="Core/Utilities/IntermediateWriter.fs" />
     <Compile Include="Core/XParsec/Foundation.fs" />
 
     <!-- Oak AST Definition (core data structures) -->
@@ -29,7 +30,9 @@
     <Compile Include="Core/MLIRGeneration/Dialect.fs" />
     <Compile Include="Core/MLIRGeneration/MLIRContext.fs" />
     <Compile Include="Core/MLIRGeneration/TypeSystem.fs" />
-    <Compile Include="Core/MLIRGeneration/Operations.fs" />
+
+    <!-- Symbol Resolution System -->
+    <Compile Include="Dabbit/SymbolResolution/SymbolRegistry.fs" />
 
     <!-- XParsec-based MLIR Generation -->
     <Compile Include="Core/MLIRGeneration/XParsecMLIRGenerator.fs" />
@@ -38,11 +41,13 @@
     <Compile Include="Dabbit/Closures/ClosureTransformer.fs" />
     <Compile Include="Dabbit/UnionLayouts/FixedLayoutCompiler.fs" />
     <Compile Include="Dabbit/BindingMetadata/BindingAttributes.fs" />
+    <Compile Include="Dabbit/TreeShaking/ReachabilityAnalyzer.fs" />
+    <Compile Include="Dabbit/TreeShaking/DependencyGraphBuilder.fs" />
+    <Compile Include="Dabbit/TreeShaking/ReachabilityTraversal.fs" />
+    <Compile Include="Dabbit/TreeShaking/AstPruner.fs" />
 
     <!-- MLIR/LLVM Conversion Pipeline -->
     <Compile Include="Core/Conversion/LoweringPipeline.fs" />
-    <Compile Include="Core/Conversion/LLVMTranslator.fs" />
-    <Compile Include="Core/Conversion/OptimizationPipeline.fs" />
 
     <!-- XParsec-based Core Translation Engine -->
     <Compile Include="Dabbit/Parsing/Translator.fs" />
@@ -50,13 +55,9 @@
     <!-- XParsec-based Configuration System -->
     <Compile Include="CLI/Configurations/ProjectConfig.fs" />
 
-    <!-- System Diagnostics and Health Checks -->
-    <Compile Include="CLI/Diagnostics/ToolchainVerification.fs" />
-
     <!-- CLI Commands using XParsec Pipeline -->
     <Compile Include="CLI/Commands/CompileCommand.fs" />
     <Compile Include="CLI/Commands/VerifyCommand.fs" />
-    <Compile Include="CLI/Commands/DoctorCommand.fs" />
 
     <!-- Main CLI Entry Point -->
     <Compile Include="CLI/Program.fs" />
@@ -69,24 +70,14 @@
     <!-- Command line argument parsing -->
     <PackageReference Include="Argu" Version="6.1.1" />
 
-    <!-- F# Compiler Services for AST parsing (used by XParsec-based AstConverter) -->
     <PackageReference Include="FSharp.Compiler.Service" Version="43.9.300" />
 
-    <!-- Fantomas for F# code formatting/parsing support -->
     <PackageReference Include="Fantomas.Core" Version="6.2.3" />
     <PackageReference Include="Fantomas.FCS" Version="6.2.3" />
 
     <!-- XParsec - Critical parser combinator library -->
     <!-- NOTE: This is the heart of the Firefly architecture - NO SUBSTITUTIONS -->
     <PackageReference Include="XParsec" Version="0.1.0" />
-
-    <!-- REMOVED: Temporary FParsec substitution -->
-    <!-- REMOVED: Temporary Tomlyn re-addition -->
-
-    <!-- REMOVED: Tomlyn - Now using XParsec-based TOML parser -->
-    <!-- <PackageReference Include="Tomlyn" Version="0.16.2" /> -->
-
-    <!-- LLVM/MLIR bindings for native code generation -->
     <PackageReference Include="Llvm.NET" Version="8.0.1" />
   </ItemGroup>
 
@@ -144,3 +135,100 @@
   </PropertyGroup>
 
 </Project>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

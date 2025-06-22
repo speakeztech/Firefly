@@ -52,3 +52,12 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+/src/nupkg/
+.idea/AndroidProjectSystem.xml
+.idea/encodings.xml
+.idea/indexLayout.xml
+.idea/vcs.xml
+src/directory_structure.txt
+
+.fake
+src/file_sizes.csv

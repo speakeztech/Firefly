@@ -42,6 +42,13 @@ and OakExpression =
     | FieldAccess of target: OakExpression * fieldName: string
     | MethodCall of target: OakExpression * methodName: string * args: OakExpression list
     | IOOperation of ioType: IOOperationType * args: OakExpression list
+    | Match of expr: OakExpression * cases: (OakPattern * OakExpression) list  // NEW
+
+and OakPattern =
+    | PatternVariable of name: string
+    | PatternLiteral of literal: OakLiteral
+    | PatternWildcard
+    | PatternConstructor of name: string * patterns: OakPattern list  // NEW
 
 type OakDeclaration =
     | FunctionDecl of name: string * params': (string * OakType) list * returnType: OakType * body: OakExpression

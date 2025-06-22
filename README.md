@@ -9,7 +9,7 @@
   </tr>
 </table>
 
-Firefly is a novel F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies or heap allocations. Built as an orchestrating .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly leverages [Fantomas](https://fsprojects.github.io/fantomas/) and [F# Compiler Services](https://fsharp.github.io/fsharp-compiler-docs/fcs/) for parsing, custom transformations using [XParsec](https://github.com/roboz0r/XParsec) to generate MLIR, and [LLVM.NET](https://github.com/UbiquityDotNET/Llvm.NET) for intelligent static library analysis and linking. The orchestration pipeline progressively lowers F# through MLIR dialects to LLVM IR, producing efficient native executables while guaranteeing zero heap allocations and compile-time resolution of all operations.
+Firefly is a novel F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies or heap allocations. Built as an orchestrating .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly leverages [F# Compiler Services](https://fsharp.github.io/fsharp-compiler-docs/fcs/) for parsing and type checking, custom transformations using [XParsec](https://github.com/roboz0r/XParsec) to generate MLIR, and [LLVM.NET](https://github.com/UbiquityDotNET/Llvm.NET) for intelligent static library analysis and linking. The orchestration pipeline progressively lowers F# through MLIR dialects to LLVM IR, producing efficient native executables while guaranteeing zero heap allocations and compile-time resolution of all operations.
 
 ## 🎯 Vision
 
@@ -19,6 +19,7 @@ Central to Firefly's approach is intelligent static library handling through LLV
 
 **Key Innovations:** 
 - **Zero-allocation guarantee** through compile-time memory management
+- **Type-preserving compilation** maintaining F#'s rich type system throughout the pipeline
 - **Intelligent static linking** via LLVM.NET archive analysis and selective object extraction
 - **Hybrid library binding** architecture allowing per-library static/dynamic decisions
 - **Progressive lowering** through MLIR dialects with continuous verification
@@ -28,7 +29,9 @@ Central to Firefly's approach is intelligent static library handling through LLV
 ```
 F# Source Code
     ↓ (F# Compiler Services parses & type-checks)
-F# AST / Oak AST  
+Type-Preserved F# AST
+    ↓ (Type-aware reachability analysis & pruning)
+Memory-Layout Analyzed F# AST
     ↓ (Dabbit transforms to MLIR operations)
 MLIR High-Level Dialects
     ↓ (Progressive lowering through dialects)
@@ -43,11 +46,14 @@ Optimized Native Code
 
 Firefly operates as an intelligent compilation orchestrator that:
 
-1. **Transforms progressively** - F# → Oak AST → MLIR dialects → LLVM IR
-2. **Analyzes statically** - All allocations and calls resolved at compile time
-3. **Links selectively** - LLVM.NET examines archives and extracts only needed objects
-4. **Optimizes aggressively** - LTO across F# and native library boundaries
-5. **Verifies continuously** - Zero allocations, bounded stack, no dynamic dispatch
+1. **Parses & analyzes** - F# Compiler Services builds a fully type-checked AST
+2. **Preserves types** - Rich type information flows through the entire pipeline
+3. **Computes layouts** - Memory layouts for all types determined at compile time
+4. **Transforms progressively** - F# AST → MLIR dialects → LLVM IR
+5. **Analyzes statically** - All allocations and calls resolved at compile time
+6. **Links selectively** - LLVM.NET examines archives and extracts only needed objects
+7. **Optimizes aggressively** - LTO across F# and native library boundaries
+8. **Verifies continuously** - Zero allocations, bounded stack, no dynamic dispatch
 
 ## 🚀 Quick Start
 
@@ -134,8 +140,9 @@ firefly/
 │   │   └── Configuration/        # TOML project configuration
 │   │
 │   ├── Core/             # Core compilation pipeline
-│   │   ├── Parsing/              # F# to Oak AST conversion
-│   │   ├── StaticAnalysis/       # Allocation & binding analysis
+│   │   ├── FCSProcessing/        # F# AST processing and analysis
+│   │   ├── TypeSystem/           # Type preservation and mapping
+│   │   ├── MemoryLayout/         # Memory layout analysis
 │   │   ├── MLIRGeneration/       # XParsec-based MLIR builders
 │   │   └── LLVMIntegration/      # LLVM.NET binding resolution
 │   │
@@ -207,11 +214,13 @@ firefly build --release --target thumbv7em-none-eabihf
 
 # What happens internally:
 # 1. F# Compiler Services → Type-checked AST
-# 2. Fantomas/Oak → Normalized AST representation  
-# 3. XParsec patterns → MLIR generation
-# 4. MLIR passes → Progressive lowering
-# 5. LLVM.NET → Archive analysis & selective linking
-# 6. LLVM → Optimized native code
+# 2. FCS Processing → Type-preserved AST with dependency resolution  
+# 3. Memory Layout Analysis → Compute precise memory layouts
+# 4. Reachability Analysis → Eliminate unreachable code
+# 5. XParsec patterns → MLIR generation
+# 6. MLIR passes → Progressive lowering
+# 7. LLVM.NET → Archive analysis & selective linking
+# 8. LLVM → Optimized native code
 ```
 
 ### Static Linking Intelligence
@@ -240,6 +249,22 @@ firefly analyze --show-symbol-deps
 
 # Profile-guided optimization
 firefly build --pgo-data trace.pgo
+```
+
+### Diagnostic Intermediate Files
+
+```bash
+# View the type-preserved F# AST
+cat build/hello.fcs.preserved
+
+# Examine memory layouts
+cat build/hello.layouts
+
+# View reachability analysis
+cat build/hello.fcs.ra
+
+# Inspect generated MLIR
+cat build/hello.mlir
 ```
 
 ## 🎯 Memory & Execution Guarantees
@@ -280,6 +305,8 @@ let createAdder x =
 ### Phase 1: Foundation (Current)
 - ✅ Basic F# to MLIR pipeline
 - ✅ Stack-only transformations  
+- 🚧 Type-preserving compilation
+- 🚧 Memory layout analysis
 - 🚧 Static library selective linking
 - 🚧 Discriminated union compilation
 
@@ -300,6 +327,8 @@ let createAdder x =
 
 We welcome contributions! Areas of particular interest:
 
+- **Type-Preserving Transformations**: Techniques for maintaining F#'s rich type system
+- **Memory Layout Algorithms**: Advanced layout strategies for complex types
 - **Zero-Allocation Patterns**: Novel stack-based algorithms for F# constructs
 - **MLIR Optimizations**: Passes for better stack frame merging
 - **Platform Targets**: Backend support for embedded architectures
