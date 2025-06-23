@@ -78,6 +78,7 @@ type ReachableProgram = {
     MainFile: string
     ReachableInputs: (string * ParsedInput) list
     ReachabilityStats: ReachabilityStats
+    ReachableSymbols: Set<string>  
 }
 
 /// Compiler result builder for computation expressions
@@ -462,8 +463,7 @@ let private buildDependencyGraph (refinedProgram: RefinedProgram) : CompilerResu
 let private performReachabilityAnalysis (ctx: CompilationContext) (refinedProgram: RefinedProgram) : CompilerResult<ReachableProgram> =
     printfn "Phase 2b: Performing reachability analysis..."
     
-    // Use the new reachability analyzer that works directly with parsed inputs
-    let reachabilityResult = Dabbit.Analysis.ReachabilityAnalyzer.analyzeFromParsedInputs refinedProgram.RefinedInputs
+    let reachabilityResult = analyzeFromParsedInputs refinedProgram.RefinedInputs
     
     // Print statistics
     let stats = reachabilityResult.Statistics
@@ -483,6 +483,7 @@ let private performReachabilityAnalysis (ctx: CompilationContext) (refinedProgra
         MainFile = refinedProgram.MainFile
         ReachableInputs = reachableInputs
         ReachabilityStats = stats
+        ReachableSymbols = reachabilityResult.Reachable  // Add this line
     }
     
     // Write reachability analysis result
@@ -507,7 +508,7 @@ let private transformASTPhase (ctx: CompilationContext) (reachableProgram: Reach
             TypeContext = typeCtx
             SymbolRegistry = symbolRegistry
             Reachability = {
-                Reachable = reachableProgram.ReachabilityStats.ReachableSymbols |> Set.ofList
+                Reachable = reachableProgram.ReachableSymbols  // Use the actual set
                 UnionCases = Map.empty
                 Statistics = reachableProgram.ReachabilityStats
             }
@@ -527,6 +528,7 @@ let private transformASTPhase (ctx: CompilationContext) (reachableProgram: Reach
             MainFile = reachableProgram.MainFile
             ReachableInputs = transformedInputs
             ReachabilityStats = reachableProgram.ReachabilityStats
+            ReachableSymbols = reachableProgram.ReachableSymbols
         }
         
         Success (transformedReachableProgram, typeCtx, symbolRegistry)
