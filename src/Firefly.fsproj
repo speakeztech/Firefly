@@ -39,7 +39,6 @@
       <!-- Analysis and Transformations -->
       <Compile Include="Dabbit/Analysis/DependencyGraphBuilder.fs" />
       <Compile Include="Dabbit/Analysis/ReachabilityAnalyzer.fs" />
-      <Compile Include="Dabbit/Analysis/ReachabilityTraversal.fs" />
       <Compile Include="Dabbit/Analysis/AstPruner.fs" />
       <Compile Include="Dabbit/Transformations/ClosureElimination.fs" />
       <Compile Include="Dabbit/Transformations/StackAllocation.fs" />

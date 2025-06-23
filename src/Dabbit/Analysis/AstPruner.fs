@@ -3,71 +3,154 @@ module Dabbit.Analysis.AstPruner
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
 
-/// Prune unreachable declarations from module
-let pruneModule (reachable: Set<string>) (moduleName: string) (decls: SynModuleDecl list) =
-    let isReachable name = Set.contains (sprintf "%s.%s" moduleName name) reachable
-    
-    let rec pruneDecl = function
-        | SynModuleDecl.Let(isRec, bindings, range) ->
-            let kept = bindings |> List.filter (fun binding ->
-                let (SynBinding(_, _, _, _, _, _, _, pat, _, _, _, _, _)) = binding
-                match pat with
-                | SynPat.Named(SynIdent(ident, _), _, _, _) -> isReachable ident.idText
-                | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
-                    ids |> List.exists (fun id -> isReachable id.idText)
-                | _ -> true)
-            
-            if List.isEmpty kept then None
-            else Some (SynModuleDecl.Let(isRec, kept, range))
-        
-        | SynModuleDecl.Types(types, range) ->
-            let kept = types |> List.filter (fun typeDef ->
-                let (SynTypeDefn(SynComponentInfo(_, _, _, longId, _, _, _, _), _, _, _, _, _)) = typeDef
-                longId |> List.exists (fun id -> isReachable id.idText))
-            
-            if List.isEmpty kept then None
-            else Some (SynModuleDecl.Types(kept, range))
-        
-        | SynModuleDecl.NestedModule(componentInfo, isRec, nestedDecls, range, trivia, attrs) ->
-            let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = componentInfo
-            let nestedName = longId |> List.map (fun id -> id.idText) |> String.concat "."
-            let fullName = sprintf "%s.%s" moduleName nestedName
-            let pruned = nestedDecls |> List.choose pruneDecl
-            
-            if List.isEmpty pruned then None
-            else Some (SynModuleDecl.NestedModule(componentInfo, isRec, pruned, range, trivia, attrs))
-        
-        | decl -> Some decl  // Keep other declarations
-    
-    decls |> List.choose pruneDecl
+/// Check if a fully qualified name is in the reachable set
+let private isReachable (reachable: Set<string>) (fullName: string) =
+    Set.contains fullName reachable
 
-/// Prune entire ParsedInput
-let prune (reachable: Set<string>) (input: ParsedInput) =
+/// Extract the full name from a pattern
+let private getPatternName (moduleName: string) (pat: SynPat) : string option =
+    match pat with
+    | SynPat.Named(SynIdent(ident, _), _, _, _) -> 
+        Some (sprintf "%s.%s" moduleName ident.idText)
+    | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
+        let name = ids |> List.map (fun id -> id.idText) |> String.concat "."
+        Some (sprintf "%s.%s" moduleName name)
+    | _ -> None
+
+/// Prune a single declaration based on reachability
+let rec pruneDeclaration (reachable: Set<string>) (moduleName: string) (decl: SynModuleDecl) : SynModuleDecl option =
+    match decl with
+    | SynModuleDecl.Let(isRec, bindings, range) ->
+        // Filter bindings to only include reachable ones
+        let reachableBindings = 
+            bindings 
+            |> List.filter (fun (SynBinding(_, _, _, _, _, _, _, pat, _, _, _, _, _)) ->
+                match getPatternName moduleName pat with
+                | Some fullName -> isReachable reachable fullName
+                | None -> false  // Can't determine name, exclude
+            )
+        
+        // Only keep the declaration if there are reachable bindings
+        if List.isEmpty reachableBindings then 
+            None
+        else 
+            Some (SynModuleDecl.Let(isRec, reachableBindings, range))
+    
+    | SynModuleDecl.Types(typeDefs, range) ->
+        // Filter type definitions to only include reachable ones
+        let reachableTypeDefs = 
+            typeDefs 
+            |> List.filter (fun (SynTypeDefn(componentInfo, typeRepr, members, implicitCtor, typeRange, trivia)) ->
+                let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = componentInfo
+                let typeName = longId |> List.map (fun id -> id.idText) |> String.concat "."
+                let fullTypeName = sprintf "%s.%s" moduleName typeName
+                
+                if isReachable reachable fullTypeName then
+                    true
+                else
+                    // Check if any members are reachable
+                    members |> List.exists (function
+                        | SynMemberDefn.Member(SynBinding(_, _, _, _, _, _, _, pat, _, _, _, _, _), _) ->
+                            match pat with
+                            | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
+                                let memberName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+                                // Check various possible qualified names
+                                isReachable reachable memberName ||
+                                isReachable reachable (sprintf "%s.%s" fullTypeName memberName) ||
+                                isReachable reachable (sprintf "%s.%s.%s" moduleName typeName memberName)
+                            | _ -> false
+                        | _ -> false
+                    )
+            )
+        
+        if List.isEmpty reachableTypeDefs then 
+            None
+        else 
+            Some (SynModuleDecl.Types(reachableTypeDefs, range))
+    
+    | SynModuleDecl.NestedModule(componentInfo, isRec, nestedDecls, range, trivia, moduleKeyword) ->
+        let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = componentInfo
+        let nestedModuleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
+        let fullNestedName = sprintf "%s.%s" moduleName nestedModuleName
+        
+        // Recursively prune nested module declarations
+        let prunedNestedDecls = 
+            nestedDecls 
+            |> List.choose (pruneDeclaration reachable fullNestedName)
+        
+        // Keep the module if it has any reachable content
+        if List.isEmpty prunedNestedDecls then 
+            None
+        else 
+            Some (SynModuleDecl.NestedModule(componentInfo, isRec, prunedNestedDecls, range, trivia, moduleKeyword))
+    
+    | SynModuleDecl.Open(target, range) ->
+        // For now, keep all opens since they affect name resolution
+        // TODO: Analyze which opens are actually used
+        Some decl
+    
+    | _ -> 
+        // Keep other declaration types for now
+        Some decl
+
+/// Prune a module based on reachability
+let private pruneModule (reachable: Set<string>) (modul: SynModuleOrNamespace) : SynModuleOrNamespace =
+    let (SynModuleOrNamespace(longId, isRec, kind, decls, xmlDoc, attrs, synAccess, range, moduleTrivia)) = modul
+    let moduleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
+    
+    // Prune each declaration
+    let prunedDecls = 
+        decls 
+        |> List.choose (pruneDeclaration reachable moduleName)
+    
+    SynModuleOrNamespace(longId, isRec, kind, prunedDecls, xmlDoc, attrs, synAccess, range, moduleTrivia)
+
+/// Prune entire ParsedInput based on reachability analysis
+let prune (reachable: Set<string>) (input: ParsedInput) : ParsedInput =
+    printfn "Pruning AST with %d reachable symbols" (Set.count reachable)
+    
     match input with
     | ParsedInput.ImplFile(implFile) ->
         let (ParsedImplFileInput(fileName, isScript, qualName, pragmas, directives, modules, isLast, trivia, ids)) = implFile
         
-        let prunedModules = modules |> List.map (fun modul ->
-            let (SynModuleOrNamespace(longId, isRec, kind, decls, xmlDoc, attrs, synAccess, range, moduleTrivia)) = modul
-            let moduleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
-            
-            // Keep all opens, types, and nested modules
-            // Only prune completely unused top-level let bindings
-            let prunedDecls = decls |> List.filter (function
-                | SynModuleDecl.Let(isRec, bindings, range) ->
-                    bindings |> List.exists (fun (SynBinding(_, _, _, _, _, _, _, pat, _, _, _, _, _)) ->
-                        match pat with
-                        | SynPat.Named(SynIdent(ident, _), _, _, _) ->
-                            let fullName = sprintf "%s.%s" moduleName ident.idText
-                            Set.contains fullName reachable ||
-                            Set.contains ident.idText reachable ||
-                            // Keep if it's used by any reachable symbol
-                            reachable |> Set.exists (fun r -> r.Contains(ident.idText))
-                        | _ -> true)
-                | _ -> true  // Keep everything else
+        // Prune each module
+        let prunedModules = 
+            modules 
+            |> List.map (pruneModule reachable)
+            |> List.filter (fun (SynModuleOrNamespace(_, _, _, decls, _, _, _, _, _)) ->
+                // Only keep modules that have content after pruning
+                not (List.isEmpty decls)
             )
-            
-            SynModuleOrNamespace(longId, isRec, kind, prunedDecls, xmlDoc, attrs, synAccess, range, moduleTrivia))
         
-        ParsedInput.ImplFile(ParsedImplFileInput(fileName, isScript, qualName, pragmas, directives, prunedModules, isLast, trivia, ids))
-    | sig_ -> sig_
+        // Report pruning statistics
+        let originalDeclCount = 
+            modules |> List.sumBy (fun (SynModuleOrNamespace(_, _, _, decls, _, _, _, _, _)) -> 
+                List.length decls)
+        let prunedDeclCount = 
+            prunedModules |> List.sumBy (fun (SynModuleOrNamespace(_, _, _, decls, _, _, _, _, _)) -> 
+                List.length decls)
+        
+        printfn "Pruned %d declarations to %d declarations" originalDeclCount prunedDeclCount
+        
+        ParsedInput.ImplFile(
+            ParsedImplFileInput(fileName, isScript, qualName, pragmas, directives, prunedModules, isLast, trivia, ids))
+    
+    | ParsedInput.SigFile(sigFile) ->
+        // For now, don't prune signature files
+        input
+
+/// Analyze which opens are actually used based on reachable symbols
+let private analyzeOpenUsage (reachable: Set<string>) (opens: (string * range) list) : Set<string> =
+    // This would require more sophisticated analysis to determine
+    // which opens are actually providing symbols that are used
+    // For now, we'll keep all opens
+    opens |> List.map fst |> Set.ofList
+
+/// More aggressive pruning that also removes unused opens
+let pruneWithOpenAnalysis (reachable: Set<string>) (input: ParsedInput) : ParsedInput =
+    // First do regular pruning
+    let pruned = prune reachable input
+    
+    // Then analyze and remove unused opens
+    // TODO: Implement open usage analysis
+    pruned
