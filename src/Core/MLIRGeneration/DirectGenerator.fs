@@ -853,7 +853,6 @@ let generateFunction (functionName: string) (attributes: SynAttributes) (pattern
                                     Some (ident.idText, sprintf "%%arg%d" i, MLIRTypes.i32)
                                 | _ -> None)
                             |> List.choose id
-                        | _ -> []
                     | _ -> []
                 | _ -> []
             
