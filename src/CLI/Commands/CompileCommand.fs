@@ -230,13 +230,14 @@ let private parseSource (ctx: CompilationContext) (sourceCode: string) : Compile
         let mainParsedInput = parseResults.ParseTree
         let dependencies = extractOpenedModules mainParsedInput
         
-        // Parse each dependency
+        // Parse each dependency, tracking which files we've already processed
         let mutable allParsedInputs = [(ctx.InputPath, mainParsedInput)]
+        let mutable processedFiles = Set.singleton ctx.InputPath
         let mutable failedDeps = []
         
         for dep in dependencies do
             match resolveModulePath dep with
-            | Some filePath ->
+            | Some filePath when not (Set.contains filePath processedFiles) ->
                 try
                     let depSource = File.ReadAllText(filePath)
                     let depSourceText = SourceText.ofString depSource
@@ -244,10 +245,31 @@ let private parseSource (ctx: CompilationContext) (sourceCode: string) : Compile
                     
                     if not depParseResults.ParseHadErrors then
                         allParsedInputs <- allParsedInputs @ [(filePath, depParseResults.ParseTree)]
+                        processedFiles <- Set.add filePath processedFiles
+                        
+                        // Also process transitive dependencies
+                        let transitiveDeps = extractOpenedModules depParseResults.ParseTree
+                        for transDep in transitiveDeps do
+                            match resolveModulePath transDep with
+                            | Some transFilePath when not (Set.contains transFilePath processedFiles) ->
+                                try
+                                    let transSource = File.ReadAllText(transFilePath)
+                                    let transSourceText = SourceText.ofString transSource
+                                    let transParseResults = checker.ParseFile(transFilePath, transSourceText, parsingOptions) |> Async.RunSynchronously
+                                    
+                                    if not transParseResults.ParseHadErrors then
+                                        allParsedInputs <- allParsedInputs @ [(transFilePath, transParseResults.ParseTree)]
+                                        processedFiles <- Set.add transFilePath processedFiles
+                                with ex ->
+                                    failedDeps <- failedDeps @ [sprintf "%s: %s" transDep ex.Message]
+                            | _ -> ()
                     else
                         failedDeps <- failedDeps @ [sprintf "%s: parse errors" dep]
                 with ex ->
                     failedDeps <- failedDeps @ [sprintf "%s: %s" dep ex.Message]
+            | Some filePath when Set.contains filePath processedFiles ->
+                // Already processed, skip
+                ()
             | None ->
                 failedDeps <- failedDeps @ [sprintf "%s: file not found" dep]
         

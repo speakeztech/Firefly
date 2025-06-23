@@ -8,6 +8,10 @@ open Core.MLIRGeneration.TypeSystem
 open Core.MLIRGeneration.Dialect
 open Core.XParsec.Foundation
 open Dabbit.Bindings.SymbolRegistry
+open Dabbit.Bindings.PatternLibrary
+
+/// Critical error for undefined MLIR generation
+exception MLIRGenerationException of string * string option
 
 /// Convert MLIRType to MLIR string with proper LLVM dialect syntax
 let mlirTypeToStringWithLLVM (t: MLIRType) : string =
@@ -26,14 +30,17 @@ and MLIRBuilderState = {
     Output: StringBuilder
     Indent: int
     SSACounter: int
-    LocalVars: Map<string, string>
+    LocalVars: Map<string, (string * MLIRType)>  // SSA name and type
     TypeContext: TypeContext
     SymbolRegistry: SymbolRegistry
     RequiredExternals: Set<string>
     CurrentFunction: string option
+    GeneratedFunctions: Set<string>
+    CurrentModule: string list  // Module path for symbol resolution
+    HasErrors: bool  // Track if we've encountered errors
 }
 
-/// MLIR builder computation expression with all required methods
+/// MLIR builder computation expression
 type MLIRBuilderCE() =
     member _.Return(x) : MLIRBuilder<'T> = 
         fun state -> (x, state)
@@ -63,8 +70,32 @@ type MLIRBuilderCE() =
                 let ((), newState) = (body item) currentState
                 currentState <- newState
             ((), currentState)
+            
+    member _.TryWith(body: MLIRBuilder<'T>, handler: exn -> MLIRBuilder<'T>) : MLIRBuilder<'T> =
+        fun state ->
+            try
+                body state
+            with e ->
+                (handler e) state
+                
+    member _.TryFinally(body: MLIRBuilder<'T>, compensation: unit -> unit) : MLIRBuilder<'T> =
+        fun state ->
+            try
+                body state
+            finally
+                compensation()
 
 let mlir = MLIRBuilderCE()
+
+/// Fail with hard error - no soft landings
+let failHard (phase: string) (message: string) : MLIRBuilder<'T> =
+    fun state ->
+        let location = 
+            match state.CurrentFunction with
+            | Some f -> sprintf " in function '%s'" f
+            | None -> ""
+        let state' = { state with HasErrors = true }
+        raise (MLIRGenerationException(sprintf "[%s]%s: %s" phase location message, None))
 
 /// Get current state
 let getState : MLIRBuilder<MLIRBuilderState> =
@@ -117,15 +148,32 @@ let indent (builder: MLIRBuilder<'T>) : MLIRBuilder<'T> =
 let requireExternal (name: string) : MLIRBuilder<unit> =
     updateState (fun s -> { s with RequiredExternals = Set.add name s.RequiredExternals })
 
-/// Bind local variable
-let bindLocal (name: string) (ssa: string) : MLIRBuilder<unit> =
-    updateState (fun s -> { s with LocalVars = Map.add name ssa s.LocalVars })
+/// Bind local variable with type
+let bindLocal (name: string) (ssa: string) (typ: MLIRType) : MLIRBuilder<unit> =
+    updateState (fun s -> { s with LocalVars = Map.add name (ssa, typ) s.LocalVars })
 
 /// Lookup local variable
-let lookupLocal (name: string) : MLIRBuilder<string option> =
+let lookupLocal (name: string) : MLIRBuilder<(string * MLIRType) option> =
     mlir {
         let! state = getState
         return Map.tryFind name state.LocalVars
+    }
+
+/// Resolve symbol in registry
+let resolveSymbol (name: string) : MLIRBuilder<ResolvedSymbol> =
+    mlir {
+        let! state = getState
+        // Add current module context to registry for resolution
+        let registryWithContext = 
+            RegistryConstruction.withNamespaceContext state.CurrentModule state.SymbolRegistry
+        
+        match RegistryConstruction.resolveSymbolInRegistry name registryWithContext with
+        | Success (symbol, _) -> return symbol
+        | CompilerFailure _ ->
+            return! failHard "Symbol Resolution" 
+                (sprintf "Cannot resolve symbol '%s'. Available symbols: %s" 
+                    name 
+                    (state.SymbolRegistry.State.SymbolsByShort |> Map.toList |> List.map fst |> String.concat ", "))
     }
 
 /// Emit MLIR type
@@ -136,19 +184,6 @@ let emitType (t: MLIRType) : MLIRBuilder<unit> =
 let emitSSA (name: string) : MLIRBuilder<unit> =
     emit name
 
-/// Emit comma-separated list
-let emitList (sep: string) (emitItem: 'T -> MLIRBuilder<unit>) (items: 'T list) : MLIRBuilder<unit> =
-    match items with
-    | [] -> mlir.Zero()
-    | [x] -> emitItem x
-    | x::xs ->
-        mlir {
-            do! emitItem x
-            for item in xs do
-                do! emit sep
-                do! emitItem item
-        }
-
 /// Emit operation result assignment
 let emitResultAssign (ssa: string) : MLIRBuilder<unit> =
     mlir {
@@ -156,94 +191,128 @@ let emitResultAssign (ssa: string) : MLIRBuilder<unit> =
         do! emit " = "
     }
 
-/// Emit constant operation
-let emitConstant (ssa: string) (value: int) (typ: MLIRType) : MLIRBuilder<unit> =
-    mlir {
-        do! emitResultAssign ssa
-        do! emit "arith.constant "
-        do! emit (string value)
-        do! emit " : "
-        do! emitType typ
-    }
-
-/// Emit undefined value
-let emitUndef (ssa: string) (typ: MLIRType) (comment: string option) : MLIRBuilder<unit> =
-    mlir {
-        do! emitResultAssign ssa
-        do! emit "llvm.mlir.undef : "
-        do! emitType typ
-        match comment with
-        | Some c -> do! emit (sprintf "  // %s" c)
-        | None -> ()
-    }
-
 /// Emit memory allocation
-let emitAlloca (ssa: string) (size: int) (elemType: MLIRType) : MLIRBuilder<unit> =
+let emitAlloca (ssa: string) (size: int) : MLIRBuilder<unit> =
     mlir {
         do! emitResultAssign ssa
-        do! emit (sprintf "memref.alloca() : memref<%dx" size)
-        do! emitType elemType
-        do! emit ">"
+        do! emit (sprintf "memref.alloca() : memref<%dxi8>" size)
     }
 
-/// Emit function call
+/// Emit function call with proper types
 let emitCall (ssa: string) (func: string) (args: string list) (argTypes: MLIRType list) (retType: MLIRType) : MLIRBuilder<unit> =
     mlir {
-        do! emitResultAssign ssa
-        do! emit "func.call @"
-        do! emit func
-        do! emit "("
-        do! emitList ", " emitSSA args
+        if retType = MLIRTypes.void_ then
+            do! emitIndented (sprintf "call @%s(" func)
+        else
+            do! emitResultAssign ssa
+            do! emit (sprintf "func.call @%s(" func)
+        
+        do! emit (String.concat ", " args)
         do! emit ") : ("
-        // Convert memref types to opaque pointers for LLVM calls
-        let llvmArgTypes = argTypes |> List.map (fun t ->
-            match t.Category with
-            | MLIRTypeCategory.MemRef -> { t with Category = MLIRTypeCategory.MemRef } // Will become !llvm.ptr
-            | _ -> t
-        )
-        do! emitList ", " emitType llvmArgTypes
+        do! emit (argTypes |> List.map mlirTypeToStringWithLLVM |> String.concat ", ")
         do! emit ") -> "
         do! emitType retType
     }
 
-/// Emit indirect call
-let emitIndirectCall (ssa: string) (func: string) (arg: string) (argType: MLIRType) (retType: MLIRType) : MLIRBuilder<unit> =
+/// Generate call based on symbol registry
+let rec generateSymbolCall (symbol: ResolvedSymbol) (args: (string * MLIRType) list) : MLIRBuilder<string * MLIRType> =
     mlir {
-        do! emitResultAssign ssa
-        do! emit "func.call_indirect "
-        do! emitSSA func
-        do! emit "("
-        do! emitSSA arg
-        do! emit ") : ("
-        // Ensure we use opaque pointers for LLVM
-        let llvmArgType = 
-            match argType.Category with
-            | MLIRTypeCategory.MemRef -> argType  // Will render as !llvm.ptr
-            | _ -> argType
-        do! emitType llvmArgType
-        do! emit ") -> "
-        do! emitType retType
-    }
-
-/// Emit return statement
-let emitReturn (value: string) (typ: MLIRType) : MLIRBuilder<unit> =
-    mlir {
-        do! emit "func.return "
-        do! emitSSA value
-        do! emit " : "
-        do! emitType typ
-    }
-
-/// Emit function declaration
-let emitFuncDecl (name: string) (parameters: (string * MLIRType) list) (retType: MLIRType) (varargs: bool) : MLIRBuilder<unit> =
-    mlir {
-        do! emit "func.func private @"
-        do! emit name
-        do! emit "("
-        do! emitList ", " emitType (parameters |> List.map snd)
-        if varargs then do! emit ", ..."
-        do! emit ") -> "
-        do! emitType retType
+        match symbol.Operation with
+        | MLIROperationPattern.DialectOp(dialect, operation, attrs) ->
+            let! resultSSA = nextSSA "op"
+            do! emitIndented (sprintf "%s = %s.%s" resultSSA (dialectToString dialect) operation)
+            
+            if not args.IsEmpty then
+                do! emit "("
+                do! emit (args |> List.map fst |> String.concat ", ")
+                do! emit ")"
+            
+            // Emit attributes
+            if not (Map.isEmpty attrs) then
+                do! emit " {"
+                let attrStrs = attrs |> Map.toList |> List.map (fun (k, v) -> sprintf "%s = %s" k v)
+                do! emit (String.concat ", " attrStrs)
+                do! emit "}"
+            
+            do! emit " : "
+            if not args.IsEmpty then
+                do! emit "("
+                do! emit (args |> List.map (snd >> mlirTypeToStringWithLLVM) |> String.concat ", ")
+                do! emit ") -> "
+            do! emitType symbol.ReturnType
+            do! newline
+            
+            return (resultSSA, symbol.ReturnType)
+            
+        | MLIROperationPattern.ExternalCall(funcName, lib) ->
+            let! resultSSA = nextSSA "call"
+            do! requireExternal funcName
+            do! emitCall resultSSA funcName (args |> List.map fst) (args |> List.map snd) symbol.ReturnType
+            do! newline
+            return (resultSSA, symbol.ReturnType)
+            
+        | MLIROperationPattern.Composite operations ->
+            // Handle composite operations - chain them together
+            let! finalResult = 
+                operations |> List.fold (fun accM (i, op) ->
+                    mlir {
+                        let! (prevSSA, prevType) = accM
+                        let stepArgs = 
+                            if i = 0 then args  // First operation gets original args
+                            else [(prevSSA, prevType)]  // Subsequent ops get previous result
+                        
+                        match op with
+                        | MLIROperationPattern.ExternalCall(funcName, lib) ->
+                            let! stepSSA = nextSSA (sprintf "step%d" i)
+                            do! requireExternal funcName
+                            
+                            // Determine return type for this step
+                            let stepRetType = 
+                                match funcName with
+                                | "fgets" -> MLIRTypes.memref MLIRTypes.i8
+                                | "strlen" -> MLIRTypes.i32
+                                | _ -> MLIRTypes.i32
+                            
+                            do! emitCall stepSSA funcName (stepArgs |> List.map fst) (stepArgs |> List.map snd) stepRetType
+                            do! newline
+                            return (stepSSA, stepRetType)
+                            
+                        | MLIROperationPattern.Transform(transformName, params') ->
+                            let! stepSSA = nextSSA (sprintf "transform%d" i)
+                            
+                            match transformName with
+                            | "result_wrapper" ->
+                                // Wrap the result in a Result type (simplified for now)
+                                do! emitLine (sprintf "%s = arith.constant 1 : i32  // Ok tag" stepSSA)
+                                return (stepSSA, MLIRTypes.i32)
+                            | _ ->
+                                do! emitLine (sprintf "%s = arith.constant 0 : i32  // Transform: %s" stepSSA transformName)
+                                return (stepSSA, MLIRTypes.i32)
+                                
+                        | _ ->
+                            let! stepSSA = nextSSA "composite_step"
+                            do! emitLine (sprintf "%s = arith.constant 0 : i32  // Unsupported composite step" stepSSA)
+                            return (stepSSA, MLIRTypes.i32)
+                    }
+                ) (mlir.Return (args |> List.head))
+                 (operations |> List.indexed)
+            
+            return finalResult
+            
+        | MLIROperationPattern.Transform(transformName, params') ->
+            let! resultSSA = nextSSA "transform"
+            
+            match transformName with
+            | "span_to_string" ->
+                // Just pass through the buffer for now
+                match args with
+                | [(argSSA, argType)] -> return (argSSA, argType)
+                | _ -> 
+                    do! emitLine (sprintf "%s = arith.constant 0 : i32  // Transform error" resultSSA)
+                    return (resultSSA, MLIRTypes.i32)
+            | _ ->
+                do! emitLine (sprintf "%s = arith.constant 0 : i32  // Transform: %s" resultSSA transformName)
+                return (resultSSA, MLIRTypes.i32)
     }
 
 /// Forward declaration
@@ -260,10 +329,11 @@ let rec generateExpression (expr: SynExpr) : MLIRBuilder<string * MLIRType> =
             return! generateApplication funcExpr argExpr
             
         | SynExpr.TypeApp(baseExpr, _, _, _, _, _, _) ->
+            // Handle generic type application
             return! generateExpression baseExpr
             
-        | SynExpr.LetOrUse(_, _, bindings, body, _, _) ->
-            return! generateLet bindings body
+        | SynExpr.LetOrUse(_, isUse, bindings, body, _, _) ->
+            return! generateLet isUse bindings body
             
         | SynExpr.Sequential(_, _, expr1, expr2, _, _) ->
             let! _ = generateExpression expr1
@@ -286,9 +356,8 @@ let rec generateExpression (expr: SynExpr) : MLIRBuilder<string * MLIRType> =
             return! generateTuple exprs
             
         | _ ->
-            let! ssa = nextSSA "unsupported"
-            do! emitLine (sprintf "%s = arith.constant 0 : i32  // TODO: %A" ssa (expr.GetType().Name))
-            return (ssa, MLIRTypes.i32)
+            return! failHard "Expression Generation" 
+                (sprintf "Unsupported expression type: %A" (expr.GetType().Name))
     }
 
 and generateConstant (constant: SynConst) : MLIRBuilder<string * MLIRType> =
@@ -300,116 +369,85 @@ and generateConstant (constant: SynConst) : MLIRBuilder<string * MLIRType> =
             return (ssa, MLIRTypes.i32)
             
         | SynConst.String(text, _, _) ->
+            // For now, create a global string constant
             let! ssa = nextSSA "str"
-            let escaped = text.Replace("\"", "\\\"")
-            do! emitUndef ssa (MLIRTypes.memref MLIRTypes.i8) (Some (sprintf "\"%s\"" escaped))
-            do! newline
+            do! requireExternal "string_literal"
+            do! emitLine (sprintf "%s = llvm.mlir.addressof @.str_%d : !llvm.ptr" ssa (text.GetHashCode()))
             return (ssa, MLIRTypes.memref MLIRTypes.i8)
             
         | SynConst.Unit ->
+            // Unit is void - no value needed
             let! ssa = nextSSA "unit"
-            do! emitUndef ssa MLIRTypes.i32 (Some "unit")
-            do! newline
             return (ssa, MLIRTypes.void_)
             
         | _ ->
-            let! ssa = nextSSA "const"
-            do! emitLine (sprintf "%s = arith.constant 0 : i32  // unsupported constant" ssa)
-            return (ssa, MLIRTypes.i32)
+            return! failHard "Constant Generation" 
+                (sprintf "Unsupported constant type: %A" constant)
     }
 
 and generateIdentifier (ident: Ident) : MLIRBuilder<string * MLIRType> =
     mlir {
         let! maybeLocal = lookupLocal ident.idText
         match maybeLocal with
-        | Some ssa -> return (ssa, MLIRTypes.i32)
+        | Some (ssa, typ) -> return (ssa, typ)
         | None ->
-            let! ssa = nextSSA "undef"
-            // Check if this is a function that will be called
-            let typ = 
-                match ident.idText with
-                | "op_PipeRight" | "op_PipeLeft" | "op_ComposeRight" | "op_ComposeLeft" ->
-                    // These are function operators - need function pointer type
-                    MLIRTypes.memref MLIRTypes.i8  // Will render as !llvm.ptr
-                | _ -> MLIRTypes.i32
-            do! emitUndef ssa typ (Some (sprintf "undefined: %s" ident.idText))
-            do! newline
-            return (ssa, typ)
+            // Not a local - might be a function reference
+            return! failHard "Identifier Resolution" 
+                (sprintf "Unbound identifier '%s'" ident.idText)
     }
 
 and generateQualifiedIdentifier (name: string) : MLIRBuilder<string * MLIRType> =
     mlir {
-        let! ssa = nextSSA "qid"
-        do! emitUndef ssa MLIRTypes.i32 (Some name)
-        do! newline
-        return (ssa, MLIRTypes.i32)
+        // Try to resolve as a symbol
+        let! symbol = resolveSymbol name
+        // Return a function reference
+        let! ssa = nextSSA "fref"
+        return (ssa, MLIRTypes.func symbol.ParameterTypes symbol.ReturnType)
     }
 
 and generateApplication (funcExpr: SynExpr) (argExpr: SynExpr) : MLIRBuilder<string * MLIRType> =
     mlir {
         match funcExpr with
         | SynExpr.Ident ident when ident.idText = "op_PipeRight" || ident.idText = "|>" ->
+            // Pipe operator - just evaluate the argument
             return! generateExpression argExpr
             
         | SynExpr.Ident ident ->
-            return! generateKnownCall ident.idText argExpr
+            // Direct function call
+            let! symbol = resolveSymbol ident.idText
+            let! (argSSA, argType) = generateExpression argExpr
+            return! generateSymbolCall symbol [(argSSA, argType)]
             
         | SynExpr.LongIdent(_, SynLongIdent(ids, _, _), _, _) ->
             let funcName = ids |> List.map (fun id -> id.idText) |> String.concat "."
-            return! generateKnownCall funcName argExpr
+            let! symbol = resolveSymbol funcName
+            let! (argSSA, argType) = generateExpression argExpr
+            return! generateSymbolCall symbol [(argSSA, argType)]
             
         | SynExpr.TypeApp(SynExpr.Ident ident, _, _, _, _, _, _) ->
-            return! generateKnownCall ident.idText argExpr
+            // Generic function call (e.g., stackBuffer<byte>)
+            let! symbol = resolveSymbol ident.idText
+            let! (argSSA, argType) = generateExpression argExpr
+            
+            // Special handling for stackBuffer
+            if ident.idText = "stackBuffer" then
+                match argExpr with
+                | SynExpr.Const(SynConst.Int32 size, _) ->
+                    let! bufferSSA = nextSSA "buffer"
+                    do! emitAlloca bufferSSA size
+                    do! newline
+                    return (bufferSSA, MLIRTypes.memref MLIRTypes.i8)
+                | _ ->
+                    return! failHard "stackBuffer" "Size must be a constant"
+            else
+                return! generateSymbolCall symbol [(argSSA, argType)]
             
         | _ ->
-            let! (funcSSA, funcType) = generateExpression funcExpr
-            let! (argSSA, argType) = generateExpression argExpr
-            let! resultSSA = nextSSA "app"
-            
-            // Check if we're calling a function pointer
-            match funcType.Category with
-            | MLIRTypeCategory.MemRef ->
-                // Function pointer call
-                do! emitIndirectCall resultSSA funcSSA argSSA argType MLIRTypes.i32
-            | _ ->
-                // Regular call (shouldn't happen with proper typing)
-                do! emitUndef resultSSA MLIRTypes.i32 (Some "invalid function call")
-            do! newline
-            return (resultSSA, MLIRTypes.i32)
+            return! failHard "Application" 
+                "Complex function expressions not yet supported"
     }
 
-and generateKnownCall (funcName: string) (argExpr: SynExpr) : MLIRBuilder<string * MLIRType> =
-    mlir {
-        match funcName with
-        | "op_PipeRight" | "|>" ->
-            // Pipe operator - evaluate argument
-            return! generateExpression argExpr
-            
-        | "call" when isCallPlaceholder argExpr ->
-            // This is a placeholder for a function call
-            let! callSSA = nextSSA "call"
-            do! emitUndef callSSA (MLIRTypes.memref MLIRTypes.i8) (Some (sprintf "call %s" funcName))
-            do! newline
-            return (callSSA, MLIRTypes.memref MLIRTypes.i8)
-            
-        // ... rest of the cases remain the same
-        | _ ->
-            let! (argSSA, argType) = generateExpression argExpr
-            let! resultSSA = nextSSA "call"
-            do! emitUndef resultSSA MLIRTypes.i32 (Some (sprintf "call %s" funcName))
-            do! newline
-            return (resultSSA, MLIRTypes.i32)
-    }
-
-and isCallPlaceholder expr =
-    match expr with
-    | SynExpr.Ident ident -> 
-        match ident.idText with
-        | "op_PipeRight" | "op_PipeLeft" | "printf" | "sprintf" | "printfn" -> true
-        | _ -> false
-    | _ -> false
-
-and generateLet (bindings: SynBinding list) (body: SynExpr) : MLIRBuilder<string * MLIRType> =
+and generateLet (isUse: bool) (bindings: SynBinding list) (body: SynExpr) : MLIRBuilder<string * MLIRType> =
     mlir {
         for binding in bindings do
             do! processLetBinding binding
@@ -420,95 +458,115 @@ and processLetBinding (SynBinding(_, _, _, _, _, _, _, pat, _, expr, _, _, _)) :
     mlir {
         match pat with
         | SynPat.Named(SynIdent(ident, _), _, _, _) ->
-            let! (ssa, _) = generateExpression expr
-            do! bindLocal ident.idText ssa
-        | _ -> ()
+            let! (ssa, typ) = generateExpression expr
+            do! bindLocal ident.idText ssa typ
+        | _ ->
+            return! failHard "Let Binding" "Complex patterns not yet supported"
     }
 
 and generateMatch (matchExpr: SynExpr) (clauses: SynMatchClause list) : MLIRBuilder<string * MLIRType> =
     mlir {
-        let! (matchSSA, _) = generateExpression matchExpr
+        let! (matchSSA, matchType) = generateExpression matchExpr
         
+        // For now, simplified match handling
         match clauses with
-        | SynMatchClause(pat, _, resultExpr, _, _, _) :: _ ->
-            match pat with
-            | SynPat.Named(SynIdent(ident, _), _, _, _) ->
-                do! bindLocal ident.idText matchSSA
-            | _ -> ()
-            return! generateExpression resultExpr
-        | [] ->
-            let! ssa = nextSSA "match"
-            do! emitLine (sprintf "%s = arith.constant 0 : i32  // empty match" ssa)
-            return (ssa, MLIRTypes.i32)
+        | SynMatchClause(SynPat.LongIdent(SynLongIdent([okIdent], _, _), _, _, _, _, _), _, okExpr, _, _, _) :: 
+          SynMatchClause(SynPat.LongIdent(SynLongIdent([errorIdent], _, _), _, _, _, _, _), _, errorExpr, _, _, _) :: _ 
+            when okIdent.idText = "Ok" && errorIdent.idText = "Error" ->
+            // Result pattern match
+            let! resultSSA = nextSSA "match_result"
+            
+            // For now, assume Ok case (proper implementation would check the tag)
+            let! (okSSA, okType) = generateExpression okExpr
+            return (okSSA, okType)
+            
+        | _ ->
+            return! failHard "Match Expression" "Complex match patterns not yet supported"
     }
 
 and generateFieldAccess (targetExpr: SynExpr) (fieldIds: Ident list) : MLIRBuilder<string * MLIRType> =
     mlir {
-        let! (targetSSA, _) = generateExpression targetExpr
+        let! (targetSSA, targetType) = generateExpression targetExpr
         let fieldName = fieldIds |> List.map (fun id -> id.idText) |> String.concat "."
-        let! ssa = nextSSA "field"
-        do! emitUndef ssa MLIRTypes.i32 (Some (sprintf "field %s of %s" fieldName targetSSA))
-        do! newline
-        return (ssa, MLIRTypes.i32)
+        
+        // Special case for buffer.AsSpan
+        if fieldName = "AsSpan" then
+            // Just return the buffer itself for now
+            return (targetSSA, targetType)
+        else
+            return! failHard "Field Access" 
+                (sprintf "Field access '%s' not implemented" fieldName)
     }
 
 and generateTuple (exprs: SynExpr list) : MLIRBuilder<string * MLIRType> =
     mlir {
-        let! ssas = 
+        let! elements = 
             exprs |> List.fold (fun accM expr ->
                 mlir {
                     let! acc = accM
-                    let! (ssa, _) = generateExpression expr
-                    return ssa :: acc
+                    let! (ssa, typ) = generateExpression expr
+                    return (ssa, typ) :: acc
                 }
             ) (mlir.Return [])
         
-        match List.rev ssas with
-        | [ssa] -> return (ssa, MLIRTypes.i32)
-        | _ ->
-            let! tupleSSA = nextSSA "tuple"
-            do! emitUndef tupleSSA MLIRTypes.i32 (Some "tuple")
-            do! newline
-            return (tupleSSA, MLIRTypes.i32)
+        let elements' = List.rev elements
+        
+        // For now, return the first element of a tuple
+        match elements' with
+        | (ssa, typ) :: _ -> return (ssa, typ)
+        | [] -> 
+            return! failHard "Tuple" "Empty tuple not supported"
     }
 
 /// Generate MLIR function
 let generateFunction (functionName: string) (attributes: SynAttributes) (expression: SynExpr) : MLIRBuilder<unit> =
     mlir {
         let! state = getState
+        
         let qualifiedName = 
-            match state.CurrentFunction with
-            | Some module' -> module' + "." + functionName
-            | None -> functionName
+            match state.CurrentModule with
+            | [] -> functionName
+            | modules -> (modules @ [functionName]) |> String.concat "."
         
-        let isMain = attributes |> List.exists (fun attrList ->
-            attrList.Attributes |> List.exists (fun attr ->
-                match attr.TypeName with
-                | SynLongIdent([ident], [], [None]) -> ident.idText = "EntryPoint"
-                | _ -> false))
-        
-        let mlirName = if isMain then "@main" else "@" + functionName
-        
-        do! emitLine (sprintf "func.func %s() -> i32 {" mlirName)
-        do! indent (mlir {
-            do! updateState (fun s -> { s with 
-                                         CurrentFunction = Some functionName
-                                         LocalVars = Map.empty
-                                         SSACounter = 0 })
+        // Check if already generated
+        if Set.contains qualifiedName state.GeneratedFunctions then
+            return ()
+        else
+            do! updateState (fun s -> { s with GeneratedFunctions = Set.add qualifiedName s.GeneratedFunctions })
             
-            let! (resultSSA, resultType) = generateExpression expression
+            let isMain = attributes |> List.exists (fun attrList ->
+                attrList.Attributes |> List.exists (fun attr ->
+                    match attr.TypeName with
+                    | SynLongIdent([ident], [], [None]) -> ident.idText = "EntryPoint"
+                    | _ -> false))
             
-            match resultType with
-            | t when t = MLIRTypes.void_ || isMain ->
-                let! zeroSSA = nextSSA "ret"
-                do! emitConstant zeroSSA 0 MLIRTypes.i32
-                do! newline
-                do! emitReturn zeroSSA MLIRTypes.i32
-            | _ ->
-                do! emitReturn resultSSA resultType
-            do! newline
-        })
-        do! emitLine "}"
+            let mlirName = 
+                if isMain then "@main" 
+                else "@" + qualifiedName.Replace(".", "_")
+            
+            do! emitLine (sprintf "func.func %s() -> i32 {" mlirName)
+            do! indent (mlir {
+                do! updateState (fun s -> { s with 
+                                             CurrentFunction = Some qualifiedName
+                                             LocalVars = Map.empty
+                                             SSACounter = 0 })
+                
+                try
+                    let! (resultSSA, resultType) = generateExpression expression
+                    
+                    match resultType with
+                    | t when t = MLIRTypes.void_ || isMain ->
+                        let! zeroSSA = nextSSA "ret"
+                        do! emitLine (sprintf "%s = arith.constant 0 : i32" zeroSSA)
+                        do! emitLine (sprintf "func.return %s : i32" zeroSSA)
+                    | _ ->
+                        do! emitLine (sprintf "func.return %s : %s" resultSSA (mlirTypeToStringWithLLVM resultType))
+                with
+                | MLIRGenerationException(msg, _) ->
+                    // Re-raise with function context
+                    raise (MLIRGenerationException(msg, Some qualifiedName))
+            })
+            do! emitLine "}"
     }
 
 /// Process binding
@@ -520,7 +578,8 @@ let processBinding (SynBinding(_, _, _, _, attributes, _, _, pattern, _, express
         | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
             let name = ids |> List.map (fun id -> id.idText) |> List.last
             do! generateFunction name attributes expression
-        | _ -> ()
+        | _ ->
+            return! failHard "Binding" "Complex binding patterns not supported"
     }
 
 /// Process declaration
@@ -532,23 +591,20 @@ let rec processDeclaration (decl: SynModuleDecl) : MLIRBuilder<unit> =
                 do! processBinding binding
         | SynModuleDecl.NestedModule(componentInfo, _, nestedDecls, _, _, _) ->
             let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = componentInfo
-            let nestedName = longId |> List.map (fun ident -> ident.idText) |> String.concat "."
-            do! updateState (fun s -> 
-                let fullPath = 
-                    match s.CurrentFunction with
-                    | Some curr -> curr + "." + nestedName
-                    | None -> nestedName
-                { s with CurrentFunction = Some fullPath })
+            let nestedName = longId |> List.map (fun ident -> ident.idText)
+            let! state = getState
+            do! updateState (fun s -> { s with CurrentModule = state.CurrentModule @ nestedName })
             for decl in nestedDecls do
                 do! processDeclaration decl
+            do! updateState (fun s -> { s with CurrentModule = state.CurrentModule })
         | _ -> ()
     }
 
 /// Process module
 let processModuleOrNamespace (SynModuleOrNamespace(longId, _, _, declarations, _, _, _, _, _)) : MLIRBuilder<unit> =
     mlir {
-        let modulePath = longId |> List.map (fun ident -> ident.idText) |> String.concat "."
-        do! updateState (fun s -> { s with CurrentFunction = Some modulePath })
+        let modulePath = longId |> List.map (fun ident -> ident.idText)
+        do! updateState (fun s -> { s with CurrentModule = modulePath })
         for decl in declarations do
             do! processDeclaration decl
     }
@@ -570,18 +626,13 @@ let emitExternalDeclarations : MLIRBuilder<unit> =
         for ext in state.RequiredExternals do
             match ext with
             | "printf" ->
-                // All pointer parameters are opaque
-                do! emit "func.func private @printf(!llvm.ptr, ...) -> i32"
-                do! newline
+                do! emitLine "func.func private @printf(!llvm.ptr, ...) -> i32"
             | "sprintf" ->
-                do! emit "func.func private @sprintf(!llvm.ptr, !llvm.ptr, ...) -> !llvm.ptr"
-                do! newline
+                do! emitLine "func.func private @sprintf(!llvm.ptr, !llvm.ptr, ...) -> i32"
             | "fgets" ->
-                do! emit "func.func private @fgets(!llvm.ptr, i32, !llvm.ptr) -> !llvm.ptr"
-                do! newline
+                do! emitLine "func.func private @fgets(!llvm.ptr, i32, !llvm.ptr) -> !llvm.ptr"
             | "strlen" ->
-                do! emit "func.func private @strlen(!llvm.ptr) -> i32"
-                do! newline
+                do! emitLine "func.func private @strlen(!llvm.ptr) -> i32"
             | _ -> ()
     }
 
@@ -598,19 +649,63 @@ let generateProgram (programName: string) (typeCtx: TypeContext) (symbolRegistry
         SymbolRegistry = symbolRegistry
         RequiredExternals = Set.empty
         CurrentFunction = None
+        GeneratedFunctions = Set.empty
+        CurrentModule = []
+        HasErrors = false
     }
     
     let builder = mlir {
         do! emitLine (sprintf "module @%s {" programName)
         
-        for (_, parsedInput) in reachableInputs do
-            do! processInputFile parsedInput
-        
-        do! emitExternalDeclarations
+        try
+            for (_, parsedInput) in reachableInputs do
+                do! processInputFile parsedInput
+            
+            do! emitExternalDeclarations
+            
+        with
+        | MLIRGenerationException(msg, funcOpt) ->
+            // Add context about where we failed
+            let context = 
+                match funcOpt with
+                | Some func -> sprintf " (in function %s)" func
+                | None -> ""
+            return! failHard "MLIR Generation" (msg + context)
         
         do! updateState (fun s -> { s with Indent = 0 })
         do! emitLine "}"
     }
     
-    let (_, finalState) = builder initialState
-    finalState.Output.ToString()
+    try
+        let (_, finalState) = builder initialState
+        let mlir = finalState.Output.ToString()
+        
+        // Final validation - check for any undefined values
+        if mlir.Contains("llvm.mlir.undef") then
+            let lines = mlir.Split('\n')
+            let undefLines = 
+                lines 
+                |> Array.indexed 
+                |> Array.filter (fun (_, line) -> line.Contains("llvm.mlir.undef"))
+                |> Array.map (fun (i, line) -> sprintf "Line %d: %s" (i + 1) (line.Trim()))
+            
+            raise (MLIRGenerationException(
+                sprintf "Generated MLIR contains undefined values:\n%s" (String.concat "\n" undefLines),
+                None))
+        
+        mlir
+    with
+    | MLIRGenerationException(msg, _) as ex ->
+        // IMPORTANT: Return partial MLIR for debugging
+        let (_, finalState) = builder initialState
+        let partialMLIR = finalState.Output.ToString()
+        
+        // Add error marker to the MLIR
+        let errorMLIR = 
+            partialMLIR + 
+            sprintf "\n// ERROR: %s\n" msg +
+            "// PARTIAL MLIR GENERATED UP TO ERROR POINT\n"
+        
+        // Still throw the exception but the partial MLIR is available
+        printfn "Partial MLIR generated (see .mlir file)"
+        failwith (sprintf "MLIR Generation Failed: %s\n\nPartial MLIR:\n%s" msg errorMLIR)
