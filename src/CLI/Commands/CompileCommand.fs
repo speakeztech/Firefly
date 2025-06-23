@@ -19,7 +19,10 @@ open Core.Conversion.OptimizationPipeline
 open CLI.Configurations.ProjectConfig
 open Dabbit.Bindings.SymbolRegistry
 open Dabbit.Analysis.ReachabilityAnalyzer
+open Dabbit.Analysis.DependencyGraphBuilder
+open Dabbit.Analysis.AstPruner
 open Dabbit.Transformations.ClosureElimination
+open Dabbit.Transformations.StackAllocation
 
 /// Command line arguments for the compile command
 type CompileArgs =
@@ -39,7 +42,7 @@ with
             | Target _ -> "Target platform (e.g. x86_64-pc-windows-msvc, x86_64-pc-linux-gnu)"
             | Optimize _ -> "Optimization level (none, less, default, aggressive, size)"
             | Config _ -> "Path to configuration file (firefly.toml)"
-            | Keep_Intermediates -> "Keep intermediate files (Oak AST, MLIR, LLVM IR)"
+            | Keep_Intermediates -> "Keep intermediate files (.raw.fcs, .sm.fcs, .ra.fcs, MLIR, LLVM IR)"
             | Verbose -> "Enable verbose output and diagnostics"
 
 /// Compilation context with settings
@@ -52,6 +55,29 @@ type CompilationContext = {
     KeepIntermediates: bool
     Verbose: bool
     IntermediatesDir: string option
+}
+
+/// Combined parsed inputs with dependency information
+type ParsedProgram = {
+    MainFile: string
+    ParsedInputs: (string * ParsedInput) list  // (filepath, parsed AST)
+    Dependencies: string list
+    Checker: FSharpChecker
+    ProjectOptions: FSharpProjectOptions
+}
+
+/// Refined AST after .NET construct removal
+type RefinedProgram = {
+    MainFile: string
+    RefinedInputs: (string * ParsedInput) list
+    RemovedConstructs: string list  // For diagnostics
+}
+
+/// Reachable program after tree-shaking
+type ReachableProgram = {
+    MainFile: string
+    ReachableInputs: (string * ParsedInput) list
+    ReachabilityStats: ReachabilityStats
 }
 
 /// Compiler result builder for computation expressions
@@ -136,8 +162,45 @@ let private writeIntermediateFile (dir: string option) (baseName: string) (exten
         printfn "  Wrote %s (%d bytes)" (Path.GetFileName(filePath)) content.Length
     | None -> ()
 
-/// Phase 1: Parse F# source
-let private parseSource (ctx: CompilationContext) (sourceCode: string) : CompilerResult<ParsedInput * FSharpChecker * FSharpProjectOptions> =
+/// Extract opened module names from parsed input
+let private extractOpenedModules (input: ParsedInput) : string list =
+    match input with
+    | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
+        modules 
+        |> List.collect (fun (SynModuleOrNamespace(_, _, _, decls, _, _, _, _, _)) ->
+            decls |> List.choose (function
+                | SynModuleDecl.Open(target, _) ->
+                    match target with
+                    | SynOpenDeclTarget.ModuleOrNamespace(SynLongIdent(ids, _, _), _) ->
+                        let modulePath = ids |> List.map (fun id -> id.idText) |> String.concat "."
+                        Some modulePath
+                    | _ -> None
+                | _ -> None))
+    | _ -> []
+
+/// Resolve module name to file path
+let private resolveModulePath (moduleName: string) : string option =
+    let possiblePaths = [
+        // Look in lib/Alloy for Alloy modules
+        Path.Combine("lib", "Alloy", moduleName.Replace(".", Path.DirectorySeparatorChar.ToString()) + ".fs")
+        // Look in lib for other modules
+        Path.Combine("lib", moduleName.Replace(".", Path.DirectorySeparatorChar.ToString()) + ".fs")
+        // Look in current directory
+        moduleName.Replace(".", Path.DirectorySeparatorChar.ToString()) + ".fs"
+        // Handle nested modules (e.g., Alloy.IO.Console -> Alloy/IO.fs)
+        let parts = moduleName.Split('.')
+        if parts.Length > 2 then
+            Path.Combine("lib", parts.[0], String.concat (Path.DirectorySeparatorChar.ToString()) parts.[1..parts.Length-2] + ".fs")
+        else
+            ""
+    ]
+    
+    possiblePaths 
+    |> List.filter (fun p -> not (String.IsNullOrEmpty(p)))
+    |> List.tryFind File.Exists
+
+/// Phase 1: Parse F# source including all dependencies
+let private parseSource (ctx: CompilationContext) (sourceCode: string) : CompilerResult<ParsedProgram> =
     printfn "Phase 1: Parsing F# source..."
     let checker = FSharpChecker.Create()
     let sourceText = SourceText.ofString sourceCode
@@ -156,77 +219,330 @@ let private parseSource (ctx: CompilationContext) (sourceCode: string) : Compile
             IsExe = true
     }
     
+    // Parse main file
     let parseResults = checker.ParseFile(ctx.InputPath, sourceText, parsingOptions) |> Async.RunSynchronously
     
-    // Check for errors first
     if parseResults.ParseHadErrors then
         let errors = parseResults.Diagnostics |> Array.map (fun d -> d.Message) |> String.concat "\n"
         CompilerFailure [SyntaxError({ Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 }, errors, ["FCS parsing"])]
     else
-        // ParseTree is not optional in this version of FCS - it's always present
-        let parsedInput = parseResults.ParseTree
+        let mainParsedInput = parseResults.ParseTree
+        let dependencies = extractOpenedModules mainParsedInput
         
+        // Parse each dependency
+        let mutable allParsedInputs = [(ctx.InputPath, mainParsedInput)]
+        let mutable failedDeps = []
+        
+        for dep in dependencies do
+            match resolveModulePath dep with
+            | Some filePath ->
+                try
+                    let depSource = File.ReadAllText(filePath)
+                    let depSourceText = SourceText.ofString depSource
+                    let depParseResults = checker.ParseFile(filePath, depSourceText, parsingOptions) |> Async.RunSynchronously
+                    
+                    if not depParseResults.ParseHadErrors then
+                        allParsedInputs <- allParsedInputs @ [(filePath, depParseResults.ParseTree)]
+                    else
+                        failedDeps <- failedDeps @ [sprintf "%s: parse errors" dep]
+                with ex ->
+                    failedDeps <- failedDeps @ [sprintf "%s: %s" dep ex.Message]
+            | None ->
+                failedDeps <- failedDeps @ [sprintf "%s: file not found" dep]
+        
+        // Log any dependency issues but don't fail compilation
+        if not failedDeps.IsEmpty && ctx.Verbose then
+            printfn "  Warning: Could not parse some dependencies:"
+            failedDeps |> List.iter (printfn "    - %s")
+        
+        let parsedProgram = {
+            MainFile = ctx.InputPath
+            ParsedInputs = allParsedInputs
+            Dependencies = dependencies
+            Checker = checker
+            ProjectOptions = projectOptions
+        }
+        
+        // Write raw FCS output with all dependencies
         if ctx.KeepIntermediates then
-            writeIntermediateFile ctx.IntermediatesDir (Path.GetFileNameWithoutExtension ctx.InputPath) ".fcs" (sprintf "%A" parsedInput)
+            writeIntermediateFile ctx.IntermediatesDir 
+                (Path.GetFileNameWithoutExtension ctx.InputPath) 
+                ".raw.fcs" 
+                (sprintf "%A" parsedProgram)
         
-        Success (parsedInput, checker, projectOptions)
+        Success parsedProgram
 
-/// Phase 2: Type check
-let private typeCheck (ctx: CompilationContext) (parsedInput: ParsedInput, checker: FSharpChecker, projectOptions: FSharpProjectOptions) : CompilerResult<FSharpCheckFileResults * ParsedInput> =
-    printfn "Phase 2: Type checking..."
-    let sourceText = SourceText.ofString (File.ReadAllText ctx.InputPath)
+/// Remove .NET-specific constructs from AST
+let private removeNetConstructs (input: ParsedInput) : ParsedInput * string list =
+    let mutable removedConstructs = []
     
-    // We need to re-parse to get the parse results for CheckFileInProject
-    let parsingOptions = { 
-        FSharpParsingOptions.Default with 
-            SourceFiles = [| ctx.InputPath |]
-            LangVersionText = "preview"
-            IsExe = true
+    let rec transformExpr expr =
+        match expr with
+        // Remove array creation expressions that use .NET allocations
+        | SynExpr.ArrayOrList(isArray, elements, range) when isArray ->
+            removedConstructs <- "Array literal allocation" :: removedConstructs
+            // Convert to stack allocation pattern if small enough
+            if elements.Length <= 16 then
+                SynExpr.App(
+                    ExprAtomicFlag.NonAtomic, false,
+                    SynExpr.Ident(Ident("stackalloc", range)),
+                    SynExpr.Const(SynConst.Int32 elements.Length, range),
+                    range)
+            else
+                SynExpr.Const(SynConst.Unit, range)  // Remove large allocations
+        
+        // Remove list expressions
+        | SynExpr.ArrayOrList(isArray, elements, range) when not isArray ->
+            removedConstructs <- "List allocation" :: removedConstructs
+            SynExpr.Const(SynConst.Unit, range)
+        
+        // Remove object expressions - FCS 43.9.300 expects 8 arguments
+        | SynExpr.ObjExpr(objType, argOpt, withKeyword, bindings, members, extraImpls, newExprRange, range) ->
+            removedConstructs <- "Object expression" :: removedConstructs
+            SynExpr.Const(SynConst.Unit, range)
+        
+        // Remove new expressions for reference types
+        | SynExpr.New(isProtected, targetType, expr, range) ->
+            removedConstructs <- "New expression" :: removedConstructs
+            transformExpr expr  // Keep the argument expression
+        
+        // Recursively transform nested expressions
+        | SynExpr.App(flag, isInfix, funcExpr, argExpr, range) ->
+            SynExpr.App(flag, isInfix, transformExpr funcExpr, transformExpr argExpr, range)
+        
+        | SynExpr.LetOrUse(isRec, isUse, bindings, body, range, trivia) ->
+            let transformedBindings = bindings |> List.map transformBinding
+            SynExpr.LetOrUse(isRec, isUse, transformedBindings, transformExpr body, range, trivia)
+        
+        | SynExpr.Sequential(debugPoint, isTrueSeq, expr1, expr2, range, trivia) ->
+            SynExpr.Sequential(debugPoint, isTrueSeq, transformExpr expr1, transformExpr expr2, range, trivia)
+        
+        | SynExpr.IfThenElse(ifExpr, thenExpr, elseExprOpt, spIfToThen, isFromTry, range, trivia) ->
+            SynExpr.IfThenElse(
+                transformExpr ifExpr,
+                transformExpr thenExpr,
+                Option.map transformExpr elseExprOpt,
+                spIfToThen, isFromTry, range, trivia)
+        
+        | SynExpr.Match(spMatch, matchExpr, clauses, range, trivia) ->
+            let transformedClauses = clauses |> List.map (fun (SynMatchClause(pat, whenExpr, resultExpr, range, spTarget, trivia)) ->
+                SynMatchClause(pat, Option.map transformExpr whenExpr, transformExpr resultExpr, range, spTarget, trivia))
+            SynExpr.Match(spMatch, transformExpr matchExpr, transformedClauses, range, trivia)
+        
+        | SynExpr.Lambda(fromMethod, inLambdaSeq, args, body, parsedData, range, trivia) ->
+            SynExpr.Lambda(fromMethod, inLambdaSeq, args, transformExpr body, parsedData, range, trivia)
+        
+        | _ -> expr
+    
+    and transformBinding (SynBinding(access, kind, isInline, isMutable, attrs, xmlDoc, valData, pat, returnInfo, expr, range, sp, trivia)) =
+        SynBinding(access, kind, isInline, isMutable, attrs, xmlDoc, valData, pat, returnInfo, transformExpr expr, range, sp, trivia)
+    
+    let rec transformDecl decl =
+        match decl with
+        | SynModuleDecl.Let(isRec, bindings, range) ->
+            SynModuleDecl.Let(isRec, bindings |> List.map transformBinding, range)
+        
+        | SynModuleDecl.Types(typeDefs, range) ->
+            // Remove class types, keep only records and unions
+            let filteredTypeDefs = typeDefs |> List.filter (fun (SynTypeDefn(componentInfo, typeRepr, members, implicitCtor, range, trivia)) ->
+                match typeRepr with
+                | SynTypeDefnRepr.ObjectModel(kind, members, range) ->
+                    match kind with
+                    | SynTypeDefnKind.Class -> 
+                        removedConstructs <- "Class definition" :: removedConstructs
+                        false
+                    | _ -> true
+                | _ -> true)
+            SynModuleDecl.Types(filteredTypeDefs, range)
+        
+        | SynModuleDecl.NestedModule(componentInfo, isRec, decls, range, trivia, moduleKeyword) ->
+            SynModuleDecl.NestedModule(componentInfo, isRec, decls |> List.map transformDecl, range, trivia, moduleKeyword)
+        
+        | _ -> decl
+    
+    match input with
+    | ParsedInput.ImplFile(ParsedImplFileInput(fileName, isScript, qualName, pragmas, directives, modules, isLast, trivia, ids)) ->
+        let transformedModules = modules |> List.map (fun (SynModuleOrNamespace(longId, isRec, kind, decls, xmlDoc, attrs, access, range, trivia)) ->
+            let transformedDecls = decls |> List.map transformDecl
+            SynModuleOrNamespace(longId, isRec, kind, transformedDecls, xmlDoc, attrs, access, range, trivia))
+        
+        let transformedInput = ParsedInput.ImplFile(
+            ParsedImplFileInput(fileName, isScript, qualName, pragmas, directives, transformedModules, isLast, trivia, ids))
+        
+        (transformedInput, removedConstructs)
+    
+    | sig_ -> (sig_, removedConstructs)
+
+/// Phase 2a: Remove .NET constructs to create smaller AST
+let private refineAST (ctx: CompilationContext) (parsedProgram: ParsedProgram) : CompilerResult<RefinedProgram> =
+    printfn "Phase 2a: Removing .NET constructs..."
+    
+    let refinedInputs = 
+        parsedProgram.ParsedInputs 
+        |> List.map (fun (path, input) ->
+            let (refined, removed) = removeNetConstructs input
+            if ctx.Verbose && not removed.IsEmpty then
+                printfn "  Removed from %s: %s" (Path.GetFileName(path)) (String.concat ", " (removed |> List.distinct))
+            (path, refined))
+    
+    let allRemoved = 
+        parsedProgram.ParsedInputs 
+        |> List.collect (fun (_, input) -> snd (removeNetConstructs input))
+        |> List.distinct
+    
+    let refinedProgram = {
+        MainFile = parsedProgram.MainFile
+        RefinedInputs = refinedInputs
+        RemovedConstructs = allRemoved
     }
-    let parseResults = checker.ParseFile(ctx.InputPath, sourceText, parsingOptions) |> Async.RunSynchronously
     
-    let checkResult = checker.CheckFileInProject(parseResults, ctx.InputPath, 0, sourceText, projectOptions) |> Async.RunSynchronously
+    // Write smaller FCS output
+    if ctx.KeepIntermediates then
+        writeIntermediateFile ctx.IntermediatesDir 
+            (Path.GetFileNameWithoutExtension ctx.InputPath) 
+            ".sm.fcs" 
+            (sprintf "%A" refinedProgram)
     
-    match checkResult with
-    | FSharpCheckFileAnswer.Aborted -> 
-        CompilerFailure [InternalError("type checking", "Type checking was aborted", None)]
-    | FSharpCheckFileAnswer.Succeeded checkResults ->
-        Success (checkResults, parsedInput)
+    Success refinedProgram
 
-/// Phase 3: Transform AST
-let private transformASTPhase (ctx: CompilationContext) (checkResults: FSharpCheckFileResults, parsedInput: ParsedInput) : CompilerResult<ParsedInput * TypeContext * SymbolRegistry> =
-    printfn "Phase 3: Transforming AST..."
+/// Build dependency graph from refined AST (without FSharpSymbol objects)
+let private buildDependencyGraph (refinedProgram: RefinedProgram) : CompilerResult<(Set<string> * Map<string, Set<string>> * Set<string>)> =
+    let mutable allSymbols = Set.empty
+    let mutable edges = Map.empty
+    let mutable entryPoints = Set.empty
+    
+    // Process each input file
+    for (filePath, input) in refinedProgram.RefinedInputs do
+        match input with
+        | ParsedInput.ImplFile(ParsedImplFileInput(_, _, qualName, _, _, modules, _, _, _)) ->
+            for (SynModuleOrNamespace(longId, _, _, decls, _, _, _, _, _)) in modules do
+                let moduleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
+                
+                // Build graph from module declarations
+                let moduleGraph = buildFromModule moduleName decls
+                
+                // Collect all symbols and merge edges
+                for KeyValue(node, deps) in moduleGraph.Edges do
+                    allSymbols <- Set.add node allSymbols
+                    edges <- Map.add node deps edges
+                    // Also add dependencies as symbols
+                    for dep in deps do
+                        allSymbols <- Set.add dep allSymbols
+                
+                // Find entry points
+                for decl in decls do
+                    match decl with
+                    | SynModuleDecl.Let(_, bindings, _) ->
+                        for binding in bindings do
+                            let (SynBinding(_, _, _, _, attrs, _, _, pat, _, _, _, _, _)) = binding
+                            let hasEntryPoint = attrs |> List.exists (fun attrList ->
+                                attrList.Attributes |> List.exists (fun attr ->
+                                    match attr.TypeName with
+                                    | SynLongIdent([ident], _, _) -> ident.idText = "EntryPoint"
+                                    | _ -> false))
+                            
+                            if hasEntryPoint then
+                                match pat with
+                                | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+                                    let fullName = sprintf "%s.%s" moduleName ident.idText
+                                    entryPoints <- Set.add fullName entryPoints
+                                    allSymbols <- Set.add fullName allSymbols
+                                | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
+                                    let name = ids |> List.map (fun id -> id.idText) |> String.concat "."
+                                    let fullName = sprintf "%s.%s" moduleName name
+                                    entryPoints <- Set.add fullName entryPoints
+                                    allSymbols <- Set.add fullName allSymbols
+                                | _ -> ()
+                    | _ -> ()
+        | _ -> ()
+    
+    Success (allSymbols, edges, entryPoints)
+
+/// Phase 2b: Perform reachability analysis (tree-shaking)
+let private performReachabilityAnalysis (ctx: CompilationContext) (refinedProgram: RefinedProgram) : CompilerResult<ReachableProgram> =
+    printfn "Phase 2b: Performing reachability analysis..."
+    
+    // Build dependency graph
+    match buildDependencyGraph refinedProgram with
+    | CompilerFailure errors -> CompilerFailure errors
+    | Success (allSymbols, edges, entryPoints) ->
+        
+        // Simple reachability analysis using worklist algorithm
+        let rec reachWorklist (visited: Set<string>) (worklist: string list) =
+            match worklist with
+            | [] -> visited
+            | current :: rest ->
+                if Set.contains current visited then
+                    reachWorklist visited rest
+                else
+                    let newVisited = Set.add current visited
+                    let neighbors = 
+                        Map.tryFind current edges 
+                        |> Option.defaultValue Set.empty
+                        |> Set.toList
+                    reachWorklist newVisited (neighbors @ rest)
+        
+        let reachableSymbols = reachWorklist Set.empty (Set.toList entryPoints)
+        
+        // Create statistics
+        let stats = {
+            TotalSymbols = Set.count allSymbols
+            ReachableSymbols = Set.count reachableSymbols
+            EliminatedSymbols = Set.count allSymbols - Set.count reachableSymbols
+            ModuleBreakdown = Map.empty  // Could calculate this if needed
+        }
+        
+        if ctx.Verbose then
+            printfn "  Total symbols: %d" stats.TotalSymbols
+            printfn "  Reachable symbols: %d" stats.ReachableSymbols
+            printfn "  Eliminated symbols: %d" stats.EliminatedSymbols
+        
+        // Prune unreachable code from AST
+        let reachableInputs = 
+            refinedProgram.RefinedInputs
+            |> List.map (fun (path, input) ->
+                let pruned = prune reachableSymbols input
+                (path, pruned))
+        
+        let reachableProgram = {
+            MainFile = refinedProgram.MainFile
+            ReachableInputs = reachableInputs
+            ReachabilityStats = stats
+        }
+        
+        // Write reachability analysis result
+        if ctx.KeepIntermediates then
+            writeIntermediateFile ctx.IntermediatesDir 
+                (Path.GetFileNameWithoutExtension ctx.InputPath) 
+                ".ra.fcs" 
+                (sprintf "%A" reachableProgram)
+        
+        Success reachableProgram
+
+/// Phase 3: Transform AST (now working with reachable code only)
+let private transformASTPhase (ctx: CompilationContext) (reachableProgram: ReachableProgram, checker: FSharpChecker, projectOptions: FSharpProjectOptions) : CompilerResult<ParsedInput * TypeContext * SymbolRegistry> =
+    printfn "Phase 3: Transforming reachable AST..."
     let typeCtx = TypeContextBuilder.create()
     
     match RegistryConstruction.buildAlloyRegistry() with
     | CompilerFailure errors -> CompilerFailure errors
     | Success symbolRegistry ->
-        // Analyze dependencies and reachability
-        let deps = buildDependencyMap checkResults
-        let entryPoints = findEntryPoints checkResults
-        let symbols = getAllSymbols checkResults
-        let reachability = { 
-            Reachable = findTransitiveDependencies deps entryPoints
-            UnionCases = Map.empty
-            Statistics = {
-                TotalSymbols = Map.count symbols
-                ReachableSymbols = Set.count entryPoints
-                EliminatedSymbols = Map.count symbols - Set.count entryPoints
-                ModuleBreakdown = Map.empty
-            }
-        }
+        // For now, just use the main file's AST for further processing
+        let (_, mainInput) = reachableProgram.ReachableInputs |> List.head
         
+        // Apply any additional transformations (closure elimination, etc.)
         let transformCtx = {
             TypeContext = typeCtx
             SymbolRegistry = symbolRegistry
-            Reachability = reachability
+            Reachability = {
+                Reachable = Set.empty  // Already pruned
+                UnionCases = Map.empty
+                Statistics = reachableProgram.ReachabilityStats
+            }
             ClosureState = { Counter = 0; Scope = Set.empty; Lifted = [] }
         }
         
-        let transformedAST = transformAST transformCtx parsedInput
-        
-        if ctx.KeepIntermediates then
-            writeIntermediateFile ctx.IntermediatesDir (Path.GetFileNameWithoutExtension ctx.InputPath) ".oak" (sprintf "%A" transformedAST)
+        let transformedAST = transformAST transformCtx mainInput
         
         Success (transformedAST, typeCtx, symbolRegistry)
 
@@ -298,8 +614,9 @@ let private validateAndFinalize (ctx: CompilationContext) (llvmIR: string) : Com
 let private compilePipeline (ctx: CompilationContext) (sourceCode: string) : CompilerResult<unit> =
     compilerResult {
         let! parsed = parseSource ctx sourceCode
-        let! typeChecked = typeCheck ctx parsed
-        let! transformed = transformASTPhase ctx typeChecked
+        let! refined = refineAST ctx parsed
+        let! reachable = performReachabilityAnalysis ctx refined
+        let! transformed = transformASTPhase ctx (reachable, parsed.Checker, parsed.ProjectOptions)
         let! mlir = generateMLIR ctx transformed
         let! lowered = lowerMLIR ctx mlir
         let! optimized = optimizeCode ctx lowered
