@@ -462,62 +462,37 @@ let private buildDependencyGraph (refinedProgram: RefinedProgram) : CompilerResu
 let private performReachabilityAnalysis (ctx: CompilationContext) (refinedProgram: RefinedProgram) : CompilerResult<ReachableProgram> =
     printfn "Phase 2b: Performing reachability analysis..."
     
-    // Build dependency graph
-    match buildDependencyGraph refinedProgram with
-    | CompilerFailure errors -> CompilerFailure errors
-    | Success (allSymbols, edges, entryPoints) ->
-        
-        // Simple reachability analysis using worklist algorithm
-        let rec reachWorklist (visited: Set<string>) (worklist: string list) =
-            match worklist with
-            | [] -> visited
-            | current :: rest ->
-                if Set.contains current visited then
-                    reachWorklist visited rest
-                else
-                    let newVisited = Set.add current visited
-                    let neighbors = 
-                        Map.tryFind current edges 
-                        |> Option.defaultValue Set.empty
-                        |> Set.toList
-                    reachWorklist newVisited (neighbors @ rest)
-        
-        let reachableSymbols = reachWorklist Set.empty (Set.toList entryPoints)
-        
-        // Create statistics
-        let stats = {
-            TotalSymbols = Set.count allSymbols
-            ReachableSymbols = Set.count reachableSymbols
-            EliminatedSymbols = Set.count allSymbols - Set.count reachableSymbols
-            ModuleBreakdown = Map.empty  // Could calculate this if needed
-        }
-        
-        if ctx.Verbose then
-            printfn "  Total symbols: %d" stats.TotalSymbols
-            printfn "  Reachable symbols: %d" stats.ReachableSymbols
-            printfn "  Eliminated symbols: %d" stats.EliminatedSymbols
-        
-        // Prune unreachable code from AST
-        let reachableInputs = 
-            refinedProgram.RefinedInputs
-            |> List.map (fun (path, input) ->
-                let pruned = prune reachableSymbols input
-                (path, pruned))
-        
-        let reachableProgram = {
-            MainFile = refinedProgram.MainFile
-            ReachableInputs = reachableInputs
-            ReachabilityStats = stats
-        }
-        
-        // Write reachability analysis result
-        if ctx.KeepIntermediates then
-            writeIntermediateFile ctx.IntermediatesDir 
-                (Path.GetFileNameWithoutExtension ctx.InputPath) 
-                ".ra.fcs" 
-                (sprintf "%A" reachableProgram)
-        
-        Success reachableProgram
+    // Use the new reachability analyzer that works directly with parsed inputs
+    let reachabilityResult = Dabbit.Analysis.ReachabilityAnalyzer.analyzeFromParsedInputs refinedProgram.RefinedInputs
+    
+    // Print statistics
+    let stats = reachabilityResult.Statistics
+    if ctx.Verbose then
+        printfn "  Total symbols: %d" stats.TotalSymbols
+        printfn "  Reachable symbols: %d" stats.ReachableSymbols
+        printfn "  Eliminated symbols: %d" stats.EliminatedSymbols
+    
+    // Prune unreachable code from AST
+    let reachableInputs = 
+        refinedProgram.RefinedInputs
+        |> List.map (fun (path, input) ->
+            let pruned = prune reachabilityResult.Reachable input
+            (path, pruned))
+    
+    let reachableProgram = {
+        MainFile = refinedProgram.MainFile
+        ReachableInputs = reachableInputs
+        ReachabilityStats = stats
+    }
+    
+    // Write reachability analysis result
+    if ctx.KeepIntermediates then
+        writeIntermediateFile ctx.IntermediatesDir 
+            (Path.GetFileNameWithoutExtension ctx.InputPath) 
+            ".ra.fcs" 
+            (sprintf "%A" reachableProgram)
+    
+    Success reachableProgram
 
 /// Phase 3: Transform AST (now working with reachable code only)
 let private transformASTPhase (ctx: CompilationContext) (reachableProgram: ReachableProgram, checker: FSharpChecker, projectOptions: FSharpProjectOptions) : CompilerResult<ParsedInput * TypeContext * SymbolRegistry> =
