@@ -133,33 +133,54 @@ let parseMessage (buffer: ReadOnlySpan<byte>) =
 
 ```
 firefly/
-├── src/
-│   ├── CLI/              # Orchestrating compiler CLI
-│   │   ├── Program.fs            # CLI entry point
-│   │   ├── Commands/             # Build, verify, profile commands
-│   │   └── Configuration/        # TOML project configuration
-│   │
-│   ├── Core/             # Core compilation pipeline
-│   │   ├── FCSProcessing/        # F# AST processing and analysis
-│   │   ├── TypeSystem/           # Type preservation and mapping
-│   │   ├── MemoryLayout/         # Memory layout analysis
-│   │   ├── MLIRGeneration/       # XParsec-based MLIR builders
-│   │   └── LLVMIntegration/      # LLVM.NET binding resolution
-│   │
-│   └── Dabbit/                   # AST to MLIR transformation
-│       ├── Closures/              # Closure → Explicit params
-│       ├── UnionLayouts/         # Fixed-size union compilation
-│       └── BindingMetadata/      # Static binding attributes
-│     
-├── tests/
-│   ├── AllocationTests/          # Verify zero-heap guarantee
-│   ├── StackBounds/              # Maximum stack usage tests
-│   └── StaticResolution/         # Ensure no dynamic dispatch
-│
-└── docs/
-    ├── memory-mgmt/              # Memory management guide
-    ├── mlir-patterns/            # Common F# → MLIR transforms
-    └── static-linking/           # LLVM.NET integration guide
+└── src/
+    ├── CLI/
+    │   ├── Program.fs
+    │   ├── Commands/
+    │   │   ├── CompileCommand.fs
+    │   │   ├── VerifyCommand.fs
+    │   │   └── DoctorCommand.fs
+    │   ├── Configurations/
+    │   │   └── ProjectConfig.fs
+    │   └── Diagnostics/
+    │       ├── EnvironmentInfo.fs
+    │       └── ToolchainVerification.fs
+    │
+    ├── Core/
+    │   ├── Utilities/
+    │   │   └── IntermediateWriter.fs
+    │   ├── XParsec/
+    │   │   └── Foundation.fs
+    │   ├── FCSProcessing/      
+    │   │   ├── TypeExtractor.fs
+    │   │   ├── DependencyResolver.fs
+    │   │   └── ASTTransformer.fs
+    │   ├── MemoryLayout/         
+    │   │   ├── LayoutAnalyzer.fs
+    │   │   └── UnionOptimizer.fs
+    │   ├── MLIRGeneration/
+    │   │   ├── Dialect.fs
+    │   │   ├── MLIRContext.fs
+    │   │   ├── TypeMapping.fs   
+    │   │   └── DirectGenerator.fs 
+    │   └── Conversion/
+    │       ├── LoweringPipeline.fs
+    │       └── OptimizationPipeline.fs
+    │
+    └── Dabbit/                  
+        ├── Transformations/     
+        │   ├── ClosureElimination.fs
+        │   └── StackAllocation.fs
+        ├── Analysis/       
+        │   ├── ReachabilityAnalyzer.fs
+        │   ├── DependencyGraph.fs
+        │   └── DeadCodeElimination.fs
+        ├── Bindings/
+        │   ├── SymbolRegistry.fs
+        │   ├── BindingMetadata.fs
+        │   └── PatternLibrary.fs 
+        └── Integration/
+            └── AlloyBindings.fs  
 ```
 
 ## 🎛️ Configuration
