@@ -27,373 +27,293 @@ type ReachabilityResult = {
     Statistics: ReachabilityStats
 }
 
-/// Enhanced dependency tracking
-type Dependency =
-    | FunctionCall of string
-    | TypeReference of string  
-    | ModuleOpen of string
-    | ValueBinding of string
+/// Symbol information extracted from AST
+type SymbolInfo = {
+    FullName: string
+    ModulePath: string list
+    UnqualifiedName: string
+    Kind: SymbolKind
+}
 
-/// Analyze expression to extract ALL dependencies
-let rec analyzeDependencies (expr: SynExpr) : Set<Dependency> =
+and SymbolKind =
+    | Function
+    | Type
+    | Method of parentType: string
+    | Value
+
+/// Resolution context built from AST
+type ResolutionContext = {
+    /// All symbols by their full names
+    SymbolsByFullName: Map<string, SymbolInfo>
+    /// Symbols grouped by module
+    SymbolsByModule: Map<string list, Set<SymbolInfo>>
+    /// Unqualified name to possible full names
+    UnqualifiedToQualified: Map<string, Set<string>>
+    /// Type members (for method resolution)
+    TypeMembers: Map<string, Set<string>>
+}
+
+/// Module-level resolution state
+type ModuleResolutionState = {
+    CurrentModule: string list
+    OpenedModules: string list list
+}
+
+/// Build symbol info from pattern in a binding
+let extractSymbolFromPattern (modulePath: string list) (pat: SynPat) : SymbolInfo option =
+    match pat with
+    | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+        let fullName = (modulePath @ [ident.idText]) |> String.concat "."
+        Some {
+            FullName = fullName
+            ModulePath = modulePath
+            UnqualifiedName = ident.idText
+            Kind = Function
+        }
+    | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
+        let names = ids |> List.map (fun id -> id.idText)
+        let unqualified = List.last names
+        let fullName = (modulePath @ names) |> String.concat "."
+        Some {
+            FullName = fullName
+            ModulePath = modulePath
+            UnqualifiedName = unqualified
+            Kind = Function
+        }
+    | _ -> None
+
+/// Extract all symbols from module declarations
+let rec extractSymbolsFromDecl (modulePath: string list) (decl: SynModuleDecl) : SymbolInfo list =
+    match decl with
+    | SynModuleDecl.Let(_, bindings, _) ->
+        bindings |> List.choose (fun (SynBinding(_, _, _, _, _, _, _, pat, _, _, _, _, _)) ->
+            extractSymbolFromPattern modulePath pat)
+    
+    | SynModuleDecl.Types(typeDefs, _) ->
+        typeDefs |> List.collect (fun (SynTypeDefn(componentInfo, typeRepr, members, _, _, _)) ->
+            let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = componentInfo
+            let typeName = longId |> List.map (fun id -> id.idText) |> String.concat "."
+            let typeFullName = (modulePath @ [typeName]) |> String.concat "."
+            
+            // Add the type itself
+            let typeSymbol = {
+                FullName = typeFullName
+                ModulePath = modulePath
+                UnqualifiedName = typeName
+                Kind = Type
+            }
+            
+            // Add type members
+            let memberSymbols = 
+                members |> List.choose (function
+                    | SynMemberDefn.Member(SynBinding(_, _, _, _, _, _, _, pat, _, _, _, _, _), _) ->
+                        match pat with
+                        | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
+                            let memberName = ids |> List.map (fun id -> id.idText) |> List.last
+                            Some {
+                                FullName = typeFullName + "." + memberName
+                                ModulePath = modulePath
+                                UnqualifiedName = memberName
+                                Kind = Method typeFullName
+                            }
+                        | _ -> None
+                    | _ -> None)
+            
+            typeSymbol :: memberSymbols)
+    
+    | SynModuleDecl.NestedModule(componentInfo, _, nestedDecls, _, _, _) ->
+        let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = componentInfo
+        let nestedName = longId |> List.map (fun id -> id.idText)
+        let nestedPath = modulePath @ nestedName
+        nestedDecls |> List.collect (extractSymbolsFromDecl nestedPath)
+    
+    | _ -> []
+
+/// Extract symbols from a parsed input file
+let extractSymbolsFromInput (input: ParsedInput) : SymbolInfo list =
+    match input with
+    | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
+        modules |> List.collect (fun (SynModuleOrNamespace(longId, _, _, decls, _, _, _, _, _)) ->
+            let modulePath = longId |> List.map (fun id -> id.idText)
+            decls |> List.collect (extractSymbolsFromDecl modulePath))
+    | _ -> []
+
+/// Build resolution context from all parsed inputs
+let buildResolutionContext (parsedInputs: (string * ParsedInput) list) : ResolutionContext =
+    // Extract all symbols
+    let allSymbols = 
+        parsedInputs 
+        |> List.collect (fun (_, input) -> extractSymbolsFromInput input)
+    
+    // Build maps
+    let symbolsByFullName = 
+        allSymbols 
+        |> List.map (fun sym -> (sym.FullName, sym))
+        |> Map.ofList
+    
+    let symbolsByModule =
+        allSymbols
+        |> List.groupBy (fun sym -> sym.ModulePath)
+        |> List.map (fun (path, syms) -> (path, Set.ofList syms))
+        |> Map.ofList
+    
+    let unqualifiedToQualified =
+        allSymbols
+        |> List.groupBy (fun sym -> sym.UnqualifiedName)
+        |> List.map (fun (unqual, syms) -> 
+            (unqual, syms |> List.map (fun s -> s.FullName) |> Set.ofList))
+        |> Map.ofList
+    
+    let typeMembers =
+        allSymbols
+        |> List.choose (fun sym ->
+            match sym.Kind with
+            | Method parentType -> Some (parentType, sym.UnqualifiedName)
+            | _ -> None)
+        |> List.groupBy fst
+        |> List.map (fun (typeName, members) -> 
+            (typeName, members |> List.map snd |> Set.ofList))
+        |> Map.ofList
+    
+    {
+        SymbolsByFullName = symbolsByFullName
+        SymbolsByModule = symbolsByModule
+        UnqualifiedToQualified = unqualifiedToQualified
+        TypeMembers = typeMembers
+    }
+
+/// Extract opened modules from declarations
+let rec extractOpenedModules (decls: SynModuleDecl list) : string list list =
+    decls |> List.choose (function
+        | SynModuleDecl.Open(target, _) ->
+            match target with
+            | SynOpenDeclTarget.ModuleOrNamespace(SynLongIdent(ids, _, _), _) ->
+                Some (ids |> List.map (fun id -> id.idText))
+            | _ -> None
+        | _ -> None)
+
+/// Resolve a symbol name given current context
+let resolveSymbol (ctx: ResolutionContext) (state: ModuleResolutionState) (name: string) : string option =
+    // First try direct lookup
+    if Map.containsKey name ctx.SymbolsByFullName then
+        Some name
+    else
+        // Try with current module prefix
+        let withCurrentModule = (state.CurrentModule @ [name]) |> String.concat "."
+        if Map.containsKey withCurrentModule ctx.SymbolsByFullName then
+            Some withCurrentModule
+        else
+            // Try with each opened module
+            state.OpenedModules
+            |> List.tryPick (fun openModule ->
+                let qualified = (openModule @ [name]) |> String.concat "."
+                if Map.containsKey qualified ctx.SymbolsByFullName then
+                    Some qualified
+                else None)
+
+/// Analyze dependencies in an expression
+let rec analyzeDependencies (ctx: ResolutionContext) (state: ModuleResolutionState) (expr: SynExpr) : Set<string> =
     match expr with
     | SynExpr.Ident ident ->
-        Set.singleton (FunctionCall ident.idText)
+        match resolveSymbol ctx state ident.idText with
+        | Some fullName -> Set.singleton fullName
+        | None -> Set.empty
     
     | SynExpr.LongIdent(_, SynLongIdent(ids, _, _), _, _) ->
-        let fullName = ids |> List.map (fun id -> id.idText) |> String.concat "."
-        Set.singleton (FunctionCall fullName)
+        let name = ids |> List.map (fun id -> id.idText) |> String.concat "."
+        match resolveSymbol ctx state name with
+        | Some fullName -> Set.singleton fullName
+        | None -> Set.empty
     
-    // SPECIFIC: Method call pattern (e.g., buffer.AsSpan(...))
-    // MUST come BEFORE general App pattern
     | SynExpr.App(_, _, SynExpr.DotGet(target, _, SynLongIdent(ids, _, _), _), arg, _) ->
+        // Method call: target.method(arg)
+        let targetDeps = analyzeDependencies ctx state target
         let methodName = ids |> List.map (fun id -> id.idText) |> String.concat "."
-        Set.unionMany [
-            analyzeDependencies target
-            analyzeDependencies arg
-            Set.singleton (FunctionCall methodName)
-        ]
+        let argDeps = analyzeDependencies ctx state arg
+        
+        // Try to resolve method based on target type
+        let methodDeps = 
+            targetDeps 
+            |> Set.toList
+            |> List.collect (fun targetName ->
+                match Map.tryFind targetName ctx.TypeMembers with
+                | Some members when Set.contains methodName members ->
+                    [targetName + "." + methodName]
+                | _ -> [])
+            |> Set.ofList
+        
+        Set.unionMany [targetDeps; argDeps; methodDeps]
     
-    // GENERAL: Any other function application
     | SynExpr.App(_, _, func, arg, _) ->
-        Set.union (analyzeDependencies func) (analyzeDependencies arg)
-    
-    | SynExpr.TypeApp(expr, _, _, _, _, _, _) ->
-        analyzeDependencies expr
+        Set.union (analyzeDependencies ctx state func) (analyzeDependencies ctx state arg)
     
     | SynExpr.LetOrUse(_, _, bindings, body, _, _) ->
         let bindingDeps = 
             bindings 
             |> List.map (fun (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) -> 
-                analyzeDependencies expr)
+                analyzeDependencies ctx state expr)
             |> Set.unionMany
-        Set.union bindingDeps (analyzeDependencies body)
+        Set.union bindingDeps (analyzeDependencies ctx state body)
     
     | SynExpr.Sequential(_, _, e1, e2, _, _) ->
-        Set.union (analyzeDependencies e1) (analyzeDependencies e2)
+        Set.union (analyzeDependencies ctx state e1) (analyzeDependencies ctx state e2)
     
     | SynExpr.IfThenElse(cond, thenExpr, elseOpt, _, _, _, _) ->
         [Some cond; Some thenExpr; elseOpt]
         |> List.choose id
-        |> List.map analyzeDependencies
+        |> List.map (analyzeDependencies ctx state)
         |> Set.unionMany
     
     | SynExpr.Match(_, matchExpr, clauses, _, _) ->
-        let exprDeps = analyzeDependencies matchExpr
+        let exprDeps = analyzeDependencies ctx state matchExpr
         let clauseDeps = 
             clauses 
             |> List.map (fun (SynMatchClause(_, whenOpt, result, _, _, _)) ->
-                let whenDeps = whenOpt |> Option.map analyzeDependencies |> Option.defaultValue Set.empty
-                Set.union whenDeps (analyzeDependencies result))
+                let whenDeps = whenOpt |> Option.map (analyzeDependencies ctx state) |> Option.defaultValue Set.empty
+                Set.union whenDeps (analyzeDependencies ctx state result))
             |> Set.unionMany
         Set.union exprDeps clauseDeps
     
     | SynExpr.Lambda(_, _, _, body, _, _, _) ->
-        analyzeDependencies body
+        analyzeDependencies ctx state body
     
     | SynExpr.Tuple(_, exprs, _, _) ->
-        exprs |> List.map analyzeDependencies |> Set.unionMany
+        exprs |> List.map (analyzeDependencies ctx state) |> Set.unionMany
     
     | SynExpr.ArrayOrList(_, exprs, _) ->
-        exprs |> List.map analyzeDependencies |> Set.unionMany
+        exprs |> List.map (analyzeDependencies ctx state) |> Set.unionMany
     
-    | SynExpr.ArrayOrListComputed(_, expr, _) ->
-        analyzeDependencies expr
+    | SynExpr.TypeApp(expr, _, _, _, _, _, _) ->
+        analyzeDependencies ctx state expr
     
-    | SynExpr.Record(_, _, fields, _) ->
-        fields 
-        |> List.choose (function 
-            | SynExprRecordField((_, _), _, exprOpt, _) -> exprOpt)
-        |> List.map analyzeDependencies
-        |> Set.unionMany
-    
-    | SynExpr.New(_, _, expr, _) ->
-        analyzeDependencies expr
-    
-    | SynExpr.ObjExpr(objType, argOpt, withKeyword, bindings, members, extraImpls, newExprRange, range) ->
-        let argDeps = 
-            match argOpt with
-            | Some (expr, identOpt) -> 
-                // expr is the expression, identOpt is the optional identifier
-                analyzeDependencies expr
-            | None -> Set.empty
-        let bindingDeps = 
-            bindings 
-            |> List.map (fun (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) -> 
-                analyzeDependencies expr)
-            |> Set.unionMany
-        let memberDeps =
-            members 
-            |> List.map (function
-                | SynMemberDefn.Member(SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _), _) -> 
-                    analyzeDependencies expr
-                | _ -> Set.empty)
-            |> Set.unionMany
-        Set.unionMany [argDeps; bindingDeps; memberDeps]
-    
-    | SynExpr.While(_, whileExpr, doExpr, _) ->
-        Set.union (analyzeDependencies whileExpr) (analyzeDependencies doExpr)
-    
-    | SynExpr.For(spFor, ident, identBodyRange, spEquals, startExpr, direction, endExpr, doExpr, range) ->
-        let startDeps = analyzeDependencies startExpr
-        let endDeps = analyzeDependencies endExpr
-        let doDeps = analyzeDependencies doExpr
-        Set.unionMany [startDeps; endDeps; doDeps]
-      
-    | SynExpr.ForEach(forDebugPoint, inDebugPoint, seqExprOnly, isFromSource, pat, enumExpr, bodyExpr, range) ->
-        Set.union (analyzeDependencies enumExpr) (analyzeDependencies bodyExpr)
-     
-    | SynExpr.TryWith(tryExpr, withClauses, _, _, _, _) ->
-        let tryDeps = analyzeDependencies tryExpr
-        let withDeps = 
-            withClauses
-            |> List.map (fun (SynMatchClause(_, _, expr, _, _, _)) -> analyzeDependencies expr)
-            |> Set.unionMany
-        Set.union tryDeps withDeps
-    
-    | SynExpr.TryFinally(tryExpr, finallyExpr, _, _, _, _) ->
-        Set.union (analyzeDependencies tryExpr) (analyzeDependencies finallyExpr)
-    
-    | SynExpr.TypeTest(expr, _, _) ->
-        analyzeDependencies expr
-    
-    | SynExpr.Downcast(expr, _, _) ->
-        analyzeDependencies expr
-    
-    | SynExpr.Upcast(expr, _, _) ->
-        analyzeDependencies expr
-    
-    | SynExpr.AddressOf(_, expr, _, _) ->
-        analyzeDependencies expr
-    
-    | SynExpr.InferredDowncast(expr, _) ->
-        analyzeDependencies expr
-    
-    | SynExpr.InferredUpcast(expr, _) ->
-        analyzeDependencies expr
-    
-    | SynExpr.DotGet(target, _, SynLongIdent(ids, _, _), _) ->
-        let memberName = ids |> List.map (fun id -> id.idText) |> String.concat "."
-        let targetDeps = analyzeDependencies target
-        Set.add (FunctionCall memberName) targetDeps
-    
-    | SynExpr.DotSet(expr, _, rhsExpr, _) ->
-        Set.union (analyzeDependencies expr) (analyzeDependencies rhsExpr)
-    
-    // For FCS 43.9.300: DotIndexedGet and DotIndexedSet use SynExpr list
-    | SynExpr.DotIndexedGet(expr, indexExpr, _, _) ->
-        let exprDeps = analyzeDependencies expr
-        let indexDeps = analyzeDependencies indexExpr
-        Set.union exprDeps indexDeps
-    
-    | SynExpr.DotIndexedSet(expr, indexExpr, valueExpr, _, _, _) ->
-        let exprDeps = analyzeDependencies expr
-        let indexDeps = analyzeDependencies indexExpr
-        let valueDeps = analyzeDependencies valueExpr
-        Set.unionMany [exprDeps; indexDeps; valueDeps]
-    
-    | SynExpr.NamedIndexedPropertySet(_, expr1, expr2, _) ->
-        Set.union (analyzeDependencies expr1) (analyzeDependencies expr2)
-    
-    | SynExpr.DotNamedIndexedPropertySet(expr1, _, expr2, expr3, _) ->
-        Set.unionMany [analyzeDependencies expr1; analyzeDependencies expr2; analyzeDependencies expr3]
-    
-    | SynExpr.JoinIn(expr1, _, expr2, _) ->
-        Set.union (analyzeDependencies expr1) (analyzeDependencies expr2)
-    
-    | SynExpr.LetOrUseBang(_, _, _, _, rhsExpr, andBangs, bodyExpr, _, _) ->
-        let rhsDeps = analyzeDependencies rhsExpr
-        let andBangDeps = 
-            andBangs 
-            |> List.map (fun (SynExprAndBang(_, _, _, _, bodyExpr, _, _)) -> 
-                analyzeDependencies bodyExpr)
-            |> Set.unionMany
-        let bodyDeps = analyzeDependencies bodyExpr
-        Set.unionMany [rhsDeps; andBangDeps; bodyDeps]
-    
-    | SynExpr.DoBang(expr, _, _) ->
-        analyzeDependencies expr
-    
-    | SynExpr.ComputationExpr(_, expr, _) ->
-        analyzeDependencies expr
-    
-    | SynExpr.MatchBang(_, expr, clauses, _, _) ->
-        let exprDeps = analyzeDependencies expr
-        let clauseDeps = 
-            clauses 
-            |> List.map (fun (SynMatchClause(_, whenOpt, result, _, _, _)) ->
-                let whenDeps = whenOpt |> Option.map analyzeDependencies |> Option.defaultValue Set.empty
-                Set.union whenDeps (analyzeDependencies result))
-            |> Set.unionMany
-        Set.union exprDeps clauseDeps
-    
-    | SynExpr.YieldOrReturn(_, expr, _, _) ->
-        analyzeDependencies expr
-    
-    | SynExpr.YieldOrReturnFrom(_, expr, _, _) ->
-        analyzeDependencies expr
-    
-    | SynExpr.Paren(expr, _, _, _) ->
-        analyzeDependencies expr
-    
-    | SynExpr.AnonRecd(_, copyInfo, fields, _, _) ->
-        let copyDeps = copyInfo |> Option.map (fun (expr, _) -> analyzeDependencies expr) |> Option.defaultValue Set.empty
-        let fieldDeps = fields |> List.map (fun (_, _, expr) -> analyzeDependencies expr) |> Set.unionMany
-        Set.union copyDeps fieldDeps
-    
-    | SynExpr.Typed(expr, _, _) ->
-        analyzeDependencies expr
-    
-    | SynExpr.Set(expr1, expr2, _) ->
-        Set.union (analyzeDependencies expr1) (analyzeDependencies expr2)
-    
-    | SynExpr.Null _ 
-    | SynExpr.Const _ 
-    | SynExpr.ImplicitZero _ 
-    | SynExpr.MatchLambda _ 
-    | SynExpr.Quote _ 
-    | SynExpr.ArbitraryAfterError _ 
-    | SynExpr.FromParseError _ 
-    | SynExpr.LibraryOnlyILAssembly _ 
-    | SynExpr.LibraryOnlyStaticOptimization _ 
-    | SynExpr.LibraryOnlyUnionCaseFieldGet _ 
-    | SynExpr.LibraryOnlyUnionCaseFieldSet _ 
-    | SynExpr.Lazy _ 
-    | SynExpr.TraitCall _ 
-    | SynExpr.Fixed _ 
-    | SynExpr.Assert _ 
-    | SynExpr.Do _ 
-    | SynExpr.DiscardAfterMissingQualificationAfterDot _ 
-    | SynExpr.IndexFromEnd _ 
-    | SynExpr.IndexRange _ 
-    | SynExpr.DebugPoint _ 
-    | SynExpr.Dynamic _ 
-    | SynExpr.Typar _ 
-    | SynExpr.WhileBang _ ->
-        Set.empty
+    | _ -> Set.empty
 
-/// Extract function body from parsed AST
-let extractFunctionBody (allInputs: (string * ParsedInput) list) (functionName: string) : SynExpr option =
-    let rec findInModule (moduleName: string) (decls: SynModuleDecl list) =
-        decls |> List.tryPick (function
-            | SynModuleDecl.Let(_, bindings, _) ->
-                bindings |> List.tryPick (fun (SynBinding(_, _, _, _, _, _, _, pat, _, expr, _, _, _)) ->
-                    match pat with
-                    | SynPat.Named(SynIdent(ident, _), _, _, _) when 
-                        sprintf "%s.%s" moduleName ident.idText = functionName ||
-                        ident.idText = functionName ->
-                        Some expr
-                    | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
-                        let name = ids |> List.map (fun id -> id.idText) |> String.concat "."
-                        if sprintf "%s.%s" moduleName name = functionName || name = functionName then
-                            Some expr
-                        else None
-                    | _ -> None)
-            | _ -> None)
-    
-    allInputs |> List.tryPick (fun (_, input) ->
-        match input with
-        | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
-            modules |> List.tryPick (fun (SynModuleOrNamespace(longId, _, _, decls, _, _, _, _, _)) ->
-                let moduleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
-                findInModule moduleName decls)
-        | _ -> None)
-
-/// Perform deep reachability analysis
-let analyzeReachability (allInputs: (string * ParsedInput) list) (entryPoints: Set<string>) =
-    let mutable reachable = Set.empty
-    let mutable analyzed = Set.empty
-    let mutable worklist = entryPoints |> Set.toList
-    
-    printfn "Starting deep reachability analysis with %d entry points" (List.length worklist)
-    
-    while not worklist.IsEmpty do
-        match worklist with
-        | current :: rest ->
-            worklist <- rest
-            
-            if not (Set.contains current analyzed) then
-                analyzed <- Set.add current analyzed
-                reachable <- Set.add current reachable
-                
-                // Extract and analyze function body
-                match extractFunctionBody allInputs current with
-                | Some body ->
-                    printfn "  Analyzing body of %s" current
-                    let deps = analyzeDependencies body
-                    
-                    for dep in deps do
-                        match dep with
-                        | FunctionCall callee ->
-                            // Try to resolve qualified name
-                            let qualifiedNames = [
-                                callee
-                                "Alloy.Memory." + callee
-                                "Alloy.IO." + callee
-                                "Alloy.IO.Console." + callee
-                                "Alloy.IO.String." + callee
-                            ]
-                            
-                            for qname in qualifiedNames do
-                                if not (Set.contains qname analyzed) then
-                                    printfn "    Found dependency: %s" qname
-                                    worklist <- qname :: worklist
-                                    
-                        | _ -> ()
-                | None ->
-                    if not (current.StartsWith("FSharp.") || current.StartsWith("System.")) then
-                        printfn "  WARNING: No body found for %s" current
-        | [] -> ()
-    
-    printfn "Reachability complete: %d symbols reachable" (Set.count reachable)
-    reachable
-
-/// Resolve module opens to find used symbols
-let resolveModuleOpens (opens: string list) (usedSymbols: Set<string>) (moduleSymbols: Map<string, string list>) =
-    let mutable resolved = Set.empty
-    
-    for openModule in opens do
-        match Map.tryFind openModule moduleSymbols with
-        | Some symbols ->
-            for symbol in symbols do
-                // Check if any used symbol might be from this module
-                if usedSymbols |> Set.exists (fun used -> 
-                    used = symbol || 
-                    used.EndsWith("." + symbol) ||
-                    symbol.EndsWith("." + used)) then
-                    resolved <- Set.add (openModule + "." + symbol) resolved
-        | None -> ()
-    
-    resolved
-
-/// Build complete dependency graph with bodies
-let buildDependencyGraph (allInputs: (string * ParsedInput) list) =
-    let mutable allSymbols = Map.empty<string, SynExpr option>
-    let mutable dependencies = Map.empty<string, Set<string>>
+/// Build complete dependency graph from parsed inputs
+let buildDependencyGraph (parsedInputs: (string * ParsedInput) list) : (ResolutionContext * Map<string, Set<string>> * Set<string>) =
+    let ctx = buildResolutionContext parsedInputs
+    let mutable dependencies = Map.empty
     let mutable entryPoints = Set.empty
     
-    // First pass: collect all symbols and their bodies
-    for (filePath, input) in allInputs do
+    // Process each input file
+    for (_, input) in parsedInputs do
         match input with
         | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
             for (SynModuleOrNamespace(longId, _, _, decls, _, _, _, _, _)) in modules do
-                let moduleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
+                let modulePath = longId |> List.map (fun id -> id.idText)
+                let openedModules = extractOpenedModules decls
+                let state = {
+                    CurrentModule = modulePath
+                    OpenedModules = openedModules
+                }
                 
+                // Process declarations
                 for decl in decls do
                     match decl with
                     | SynModuleDecl.Let(_, bindings, _) ->
                         for (SynBinding(_, _, _, _, attrs, _, _, pat, _, expr, _, _, _)) in bindings do
-                            let symbolName = 
-                                match pat with
-                                | SynPat.Named(SynIdent(ident, _), _, _, _) ->
-                                    Some (sprintf "%s.%s" moduleName ident.idText)
-                                | _ -> None
-                            
-                            match symbolName with
-                            | Some name ->
-                                allSymbols <- Map.add name (Some expr) allSymbols
-                                
-                                // Check for entry point
+                            match extractSymbolFromPattern modulePath pat with
+                            | Some symbol ->
+                                // Check if entry point
                                 let isEntryPoint = attrs |> List.exists (fun attrList ->
                                     attrList.Attributes |> List.exists (fun attr ->
                                         match attr.TypeName with
@@ -401,58 +321,26 @@ let buildDependencyGraph (allInputs: (string * ParsedInput) list) =
                                         | _ -> false))
                                 
                                 if isEntryPoint then
-                                    entryPoints <- Set.add name entryPoints
+                                    entryPoints <- Set.add symbol.FullName entryPoints
+                                
+                                // Analyze dependencies
+                                let deps = analyzeDependencies ctx state expr
+                                dependencies <- Map.add symbol.FullName deps dependencies
                             | None -> ()
                     | _ -> ()
         | _ -> ()
     
-    // Second pass: build dependency edges
-    for KeyValue(symbolName, bodyOpt) in allSymbols do
-        match bodyOpt with
-        | Some body ->
-            let deps = analyzeDependencies body
-            let depNames = 
-                deps 
-                |> Set.toList
-                |> List.choose (function FunctionCall name -> Some name | _ -> None)
-                |> Set.ofList
-            dependencies <- Map.add symbolName depNames dependencies
-        | None -> ()
-    
-    (allSymbols, dependencies, entryPoints)
+    (ctx, dependencies, entryPoints)
 
-/// Validate reachability results
-let validateReachability (reachable: Set<string>) (allCalls: Set<string>) =
-    let undefined = Set.difference allCalls reachable
-    
-    if not (Set.isEmpty undefined) then
-        printfn "ERROR: Reachability validation failed!"
-        printfn "Undefined symbols that are called but not reachable:"
-        for symbol in undefined do
-            printfn "  - %s" symbol
-        false
-    else
-        true
-
-/// Perform reachability analysis using worklist algorithm
+/// Perform reachability analysis
 let analyze (symbols: Map<string, FSharpSymbol>) (dependencies: Map<string, Set<string>>) (entryPoints: Set<string>) : ReachabilityResult =
-    printfn "Starting reachability analysis with %d entry points" (Set.count entryPoints)
-    
-    let mutable reachable = Set.empty<string>
+    // Note: This function signature is kept for compatibility, but we'll use our own graph
+    let mutable reachable = Set.empty
     let mutable worklist = entryPoints |> Set.toList
-    let mutable reachableUnionCases = Map.empty<string, Set<string>>
-    
-    // Make sure we have at least one entry point
-    if worklist.IsEmpty && not (Map.isEmpty symbols) then
-        printfn "WARNING: No entry points found, using first declaration as seed"
-        let firstDecl = symbols |> Map.toSeq |> Seq.head |> fst
-        worklist <- [firstDecl]
-    
-    // Process worklist until empty
     let mutable iterations = 0
-    while not worklist.IsEmpty do
+    
+    while not worklist.IsEmpty && iterations < 1000 do
         iterations <- iterations + 1
-        
         match worklist with
         | current :: rest ->
             worklist <- rest
@@ -460,47 +348,65 @@ let analyze (symbols: Map<string, FSharpSymbol>) (dependencies: Map<string, Set<
             if not (Set.contains current reachable) then
                 reachable <- Set.add current reachable
                 
-                // Get dependencies of current item
                 match Map.tryFind current dependencies with
                 | Some deps ->
                     for dep in deps do
-                        // Add all possible qualified versions
-                        let possibleNames = [
-                            dep
-                            // Try common Alloy namespaces
-                            "Alloy.Memory." + dep
-                            "Alloy.IO." + dep
-                            "Alloy.IO.Console." + dep
-                            "Alloy.IO.String." + dep
-                            // Try to find by suffix match
-                            yield! symbols 
-                                   |> Map.toSeq 
-                                   |> Seq.choose (fun (k, _) -> 
-                                       if k.EndsWith("." + dep) || k = dep then Some k 
-                                       else None)
-                        ]
-                        
-                        for name in possibleNames do
-                            if Map.containsKey name symbols && 
-                               not (Set.contains name reachable) && 
-                               not (List.contains name worklist) then
-                                worklist <- name :: worklist
+                        if not (Set.contains dep reachable) && not (List.contains dep worklist) then
+                            worklist <- dep :: worklist
                 | None -> ()
         | [] -> ()
     
-    printfn "Reachability analysis completed after %d iterations" iterations
-    printfn "Found %d reachable symbols out of %d total" (Set.count reachable) (Map.count symbols)
-    
-    // Calculate statistics
     let stats = {
-        TotalSymbols = Map.count symbols
+        TotalSymbols = Map.count dependencies
         ReachableSymbols = Set.count reachable
-        EliminatedSymbols = Map.count symbols - Set.count reachable
-        ModuleBreakdown = Map.empty  // Could calculate if needed
+        EliminatedSymbols = Map.count dependencies - Set.count reachable
+        ModuleBreakdown = Map.empty
     }
     
     {
         Reachable = reachable
-        UnionCases = reachableUnionCases
+        UnionCases = Map.empty
+        Statistics = stats
+    }
+
+/// Perform complete reachability analysis on parsed inputs
+let analyzeFromParsedInputs (parsedInputs: (string * ParsedInput) list) : ReachabilityResult =
+    let (ctx, dependencies, entryPoints) = buildDependencyGraph parsedInputs
+    
+    // Use our own reachability algorithm
+    let mutable reachable = Set.empty
+    let mutable worklist = entryPoints |> Set.toList
+    
+    printfn "Starting reachability analysis with %d entry points" (Set.count entryPoints)
+    printfn "Total symbols found: %d" (Map.count ctx.SymbolsByFullName)
+    
+    while not worklist.IsEmpty do
+        match worklist with
+        | current :: rest ->
+            worklist <- rest
+            
+            if not (Set.contains current reachable) then
+                reachable <- Set.add current reachable
+                
+                match Map.tryFind current dependencies with
+                | Some deps ->
+                    for dep in deps do
+                        if not (Set.contains dep reachable) && not (List.contains dep worklist) then
+                            worklist <- dep :: worklist
+                | None -> ()
+        | [] -> ()
+    
+    printfn "Reachability complete: %d symbols reachable" (Set.count reachable)
+    
+    let stats = {
+        TotalSymbols = Map.count ctx.SymbolsByFullName
+        ReachableSymbols = Set.count reachable
+        EliminatedSymbols = Map.count ctx.SymbolsByFullName - Set.count reachable
+        ModuleBreakdown = Map.empty
+    }
+    
+    {
+        Reachable = reachable
+        UnionCases = Map.empty
         Statistics = stats
     }
