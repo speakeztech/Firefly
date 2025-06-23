@@ -7,7 +7,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.2.018</Version>
+    <Version>0.2.031</Version>
     <Description>F# to Native Compiler with Zero-Allocation Guarantees using XParsec</Description>
     <Authors>Speakez LLC</Authors>
     <PackageTags>fsharp;compiler;native;zero-allocation;xparsec;mlir;llvm</PackageTags>
@@ -18,6 +18,7 @@
   <ItemGroup>
       <!-- Core Infrastructure -->
       <Compile Include="Core/Utilities/IntermediateWriter.fs" />
+      <Compile Include="Core/Utilities/RemoveIntermediates.fs" />
       <Compile Include="Core/XParsec/Foundation.fs" />
       
       <!-- MLIR Core Types -->
@@ -137,6 +138,19 @@
   </PropertyGroup>
 
 </Project>
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

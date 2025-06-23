@@ -10,6 +10,7 @@ open FSharp.Compiler.Text
 open FSharp.Compiler.Diagnostics
 open FSharp.Compiler.Syntax
 open Core.XParsec.Foundation
+open Core.Utilities.RemoveIntermediates
 open Core.FCSProcessing.ASTTransformer
 open Core.FCSProcessing.DependencyResolver
 open Core.MLIRGeneration.DirectGenerator
@@ -560,13 +561,44 @@ let private generateMLIR (ctx: CompilationContext) (reachableProgram: ReachableP
     printfn "Phase 4: Generating MLIR..."
     let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
     
-    // Pass all reachable inputs to the generator
-    let mlirText = Core.MLIRGeneration.DirectGenerator.generateProgram baseName typeCtx symbolRegistry reachableProgram.ReachableInputs
-    
-    if ctx.KeepIntermediates then
-        writeIntermediateFile ctx.IntermediatesDir baseName ".mlir" mlirText
-    
-    Success mlirText
+    try
+        // Pass all reachable inputs to the generator
+        let mlirText = Core.MLIRGeneration.DirectGenerator.generateProgram baseName typeCtx symbolRegistry reachableProgram.ReachableInputs
+        
+        if ctx.KeepIntermediates then
+            writeIntermediateFile ctx.IntermediatesDir baseName ".mlir" mlirText
+        
+        Success mlirText
+    with
+    | ex ->
+        // Try to extract partial MLIR from the exception message
+        let errorMsg = ex.Message
+        
+        // Look for the partial MLIR markers
+        let startMarker = "===PARTIAL_MLIR_START==="
+        let endMarker = "===PARTIAL_MLIR_END==="
+        
+        if errorMsg.Contains(startMarker) && errorMsg.Contains(endMarker) then
+            let startIdx = errorMsg.IndexOf(startMarker) + startMarker.Length
+            let endIdx = errorMsg.IndexOf(endMarker)
+            
+            if endIdx > startIdx then
+                let partialMLIR = errorMsg.Substring(startIdx, endIdx - startIdx).Trim()
+                
+                // Write the partial MLIR
+                if ctx.KeepIntermediates && not (System.String.IsNullOrWhiteSpace(partialMLIR)) then
+                    writeIntermediateFile ctx.IntermediatesDir baseName ".partial.mlir" partialMLIR
+                    printfn "  Wrote partial MLIR to %s.partial.mlir" baseName
+        
+        // Extract the actual error message (before the partial MLIR)
+        let actualError = 
+            if errorMsg.Contains(startMarker) then
+                errorMsg.Substring(0, errorMsg.IndexOf(startMarker)).Trim()
+            else
+                errorMsg
+        
+        // Re-throw as CompilerFailure
+        CompilerFailure [InternalError("MLIR Generation", actualError, None)]
 
 /// Phase 5: Lower MLIR
 let private lowerMLIR (ctx: CompilationContext) (mlirText: string) : CompilerResult<string> =

@@ -36,8 +36,10 @@ and MLIRBuilderState = {
     RequiredExternals: Set<string>
     CurrentFunction: string option
     GeneratedFunctions: Set<string>
+    LocalFunctions: Map<string, MLIRType>  
     CurrentModule: string list  // Module path for symbol resolution
-    HasErrors: bool  // Track if we've encountered errors
+    OpenedNamespaces: string list list  // List of opened namespaces
+    HasErrors: bool  
 }
 
 /// MLIR builder computation expression
@@ -90,6 +92,10 @@ let mlir = MLIRBuilderCE()
 /// Fail with hard error - no soft landings
 let failHard (phase: string) (message: string) : MLIRBuilder<'T> =
     fun state ->
+        // Emit error marker to the output
+        state.Output.AppendLine() |> ignore
+        state.Output.AppendLine(sprintf "    // ERROR: %s - %s" phase message) |> ignore
+        
         let location = 
             match state.CurrentFunction with
             | Some f -> sprintf " in function '%s'" f
@@ -159,21 +165,94 @@ let lookupLocal (name: string) : MLIRBuilder<(string * MLIRType) option> =
         return Map.tryFind name state.LocalVars
     }
 
-/// Resolve symbol in registry
+/// Resolve symbol in registry with namespace handling
+/// Resolve symbol in registry with namespace handling
 let resolveSymbol (name: string) : MLIRBuilder<ResolvedSymbol> =
     mlir {
         let! state = getState
-        // Add current module context to registry for resolution
-        let registryWithContext = 
-            RegistryConstruction.withNamespaceContext state.CurrentModule state.SymbolRegistry
         
-        match RegistryConstruction.resolveSymbolInRegistry name registryWithContext with
-        | Success (symbol, _) -> return symbol
-        | CompilerFailure _ ->
-            return! failHard "Symbol Resolution" 
-                (sprintf "Cannot resolve symbol '%s'. Available symbols: %s" 
-                    name 
-                    (state.SymbolRegistry.State.SymbolsByShort |> Map.toList |> List.map fst |> String.concat ", "))
+        // Check if it's a local function first
+        match Map.tryFind name state.LocalFunctions with
+        | Some funcType ->
+            // Create a pseudo-symbol for the local function
+            let qualifiedName = 
+                match state.CurrentModule with
+                | [] -> name
+                | modules -> (modules @ [name]) |> String.concat "."
+                
+            let symbol = {
+                QualifiedName = qualifiedName
+                ShortName = name
+                ParameterTypes = []  // Simplified
+                ReturnType = MLIRTypes.i32  // Simplified
+                Operation = ExternalCall(qualifiedName.Replace(".", "_"), None)  // Use qualified name
+                Namespace = ""
+                SourceLibrary = "Local"
+                RequiresExternal = false
+            }
+            return symbol
+        | None ->
+            // Continue with existing resolution logic...
+            // Debug: emit opened namespaces
+            if name = "String.format" then
+                do! emit (sprintf "\n    // DEBUG: Resolving '%s', opened namespaces: %s\n" 
+                            name 
+                            (state.OpenedNamespaces |> List.map (String.concat ".") |> String.concat ", "))
+            
+            // Try direct resolution first
+            let registryWithContext = 
+                RegistryConstruction.withNamespaceContext state.CurrentModule state.SymbolRegistry
+            
+            match RegistryConstruction.resolveSymbolInRegistry name registryWithContext with
+            | Success (symbol, _) -> return symbol
+            | CompilerFailure _ ->
+                // Try with opened namespaces
+                let mutable found = None
+                for ns in state.OpenedNamespaces do
+                    if found.IsNone then
+                        let qualifiedName = (ns @ [name]) |> String.concat "."
+                        if name = "String.format" then
+                            do! emit (sprintf "    // DEBUG: Trying '%s'\n" qualifiedName)
+                        match RegistryConstruction.resolveSymbolInRegistry qualifiedName registryWithContext with
+                        | Success (symbol, _) -> found <- Some symbol
+                        | CompilerFailure _ -> ()
+                
+                match found with
+                | Some symbol -> return symbol
+                | None ->
+                    // Also try partial namespace resolution (e.g., String.format -> Alloy.IO.String.format)
+                    if name.Contains(".") then
+                        let parts = name.Split('.')
+                        let mutable partialFound = None
+                        
+                        for ns in state.OpenedNamespaces do
+                            if partialFound.IsNone then
+                                let qualifiedName = (ns @ Array.toList parts) |> String.concat "."
+                                if name = "String.format" then
+                                    do! emit (sprintf "    // DEBUG: Trying partial '%s'\n" qualifiedName)
+                                match RegistryConstruction.resolveSymbolInRegistry qualifiedName registryWithContext with
+                                | Success (symbol, _) -> partialFound <- Some symbol
+                                | CompilerFailure _ -> ()
+                        
+                        match partialFound with
+                        | Some symbol -> return symbol
+                        | None ->
+                            // List all available symbols in all namespaces
+                            let allSymbols = 
+                                state.SymbolRegistry.State.SymbolsByQualified 
+                                |> Map.toList 
+                                |> List.map fst
+                                |> List.filter (fun s -> s.Contains("format"))
+                                |> String.concat ", "
+                            
+                            return! failHard "Symbol Resolution" 
+                                (sprintf "Cannot resolve symbol '%s'. Format-related symbols: %s" 
+                                    name allSymbols)
+                    else
+                        return! failHard "Symbol Resolution" 
+                            (sprintf "Cannot resolve symbol '%s'. Available symbols: %s" 
+                                name 
+                                (state.SymbolRegistry.State.SymbolsByShort |> Map.toList |> List.map fst |> String.concat ", "))
     }
 
 /// Emit MLIR type
@@ -217,6 +296,13 @@ let emitCall (ssa: string) (func: string) (args: string list) (argTypes: MLIRTyp
 /// Generate call based on symbol registry
 let rec generateSymbolCall (symbol: ResolvedSymbol) (args: (string * MLIRType) list) : MLIRBuilder<string * MLIRType> =
     mlir {
+        if symbol.SourceLibrary = "Local" then
+            let! resultSSA = nextSSA "call"
+            let funcName = "@" + symbol.Operation.ToString().Replace("ExternalCall(", "").Replace(", None)", "")
+            do! emitCall resultSSA funcName (args |> List.map fst) (args |> List.map snd) symbol.ReturnType
+            do! newline
+            return (resultSSA, symbol.ReturnType)
+        else
         match symbol.Operation with
         | MLIROperationPattern.DialectOp(dialect, operation, attrs) ->
             let! resultSSA = nextSSA "op"
@@ -253,51 +339,62 @@ let rec generateSymbolCall (symbol: ResolvedSymbol) (args: (string * MLIRType) l
             
         | MLIROperationPattern.Composite operations ->
             // Handle composite operations - chain them together
-            let! finalResult = 
-                operations |> List.fold (fun accM (i, op) ->
-                    mlir {
-                        let! (prevSSA, prevType) = accM
-                        let stepArgs = 
-                            if i = 0 then args  // First operation gets original args
-                            else [(prevSSA, prevType)]  // Subsequent ops get previous result
+            let rec processOperations (ops: (int * MLIROperationPattern) list) (currentArgs: (string * MLIRType) list) : MLIRBuilder<string * MLIRType> =
+                mlir {
+                    match ops with
+                    | [] -> 
+                        // No operations, return the first argument
+                        match currentArgs with
+                        | (ssa, typ) :: _ -> return (ssa, typ)
+                        | [] -> return! failHard "Composite" "No arguments for composite operation"
                         
-                        match op with
-                        | MLIROperationPattern.ExternalCall(funcName, lib) ->
-                            let! stepSSA = nextSSA (sprintf "step%d" i)
-                            do! requireExternal funcName
-                            
-                            // Determine return type for this step
-                            let stepRetType = 
-                                match funcName with
-                                | "fgets" -> MLIRTypes.memref MLIRTypes.i8
-                                | "strlen" -> MLIRTypes.i32
-                                | _ -> MLIRTypes.i32
-                            
-                            do! emitCall stepSSA funcName (stepArgs |> List.map fst) (stepArgs |> List.map snd) stepRetType
-                            do! newline
-                            return (stepSSA, stepRetType)
-                            
-                        | MLIROperationPattern.Transform(transformName, params') ->
-                            let! stepSSA = nextSSA (sprintf "transform%d" i)
-                            
-                            match transformName with
-                            | "result_wrapper" ->
-                                // Wrap the result in a Result type (simplified for now)
-                                do! emitLine (sprintf "%s = arith.constant 1 : i32  // Ok tag" stepSSA)
-                                return (stepSSA, MLIRTypes.i32)
-                            | _ ->
-                                do! emitLine (sprintf "%s = arith.constant 0 : i32  // Transform: %s" stepSSA transformName)
-                                return (stepSSA, MLIRTypes.i32)
+                    | (i, op) :: rest ->
+                        // Process current operation
+                        let! (stepSSA, stepType) = 
+                            match op with
+                            | MLIROperationPattern.ExternalCall(funcName, lib) ->
+                                mlir {
+                                    let! stepSSA = nextSSA (sprintf "step%d" i)
+                                    do! requireExternal funcName
+                                    
+                                    // Determine return type for this step
+                                    let stepRetType = 
+                                        match funcName with
+                                        | "fgets" -> MLIRTypes.memref MLIRTypes.i8
+                                        | "strlen" -> MLIRTypes.i32
+                                        | _ -> MLIRTypes.i32
+                                    
+                                    do! emitCall stepSSA funcName (currentArgs |> List.map fst) (currentArgs |> List.map snd) stepRetType
+                                    do! newline
+                                    return (stepSSA, stepRetType)
+                                }
                                 
-                        | _ ->
-                            let! stepSSA = nextSSA "composite_step"
-                            do! emitLine (sprintf "%s = arith.constant 0 : i32  // Unsupported composite step" stepSSA)
-                            return (stepSSA, MLIRTypes.i32)
-                    }
-                ) (mlir.Return (args |> List.head))
-                 (operations |> List.indexed)
+                            | MLIROperationPattern.Transform(transformName, params') ->
+                                mlir {
+                                    let! stepSSA = nextSSA (sprintf "transform%d" i)
+                                    
+                                    match transformName with
+                                    | "result_wrapper" ->
+                                        // Wrap the result in a Result type (simplified for now)
+                                        do! emitLine (sprintf "%s = arith.constant 1 : i32  // Ok tag" stepSSA)
+                                        return (stepSSA, MLIRTypes.i32)
+                                    | _ ->
+                                        do! emitLine (sprintf "%s = arith.constant 0 : i32  // Transform: %s" stepSSA transformName)
+                                        return (stepSSA, MLIRTypes.i32)
+                                }
+                                
+                            | _ ->
+                                mlir {
+                                    let! stepSSA = nextSSA "composite_step"
+                                    do! emitLine (sprintf "%s = arith.constant 0 : i32  // Unsupported composite step" stepSSA)
+                                    return (stepSSA, MLIRTypes.i32)
+                                }
+                        
+                        // Continue with remaining operations using the result of this step
+                        return! processOperations rest [(stepSSA, stepType)]
+                }
             
-            return finalResult
+            return! processOperations (operations |> List.indexed) args
             
         | MLIROperationPattern.Transform(transformName, params') ->
             let! resultSSA = nextSSA "transform"
@@ -315,8 +412,7 @@ let rec generateSymbolCall (symbol: ResolvedSymbol) (args: (string * MLIRType) l
                 return (resultSSA, MLIRTypes.i32)
     }
 
-/// Forward declaration
-let rec generateExpression (expr: SynExpr) : MLIRBuilder<string * MLIRType> =
+and generateExpression (expr: SynExpr) : MLIRBuilder<string * MLIRType> =
     mlir {
         match expr with
         | SynExpr.Const(constant, _) ->
@@ -346,8 +442,38 @@ let rec generateExpression (expr: SynExpr) : MLIRBuilder<string * MLIRType> =
             return! generateExpression inner
             
         | SynExpr.LongIdent(_, SynLongIdent(ids, _, _), _, _) ->
-            let name = ids |> List.map (fun id -> id.idText) |> String.concat "."
-            return! generateQualifiedIdentifier name
+            let parts = ids |> List.map (fun id -> id.idText)
+            match parts with
+            | [varName; methodName] ->
+                // This is a method-like call (e.g., buffer.AsSpan)
+                // Look up the variable
+                let! maybeVar = lookupLocal varName
+                match maybeVar with
+                | Some (varSSA, varType) ->
+                    // Handle known methods
+                    match methodName with
+                    | "AsSpan" ->
+                        // For now, just return the buffer
+                        return (varSSA, varType)
+                    | "Pointer" ->
+                        // Return the buffer pointer
+                        return (varSSA, varType)
+                    | "Length" ->
+                        // Return a constant for now
+                        let! lengthSSA = nextSSA "len"
+                        do! emitLine (sprintf "%s = arith.constant 256 : i32" lengthSSA)
+                        return (lengthSSA, MLIRTypes.i32)
+                    | _ ->
+                        return! failHard "Method Access" 
+                            (sprintf "Unknown method '%s' on '%s'" methodName varName)
+                | None ->
+                    // Not a local variable, try as qualified name
+                    let name = String.concat "." parts
+                    return! generateQualifiedIdentifier name
+            | _ ->
+                // Regular qualified identifier
+                let name = String.concat "." parts
+                return! generateQualifiedIdentifier name
             
         | SynExpr.DotGet(targetExpr, _, SynLongIdent(ids, _, _), _) ->
             return! generateFieldAccess targetExpr ids
@@ -412,15 +538,118 @@ and generateApplication (funcExpr: SynExpr) (argExpr: SynExpr) : MLIRBuilder<str
             // Pipe operator - just evaluate the argument
             return! generateExpression argExpr
             
+        | SynExpr.LongIdent(_, SynLongIdent(ids, _, _), _, _) ->
+            let parts = ids |> List.map (fun id -> id.idText)
+            match parts with
+            | ["op_PipeRight"] | ["|>"] ->
+                // Pipe operator as LongIdent - just evaluate the argument
+                return! generateExpression argExpr
+                
+            | [varName; methodName] ->
+                // This is a method call pattern (e.g., buffer.AsSpan(...))
+                let! maybeVar = lookupLocal varName
+                match maybeVar with
+                | Some (varSSA, varType) ->
+                    // Handle known methods
+                    match methodName with
+                    | "AsSpan" ->
+                        // buffer.AsSpan(start, length) - for now just return the buffer
+                        match argExpr with
+                        | SynExpr.Tuple(_, [startExpr; lengthExpr], _, _) ->
+                            let! (startSSA, _) = generateExpression startExpr
+                            let! (lengthSSA, _) = generateExpression lengthExpr
+                            // For now, just return the buffer itself
+                            return (varSSA, varType)
+                        | _ ->
+                            // AsSpan() with no arguments
+                            return (varSSA, varType)
+                    | _ ->
+                        return! failHard "Method Call" 
+                            (sprintf "Unknown method '%s' on variable '%s'" methodName varName)
+                | None ->
+                    // Not a local variable, try as a regular function
+                    let funcName = String.concat "." parts
+                    let! symbol = resolveSymbol funcName
+                    let! (argSSA, argType) = generateExpression argExpr
+                    return! generateSymbolCall symbol [(argSSA, argType)]
+            | _ ->
+                // Regular qualified function name
+                let funcName = String.concat "." parts
+                let! symbol = resolveSymbol funcName
+                let! (argSSA, argType) = generateExpression argExpr
+                return! generateSymbolCall symbol [(argSSA, argType)]
+            
+        | SynExpr.App(_, _, innerFunc, innerArg, _) ->
+            // Handle nested applications (like piped expressions)
+            // This handles expressions like: (a |> b) |> c
+            match innerFunc with
+            | SynExpr.LongIdent(_, SynLongIdent([pipeId], _, _), _, _) when pipeId.idText = "op_PipeRight" ->
+                // This is a pipe application
+                match argExpr with
+                | SynExpr.App(_, _, func2, arg2, _) ->
+                    // Pipeline: innerArg |> func2 arg2
+                    let! (innerResult, innerType) = generateExpression innerArg
+                    
+                    // Now apply func2 to both innerResult and arg2
+                    match func2 with
+                    | SynExpr.LongIdent(_, SynLongIdent(ids, _, _), _, _) ->
+                        let funcName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+                        let! symbol = resolveSymbol funcName
+                        let! (arg2SSA, arg2Type) = generateExpression arg2
+                        return! generateSymbolCall symbol [(arg2SSA, arg2Type); (innerResult, innerType)]
+                    | SynExpr.Ident ident ->
+                        let! symbol = resolveSymbol ident.idText
+                        let! (arg2SSA, arg2Type) = generateExpression arg2
+                        return! generateSymbolCall symbol [(arg2SSA, arg2Type); (innerResult, innerType)]
+                    | _ ->
+                        return! failHard "Pipeline" "Complex function in pipeline"
+                | _ ->
+                    // Simple pipeline: innerArg |> func
+                    let! (innerResult, innerType) = generateExpression innerArg
+                    match argExpr with
+                    | SynExpr.Ident ident ->
+                        let! symbol = resolveSymbol ident.idText
+                        return! generateSymbolCall symbol [(innerResult, innerType)]
+                    | _ ->
+                        return! failHard "Pipeline" "Complex expression in pipeline"
+            | SynExpr.Ident pipeIdent when pipeIdent.idText = "op_PipeRight" ->
+                // This is a pipe application with Ident
+                match argExpr with
+                | SynExpr.App(_, _, func2, arg2, _) ->
+                    // Pipeline: innerArg |> func2 arg2
+                    let! (innerResult, innerType) = generateExpression innerArg
+                    
+                    // Now apply func2 to both innerResult and arg2
+                    match func2 with
+                    | SynExpr.LongIdent(_, SynLongIdent(ids, _, _), _, _) ->
+                        let funcName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+                        let! symbol = resolveSymbol funcName
+                        let! (arg2SSA, arg2Type) = generateExpression arg2
+                        return! generateSymbolCall symbol [(arg2SSA, arg2Type); (innerResult, innerType)]
+                    | SynExpr.Ident ident ->
+                        let! symbol = resolveSymbol ident.idText
+                        let! (arg2SSA, arg2Type) = generateExpression arg2
+                        return! generateSymbolCall symbol [(arg2SSA, arg2Type); (innerResult, innerType)]
+                    | _ ->
+                        return! failHard "Pipeline" "Complex function in pipeline"
+                | _ ->
+                    // Simple pipeline: innerArg |> func
+                    let! (innerResult, innerType) = generateExpression innerArg
+                    match argExpr with
+                    | SynExpr.Ident ident ->
+                        let! symbol = resolveSymbol ident.idText
+                        return! generateSymbolCall symbol [(innerResult, innerType)]
+                    | _ ->
+                        return! failHard "Pipeline" "Complex expression in pipeline"
+            | _ ->
+                // Not a pipe, handle as regular application
+                let! (funcSSA, funcType) = generateExpression innerFunc
+                let! (argSSA, argType) = generateExpression argExpr
+                return! failHard "Nested Application" "Nested function applications not yet supported"
+            
         | SynExpr.Ident ident ->
             // Direct function call
             let! symbol = resolveSymbol ident.idText
-            let! (argSSA, argType) = generateExpression argExpr
-            return! generateSymbolCall symbol [(argSSA, argType)]
-            
-        | SynExpr.LongIdent(_, SynLongIdent(ids, _, _), _, _) ->
-            let funcName = ids |> List.map (fun id -> id.idText) |> String.concat "."
-            let! symbol = resolveSymbol funcName
             let! (argSSA, argType) = generateExpression argExpr
             return! generateSymbolCall symbol [(argSSA, argType)]
             
@@ -444,7 +673,7 @@ and generateApplication (funcExpr: SynExpr) (argExpr: SynExpr) : MLIRBuilder<str
             
         | _ ->
             return! failHard "Application" 
-                "Complex function expressions not yet supported"
+                (sprintf "Complex function expressions not yet supported: %A" funcExpr)
     }
 
 and generateLet (isUse: bool) (bindings: SynBinding list) (body: SynExpr) : MLIRBuilder<string * MLIRType> =
@@ -544,6 +773,10 @@ let generateFunction (functionName: string) (attributes: SynAttributes) (express
                 if isMain then "@main" 
                 else "@" + qualifiedName.Replace(".", "_")
             
+            // Register this function for local resolution
+            let funcType = MLIRTypes.func [] MLIRTypes.i32  // Simplified for now
+            do! updateState (fun s -> { s with LocalFunctions = Map.add functionName funcType s.LocalFunctions })
+            
             do! emitLine (sprintf "func.func %s() -> i32 {" mlirName)
             do! indent (mlir {
                 do! updateState (fun s -> { s with 
@@ -589,6 +822,11 @@ let rec processDeclaration (decl: SynModuleDecl) : MLIRBuilder<unit> =
         | SynModuleDecl.Let(_, bindings, _) ->
             for binding in bindings do
                 do! processBinding binding
+                
+        | SynModuleDecl.Open(_, _) ->
+            // Already processed in first pass
+            ()
+            
         | SynModuleDecl.NestedModule(componentInfo, _, nestedDecls, _, _, _) ->
             let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = componentInfo
             let nestedName = longId |> List.map (fun ident -> ident.idText)
@@ -597,6 +835,7 @@ let rec processDeclaration (decl: SynModuleDecl) : MLIRBuilder<unit> =
             for decl in nestedDecls do
                 do! processDeclaration decl
             do! updateState (fun s -> { s with CurrentModule = state.CurrentModule })
+            
         | _ -> ()
     }
 
@@ -605,8 +844,37 @@ let processModuleOrNamespace (SynModuleOrNamespace(longId, _, _, declarations, _
     mlir {
         let modulePath = longId |> List.map (fun ident -> ident.idText)
         do! updateState (fun s -> { s with CurrentModule = modulePath })
+        
+        // First pass: collect all Open declarations and function signatures
         for decl in declarations do
-            do! processDeclaration decl
+            match decl with
+            | SynModuleDecl.Open(target, _) ->
+                match target with
+                | SynOpenDeclTarget.ModuleOrNamespace(SynLongIdent(ids, _, _), _) ->
+                    let namespacePath = ids |> List.map (fun id -> id.idText)
+                    do! updateState (fun s -> { s with OpenedNamespaces = namespacePath :: s.OpenedNamespaces })
+                | _ -> ()
+                
+            | SynModuleDecl.Let(_, bindings, _) ->
+                // Register function names before generating bodies
+                for binding in bindings do
+                    let (SynBinding(_, _, _, _, _, _, _, pattern, _, _, _, _, _)) = binding
+                    match pattern with
+                    | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+                        let funcType = MLIRTypes.func [] MLIRTypes.i32  // Simplified
+                        do! updateState (fun s -> { s with LocalFunctions = Map.add ident.idText funcType s.LocalFunctions })
+                    | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
+                        let name = ids |> List.map (fun id -> id.idText) |> List.last
+                        let funcType = MLIRTypes.func [] MLIRTypes.i32  // Simplified
+                        do! updateState (fun s -> { s with LocalFunctions = Map.add name funcType s.LocalFunctions })
+                    | _ -> ()
+            | _ -> ()
+        
+        // Second pass: generate all declarations
+        for decl in declarations do
+            match decl with
+            | SynModuleDecl.Open(_, _) -> () // Already processed
+            | _ -> do! processDeclaration decl
     }
 
 /// Process input file
@@ -614,6 +882,24 @@ let processInputFile (parsedInput: ParsedInput) : MLIRBuilder<unit> =
     mlir {
         match parsedInput with
         | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
+            // First pass: collect all open declarations
+            for module' in modules do
+                let (SynModuleOrNamespace(longId, _, _, declarations, _, _, _, _, _)) = module'
+                let modulePath = longId |> List.map (fun ident -> ident.idText)
+                do! updateState (fun s -> { s with CurrentModule = modulePath })
+                
+                // Process only Open declarations first
+                for decl in declarations do
+                    match decl with
+                    | SynModuleDecl.Open(target, _) ->
+                        match target with
+                        | SynOpenDeclTarget.ModuleOrNamespace(SynLongIdent(ids, _, _), _) ->
+                            let namespacePath = ids |> List.map (fun id -> id.idText)
+                            do! updateState (fun s -> { s with OpenedNamespaces = namespacePath :: s.OpenedNamespaces })
+                        | _ -> ()
+                    | _ -> ()
+            
+            // Second pass: process all other declarations
             for module' in modules do
                 do! processModuleOrNamespace module'
         | ParsedInput.SigFile(_) -> ()
@@ -640,6 +926,8 @@ let emitExternalDeclarations : MLIRBuilder<unit> =
 let generateProgram (programName: string) (typeCtx: TypeContext) (symbolRegistry: SymbolRegistry) 
                    (reachableInputs: (string * ParsedInput) list) : string =
     
+    let mutable capturedState = None
+    
     let initialState = {
         Output = StringBuilder()
         Indent = 1
@@ -650,7 +938,9 @@ let generateProgram (programName: string) (typeCtx: TypeContext) (symbolRegistry
         RequiredExternals = Set.empty
         CurrentFunction = None
         GeneratedFunctions = Set.empty
+        LocalFunctions = Map.empty
         CurrentModule = []
+        OpenedNamespaces = []
         HasErrors = false
     }
     
@@ -665,6 +955,10 @@ let generateProgram (programName: string) (typeCtx: TypeContext) (symbolRegistry
             
         with
         | MLIRGenerationException(msg, funcOpt) ->
+            // Capture state before re-throwing
+            let! state = getState
+            capturedState <- Some state
+            
             // Add context about where we failed
             let context = 
                 match funcOpt with
@@ -696,16 +990,30 @@ let generateProgram (programName: string) (typeCtx: TypeContext) (symbolRegistry
         mlir
     with
     | MLIRGenerationException(msg, _) as ex ->
-        // IMPORTANT: Return partial MLIR for debugging
-        let (_, finalState) = builder initialState
-        let partialMLIR = finalState.Output.ToString()
+        // Use captured state if available
+        let partialMLIR = 
+            match capturedState with
+            | Some state -> state.Output.ToString()
+            | None ->
+                // Try to run builder to get partial output
+                try
+                    let (_, state) = builder initialState
+                    state.Output.ToString()
+                with _ -> ""
         
-        // Add error marker to the MLIR
-        let errorMLIR = 
-            partialMLIR + 
-            sprintf "\n// ERROR: %s\n" msg +
-            "// PARTIAL MLIR GENERATED UP TO ERROR POINT\n"
-        
-        // Still throw the exception but the partial MLIR is available
-        printfn "Partial MLIR generated (see .mlir file)"
-        failwith (sprintf "MLIR Generation Failed: %s\n\nPartial MLIR:\n%s" msg errorMLIR)
+        // Create a custom exception that includes the partial MLIR
+        let fullMessage = sprintf "%s\n\n===PARTIAL_MLIR_START===\n%s\n===PARTIAL_MLIR_END===" msg partialMLIR
+        raise (System.Exception(fullMessage))
+    | ex ->
+        // For other exceptions, try to get partial output
+        let partialMLIR = 
+            try
+                let (_, state) = builder initialState
+                state.Output.ToString()
+            with _ -> ""
+            
+        if not (System.String.IsNullOrWhiteSpace(partialMLIR)) then
+            let fullMessage = sprintf "%s\n\n===PARTIAL_MLIR_START===\n%s\n===PARTIAL_MLIR_END===" ex.Message partialMLIR
+            raise (System.Exception(fullMessage))
+        else
+            reraise()
