@@ -44,12 +44,18 @@ let pruneModule (reachable: Set<string>) (moduleName: string) (decls: SynModuleD
 /// Prune entire ParsedInput
 let prune (reachable: Set<string>) (input: ParsedInput) =
     match input with
-    | ParsedInput.ImplFile(ParsedImplFileInput(name, script, qname, attrs, mods, implFiles, binds, trivia, idents)) ->
-        let prunedMods = mods |> List.map (fun modul ->
-            let (SynModuleOrNamespace(longId, isRec, kind, decls, xmlDoc, attrs, synAccess, range, trivia)) = modul
+    | ParsedInput.ImplFile(implFile) ->
+        // Extract contents using named pattern
+        let (ParsedImplFileInput(fileName, isScript, qualifiedNameOfFile, scopedPragmas, hashDirectives, modules, isLastCompiland, trivia, identifiers)) = implFile
+        
+        // Prune modules
+        let prunedMods = modules |> List.map (fun modul ->
+            let (SynModuleOrNamespace(longId, isRec, kind, decls, xmlDoc, attrs, synAccess, range, moduleTrivia)) = modul
             let moduleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
             let prunedDecls = pruneModule reachable moduleName decls
-            SynModuleOrNamespace(longId, isRec, kind, prunedDecls, xmlDoc, attrs, synAccess, range, trivia))
-        ParsedInput.ImplFile(ParsedImplFileInput(name, script, qname, attrs, prunedMods, implFiles, binds, trivia, idents))
+            SynModuleOrNamespace(longId, isRec, kind, prunedDecls, xmlDoc, attrs, synAccess, range, moduleTrivia))
+        
+        // Reconstruct with pruned modules
+        ParsedInput.ImplFile(ParsedImplFileInput(fileName, isScript, qualifiedNameOfFile, scopedPragmas, hashDirectives, prunedMods, isLastCompiland, trivia, identifiers))
     
     | ParsedInput.SigFile _ -> input  // Don't prune signatures

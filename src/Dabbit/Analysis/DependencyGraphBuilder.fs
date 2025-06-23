@@ -22,8 +22,8 @@ let rec analyzeDeps expr =
     | SynExpr.Ident ident ->
         Set.singleton ident.idText
     
-    | SynExpr.LongIdent(_, lid, _, _) ->
-        Set.singleton (lid.Lid |> List.map (fun i -> i.idText) |> String.concat ".")
+    | SynExpr.LongIdent(_, SynLongIdent(ids, _, _), _, _) ->
+        Set.singleton (ids |> List.map (fun i -> i.idText) |> String.concat ".")
     
     | SynExpr.App(_, _, func, arg, _) ->
         Set.union (analyzeDeps func) (analyzeDeps arg)
@@ -52,11 +52,38 @@ let rec analyzeDeps expr =
             |> Set.unionMany
         Set.union exprDeps clauseDeps
     
-    | SynExpr.Sequential(_, _, e1, e2, _) ->
+    | SynExpr.Sequential(_, _, e1, e2, _, _) ->
         Set.union (analyzeDeps e1) (analyzeDeps e2)
     
     | SynExpr.Lambda(_, _, _, body, _, _, _) ->
         analyzeDeps body
+    
+    | SynExpr.Tuple(_, exprs, _, _) ->
+        exprs |> List.map analyzeDeps |> Set.unionMany
+    
+    | SynExpr.ArrayOrList(_, exprs, _) ->
+        exprs |> List.map analyzeDeps |> Set.unionMany
+    
+    | SynExpr.Record(_, _, fields, _) ->
+        fields 
+        |> List.choose (fun (SynExprRecordField(_, _, expr, _)) -> expr)
+        |> List.map analyzeDeps
+        |> Set.unionMany
+    
+    | SynExpr.TypeTest(expr, _, _) ->
+        analyzeDeps expr
+    
+    | SynExpr.Downcast(expr, _, _) ->
+        analyzeDeps expr
+    
+    | SynExpr.Upcast(expr, _, _) ->
+        analyzeDeps expr
+    
+    | SynExpr.DotGet(expr, _, _, _) ->
+        analyzeDeps expr
+    
+    | SynExpr.DotSet(expr, _, rhsExpr, _) ->
+        Set.union (analyzeDeps expr) (analyzeDeps rhsExpr)
     
     | _ -> Set.empty
 
@@ -69,6 +96,10 @@ let buildFromModule (moduleName: string) (decls: SynModuleDecl list) =
                 match pat with
                 | SynPat.Named(SynIdent(ident, _), _, _, _) ->
                     let name = sprintf "%s.%s" moduleName ident.idText
+                    let deps = analyzeDeps expr
+                    { g with Edges = Map.add name deps g.Edges }
+                | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
+                    let name = sprintf "%s.%s" moduleName (ids |> List.map (fun i -> i.idText) |> String.concat ".")
                     let deps = analyzeDeps expr
                     { g with Edges = Map.add name deps g.Edges }
                 | _ -> g) graph

@@ -18,7 +18,7 @@ module StackTransform =
             when ident.idText = "Array.zeroCreate" || ident.idText = "Array.create" ->
             Some (size, ident.idText)
         | SynExpr.ArrayOrList(true, elements, _) ->
-            Some (SynExpr.Const(SynConst.Int32 elements.Length, range0), "array literal")
+            Some (SynExpr.Const(SynConst.Int32 elements.Length, range.Zero), "array literal")
         | _ -> None
     
     /// Extract constant size
@@ -58,8 +58,8 @@ module StackTransform =
                 SynMatchClause(pat, Option.map transform when', transform result, r, sp, tr))
             SynExpr.Match(sp, transform matchExpr, clauses', range, trivia)
         
-        | SynExpr.Sequential(sp, isTrueSeq, e1, e2, range) ->
-            SynExpr.Sequential(sp, isTrueSeq, transform e1, transform e2, range)
+        | SynExpr.Sequential(sp, isTrueSeq, e1, e2, range, trivia) ->
+            SynExpr.Sequential(sp, isTrueSeq, transform e1, transform e2, range, trivia)
         
         | _ -> expr
     
@@ -93,7 +93,7 @@ module StackSafety =
             | Some err -> err
             | None -> verify body
         
-        | SynExpr.Sequential(_, _, e1, e2, _) ->
+        | SynExpr.Sequential(_, _, e1, e2, _, _) ->
             Result.bind (fun _ -> verify e2) (verify e1)
         
         | _ -> Ok ()

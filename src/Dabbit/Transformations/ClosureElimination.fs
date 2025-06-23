@@ -2,6 +2,8 @@
 
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
+open FSharp.Compiler.Xml
+open FSharp.Compiler.SyntaxTrivia
 
 /// Closure elimination state
 type ClosureState = {
@@ -20,15 +22,23 @@ module FreeVars =
         | SynExpr.App(_, _, func, arg, _) ->
             Set.union (analyze scope func) (analyze scope arg)
         
+        | SynExpr.ArrayOrList(isList, elements, range) ->
+            elements 
+            |> List.map (analyze scope)
+            |> Set.unionMany
+        
+        | SynExpr.ArrayOrListComputed(isArray, expr, range) ->
+            analyze scope expr
+        
         | SynExpr.Lambda(_, _, args, body, _, _, _) ->
             let argNames = 
                 match args with
-                | SynSimplePats.SimplePats(pats, _) ->
+                | SynSimplePats.SimplePats(pats, _, _) ->
                     pats |> List.choose (function
                         | SynSimplePat.Id(ident, _, _, _, _, _) -> Some ident.idText
+                        | SynSimplePat.Typed(SynSimplePat.Id(ident, _, _, _, _, _), _, _) -> Some ident.idText
                         | _ -> None)
                     |> Set.ofList
-                | _ -> Set.empty
             analyze (Set.union scope argNames) body
         
         | SynExpr.LetOrUse(_, _, bindings, body, _, _) ->
@@ -36,6 +46,8 @@ module FreeVars =
                 bindings |> List.choose (fun (SynBinding(_, _, _, _, _, _, _, pat, _, _, _, _, _)) ->
                     match pat with
                     | SynPat.Named(SynIdent(ident, _), _, _, _) -> Some ident.idText
+                    | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
+                        ids |> List.tryLast |> Option.map (fun id -> id.idText)
                     | _ -> None)
                 |> Set.ofList
             
@@ -52,8 +64,11 @@ module FreeVars =
             let elseFree = elseOpt |> Option.map (analyze scope) |> Option.defaultValue Set.empty
             Set.unionMany [condFree; thenFree; elseFree]
         
-        | SynExpr.Match(_, expr, clauses, _, _) ->
-            let exprFree = analyze scope expr
+        | SynExpr.Sequential(_, _, e1, e2, _, _) ->
+            Set.union (analyze scope e1) (analyze scope e2)
+        
+        | SynExpr.Match(_, matchExpr, clauses, _, _) ->
+            let exprFree = analyze scope matchExpr
             let clausesFree = 
                 clauses |> List.map (fun (SynMatchClause(pat, whenOpt, result, _, _, _)) ->
                     let patVars = extractPatternVars pat
@@ -63,21 +78,26 @@ module FreeVars =
                 |> Set.unionMany
             Set.union exprFree clausesFree
         
-        | SynExpr.Sequential(_, _, e1, e2, _) ->
-            Set.union (analyze scope e1) (analyze scope e2)
+        | SynExpr.Tuple(_, elements, _, _) ->
+            elements 
+            |> List.map (analyze scope)
+            |> Set.unionMany
         
         | _ -> Set.empty
     
     and extractPatternVars = function
         | SynPat.Named(SynIdent(ident, _), _, _, _) -> Set.singleton ident.idText
         | SynPat.Paren(pat, _) -> extractPatternVars pat
-        | SynPat.Tuple(_, pats, _) -> pats |> List.map extractPatternVars |> Set.unionMany
+        | SynPat.Tuple(_, pats, _, _) -> 
+            pats |> List.map extractPatternVars |> Set.unionMany
+        | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
+            ids |> List.tryLast |> Option.map (fun id -> Set.singleton id.idText) |> Option.defaultValue Set.empty
         | _ -> Set.empty
 
 /// Transform expressions to eliminate closures
 let rec transform (state: ClosureState) expr =
     match expr with
-    | SynExpr.Lambda(fromMethod, inSeq, args, body, parsedData, range, trivia) ->
+    | SynExpr.Lambda(fromMethod, inLambdaSeq, args, body, parsedData, range, trivia) ->
         let freeVars = FreeVars.analyze state.Scope body
         if Set.isEmpty freeVars then
             (expr, state)
@@ -97,19 +117,35 @@ let rec transform (state: ClosureState) expr =
             // Create lifted function binding
             let allArgs = 
                 match args with
-                | SynSimplePats.SimplePats(pats, r) ->
+                | SynSimplePats.SimplePats(pats, _, r) ->
                     let captured = capturedParams |> List.map (fun p ->
-                        SynSimplePat.Id(Ident("_cap", range), None, false, false, false, range))
-                    SynSimplePats.SimplePats(captured @ pats, r)
-                | SynSimplePats.Typed(pats, ty, r) ->
-                    SynSimplePats.SimplePats([], r) // Simplified
+                        match p with
+                        | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+                            SynSimplePat.Id(ident, None, false, false, false, range)
+                        | _ -> SynSimplePat.Id(Ident("_cap", range), None, false, false, false, range))
+                    SynSimplePats.SimplePats(captured @ pats, [], r)
             
             let liftedBinding = 
-                SynBinding(None, SynBindingKind.Normal, false, false, [], 
-                          PreXmlDoc.Empty, SynValData(None, SynValInfo([], SynArgInfo([], false, None)), None),
-                          SynPat.LongIdent(SynLongIdent([liftedIdent], [], [None]), None, None, 
-                                         SynArgPats.Pats [], None, range),
-                          None, body, range, DebugPointAtBinding.NoneAtInvisible, SynBindingTrivia.Zero)
+                SynBinding(
+                    None, 
+                    SynBindingKind.Normal, 
+                    false, 
+                    false, 
+                    [], 
+                    PreXmlDoc.Empty, 
+                    SynValData(None, SynValInfo([], SynArgInfo([], false, None)), None),
+                    SynPat.LongIdent(
+                        SynLongIdent([liftedIdent], [], [None]), 
+                        None, 
+                        None, 
+                        SynArgPats.Pats [], 
+                        None, 
+                        range),
+                    None, 
+                    body, 
+                    range, 
+                    DebugPointAtBinding.NoneAtInvisible, 
+                    SynBindingTrivia.Zero)
             
             let newState = 
                 { state with 
@@ -145,6 +181,39 @@ let rec transform (state: ClosureState) expr =
         let (body', state2) = transform state1 body
         (SynExpr.LetOrUse(isRec, isUse, List.rev bindings', body', range, trivia), state2)
     
+    | SynExpr.Sequential(debugPoint, isTrueSeq, e1, e2, range, trivia) ->
+        let (e1', state1) = transform state e1
+        let (e2', state2) = transform state1 e2
+        (SynExpr.Sequential(debugPoint, isTrueSeq, e1', e2', range, trivia), state2)
+    
+    | SynExpr.IfThenElse(cond, thenExpr, elseOpt, spIfToThen, isFromTry, range, trivia) ->
+        let (cond', state1) = transform state cond
+        let (thenExpr', state2) = transform state1 thenExpr
+        let (elseOpt', state3) = 
+            match elseOpt with
+            | Some elseExpr -> 
+                let (e, s) = transform state2 elseExpr
+                (Some e, s)
+            | None -> (None, state2)
+        (SynExpr.IfThenElse(cond', thenExpr', elseOpt', spIfToThen, isFromTry, range, trivia), state3)
+    
+    | SynExpr.Match(debugPoint, matchExpr, clauses, range, trivia) ->
+        let (matchExpr', state1) = transform state matchExpr
+        let (clauses', state2) = 
+            clauses |> List.fold (fun (accClauses, accState) clause ->
+                let (SynMatchClause(pat, whenOpt, result, range, debugPoint, trivia)) = clause
+                let (whenOpt', state') = 
+                    match whenOpt with
+                    | Some whenExpr -> 
+                        let (e, s) = transform accState whenExpr
+                        (Some e, s)
+                    | None -> (None, accState)
+                let (result', state'') = transform state' result
+                let clause' = SynMatchClause(pat, whenOpt', result', range, debugPoint, trivia)
+                (clause' :: accClauses, state''))
+                ([], state1)
+        (SynExpr.Match(debugPoint, matchExpr', List.rev clauses', range, trivia), state2)
+    
     | _ -> (expr, state)
 
 /// Transform a module's bindings
@@ -155,7 +224,22 @@ let transformModule (bindings: SynBinding list) =
         bindings |> List.fold (fun (accBindings, accState) binding ->
             let (SynBinding(access, kind, isInline, isMut, attrs, xmlDoc, valData, 
                           headPat, retInfo, expr, range, debugPoint, trivia)) = binding
-            let (expr', newState) = transform accState expr
+            
+            // Extract binding name to add to scope
+            let bindingName = 
+                match headPat with
+                | SynPat.Named(SynIdent(ident, _), _, _, _) -> Some ident.idText
+                | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
+                    ids |> List.tryLast |> Option.map (fun id -> id.idText)
+                | _ -> None
+            
+            let scope' = 
+                match bindingName with
+                | Some name -> Set.add name accState.Scope
+                | None -> accState.Scope
+            
+            let stateWithScope = { accState with Scope = scope' }
+            let (expr', newState) = transform stateWithScope expr
             let binding' = SynBinding(access, kind, isInline, isMut, attrs, xmlDoc, valData,
                                     headPat, retInfo, expr', range, debugPoint, trivia)
             (binding' :: accBindings, newState))

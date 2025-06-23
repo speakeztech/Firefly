@@ -74,7 +74,7 @@ let rec mapType (ctx: TypeContext) (fsType: FSharpType) : MLIRType * TypeContext
                     | _ when fsType.TypeDefinition.IsValueType ->
                         mapStructType ctx fsType
                     | _ when fsType.TypeDefinition.IsFSharpUnion ->
-                        mapUnionType ctx fsType
+                        mapUnionType ctx fsType.TypeDefinition
                     | _ ->
                         (MLIRTypes.memref MLIRTypes.i8, ctx)  // Reference type
             else

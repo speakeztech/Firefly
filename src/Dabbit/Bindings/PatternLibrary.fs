@@ -27,8 +27,8 @@ type SymbolPattern = {
 module Matchers =
     let (|AppNamed|_|) name = function
         | SynExpr.App(_, _, SynExpr.Ident(ident), _, _) when ident.idText = name -> Some ()
-        | SynExpr.App(_, _, SynExpr.LongIdent(_, lid, _, _), _, _) ->
-            match lid.Lid with
+        | SynExpr.App(_, _, SynExpr.LongIdent(_, SynLongIdent(ids, _, _), _, _), _, _) ->
+            match ids with
             | [ident] when ident.idText = name -> Some ()
             | _ -> None
         | _ -> None

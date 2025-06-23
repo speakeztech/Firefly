@@ -6,6 +6,7 @@ open FSharp.Compiler.Symbols
 open Dabbit.Bindings.PatternLibrary
 open Core.MLIRGeneration.TypeMapping
 open Core.MLIRGeneration.TypeSystem
+open Core.MLIRGeneration.Dialect
 
 /// MLIR generation state
 type GenState = {
@@ -43,9 +44,10 @@ let rec genExpr (state: GenState) expr =
             match findByName ident.idText with
             | Some pattern ->
                 let (ssa, state') = nextSSA "func" state
-                let state'' = emit (sprintf "%s = func.constant @%s : %s" 
-                                    ssa pattern.QualifiedName 
-                                    (mlirTypeToString (MLIRTypes.func (fst pattern.TypeSig) (snd pattern.TypeSig)))) state'
+                let funcType = MLIRTypes.func (fst pattern.TypeSig) (snd pattern.TypeSig)
+                let typeStr = Core.MLIRGeneration.TypeSystem.mlirTypeToString funcType
+                let formatted = sprintf "%s = func.constant @%s : %s" ssa pattern.QualifiedName typeStr
+                let state'' = emit formatted state'
                 (ssa, snd pattern.TypeSig, state'')
             | None ->
                 let (ssa, state') = nextSSA "undef" state
@@ -62,8 +64,9 @@ let rec genExpr (state: GenState) expr =
             let (funcSSA, funcType, state1) = genExpr state func
             let (argSSA, argType, state2) = genExpr state1 arg
             let (resultSSA, state3) = nextSSA "call" state2
-            let state4 = emit (sprintf "%s = func.call_indirect %s(%s) : (%s) -> i32" 
-                               resultSSA funcSSA argSSA (mlirTypeToString argType)) state3
+            let argTypeStr = Core.MLIRGeneration.TypeSystem.mlirTypeToString argType
+            let formatted = sprintf "%s = func.call_indirect %s(%s) : (%s) -> i32" resultSSA funcSSA argSSA argTypeStr
+            let state4 = emit formatted state3
             (resultSSA, MLIRTypes.i32, state4)
     
     | SynExpr.LetOrUse(_, _, bindings, body, _, _) ->
@@ -78,13 +81,16 @@ let rec genExpr (state: GenState) expr =
         let state3 = emit (sprintf "cf.cond_br %s, ^then, ^else" condSSA) state2
         let state4 = emit "^then:" state3
         let (thenSSA, thenType, state5) = genExpr { state4 with Indent = state4.Indent + 1 } thenExpr
-        let state6 = emit (sprintf "cf.br ^merge(%s : %s)" thenSSA (mlirTypeToString thenType)) state5
+        let thenTypeStr = Core.MLIRGeneration.TypeSystem.mlirTypeToString thenType
+        let state6 = emit (sprintf "cf.br ^merge(%s : %s)" thenSSA thenTypeStr) state5
         
         let state7 = emit "^else:" { state6 with Indent = state.Indent }
         let (elseSSA, elseType, state8) = genExpr { state7 with Indent = state7.Indent + 1 } elseExpr
-        let state9 = emit (sprintf "cf.br ^merge(%s : %s)" elseSSA (mlirTypeToString elseType)) state8
+        let elseTypeStr = Core.MLIRGeneration.TypeSystem.mlirTypeToString elseType
+        let state9 = emit (sprintf "cf.br ^merge(%s : %s)" elseSSA elseTypeStr) state8
         
-        let state10 = emit (sprintf "^merge(%s : %s):" resultSSA (mlirTypeToString thenType)) { state9 with Indent = state.Indent }
+        let mergeTypeStr = Core.MLIRGeneration.TypeSystem.mlirTypeToString thenType
+        let state10 = emit (sprintf "^merge(%s : %s):" resultSSA mergeTypeStr) { state9 with Indent = state.Indent }
         (resultSSA, thenType, state10)
     
     | _ ->
@@ -97,21 +103,23 @@ and genPatternApp state pattern expr =
     match pattern.OpPattern with
     | DialectOp(dialect, op, attrs) ->
         let (resultSSA, state') = nextSSA "op" state
-        let dialectStr = Core.MLIRGeneration.Dialect.dialectToString dialect
+        let dialectStr = dialectToString dialect
         let attrStr = 
             if Map.isEmpty attrs then ""
             else attrs |> Map.toList |> List.map (fun (k, v) -> sprintf "%s = %s" k v) |> String.concat ", " |> sprintf " {%s}"
-        let state'' = emit (sprintf "%s = %s.%s()%s : %s" 
-                            resultSSA dialectStr op attrStr 
-                            (mlirTypeToString (snd pattern.TypeSig))) state'
-        (resultSSA, snd pattern.TypeSig, state'')
+        let returnType = snd pattern.TypeSig
+        let returnTypeStr = Core.MLIRGeneration.TypeSystem.mlirTypeToString returnType
+        let formatted = sprintf "%s = %s.%s()%s : %s" resultSSA dialectStr op attrStr returnTypeStr
+        let state'' = emit formatted state'
+        (resultSSA, returnType, state'')
     
     | ExternalCall(func, _) ->
         let (resultSSA, state') = nextSSA "call" state
-        let state'' = emit (sprintf "%s = func.call @%s() : () -> %s" 
-                            resultSSA func 
-                            (mlirTypeToString (snd pattern.TypeSig))) state'
-        (resultSSA, snd pattern.TypeSig, state'')
+        let returnType = snd pattern.TypeSig
+        let returnTypeStr = Core.MLIRGeneration.TypeSystem.mlirTypeToString returnType
+        let formatted = sprintf "%s = func.call @%s() : () -> %s" resultSSA func returnTypeStr
+        let state'' = emit formatted state'
+        (resultSSA, returnType, state'')
     
     | _ ->
         let (ssa, state') = nextSSA "pattern" state
@@ -141,7 +149,7 @@ and generateModule (moduleName: string) (typeCtx: TypeContext) (input: ParsedInp
     
     let finalState = 
         match input with
-        | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, modules, _, _, _, _)) ->
+        | ParsedInput.ImplFile(ParsedImplFileInput(fileName, isScript, qualifiedNameOfFile, scopedPragmas, hashDirectives, modules, isLastCompiland, trivia, identifiers)) ->
             modules |> List.fold (fun s (SynModuleOrNamespace(_, _, _, decls, _, _, _, _, _)) ->
                 decls |> List.fold genModuleDecl s) { state' with Indent = 1 }
         | _ -> state'
