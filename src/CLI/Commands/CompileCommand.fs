@@ -494,38 +494,50 @@ let private performReachabilityAnalysis (ctx: CompilationContext) (refinedProgra
     
     Success reachableProgram
 
-/// Phase 3: Transform AST (now working with reachable code only)
-let private transformASTPhase (ctx: CompilationContext) (reachableProgram: ReachableProgram, checker: FSharpChecker, projectOptions: FSharpProjectOptions) : CompilerResult<ParsedInput * TypeContext * SymbolRegistry> =
+/// Phase 3: Transform AST 
+let private transformASTPhase (ctx: CompilationContext) (reachableProgram: ReachableProgram, checker: FSharpChecker, projectOptions: FSharpProjectOptions) : CompilerResult<ReachableProgram * TypeContext * SymbolRegistry> =
     printfn "Phase 3: Transforming reachable AST..."
     let typeCtx = TypeContextBuilder.create()
     
     match RegistryConstruction.buildAlloyRegistry() with
     | CompilerFailure errors -> CompilerFailure errors
     | Success symbolRegistry ->
-        // For now, just use the main file's AST for further processing
-        let (_, mainInput) = reachableProgram.ReachableInputs |> List.head
-        
-        // Apply any additional transformations (closure elimination, etc.)
+        // Transform all reachable inputs while preserving the structure
         let transformCtx = {
             TypeContext = typeCtx
             SymbolRegistry = symbolRegistry
             Reachability = {
-                Reachable = Set.empty  // Already pruned
+                Reachable = reachableProgram.ReachabilityStats.ReachableSymbols |> Set.ofList
                 UnionCases = Map.empty
                 Statistics = reachableProgram.ReachabilityStats
             }
             ClosureState = { Counter = 0; Scope = Set.empty; Lifted = [] }
         }
         
-        let transformedAST = transformAST transformCtx mainInput
+        // Transform each reachable input
+        let transformedInputs = 
+            reachableProgram.ReachableInputs 
+            |> List.map (fun (path, input) ->
+                let transformedAST = transformAST transformCtx input
+                (path, transformedAST)
+            )
         
-        Success (transformedAST, typeCtx, symbolRegistry)
+        // Create transformed reachable program
+        let transformedReachableProgram = {
+            MainFile = reachableProgram.MainFile
+            ReachableInputs = transformedInputs
+            ReachabilityStats = reachableProgram.ReachabilityStats
+        }
+        
+        Success (transformedReachableProgram, typeCtx, symbolRegistry)
 
 /// Phase 4: Generate MLIR
-let private generateMLIR (ctx: CompilationContext) (transformedAST: ParsedInput, typeCtx: TypeContext, symbolRegistry: SymbolRegistry) : CompilerResult<string> =
+let private generateMLIR (ctx: CompilationContext) (reachableProgram: ReachableProgram, typeCtx: TypeContext, symbolRegistry: SymbolRegistry) : CompilerResult<string> =
     printfn "Phase 4: Generating MLIR..."
     let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
-    let mlirText = generateModule baseName typeCtx transformedAST
+    
+    // Pass all reachable inputs to the generator
+    let mlirText = Core.MLIRGeneration.DirectGenerator.generateProgram baseName typeCtx symbolRegistry reachableProgram.ReachableInputs
     
     if ctx.KeepIntermediates then
         writeIntermediateFile ctx.IntermediatesDir baseName ".mlir" mlirText
@@ -591,12 +603,50 @@ let private compilePipeline (ctx: CompilationContext) (sourceCode: string) : Com
         let! parsed = parseSource ctx sourceCode
         let! refined = refineAST ctx parsed
         let! reachable = performReachabilityAnalysis ctx refined
-        let! transformed = transformASTPhase ctx (reachable, parsed.Checker, parsed.ProjectOptions)
-        let! mlir = generateMLIR ctx transformed
-        let! lowered = lowerMLIR ctx mlir
-        let! optimized = optimizeCode ctx lowered
-        let! llvmIR = convertToLLVMIR ctx optimized
-        return! validateAndFinalize ctx llvmIR
+        let! (transformedReachable, typeCtx, symbolRegistry) = transformASTPhase ctx (reachable, parsed.Checker, parsed.ProjectOptions)
+        let! mlir = generateMLIR ctx (transformedReachable, typeCtx, symbolRegistry)
+        
+        // Phase 5: Lower MLIR
+        let! lowered = 
+            match Core.Conversion.LoweringPipeline.applyLoweringPipeline mlir with
+            | Success result -> Success result
+            | CompilerFailure errors -> CompilerFailure errors
+        
+        // Phase 6: Optimize
+        let optLevel = 
+            match ctx.OptimizeLevel.ToLowerInvariant() with
+            | "none" -> Core.Conversion.OptimizationPipeline.OptimizationLevel.Zero
+            | "less" -> Core.Conversion.OptimizationPipeline.OptimizationLevel.Less
+            | "aggressive" -> Core.Conversion.OptimizationPipeline.OptimizationLevel.Aggressive
+            | "size" -> Core.Conversion.OptimizationPipeline.OptimizationLevel.Size
+            | _ -> Core.Conversion.OptimizationPipeline.OptimizationLevel.Default
+        
+        let llvmOutput = {
+            Core.Conversion.OptimizationPipeline.LLVMIRText = lowered
+            ModuleName = Path.GetFileNameWithoutExtension(ctx.InputPath)
+            OptimizationLevel = optLevel
+            Metadata = Map.empty
+        }
+        
+        let! optimized = 
+            let passes = Core.Conversion.OptimizationPipeline.createOptimizationPipeline optLevel
+            Core.Conversion.OptimizationPipeline.optimizeLLVMIR llvmOutput passes
+        
+        // Phase 7: Convert to LLVM IR
+        let! llvmIR = 
+            match Core.Conversion.LoweringPipeline.translateToLLVMIR optimized.LLVMIRText ctx.IntermediatesDir with
+            | Success result -> Success result
+            | CompilerFailure errors -> CompilerFailure errors
+        
+        // Phase 8: Validate
+        return! 
+            match Core.Conversion.OptimizationPipeline.validateZeroAllocationGuarantees llvmIR with
+            | Success () ->
+                printfn "✓ Zero-allocation guarantees verified"
+                printfn "Phase 8: Invoking external tools..."
+                printfn "TODO: Call clang/lld to produce final executable"
+                Success ()
+            | CompilerFailure errors -> CompilerFailure errors
     }
 
 /// Compiles F# source to native executable
