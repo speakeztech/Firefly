@@ -45,17 +45,29 @@ let pruneModule (reachable: Set<string>) (moduleName: string) (decls: SynModuleD
 let prune (reachable: Set<string>) (input: ParsedInput) =
     match input with
     | ParsedInput.ImplFile(implFile) ->
-        // Extract contents using named pattern
-        let (ParsedImplFileInput(fileName, isScript, qualifiedNameOfFile, scopedPragmas, hashDirectives, modules, isLastCompiland, trivia, identifiers)) = implFile
+        let (ParsedImplFileInput(fileName, isScript, qualName, pragmas, directives, modules, isLast, trivia, ids)) = implFile
         
-        // Prune modules
-        let prunedMods = modules |> List.map (fun modul ->
+        let prunedModules = modules |> List.map (fun modul ->
             let (SynModuleOrNamespace(longId, isRec, kind, decls, xmlDoc, attrs, synAccess, range, moduleTrivia)) = modul
             let moduleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
-            let prunedDecls = pruneModule reachable moduleName decls
+            
+            // Keep all opens, types, and nested modules
+            // Only prune completely unused top-level let bindings
+            let prunedDecls = decls |> List.filter (function
+                | SynModuleDecl.Let(isRec, bindings, range) ->
+                    bindings |> List.exists (fun (SynBinding(_, _, _, _, _, _, _, pat, _, _, _, _, _)) ->
+                        match pat with
+                        | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+                            let fullName = sprintf "%s.%s" moduleName ident.idText
+                            Set.contains fullName reachable ||
+                            Set.contains ident.idText reachable ||
+                            // Keep if it's used by any reachable symbol
+                            reachable |> Set.exists (fun r -> r.Contains(ident.idText))
+                        | _ -> true)
+                | _ -> true  // Keep everything else
+            )
+            
             SynModuleOrNamespace(longId, isRec, kind, prunedDecls, xmlDoc, attrs, synAccess, range, moduleTrivia))
         
-        // Reconstruct with pruned modules
-        ParsedInput.ImplFile(ParsedImplFileInput(fileName, isScript, qualifiedNameOfFile, scopedPragmas, hashDirectives, prunedMods, isLastCompiland, trivia, identifiers))
-    
-    | ParsedInput.SigFile _ -> input  // Don't prune signatures
+        ParsedInput.ImplFile(ParsedImplFileInput(fileName, isScript, qualName, pragmas, directives, prunedModules, isLast, trivia, ids))
+    | sig_ -> sig_
