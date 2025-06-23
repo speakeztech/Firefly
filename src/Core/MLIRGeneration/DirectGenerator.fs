@@ -421,6 +421,30 @@ and generateExpression (expr: SynExpr) : MLIRBuilder<string * MLIRType> =
         | SynExpr.Ident ident ->
             return! generateIdentifier ident
             
+        | SynExpr.New(_, targetType, argExpr, _) ->
+            // Handle constructor calls
+            let! (argSSA, argType) = generateExpression argExpr
+            // For StackBuffer, this is essentially an alloca
+            match targetType with
+            | SynType.App(SynType.LongIdent(SynLongIdent(ids, _, _)), _, _, _, _, _, _) ->
+                let typeName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+                if typeName.Contains("StackBuffer") then
+                    // For StackBuffer, generate an alloca
+                    let! bufferSSA = nextSSA "buffer"
+                    // The size should come from the argument
+                    match argExpr with
+                    | SynExpr.Const(SynConst.Int32 size, _) ->
+                        do! emitAlloca bufferSSA size
+                    | _ ->
+                        // Dynamic size - use the computed value
+                        do! emitLine (sprintf "%s = memref.alloca(%s) : memref<?xi8>" bufferSSA argSSA)
+                    do! newline
+                    return (bufferSSA, MLIRTypes.memref MLIRTypes.i8)
+                else
+                    return! failHard "Constructor" (sprintf "Constructor for type '%s' not implemented" typeName)
+            | _ ->
+                return! failHard "Constructor" "Complex type constructors not supported"
+            
         | SynExpr.App(_, _, funcExpr, argExpr, _) ->
             return! generateApplication funcExpr argExpr
             
@@ -718,13 +742,25 @@ and generateFieldAccess (targetExpr: SynExpr) (fieldIds: Ident list) : MLIRBuild
         let! (targetSSA, targetType) = generateExpression targetExpr
         let fieldName = fieldIds |> List.map (fun id -> id.idText) |> String.concat "."
         
-        // Special case for buffer.AsSpan
-        if fieldName = "AsSpan" then
+        // Handle known methods
+        match fieldName with
+        | "AsSpan" ->
             // Just return the buffer itself for now
             return (targetSSA, targetType)
-        else
+        | "ToString" ->
+            // For now, just return the input as-is (spans are already string-like)
+            return (targetSSA, targetType)
+        | "Pointer" ->
+            // Return the buffer pointer
+            return (targetSSA, targetType)
+        | "Length" ->
+            // Return a constant for now
+            let! lengthSSA = nextSSA "len"
+            do! emitLine (sprintf "%s = arith.constant 256 : i32" lengthSSA)
+            return (lengthSSA, MLIRTypes.i32)
+        | _ ->
             return! failHard "Field Access" 
-                (sprintf "Field access '%s' not implemented" fieldName)
+                (sprintf "Field or method '%s' not implemented" fieldName)
     }
 
 and generateTuple (exprs: SynExpr list) : MLIRBuilder<string * MLIRType> =
@@ -747,8 +783,8 @@ and generateTuple (exprs: SynExpr list) : MLIRBuilder<string * MLIRType> =
             return! failHard "Tuple" "Empty tuple not supported"
     }
 
-/// Generate MLIR function
-let generateFunction (functionName: string) (attributes: SynAttributes) (expression: SynExpr) : MLIRBuilder<unit> =
+/// Generate MLIR function with parameters
+let generateFunction (functionName: string) (attributes: SynAttributes) (pattern: SynPat) (expression: SynExpr) : MLIRBuilder<unit> =
     mlir {
         let! state = getState
         
@@ -773,44 +809,123 @@ let generateFunction (functionName: string) (attributes: SynAttributes) (express
                 if isMain then "@main" 
                 else "@" + qualifiedName.Replace(".", "_")
             
+            // Unwrap parentheses if present
+            let rec unwrapParen expr =
+                match expr with
+                | SynExpr.Paren(inner, _, _, _) -> unwrapParen inner
+                | _ -> expr
+            
+            let unwrappedExpr = unwrapParen expression
+            
+            // Debug output for stackBuffer
+            if functionName = "stackBuffer" then
+                do! emit (sprintf "\n    // DEBUG: Pattern type: %A\n" (pattern.GetType().Name))
+                do! emit (sprintf "    // DEBUG: Unwrapped expr type: %A\n" (unwrappedExpr.GetType().Name))
+            
+            // Extract parameters from pattern
+            let parameters = 
+                match pattern with
+                | SynPat.LongIdent(_, _, _, SynArgPats.Pats pats, _, _) ->
+                    // Parameters in pattern
+                    pats |> List.mapi (fun i pat ->
+                        match pat with
+                        | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+                            Some (ident.idText, sprintf "%%arg%d" i, MLIRTypes.i32)
+                        | SynPat.Paren(SynPat.Named(SynIdent(ident, _), _, _, _), _) ->
+                            Some (ident.idText, sprintf "%%arg%d" i, MLIRTypes.i32)
+                        | SynPat.Typed(SynPat.Named(SynIdent(ident, _), _, _, _), _, _) ->
+                            Some (ident.idText, sprintf "%%arg%d" i, MLIRTypes.i32)
+                        | SynPat.Paren(SynPat.Typed(SynPat.Named(SynIdent(ident, _), _, _, _), _, _), _) ->
+                            Some (ident.idText, sprintf "%%arg%d" i, MLIRTypes.i32)
+                        | _ -> None)
+                    |> List.choose id
+                | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+                    // Simple binding - check if expression is a lambda
+                    match unwrappedExpr with
+                    | SynExpr.Lambda(_, _, args, _, _, _, _) ->
+                        match args with
+                        | SynSimplePats.SimplePats(pats, _, _) ->
+                            pats |> List.mapi (fun i pat ->
+                                match pat with
+                                | SynSimplePat.Id(ident, _, _, _, _, _) ->
+                                    Some (ident.idText, sprintf "%%arg%d" i, MLIRTypes.i32)
+                                | SynSimplePat.Typed(SynSimplePat.Id(ident, _, _, _, _, _), _, _) ->
+                                    Some (ident.idText, sprintf "%%arg%d" i, MLIRTypes.i32)
+                                | _ -> None)
+                            |> List.choose id
+                        | _ -> []
+                    | _ -> []
+                | _ -> []
+            
+            // Additional debug for stackBuffer if no parameters found
+            if functionName = "stackBuffer" && parameters.IsEmpty then
+                match pattern with
+                | SynPat.LongIdent(_, _, _, args, _, _) ->
+                    do! emit (sprintf "    // DEBUG: SynArgPats: %A\n" args)
+                | _ -> ()
+            
+            // Build function signature
+            let paramList = 
+                if parameters.IsEmpty then ""
+                else
+                    let paramStrs = parameters |> List.map (fun (_, ssa, typ) ->
+                        sprintf "%s: %s" ssa (mlirTypeToStringWithLLVM typ))
+                    sprintf "(%s)" (String.concat ", " paramStrs)
+            
             // Register this function for local resolution
-            let funcType = MLIRTypes.func [] MLIRTypes.i32  // Simplified for now
+            let paramTypes = parameters |> List.map (fun (_, _, typ) -> typ)
+            let funcType = MLIRTypes.func paramTypes MLIRTypes.i32
             do! updateState (fun s -> { s with LocalFunctions = Map.add functionName funcType s.LocalFunctions })
             
-            do! emitLine (sprintf "func.func %s() -> i32 {" mlirName)
-            do! indent (mlir {
-                do! updateState (fun s -> { s with 
-                                             CurrentFunction = Some qualifiedName
-                                             LocalVars = Map.empty
-                                             SSACounter = 0 })
-                
-                try
-                    let! (resultSSA, resultType) = generateExpression expression
+            do! emitLine (sprintf "func.func %s%s -> i32 {" mlirName paramList)
+            do! indent (
+                mlir {
+                    // Bind parameters and set up function state in one update
+                    do! updateState (fun s -> 
+                        let withFunctionState = { s with 
+                                                    CurrentFunction = Some qualifiedName
+                                                    LocalVars = Map.empty
+                                                    SSACounter = 0 }
+                        // Bind parameters to the local vars
+                        parameters |> List.fold (fun state (name, ssa, typ) ->
+                            { state with LocalVars = Map.add name (ssa, typ) state.LocalVars }
+                        ) withFunctionState
+                    )
                     
-                    match resultType with
-                    | t when t = MLIRTypes.void_ || isMain ->
-                        let! zeroSSA = nextSSA "ret"
-                        do! emitLine (sprintf "%s = arith.constant 0 : i32" zeroSSA)
-                        do! emitLine (sprintf "func.return %s : i32" zeroSSA)
-                    | _ ->
-                        do! emitLine (sprintf "func.return %s : %s" resultSSA (mlirTypeToStringWithLLVM resultType))
-                with
-                | MLIRGenerationException(msg, _) ->
-                    // Re-raise with function context
-                    raise (MLIRGenerationException(msg, Some qualifiedName))
-            })
+                    try
+                        // If expression is a lambda, generate its body
+                        let bodyExpr = 
+                            match unwrappedExpr with
+                            | SynExpr.Lambda(_, _, _, body, _, _, _) when not parameters.IsEmpty ->
+                                body
+                            | _ -> unwrappedExpr
+                        
+                        let! (resultSSA, resultType) = generateExpression bodyExpr
+                        
+                        match resultType with
+                        | t when t = MLIRTypes.void_ || isMain ->
+                            let! zeroSSA = nextSSA "ret"
+                            do! emitLine (sprintf "%s = arith.constant 0 : i32" zeroSSA)
+                            do! emitLine (sprintf "func.return %s : i32" zeroSSA)
+                        | _ ->
+                            do! emitLine (sprintf "func.return %s : %s" resultSSA (mlirTypeToStringWithLLVM resultType))
+                    with
+                    | MLIRGenerationException(msg, _) ->
+                        // Re-raise with function context
+                        raise (MLIRGenerationException(msg, Some qualifiedName))
+                })
             do! emitLine "}"
     }
 
-/// Process binding
+/// Process binding - passes pattern to generateFunction
 let processBinding (SynBinding(_, _, _, _, attributes, _, _, pattern, _, expression, _, _, _)) : MLIRBuilder<unit> =
     mlir {
         match pattern with
         | SynPat.Named(SynIdent(ident, _), _, _, _) ->
-            do! generateFunction ident.idText attributes expression
+            do! generateFunction ident.idText attributes pattern expression
         | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
             let name = ids |> List.map (fun id -> id.idText) |> List.last
-            do! generateFunction name attributes expression
+            do! generateFunction name attributes pattern expression
         | _ ->
             return! failHard "Binding" "Complex binding patterns not supported"
     }
