@@ -110,49 +110,398 @@ module SymbolResolution =
             match tryNamespaceResolution () with
             | Some symbol -> Success symbol
             | None ->
-                let patternMatch = 
-                    state.PatternRegistry
-                    |> List.tryFind (fun pattern -> 
-                        pattern.QualifiedName.EndsWith(shortName))
-                
-                match patternMatch with
-                | Some pattern ->
-                    let qualifiedName = 
-                        if state.ActiveNamespaces.IsEmpty then shortName
-                        else sprintf "%s.%s" state.ActiveNamespaces.[0] shortName
-                    
-                    let symbol = {
-                        QualifiedName = qualifiedName
-                        ShortName = shortName
-                        ParameterTypes = fst pattern.TypeSig
-                        ReturnType = snd pattern.TypeSig
-                        Operation = pattern.OpPattern
-                        Namespace = if state.ActiveNamespaces.IsEmpty then "" else state.ActiveNamespaces.[0]
-                        SourceLibrary = "Alloy"
-                        RequiresExternal = 
-                            match pattern.OpPattern with
-                            | ExternalCall(_, Some _) -> true
-                            | Composite patterns ->
-                                patterns |> List.exists (function
-                                    | ExternalCall(_, Some _) -> true
-                                    | _ -> false)
-                            | _ -> false
-                    }
-                    Success symbol
-                | None ->
-                    CompilerFailure [ConversionError(
-                        "unqualified symbol resolution",
-                        shortName,
-                        "resolved symbol",
-                        sprintf "Symbol '%s' not found in any active namespace or pattern library" shortName
-                    )]
+                CompilerFailure [ConversionError(
+                    "unqualified symbol resolution",
+                    shortName,
+                    "resolved symbol",
+                    sprintf "Symbol '%s' not found in any active namespace" shortName
+                )]
     
     let resolveSymbol (name: string) (state: SymbolResolutionState) : CompilerResult<ResolvedSymbol> =
-        if name.Contains('.') then resolveQualified name state
+        if name.Contains(".") 
+        then resolveQualified name state
         else resolveUnqualified name state
 
 /// Alloy library symbol definitions
 module AlloySymbols =
+    
+    // Core module symbols
+    let createCoreSymbols() : ResolvedSymbol list = [
+        // Collection operations
+        {
+            QualifiedName = "Alloy.Core.iter"
+            ShortName = "iter"
+            ParameterTypes = [MLIRTypes.func([MLIRTypes.i8], MLIRTypes.void_); MLIRTypes.memref MLIRTypes.i8]
+            ReturnType = MLIRTypes.void_
+            Operation = Transform("iterate_array", ["inline_function"])
+            Namespace = "Alloy.Core"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Core.map"
+            ShortName = "map"
+            ParameterTypes = [MLIRTypes.func([MLIRTypes.i8], MLIRTypes.i8); MLIRTypes.memref MLIRTypes.i8]
+            ReturnType = MLIRTypes.memref MLIRTypes.i8
+            Operation = Transform("map_array", ["inline_function"])
+            Namespace = "Alloy.Core"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Core.len"
+            ShortName = "len"
+            ParameterTypes = [MLIRTypes.memref MLIRTypes.i8]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("array_length", [])
+            Namespace = "Alloy.Core"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        // Zero/One/Default operations
+        {
+            QualifiedName = "Alloy.Core.zero"
+            ShortName = "zero"
+            ParameterTypes = []
+            ReturnType = MLIRTypes.i32  // Will be resolved based on usage
+            Operation = Transform("zero_value", ["type_dependent"])
+            Namespace = "Alloy.Core"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Core.one"
+            ShortName = "one"
+            ParameterTypes = []
+            ReturnType = MLIRTypes.i32  // Will be resolved based on usage
+            Operation = Transform("one_value", ["type_dependent"])
+            Namespace = "Alloy.Core"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        // Boolean operations
+        {
+            QualifiedName = "Alloy.Core.not"
+            ShortName = "not"
+            ParameterTypes = [MLIRTypes.i1]
+            ReturnType = MLIRTypes.i1
+            Operation = DialectOp(Arith, "arith.xori", Map["rhs", "1"])
+            Namespace = "Alloy.Core"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+    ]
+    
+    // Numeric operations symbols
+    let createNumericSymbols() : ResolvedSymbol list = [
+        // Basic arithmetic - will be resolved to concrete types at usage
+        {
+            QualifiedName = "Alloy.Numerics.add"
+            ShortName = "add"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("add_resolved", ["type_dependent"])
+            Namespace = "Alloy.Numerics"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Numerics.subtract"
+            ShortName = "subtract"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("subtract_resolved", ["type_dependent"])
+            Namespace = "Alloy.Numerics"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Numerics.multiply"
+            ShortName = "multiply"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("multiply_resolved", ["type_dependent"])
+            Namespace = "Alloy.Numerics"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Numerics.divide"
+            ShortName = "divide"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("divide_resolved", ["type_dependent"])
+            Namespace = "Alloy.Numerics"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Numerics.modulo"
+            ShortName = "modulo"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("modulo_resolved", ["type_dependent"])
+            Namespace = "Alloy.Numerics"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Numerics.power"
+            ShortName = "power"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("power_resolved", ["type_dependent"])
+            Namespace = "Alloy.Numerics"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        // Mathematical functions
+        {
+            QualifiedName = "Alloy.Numerics.abs"
+            ShortName = "abs"
+            ParameterTypes = [MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("abs_resolved", ["type_dependent"])
+            Namespace = "Alloy.Numerics"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Numerics.sqrt"
+            ShortName = "sqrt"
+            ParameterTypes = [MLIRTypes.f32]
+            ReturnType = MLIRTypes.f32
+            Operation = Transform("sqrt_resolved", ["type_dependent"])
+            Namespace = "Alloy.Numerics"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        // Comparison operations
+        {
+            QualifiedName = "Alloy.Numerics.equals"
+            ShortName = "equals"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i1
+            Operation = Transform("equals_resolved", ["type_dependent"])
+            Namespace = "Alloy.Numerics"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Numerics.lessThan"
+            ShortName = "lessThan"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i1
+            Operation = Transform("less_than_resolved", ["type_dependent"])
+            Namespace = "Alloy.Numerics"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Numerics.greaterThan"
+            ShortName = "greaterThan"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i1
+            Operation = Transform("greater_than_resolved", ["type_dependent"])
+            Namespace = "Alloy.Numerics"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Numerics.lessThanOrEqual"
+            ShortName = "lessThanOrEqual"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i1
+            Operation = Transform("less_than_or_equal_resolved", ["type_dependent"])
+            Namespace = "Alloy.Numerics"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Numerics.greaterThanOrEqual"
+            ShortName = "greaterThanOrEqual"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i1
+            Operation = Transform("greater_than_or_equal_resolved", ["type_dependent"])
+            Namespace = "Alloy.Numerics"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+    ]
+    
+    // Operator symbols
+    let createOperatorSymbols() : ResolvedSymbol list = [
+        // Pipe operators
+        {
+            QualifiedName = "Alloy.Operators.op_PipeRight"
+            ShortName = "|>"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.func([MLIRTypes.i32], MLIRTypes.i32)]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("pipe_right", ["function_application"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Operators.op_PipeLeft"
+            ShortName = "<|"
+            ParameterTypes = [MLIRTypes.func([MLIRTypes.i32], MLIRTypes.i32); MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("pipe_left", ["function_application"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Operators.op_ComposeRight"
+            ShortName = ">>"
+            ParameterTypes = [
+                MLIRTypes.func([MLIRTypes.i32], MLIRTypes.i32)
+                MLIRTypes.func([MLIRTypes.i32], MLIRTypes.i32)
+            ]
+            ReturnType = MLIRTypes.func([MLIRTypes.i32], MLIRTypes.i32)
+            Operation = Transform("compose_right", ["function_composition"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Operators.op_ComposeLeft"
+            ShortName = "<<"
+            ParameterTypes = [
+                MLIRTypes.func([MLIRTypes.i32], MLIRTypes.i32)
+                MLIRTypes.func([MLIRTypes.i32], MLIRTypes.i32)
+            ]
+            ReturnType = MLIRTypes.func([MLIRTypes.i32], MLIRTypes.i32)
+            Operation = Transform("compose_left", ["function_composition"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        // Arithmetic operators (will delegate to Numerics functions)
+        {
+            QualifiedName = "Alloy.Operators.op_Addition"
+            ShortName = "+"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("add_operator", ["delegates_to_add"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Operators.op_Subtraction"
+            ShortName = "-"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("subtract_operator", ["delegates_to_subtract"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Operators.op_Multiply"
+            ShortName = "*"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("multiply_operator", ["delegates_to_multiply"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Operators.op_Division"
+            ShortName = "/"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("divide_operator", ["delegates_to_divide"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Operators.op_Modulus"
+            ShortName = "%"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("modulo_operator", ["delegates_to_modulo"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Operators.op_Exponentiation"
+            ShortName = "**"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("power_operator", ["delegates_to_power"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        // Comparison operators
+        {
+            QualifiedName = "Alloy.Operators.op_Equality"
+            ShortName = "="
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i1
+            Operation = Transform("equals_operator", ["delegates_to_equals"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Operators.op_Inequality"
+            ShortName = "<>"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i1
+            Operation = Transform("not_equals_operator", ["delegates_to_not_equals"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Operators.op_LessThan"
+            ShortName = "<"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i1
+            Operation = Transform("less_than_operator", ["delegates_to_lessThan"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Operators.op_GreaterThan"
+            ShortName = ">"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i1
+            Operation = Transform("greater_than_operator", ["delegates_to_greaterThan"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Operators.op_LessThanOrEqual"
+            ShortName = "<="
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i1
+            Operation = Transform("less_than_or_equal_operator", ["delegates_to_lessThanOrEqual"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Operators.op_GreaterThanOrEqual"
+            ShortName = ">="
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i1
+            Operation = Transform("greater_than_or_equal_operator", ["delegates_to_greaterThanOrEqual"])
+            Namespace = "Alloy.Operators"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+    ]
+    
     // Memory management symbols
     let createMemorySymbols() : ResolvedSymbol list = [
         {
@@ -176,12 +525,80 @@ module AlloySymbols =
             RequiresExternal = false
         }
         {
-            QualifiedName = "Alloy.Memory.stackalloc"
-            ShortName = "stackalloc"
-            ParameterTypes = [MLIRTypes.i32]
+            QualifiedName = "Alloy.Memory.BufferOps.AsSpan"
+            ShortName = "AsSpan"
+            ParameterTypes = [
+                MLIRTypes.memref MLIRTypes.i8  // buffer
+                MLIRTypes.i32                   // offset
+                MLIRTypes.i32                   // length
+            ]
             ReturnType = MLIRTypes.memref MLIRTypes.i8
-            Operation = DialectOp(MemRef, "memref.alloca", Map["element_type", "i8"])
-            Namespace = "Alloy.Memory"
+            Operation = Transform("buffer_slice", ["offset", "length"])
+            Namespace = "Alloy.Memory.BufferOps"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+    ]
+    
+    // Span operations symbols
+    let createSpanSymbols() : ResolvedSymbol list = [
+        {
+            QualifiedName = "Alloy.Span.asSpan"
+            ShortName = "asSpan"
+            ParameterTypes = [MLIRTypes.memref MLIRTypes.i8]
+            ReturnType = MLIRTypes.memref MLIRTypes.i8
+            Operation = Transform("array_to_span", [])
+            Namespace = "Alloy.Span"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Span.sliceSpan"
+            ShortName = "sliceSpan"
+            ParameterTypes = [
+                MLIRTypes.memref MLIRTypes.i8
+                MLIRTypes.i32  // start
+                MLIRTypes.i32  // length
+            ]
+            ReturnType = MLIRTypes.memref MLIRTypes.i8
+            Operation = Transform("span_slice", ["bounds_check"])
+            Namespace = "Alloy.Span"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Span.length"
+            ShortName = "length"
+            ParameterTypes = [MLIRTypes.memref MLIRTypes.i8]
+            ReturnType = MLIRTypes.i32
+            Operation = Transform("span_length", [])
+            Namespace = "Alloy.Span"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Span.copyTo"
+            ShortName = "copyTo"
+            ParameterTypes = [
+                MLIRTypes.memref MLIRTypes.i8  // source
+                MLIRTypes.memref MLIRTypes.i8  // dest
+            ]
+            ReturnType = MLIRTypes.void_
+            Operation = Transform("span_copy", ["memcpy_equivalent"])
+            Namespace = "Alloy.Span"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Span.fill"
+            ShortName = "fill"
+            ParameterTypes = [
+                MLIRTypes.memref MLIRTypes.i8
+                MLIRTypes.i8  // value
+            ]
+            ReturnType = MLIRTypes.void_
+            Operation = Transform("span_fill", ["memset_equivalent"])
+            Namespace = "Alloy.Span"
             SourceLibrary = "Alloy"
             RequiresExternal = false
         }
@@ -203,7 +620,7 @@ module AlloySymbols =
             QualifiedName = "Alloy.IO.Console.readInto"
             ShortName = "readInto"
             ParameterTypes = [MLIRTypes.memref MLIRTypes.i8]
-            ReturnType = MLIRTypes.i32
+            ReturnType = MLIRTypes.struct_([MLIRTypes.i32; MLIRTypes.i32])  // Result<int, ErrorCode>
             Operation = Composite [
                 ExternalCall("fgets", Some "libc")
                 ExternalCall("strlen", Some "libc")
@@ -218,22 +635,8 @@ module AlloySymbols =
             ShortName = "writeLine"
             ParameterTypes = [MLIRTypes.memref MLIRTypes.i8]
             ReturnType = MLIRTypes.void_
-            Operation = ExternalCall("printf", Some "libc")
-            Namespace = "Alloy.IO.Console"
-            SourceLibrary = "Alloy"
-            RequiresExternal = true
-        }
-        {
-            QualifiedName = "Alloy.IO.Console.readLine"
-            ShortName = "readLine"
-            ParameterTypes = [
-                MLIRTypes.memref MLIRTypes.i8
-                MLIRTypes.i32
-            ]
-            ReturnType = MLIRTypes.i32
             Operation = Composite [
-                ExternalCall("fgets", Some "libc")
-                ExternalCall("strlen", Some "libc")
+                ExternalCall("puts", Some "libc")
             ]
             Namespace = "Alloy.IO.Console"
             SourceLibrary = "Alloy"
@@ -241,17 +644,17 @@ module AlloySymbols =
         }
     ]
     
-    // String manipulation symbols
+    // String operations symbols
     let createStringSymbols() : ResolvedSymbol list = [
         {
             QualifiedName = "Alloy.IO.String.format"
             ShortName = "format"
-            ParameterTypes = [
-                MLIRTypes.memref MLIRTypes.i8
-                MLIRTypes.memref MLIRTypes.i8
-            ] 
+            ParameterTypes = [MLIRTypes.memref MLIRTypes.i8; MLIRTypes.memref MLIRTypes.i8]
             ReturnType = MLIRTypes.memref MLIRTypes.i8
-            Operation = ExternalCall("sprintf", Some "libc")
+            Operation = Composite [
+                ExternalCall("sprintf", Some "libc")
+                Transform("utf8_conversion", [])
+            ]
             Namespace = "Alloy.IO.String"
             SourceLibrary = "Alloy"
             RequiresExternal = true
@@ -279,6 +682,132 @@ module AlloySymbols =
             SourceLibrary = "Alloy"
             RequiresExternal = true
         }
+        {
+            QualifiedName = "Alloy.IO.String.compare"
+            ShortName = "compare"
+            ParameterTypes = [
+                MLIRTypes.memref MLIRTypes.i8
+                MLIRTypes.memref MLIRTypes.i8
+            ]
+            ReturnType = MLIRTypes.i32
+            Operation = ExternalCall("strcmp", Some "libc")
+            Namespace = "Alloy.IO.String"
+            SourceLibrary = "Alloy"
+            RequiresExternal = true
+        }
+        {
+            QualifiedName = "Alloy.IO.String.substring"
+            ShortName = "substring"
+            ParameterTypes = [
+                MLIRTypes.memref MLIRTypes.i8  // source
+                MLIRTypes.i32                   // start
+                MLIRTypes.i32                   // length
+                MLIRTypes.memref MLIRTypes.i8  // dest
+            ]
+            ReturnType = MLIRTypes.memref MLIRTypes.i8
+            Operation = Transform("string_substring", ["bounds_check", "null_terminate"])
+            Namespace = "Alloy.IO.String"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+    ]
+    
+    // File I/O symbols
+    let createFileSymbols() : ResolvedSymbol list = [
+        {
+            QualifiedName = "Alloy.IO.File.exists"
+            ShortName = "exists"
+            ParameterTypes = [MLIRTypes.memref MLIRTypes.i8]
+            ReturnType = MLIRTypes.i1
+            Operation = ExternalCall("access", Some "libc")
+            Namespace = "Alloy.IO.File"
+            SourceLibrary = "Alloy"
+            RequiresExternal = true
+        }
+        {
+            QualifiedName = "Alloy.IO.File.readAllBytes"
+            ShortName = "readAllBytes"
+            ParameterTypes = [MLIRTypes.memref MLIRTypes.i8]  // filename
+            ReturnType = MLIRTypes.struct_([MLIRTypes.memref MLIRTypes.i8; MLIRTypes.i32])  // Result<buffer, ErrorCode>
+            Operation = Composite [
+                ExternalCall("fopen", Some "libc")
+                ExternalCall("fseek", Some "libc")
+                ExternalCall("ftell", Some "libc")
+                ExternalCall("fread", Some "libc")
+                ExternalCall("fclose", Some "libc")
+                Transform("result_wrapper", ["file_io_check"])
+            ]
+            Namespace = "Alloy.IO.File"
+            SourceLibrary = "Alloy"
+            RequiresExternal = true
+        }
+        {
+            QualifiedName = "Alloy.IO.File.writeAllBytes"
+            ShortName = "writeAllBytes"
+            ParameterTypes = [
+                MLIRTypes.memref MLIRTypes.i8  // filename
+                MLIRTypes.memref MLIRTypes.i8  // buffer
+                MLIRTypes.i32                   // length
+            ]
+            ReturnType = MLIRTypes.struct_([MLIRTypes.void_; MLIRTypes.i32])  // Result<unit, ErrorCode>
+            Operation = Composite [
+                ExternalCall("fopen", Some "libc")
+                ExternalCall("fwrite", Some "libc")
+                ExternalCall("fclose", Some "libc")
+                Transform("result_wrapper", ["file_io_check"])
+            ]
+            Namespace = "Alloy.IO.File"
+            SourceLibrary = "Alloy"
+            RequiresExternal = true
+        }
+    ]
+    
+    // Time operations symbols
+    let createTimeSymbols() : ResolvedSymbol list = [
+        {
+            QualifiedName = "Alloy.Time.currentTicks"
+            ShortName = "currentTicks"
+            ParameterTypes = []
+            ReturnType = MLIRTypes.i64
+            Operation = Transform("platform_ticks", ["platform_specific"])
+            Namespace = "Alloy.Time"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Time.currentUnixTimestamp"
+            ShortName = "currentUnixTimestamp"
+            ParameterTypes = []
+            ReturnType = MLIRTypes.i64
+            Operation = ExternalCall("time", Some "libc")
+            Namespace = "Alloy.Time"
+            SourceLibrary = "Alloy"
+            RequiresExternal = true
+        }
+    ]
+    
+    // Result type operations
+    let createResultSymbols() : ResolvedSymbol list = [
+        {
+            QualifiedName = "Alloy.Core.Result.Ok"
+            ShortName = "Ok"
+            ParameterTypes = [MLIRTypes.i32]  // Value - will be resolved based on usage
+            ReturnType = MLIRTypes.struct_([MLIRTypes.i32; MLIRTypes.i32])  // tag + value
+            Operation = Transform("result_ok", ["tag_value"])
+            Namespace = "Alloy.Core.Result"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
+        {
+            QualifiedName = "Alloy.Core.Result.Error"
+            ShortName = "Error"
+            ParameterTypes = [MLIRTypes.i32]  // Error - will be resolved based on usage
+            ReturnType = MLIRTypes.struct_([MLIRTypes.i32; MLIRTypes.i32])  // tag + error
+            Operation = Transform("result_error", ["tag_value"])
+            Namespace = "Alloy.Core.Result"
+            SourceLibrary = "Alloy"
+            RequiresExternal = false
+        }
     ]
 
 /// Registry construction and management
@@ -287,11 +816,18 @@ module RegistryConstruction =
         try
             let initialState = SymbolResolution.createEmptyState()
             
-            // Gather all Alloy symbols
+            // Gather ALL Alloy symbols
             let alloySymbols = 
+                AlloySymbols.createCoreSymbols() @
+                AlloySymbols.createNumericSymbols() @
+                AlloySymbols.createOperatorSymbols() @
                 AlloySymbols.createMemorySymbols() @
+                AlloySymbols.createSpanSymbols() @
                 AlloySymbols.createConsoleSymbols() @
-                AlloySymbols.createStringSymbols()
+                AlloySymbols.createStringSymbols() @
+                AlloySymbols.createFileSymbols() @
+                AlloySymbols.createTimeSymbols() @
+                AlloySymbols.createResultSymbols()
             
             // Register all symbols
             let finalState = 
@@ -302,325 +838,74 @@ module RegistryConstruction =
             let stateWithNamespaces = {
                 finalState with 
                     ActiveNamespaces = [
+                        "Alloy.Core"
+                        "Alloy.Numerics"
+                        "Alloy.Operators"
                         "Alloy.Memory"
+                        "Alloy.Memory.BufferOps"
+                        "Alloy.Span"
                         "Alloy.IO.Console"
                         "Alloy.IO.String"
+                        "Alloy.IO.File"
+                        "Alloy.Time"
+                        "Alloy.Core.Result"
                     ]
             }
             
             Success {
                 State = stateWithNamespaces
-                ResolutionHistory = [("initialization", "Alloy registry built with pattern support")]
+                ResolutionHistory = [("initialization", "Complete Alloy registry built")]
             }
             
         with ex ->
             CompilerFailure [InternalError(
                 "registry construction",
-                "Failed to build Alloy registry with pattern support",
+                "Failed to build Alloy registry",
                 Some ex.Message
             )]
-            
-    let withNamespaceContext (namespaces: string list) (registry: SymbolRegistry) : SymbolRegistry =
-        { registry with 
-            State = { registry.State with ActiveNamespaces = namespaces @ registry.State.ActiveNamespaces }
-            ResolutionHistory = ("namespace_context", String.concat ", " namespaces) :: registry.ResolutionHistory
-        }
-    
-    let trackActiveSymbol (symbolId: string) (registry: SymbolRegistry) : SymbolRegistry =
-        { registry with 
-            State = { registry.State with ActiveSymbols = symbolId :: registry.State.ActiveSymbols }
-        }
-    
-    let resolveSymbolInRegistry (symbolName: string) (registry: SymbolRegistry) : CompilerResult<ResolvedSymbol * SymbolRegistry> =
-        match SymbolResolution.resolveSymbol symbolName registry.State with
-        | Success symbol ->
-            let updatedRegistry = { 
-                registry with 
-                    ResolutionHistory = ("resolution", sprintf "%s -> %s" symbolName symbol.QualifiedName) :: registry.ResolutionHistory 
-            }
-            Success (symbol, updatedRegistry)
-            
-        | CompilerFailure errors ->
-            let updatedRegistry = { 
-                registry with 
-                    ResolutionHistory = ("resolution_failed", sprintf "Failed to resolve %s" symbolName) :: registry.ResolutionHistory 
-            }
-            CompilerFailure errors
 
-/// MLIR operation generation based on resolved symbols and patterns
+/// MLIR generation helpers
 module MLIRGeneration =
-    let findActiveBuffer (activeSymbols: string list) : string =
-        activeSymbols 
-        |> List.tryFind (fun s -> s.Contains("buffer"))
-        |> Option.defaultValue "%unknown_buffer"
-    
-    let validateArgumentTypes (symbol: ResolvedSymbol) (argSSAValues: string list) (argTypes: MLIRType list) : bool * string list =
-        if argSSAValues.Length <> symbol.ParameterTypes.Length then
-            (false, [sprintf "Expected %d arguments for %s, got %d" 
-                    symbol.ParameterTypes.Length symbol.QualifiedName argSSAValues.Length])
-        else
-            let typeChecks = 
-                List.zip3 argSSAValues argTypes symbol.ParameterTypes
-                |> List.map (fun (argVal, actualType, expectedType) ->
-                    if TypeAnalysis.canConvertTo actualType expectedType then
-                        (true, "")
-                    else
-                        (false, sprintf "Type mismatch for %s: expected %s, got %s" 
-                            argVal (mlirTypeToString expectedType) (mlirTypeToString actualType)))
-            
-            (List.forall fst typeChecks, typeChecks |> List.filter (not << fst) |> List.map snd)
-    
-    let generatePatternOperations (pattern: SymbolPattern) (args: string list) (resultId: string) : string list =
-        match pattern.OpPattern with
+    let generateMLIROperation (symbol: ResolvedSymbol) (args: string list) (resultId: string) : string list =
+        match symbol.Operation with
         | DialectOp(dialect, operation, attributes) ->
             let dialectPrefix = dialectToString dialect
             let attrStr = 
                 if attributes.IsEmpty then ""
-                else 
-                    attributes 
-                    |> Map.toList 
-                    |> List.map (fun (k, v) -> sprintf "%s = %s" k v)
-                    |> String.concat ", "
-                    |> sprintf " {%s}"
-            
+                else attributes |> Map.toList |> List.map (fun (k, v) -> sprintf "%s = %s" k v) |> String.concat ", " |> sprintf " {%s}"
             let argStr = if args.IsEmpty then "" else sprintf "(%s)" (String.concat ", " args)
-            let returnType = snd pattern.TypeSig
-            let typeStr = mlirTypeToString returnType
+            [sprintf "    %s = %s.%s%s : %s%s" resultId dialectPrefix operation argStr (mlirTypeToString symbol.ReturnType) attrStr]
             
-            [sprintf "    %s = %s.%s%s : %s%s" resultId dialectPrefix operation argStr typeStr attrStr]
-            
-        | ExternalCall(funcName, _) ->
-            let paramTypes = fst pattern.TypeSig
-            let returnType = snd pattern.TypeSig
-            
-            let paramTypeStrs = 
-                if args.IsEmpty then ["void"]
-                else paramTypes |> List.map mlirTypeToString
-            
-            let argStr = String.concat ", " args
-            let typeStr = String.concat ", " paramTypeStrs
-            let returnTypeStr = mlirTypeToString returnType
-            
-            [sprintf "    %s = func.call @%s(%s) : (%s) -> %s" 
-                resultId funcName argStr typeStr returnTypeStr]
+        | ExternalCall(funcName, lib) ->
+            let argTypes = symbol.ParameterTypes |> List.map mlirTypeToString |> String.concat ", "
+            let retType = mlirTypeToString symbol.ReturnType
+            [sprintf "    %s = llvm.call @%s(%s) : (%s) -> %s" resultId funcName (String.concat ", " args) argTypes retType]
             
         | Composite operations ->
-            operations
-            |> List.mapi (fun i operation ->
-                let stepResultId = 
-                    if i = operations.Length - 1 then resultId 
-                    else sprintf "%s_step%d" resultId i
-                
-                let returnType = snd pattern.TypeSig
-                
-                match operation with
-                | ExternalCall(extFuncName, _) ->
-                    let paramTypes = fst pattern.TypeSig
-                    let paramTypeStrs = 
-                        if args.IsEmpty then ["void"]
-                        else paramTypes |> List.map mlirTypeToString
-                    
-                    let argStr = String.concat ", " args
-                    let typeStr = String.concat ", " paramTypeStrs
-                    
-                    sprintf "    %s = func.call @%s(%s) : (%s) -> %s" 
-                        stepResultId extFuncName argStr typeStr (mlirTypeToString returnType)
-                    
-                | Transform(transformName, _) ->
-                    sprintf "    %s = composite.%s%d : %s" 
-                        stepResultId transformName i (mlirTypeToString returnType)
-                    
-                | _ ->
-                    sprintf "    %s = arith.constant %d : i32 // Step %d" 
-                        stepResultId i i)
+            operations |> List.mapi (fun i op ->
+                let stepId = sprintf "%s_step%d" resultId i
+                match op with
+                | ExternalCall(f, _) -> sprintf "    %s = llvm.call @%s(%s)" stepId f (String.concat ", " args)
+                | _ -> sprintf "    %s = arith.constant 0 : i32  // Composite step" stepId
+            )
             
-        | Transform(transformName, _) ->
-            match transformName with
-            | "span_to_string" ->
-                let bufferArg = if args.IsEmpty then "%unknown_buffer" else args.[0]
-                [sprintf "    %s = memref.cast %s : memref<?xi8> to memref<?xi8>" resultId bufferArg]
-                
-            | "result_wrapper" ->
-                [sprintf "    %s = arith.addi %s, 0x10000 : i32" 
-                    resultId (if args.IsEmpty then "0" else args.[0])]
-                
-            | "result_match" ->
-                [sprintf "    %s = arith.constant 0 : i32 // Result match handled by pattern system" resultId]
-                
-            | _ ->
-                [sprintf "    %s = arith.constant 0 : i32 // Custom transform: %s" resultId transformName]
+        | Transform(name, parameters) ->
+            match name with
+            | "add_resolved" | "add_operator" -> [sprintf "    %s = arith.addi %s, %s : i32" resultId args.[0] args.[1]]
+            | "subtract_resolved" | "subtract_operator" -> [sprintf "    %s = arith.subi %s, %s : i32" resultId args.[0] args.[1]]
+            | "multiply_resolved" | "multiply_operator" -> [sprintf "    %s = arith.muli %s, %s : i32" resultId args.[0] args.[1]]
+            | "divide_resolved" | "divide_operator" -> [sprintf "    %s = arith.divi_signed %s, %s : i32" resultId args.[0] args.[1]]
+            | "modulo_resolved" | "modulo_operator" -> [sprintf "    %s = arith.remsi %s, %s : i32" resultId args.[0] args.[1]]
+            | "equals_resolved" | "equals_operator" -> [sprintf "    %s = arith.cmpi eq, %s, %s : i32" resultId args.[0] args.[1]]
+            | "less_than_resolved" | "less_than_operator" -> [sprintf "    %s = arith.cmpi slt, %s, %s : i32" resultId args.[0] args.[1]]
+            | "greater_than_resolved" | "greater_than_operator" -> [sprintf "    %s = arith.cmpi sgt, %s, %s : i32" resultId args.[0] args.[1]]
+            | "pipe_right" -> [sprintf "    %s = llvm.call %s(%s)" resultId args.[1] args.[0]]
+            | _ -> [sprintf "    %s = arith.constant 0 : i32  // Transform: %s" resultId name]
 
-    let generateMLIROperation (symbol: ResolvedSymbol) (args: string list) (argTypes: MLIRType list)
-                            (resultId: string) (registry: SymbolRegistry) : CompilerResult<string list * SymbolRegistry> =
-        let patternMatch = 
-            registry.State.PatternRegistry
-            |> List.tryFind (fun pattern -> 
-                pattern.QualifiedName = symbol.QualifiedName ||
-                symbol.QualifiedName.EndsWith(pattern.QualifiedName))
-        
-        match patternMatch with
-        | Some pattern -> Success (generatePatternOperations pattern args resultId, registry)
-        | None ->
-            match symbol.Operation with
-            | DialectOp(dialect, operation, attributes) ->
-                let dialectPrefix = dialectToString dialect
-                let attrStr = 
-                    if attributes.IsEmpty then ""
-                    else 
-                        attributes 
-                        |> Map.toList 
-                        |> List.map (fun (k, v) -> sprintf "%s = %s" k v)
-                        |> String.concat ", "
-                        |> sprintf " {%s}"
-                
-                let argStr = if args.IsEmpty then "" else sprintf "(%s)" (String.concat ", " args)
-                let typeStr = mlirTypeToString symbol.ReturnType
-                let operationStr = sprintf "    %s = %s.%s%s : %s%s" resultId dialectPrefix operation argStr typeStr attrStr
-                Success ([operationStr], registry)
-            
-            | ExternalCall(funcName, _) ->
-                let argStr = String.concat ", " args
-                let paramTypes = symbol.ParameterTypes |> List.map mlirTypeToString |> String.concat ", "
-                let returnType = mlirTypeToString symbol.ReturnType
-                let callOp = sprintf "    %s = func.call @%s(%s) : (%s) -> %s" resultId funcName argStr paramTypes returnType
-                Success ([callOp], registry)
-            
-            | Composite operations ->
-                let operationResults =
-                    operations |> List.mapi (fun i operation ->
-                        match operation with
-                        | ExternalCall(extFuncName, _) ->
-                            let tempResultId = if i = operations.Length - 1 then resultId else sprintf "%s_step%d" resultId i
-                            let paramTypes = if args.IsEmpty then "void" else String.concat ", " (symbol.ParameterTypes |> List.map mlirTypeToString)
-                            sprintf "    %s = func.call @%s(%s) : (%s) -> %s" 
-                                tempResultId extFuncName (String.concat ", " args)
-                                paramTypes (mlirTypeToString symbol.ReturnType)
-                            
-                        | Transform(transformName, _) ->
-                            let tempResultId = if i = operations.Length - 1 then resultId else sprintf "%s_step%d" resultId i
-                            sprintf "    %s = composite.%s%d : %s" 
-                                tempResultId transformName i (mlirTypeToString symbol.ReturnType)
-                            
-                        | _ ->
-                            let tempResultId = if i = operations.Length - 1 then resultId else sprintf "%s_step%d" resultId i
-                            sprintf "    %s = arith.constant %d : i32 // Placeholder for operation %d" 
-                                tempResultId i i)
-                
-                Success (operationResults, registry)
-                
-            | Transform(transformName, _) ->
-                match transformName with
-                | "span_to_string" ->
-                    let bufferValue = 
-                        if args.IsEmpty then findActiveBuffer registry.State.ActiveSymbols
-                        else args.[0]
-                    
-                    let bitcastOp = sprintf "    %s = memref.cast %s : memref<?xi8> to memref<?xi8>" resultId bufferValue
-                    Success ([bitcastOp], registry)
-                    
-                | _ ->
-                    let constOp = sprintf "    %s = arith.constant 0 : i32" resultId
-                    Success ([constOp], registry)
-
-/// Type-aware external interface for integration with existing MLIR generation
+/// Public interface
 module PublicInterface =
     let createStandardRegistry() : CompilerResult<SymbolRegistry> =
         RegistryConstruction.buildAlloyRegistry()
     
-    let getSymbolType (funcName: string) (registry: SymbolRegistry) : MLIRType option =
-        match RegistryConstruction.resolveSymbolInRegistry funcName registry with
-        | Success (symbol, _) -> Some symbol.ReturnType
-        | CompilerFailure _ ->
-            registry.State.PatternRegistry
-            |> List.tryFind (fun pattern -> 
-                pattern.QualifiedName = funcName ||
-                funcName.EndsWith(pattern.QualifiedName))
-            |> Option.map (fun pattern -> snd pattern.TypeSig)
-    
-    let resolveFunctionCall (funcName: string) (args: string list) (resultId: string) (registry: SymbolRegistry)
-                           : CompilerResult<string list * SymbolRegistry> =
-        let patternMatch = 
-            registry.State.PatternRegistry
-            |> List.tryFind (fun pattern -> 
-                pattern.QualifiedName = funcName ||
-                funcName.EndsWith(pattern.QualifiedName))
-        
-        match patternMatch with
-        | Some pattern -> Success (MLIRGeneration.generatePatternOperations pattern args resultId, registry)
-        | None ->
-            match RegistryConstruction.resolveSymbolInRegistry funcName registry with
-            | Success (symbol, updatedRegistry) ->
-                let argTypes = 
-                    args |> List.mapi (fun i _ ->
-                        if i < symbol.ParameterTypes.Length then symbol.ParameterTypes.[i]
-                        else MLIRTypes.i32)
-                
-                let (typesValid, typeErrors) = MLIRGeneration.validateArgumentTypes symbol args argTypes
-                
-                if not typesValid then
-                    let errorMsg = sprintf "Type validation failed for %s: %s" funcName (String.concat "; " typeErrors)
-                    
-                    let registry2 = { 
-                        updatedRegistry with 
-                            ResolutionHistory = ("type_warning", errorMsg) :: updatedRegistry.ResolutionHistory 
-                    }
-                    
-                    MLIRGeneration.generateMLIROperation symbol args argTypes resultId registry2
-                else
-                    MLIRGeneration.generateMLIROperation symbol args argTypes resultId updatedRegistry
-                
-            | CompilerFailure _ -> 
-                let defaultOp = sprintf "    %s = arith.constant 0 : i32 // Unknown function: %s" resultId funcName
-                let updatedRegistry = { 
-                    registry with 
-                        ResolutionHistory = ("resolution_fallback", sprintf "Created fallback for %s" funcName) :: registry.ResolutionHistory 
-                }
-                Success ([defaultOp], updatedRegistry)
-
-    let getNamespaceSymbols (namespaceName: string) (registry: SymbolRegistry) : string list =
-        match Map.tryFind namespaceName registry.State.NamespaceMap with
-        | Some symbols -> symbols
-        | None -> []
-    
-    let validateRequiredSymbols (requiredSymbols: string list) (registry: SymbolRegistry) : CompilerResult<unit> =
-        let missingSymbols = 
-            requiredSymbols
-            |> List.filter (fun symbolName ->
-                match SymbolResolution.resolveSymbol symbolName registry.State with
-                | Success _ -> false
-                | CompilerFailure _ -> 
-                    not (registry.State.PatternRegistry
-                         |> List.exists (fun pattern -> 
-                             pattern.QualifiedName = symbolName ||
-                             symbolName.EndsWith(pattern.QualifiedName))))
-        
-        if missingSymbols.IsEmpty then Success ()
-        else
-            CompilerFailure [ConversionError(
-                "symbol validation",
-                String.concat ", " missingSymbols,
-                "available symbols",
-                sprintf "Missing required symbols: %s" (String.concat ", " missingSymbols)
-            )]
-            
-    let getParameterTypes (funcName: string) (registry: SymbolRegistry) : MLIRType list option =
-        match RegistryConstruction.resolveSymbolInRegistry funcName registry with
-        | Success (symbol, _) -> Some symbol.ParameterTypes
-        | CompilerFailure _ -> 
-            registry.State.PatternRegistry
-            |> List.tryFind (fun pattern -> 
-                pattern.QualifiedName = funcName ||
-                funcName.EndsWith(pattern.QualifiedName))
-            |> Option.map (fun pattern -> fst pattern.TypeSig)
-        
-    let areArgumentTypesCompatible (funcName: string) (argTypes: MLIRType list) (registry: SymbolRegistry) : bool =
-        match getParameterTypes funcName registry with
-        | Some paramTypes ->
-            paramTypes.Length = argTypes.Length &&
-            List.zip paramTypes argTypes
-            |> List.forall (fun (paramType, argType) -> TypeAnalysis.canConvertTo argType paramType)
-        | None -> false
-    
-    let findPatternByExpression (expr: SynExpr) (registry: SymbolRegistry) : SymbolPattern option =
-        registry.State.PatternRegistry
-        |> List.tryFind (fun pattern -> pattern.Matcher expr)
+    let resolveSymbol (name: string) (registry: SymbolRegistry) : CompilerResult<ResolvedSymbol> =
+        SymbolResolution.resolveSymbol name registry.State
