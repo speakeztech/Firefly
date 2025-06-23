@@ -417,7 +417,7 @@ let verifyToolchain (verbose: bool) : CompilerResult<unit> =
             printfn "2. Open 'MSYS2 MINGW64' terminal"
             printfn "3. Run: pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-llvm"
             printfn "4. Run: firefly doctor"
-        CompilerFailure [CompilerError("toolchain", "Missing required toolchain components", None)]
+        CompilerFailure [InternalError("toolchain", "Missing required toolchain components", None)]
     elif hasWarnings then
         printfn "All required components found!"
         printfn "Some optional components are missing but compilation should work."

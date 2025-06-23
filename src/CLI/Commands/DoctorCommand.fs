@@ -4,6 +4,7 @@ open System
 open System.Runtime.InteropServices
 open Argu
 open Core.XParsec.Foundation
+open CLI.Diagnostics
 
 /// Command line arguments for the doctor command
 type DoctorArgs =
@@ -47,8 +48,8 @@ let doctor (args: ParseResults<DoctorArgs>) =
     
     printfn ""
     
-    // Run toolchain verification
-    match CLI.Diagnostics.ToolChainVerification.verifyToolchain verbose with
+    // Run toolchain verification - fixed casing
+    match ToolchainVerification.verifyToolchain verbose with
     | Success () ->
         printfn ""
         printfn "✓ All checks passed! Firefly is ready to compile."
@@ -97,7 +98,7 @@ let doctor (args: ParseResults<DoctorArgs>) =
 
 /// Provides a quick check that can be called from other commands
 let quickCheck() : bool =
-    match CLI.Diagnostics.ToolChainVerification.quickVerifyToolchain() with
+    match ToolchainVerification.quickVerifyToolchain() with
     | true -> true
     | false ->
         printfn ""

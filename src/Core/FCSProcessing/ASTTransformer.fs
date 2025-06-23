@@ -182,7 +182,7 @@ let verifyTransformations (input: ParsedInput) =
 
 /// Computation expression for AST transformation
 type ASTBuilder() =
-    member _.Bind(transformer: ASTTransformer<'T>, f: 'T -> ASTTransformer<'U>) : ASTTransformer<'U> =
+    member _.Bind(transformer: ASTTransformer<'T>, f: 'T -> ASTTransformer<'T>) : ASTTransformer<'T> =
         fun ast ctx ->
             match transformer ast ctx with
             | Success result -> (f result) result ctx

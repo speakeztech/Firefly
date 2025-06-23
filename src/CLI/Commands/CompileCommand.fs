@@ -54,6 +54,19 @@ type CompilationContext = {
     IntermediatesDir: string option
 }
 
+/// Compiler result builder for computation expressions
+type CompilerResultBuilder() =
+    member _.Return(x) = Success x
+    member _.ReturnFrom(x: CompilerResult<_>) = x
+    member _.Bind(x, f) = ResultHelpers.bind f x
+    member _.Zero() = Success ()
+    member _.Combine(a: CompilerResult<unit>, b: CompilerResult<'T>) : CompilerResult<'T> =
+        match a with
+        | Success () -> b
+        | CompilerFailure errors -> CompilerFailure errors
+
+let compilerResult = CompilerResultBuilder()
+
 /// Gets default target for current platform
 let private getDefaultTarget() =
     if Environment.OSVersion.Platform = PlatformID.Win32NT then
@@ -123,19 +136,15 @@ let private writeIntermediateFile (dir: string option) (baseName: string) (exten
         printfn "  Wrote %s (%d bytes)" (Path.GetFileName(filePath)) content.Length
     | None -> ()
 
-/// Main compilation pipeline
-let private compilePipeline (ctx: CompilationContext) (sourceCode: string) : CompilerResult<unit> =
-    let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
-    
-    // Phase 1: Parse with FCS
+/// Phase 1: Parse F# source
+let private parseSource (ctx: CompilationContext) (sourceCode: string) : CompilerResult<ParsedInput * FSharpChecker * FSharpProjectOptions> =
     printfn "Phase 1: Parsing F# source..."
     let checker = FSharpChecker.Create()
     let sourceText = SourceText.ofString sourceCode
-    let (projectOptions, scriptDiagnostics) = 
+    let (projectOptions, _) = 
         checker.GetProjectOptionsFromScript(ctx.InputPath, sourceText) 
         |> Async.RunSynchronously
     
-    // Create parsing options
     let parsingOptions = { 
         FSharpParsingOptions.Default with 
             SourceFiles = [| ctx.InputPath |]
@@ -149,124 +158,154 @@ let private compilePipeline (ctx: CompilationContext) (sourceCode: string) : Com
     
     let parseResults = checker.ParseFile(ctx.InputPath, sourceText, parsingOptions) |> Async.RunSynchronously
     
-    // Check for parse errors first
+    // Check for errors first
     if parseResults.ParseHadErrors then
         let errors = parseResults.Diagnostics |> Array.map (fun d -> d.Message) |> String.concat "\n"
         CompilerFailure [SyntaxError({ Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 }, errors, ["FCS parsing"])]
     else
-        // Extract parse tree
-        let parseTreeOpt = parseResults.ParseTree
-        match parseTreeOpt with
-        | None -> 
-            CompilerFailure [SyntaxError({ Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 }, "No parse tree generated", ["FCS parsing"])]
-        | Some parsedInput ->
-            
-            // Write FCS AST if keeping intermediates
-            writeIntermediateFile ctx.IntermediatesDir baseName ".fcs" (sprintf "%A" parsedInput)
-            
-            // Phase 2: Type check
-            printfn "Phase 2: Type checking..."
-            let checkResult = checker.CheckFileInProject(parseResults, ctx.InputPath, 0, sourceText, projectOptions) |> Async.RunSynchronously
-            
-            match checkResult with
-            | FSharpCheckFileAnswer.Aborted -> 
-                CompilerFailure [InternalError("type checking", "Type checking was aborted", None)]
-            | FSharpCheckFileAnswer.Succeeded checkResults ->
-                
-                // Phase 3: Transform AST
-                printfn "Phase 3: Transforming AST..."
-                let typeCtx = TypeContextBuilder.create()
-                
-                match RegistryConstruction.buildAlloyRegistry() with
-                | CompilerFailure errors -> CompilerFailure errors
-                | Success symbolRegistry ->
-                    
-                    // Analyze dependencies and reachability
-                    let deps = buildDependencyMap checkResults
-                    let entryPoints = findEntryPoints checkResults
-                    let symbols = getAllSymbols checkResults
-                    let reachability = { 
-                        Reachable = findTransitiveDependencies deps entryPoints
-                        UnionCases = Map.empty
-                        Statistics = {
-                            TotalSymbols = Map.count symbols
-                            ReachableSymbols = Set.count entryPoints
-                            EliminatedSymbols = Map.count symbols - Set.count entryPoints
-                            ModuleBreakdown = Map.empty
-                        }
-                    }
-                    
-                    // Create transformation context
-                    let transformCtx = {
-                        TypeContext = typeCtx
-                        SymbolRegistry = symbolRegistry
-                        Reachability = reachability
-                        ClosureState = { Counter = 0; Scope = Set.empty; Lifted = [] }
-                    }
-                    
-                    // Transform the AST
-                    let transformedAST = transformAST transformCtx parsedInput
-                    
-                    // Write Oak AST if keeping intermediates
-                    writeIntermediateFile ctx.IntermediatesDir baseName ".oak" (sprintf "%A" transformedAST)
-                    
-                    // Phase 4: Generate MLIR
-                    printfn "Phase 4: Generating MLIR..."
-                    let mlirText = generateModule baseName typeCtx transformedAST
-                    
-                    // Write MLIR if keeping intermediates
-                    writeIntermediateFile ctx.IntermediatesDir baseName ".mlir" mlirText
-                    
-                    // Phase 5: Apply lowering
-                    printfn "Phase 5: Lowering MLIR..."
-                    match applyLoweringPipeline mlirText with
-                    | CompilerFailure errors -> CompilerFailure errors
-                    | Success loweredMLIR ->
-                        
-                        // Write lowered MLIR if keeping intermediates
-                        writeIntermediateFile ctx.IntermediatesDir baseName "_lowered.mlir" loweredMLIR
-                        
-                        // Phase 6: Optimize
-                        printfn "Phase 6: Optimizing..."
-                        let optLevel = 
-                            match ctx.OptimizeLevel.ToLowerInvariant() with
-                            | "none" -> OptimizationLevel.Zero
-                            | "less" -> OptimizationLevel.Less
-                            | "aggressive" -> OptimizationLevel.Aggressive
-                            | "size" -> OptimizationLevel.Size
-                            | _ -> OptimizationLevel.Default
-                        
-                        let llvmOutput = {
-                            LLVMIRText = loweredMLIR
-                            ModuleName = baseName
-                            OptimizationLevel = optLevel
-                            Metadata = Map.empty
-                        }
-                        
-                        let passes = createOptimizationPipeline optLevel
-                        match optimizeLLVMIR llvmOutput passes with
-                        | CompilerFailure errors -> CompilerFailure errors
-                        | Success optimizedOutput ->
-                            
-                            // Phase 7: Convert to LLVM IR
-                            printfn "Phase 7: Converting to LLVM IR..."
-                            match translateToLLVMIR optimizedOutput.LLVMIRText ctx.IntermediatesDir with
-                            | CompilerFailure errors -> CompilerFailure errors
-                            | Success llvmIR ->
-                                
-                                // Write LLVM IR if keeping intermediates
-                                writeIntermediateFile ctx.IntermediatesDir baseName ".ll" llvmIR
-                                
-                                // Validate zero-allocation guarantees
-                                match validateZeroAllocationGuarantees llvmIR with
-                                | CompilerFailure errors -> CompilerFailure errors
-                                | Success () ->
-                                    printfn "✓ Zero-allocation guarantees verified"
-                                    
-                                    // Phase 8: Invoke external tools for final compilation
-                                    printfn "Phase 8: Invoking external tools..."
-                                    printfn "TODO: Call clang/lld to produce final executable"
-                                    Success ()
+        // ParseTree is not optional in this version of FCS - it's always present
+        let parsedInput = parseResults.ParseTree
+        
+        if ctx.KeepIntermediates then
+            writeIntermediateFile ctx.IntermediatesDir (Path.GetFileNameWithoutExtension ctx.InputPath) ".fcs" (sprintf "%A" parsedInput)
+        
+        Success (parsedInput, checker, projectOptions)
+
+/// Phase 2: Type check
+let private typeCheck (ctx: CompilationContext) (parsedInput: ParsedInput, checker: FSharpChecker, projectOptions: FSharpProjectOptions) : CompilerResult<FSharpCheckFileResults * ParsedInput> =
+    printfn "Phase 2: Type checking..."
+    let sourceText = SourceText.ofString (File.ReadAllText ctx.InputPath)
+    
+    // We need to re-parse to get the parse results for CheckFileInProject
+    let parsingOptions = { 
+        FSharpParsingOptions.Default with 
+            SourceFiles = [| ctx.InputPath |]
+            LangVersionText = "preview"
+            IsExe = true
+    }
+    let parseResults = checker.ParseFile(ctx.InputPath, sourceText, parsingOptions) |> Async.RunSynchronously
+    
+    let checkResult = checker.CheckFileInProject(parseResults, ctx.InputPath, 0, sourceText, projectOptions) |> Async.RunSynchronously
+    
+    match checkResult with
+    | FSharpCheckFileAnswer.Aborted -> 
+        CompilerFailure [InternalError("type checking", "Type checking was aborted", None)]
+    | FSharpCheckFileAnswer.Succeeded checkResults ->
+        Success (checkResults, parsedInput)
+
+/// Phase 3: Transform AST
+let private transformASTPhase (ctx: CompilationContext) (checkResults: FSharpCheckFileResults, parsedInput: ParsedInput) : CompilerResult<ParsedInput * TypeContext * SymbolRegistry> =
+    printfn "Phase 3: Transforming AST..."
+    let typeCtx = TypeContextBuilder.create()
+    
+    match RegistryConstruction.buildAlloyRegistry() with
+    | CompilerFailure errors -> CompilerFailure errors
+    | Success symbolRegistry ->
+        // Analyze dependencies and reachability
+        let deps = buildDependencyMap checkResults
+        let entryPoints = findEntryPoints checkResults
+        let symbols = getAllSymbols checkResults
+        let reachability = { 
+            Reachable = findTransitiveDependencies deps entryPoints
+            UnionCases = Map.empty
+            Statistics = {
+                TotalSymbols = Map.count symbols
+                ReachableSymbols = Set.count entryPoints
+                EliminatedSymbols = Map.count symbols - Set.count entryPoints
+                ModuleBreakdown = Map.empty
+            }
+        }
+        
+        let transformCtx = {
+            TypeContext = typeCtx
+            SymbolRegistry = symbolRegistry
+            Reachability = reachability
+            ClosureState = { Counter = 0; Scope = Set.empty; Lifted = [] }
+        }
+        
+        let transformedAST = transformAST transformCtx parsedInput
+        
+        if ctx.KeepIntermediates then
+            writeIntermediateFile ctx.IntermediatesDir (Path.GetFileNameWithoutExtension ctx.InputPath) ".oak" (sprintf "%A" transformedAST)
+        
+        Success (transformedAST, typeCtx, symbolRegistry)
+
+/// Phase 4: Generate MLIR
+let private generateMLIR (ctx: CompilationContext) (transformedAST: ParsedInput, typeCtx: TypeContext, symbolRegistry: SymbolRegistry) : CompilerResult<string> =
+    printfn "Phase 4: Generating MLIR..."
+    let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
+    let mlirText = generateModule baseName typeCtx transformedAST
+    
+    if ctx.KeepIntermediates then
+        writeIntermediateFile ctx.IntermediatesDir baseName ".mlir" mlirText
+    
+    Success mlirText
+
+/// Phase 5: Lower MLIR
+let private lowerMLIR (ctx: CompilationContext) (mlirText: string) : CompilerResult<string> =
+    printfn "Phase 5: Lowering MLIR..."
+    match applyLoweringPipeline mlirText with
+    | CompilerFailure errors -> CompilerFailure errors
+    | Success loweredMLIR ->
+        if ctx.KeepIntermediates then
+            let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
+            writeIntermediateFile ctx.IntermediatesDir baseName "_lowered.mlir" loweredMLIR
+        Success loweredMLIR
+
+/// Phase 6: Optimize
+let private optimizeCode (ctx: CompilationContext) (loweredMLIR: string) : CompilerResult<LLVMOutput> =
+    printfn "Phase 6: Optimizing..."
+    let optLevel = 
+        match ctx.OptimizeLevel.ToLowerInvariant() with
+        | "none" -> OptimizationLevel.Zero
+        | "less" -> OptimizationLevel.Less
+        | "aggressive" -> OptimizationLevel.Aggressive
+        | "size" -> OptimizationLevel.Size
+        | _ -> OptimizationLevel.Default
+    
+    let llvmOutput = {
+        LLVMIRText = loweredMLIR
+        ModuleName = Path.GetFileNameWithoutExtension(ctx.InputPath)
+        OptimizationLevel = optLevel
+        Metadata = Map.empty
+    }
+    
+    let passes = createOptimizationPipeline optLevel
+    optimizeLLVMIR llvmOutput passes
+
+/// Phase 7: Convert to LLVM IR
+let private convertToLLVMIR (ctx: CompilationContext) (optimizedOutput: LLVMOutput) : CompilerResult<string> =
+    printfn "Phase 7: Converting to LLVM IR..."
+    match translateToLLVMIR optimizedOutput.LLVMIRText ctx.IntermediatesDir with
+    | CompilerFailure errors -> CompilerFailure errors
+    | Success llvmIR ->
+        if ctx.KeepIntermediates then
+            let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
+            writeIntermediateFile ctx.IntermediatesDir baseName ".ll" llvmIR
+        Success llvmIR
+
+/// Phase 8: Validate and finalize
+let private validateAndFinalize (ctx: CompilationContext) (llvmIR: string) : CompilerResult<unit> =
+    match validateZeroAllocationGuarantees llvmIR with
+    | CompilerFailure errors -> CompilerFailure errors
+    | Success () ->
+        printfn "✓ Zero-allocation guarantees verified"
+        printfn "Phase 8: Invoking external tools..."
+        printfn "TODO: Call clang/lld to produce final executable"
+        Success ()
+
+/// Main compilation pipeline - clean composition using computation expression
+let private compilePipeline (ctx: CompilationContext) (sourceCode: string) : CompilerResult<unit> =
+    compilerResult {
+        let! parsed = parseSource ctx sourceCode
+        let! typeChecked = typeCheck ctx parsed
+        let! transformed = transformASTPhase ctx typeChecked
+        let! mlir = generateMLIR ctx transformed
+        let! lowered = lowerMLIR ctx mlir
+        let! optimized = optimizeCode ctx lowered
+        let! llvmIR = convertToLLVMIR ctx optimized
+        return! validateAndFinalize ctx llvmIR
+    }
 
 /// Compiles F# source to native executable
 let compile (args: ParseResults<CompileArgs>) =

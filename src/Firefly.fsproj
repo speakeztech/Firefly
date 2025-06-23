@@ -7,7 +7,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.1.102</Version>
+    <Version>0.2.000</Version>
     <Description>F# to Native Compiler with Zero-Allocation Guarantees using XParsec</Description>
     <Authors>Speakez LLC</Authors>
     <PackageTags>fsharp;compiler;native;zero-allocation;xparsec;mlir;llvm</PackageTags>
@@ -57,11 +57,11 @@
       
       <!-- CLI -->
       <Compile Include="CLI/Configurations/ProjectConfig.fs" />
+      <Compile Include="CLI/Diagnostics/EnvironmentInfo.fs" />
+      <Compile Include="CLI/Diagnostics/ToolchainVerification.fs" />
       <Compile Include="CLI/Commands/CompileCommand.fs" />
       <Compile Include="CLI/Commands/VerifyCommand.fs" />
       <Compile Include="CLI/Commands/DoctorCommand.fs" />
-      <Compile Include="CLI/Diagnostics/EnvironmentInfo.fs" />
-      <Compile Include="CLI/Diagnostics/ToolchainVerification.fs" />
       <Compile Include="CLI/Program.fs" />
   </ItemGroup>
 
@@ -119,7 +119,7 @@
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/speakez-llc/firefly</PackageProjectUrl>
     <PackageReleaseNotes>
-      Version 0.1.0-alpha:
+      Version 0.2.0-alpha:
       - Complete XParsec-based architecture implementation
       - Zero-allocation F# to native compilation
       - Comprehensive MLIR/LLVM pipeline using parser combinators
