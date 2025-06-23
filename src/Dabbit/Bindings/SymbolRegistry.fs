@@ -1,303 +1,40 @@
-module Dabbit.SymbolResolution.SymbolRegistry
+module Dabbit.Bindings.SymbolRegistry
 
 open System
+open FSharp.Compiler.Syntax
 open Core.XParsec.Foundation
-open Dabbit.Parsing.OakAst
 open Core.MLIRGeneration.TypeSystem
 open Core.MLIRGeneration.Dialect
-
-/// Create MLIRTypes helper module for backwards compatibility
-module MLIRTypes =
-    /// Creates an integer type with specified width
-    let createInteger (width: int) = {
-        Category = MLIRTypeCategory.Integer
-        Width = Some width
-        ElementType = None
-        Parameters = []
-        ReturnType = None
-    }
-
-    /// Creates a float type with specified width
-    let createFloat (width: int) = {
-        Category = MLIRTypeCategory.Float
-        Width = Some width
-        ElementType = None
-        Parameters = []
-        ReturnType = None
-    }
-
-    /// Creates a void type
-    let createVoid() = {
-        Category = MLIRTypeCategory.Void
-        Width = None
-        ElementType = None
-        Parameters = []
-        ReturnType = None
-    }
-
-    /// Creates a memory reference type with element type and dimensions
-    let createMemRef (elementType: MLIRType) (dimensions: int list) = {
-        Category = MLIRTypeCategory.MemRef
-        Width = None
-        ElementType = Some elementType
-        Parameters = dimensions |> List.map (fun d -> createInteger d)
-        ReturnType = None
-    }
-
-    /// Creates a function type with parameters and return type
-    let createFunction (inputTypes: MLIRType list) (returnType: MLIRType) = {
-        Category = MLIRTypeCategory.Function
-        Width = None
-        ElementType = None
-        Parameters = inputTypes
-        ReturnType = Some returnType
-    }
-
-/// Type analysis module for compatibility checking
-module TypeAnalysis =
-    /// Checks if types are compatible for conversion
-    let canConvertTo (fromType: MLIRType) (toType: MLIRType) : bool =
-        fromType = toType || 
-        (fromType.Category = MLIRTypeCategory.Integer && toType.Category = MLIRTypeCategory.Integer) ||
-        (fromType.Category = MLIRTypeCategory.Float && toType.Category = MLIRTypeCategory.Float) ||
-        (fromType.Category = MLIRTypeCategory.Integer && toType.Category = MLIRTypeCategory.Float) ||
-        (fromType.Category = MLIRTypeCategory.MemRef && toType.Category = MLIRTypeCategory.MemRef)
-
-/// MLIR operation pattern for resolved symbols
-type MLIROperationPattern =
-    | DialectOperation of dialect: MLIRDialect * operation: string * attributes: Map<string, string>
-    | ExternalCall of funcName: string * library: string option
-    | CompositePattern of patterns: MLIROperationPattern list
-    | CustomTransform of transformName: string * parameters: string list
+open Dabbit.Bindings.PatternLibrary
 
 /// Symbol with type safety and MLIR generation info
 type ResolvedSymbol = {
-    QualifiedName: string                // Fully qualified name (e.g., "Alloy.Memory.stackBuffer")
-    ShortName: string                    // Short name for lookup (e.g., "stackBuffer")
-    ParameterTypes: MLIRType list        // Parameter type signatures
-    ReturnType: MLIRType                 // Return type signature
-    Operation: MLIROperationPattern      // MLIR operation pattern to generate
-    Namespace: string                    // Namespace this symbol belongs to
-    SourceLibrary: string                // Library or module providing this symbol
-    RequiresExternal: bool               // Whether this requires external linking
-}
-
-/// Pattern-based transformation for symbols
-type SymbolPattern = {
-    Name: string                         // Name of the pattern
-    Description: string                  // Description of what the pattern does
-    QualifiedNamePattern: string         // Qualified name pattern to match
-    OperationPattern: MLIROperationPattern // Operation pattern to generate
-    TypeSignature: MLIRType list * MLIRType // Type signature (parameters and return type)
-    AstPattern: OakExpression -> bool    // Pattern matcher for AST expressions
+    QualifiedName: string
+    ShortName: string
+    ParameterTypes: MLIRType list
+    ReturnType: MLIRType
+    Operation: MLIROperationPattern
+    Namespace: string
+    SourceLibrary: string
+    RequiresExternal: bool
 }
 
 /// Symbol resolution state
 type SymbolResolutionState = {
-    SymbolsByQualified: Map<string, ResolvedSymbol>  // All registered symbols by qualified name
-    SymbolsByShort: Map<string, ResolvedSymbol>      // Symbols by short name for unqualified lookup
-    NamespaceMap: Map<string, string list>           // Namespace mappings for qualified resolution
-    ActiveNamespaces: string list                    // Active namespace context for resolution
-    TypeRegistry: Map<string, MLIRType>              // Type aliases and custom types
-    ActiveSymbols: string list                       // Active symbols in current context
-    PatternRegistry: SymbolPattern list              // Pattern registry for AST-driven transformation
+    SymbolsByQualified: Map<string, ResolvedSymbol>
+    SymbolsByShort: Map<string, ResolvedSymbol>
+    NamespaceMap: Map<string, string list>
+    ActiveNamespaces: string list
+    TypeRegistry: Map<string, MLIRType>
+    ActiveSymbols: string list
+    PatternRegistry: SymbolPattern list
 }
 
 /// The complete symbol registry
 type SymbolRegistry = {
-    State: SymbolResolutionState                     // Current resolution state
-    ResolutionHistory: (string * string) list        // Transformation history for debugging
+    State: SymbolResolutionState
+    ResolutionHistory: (string * string) list
 }
-
-/// Pattern library utility functions
-module PatternLibrary =
-    let isResultReturningFunction (funcName: string) : bool =
-        match funcName with
-        | "readInto" | "readFile" | "parseInput" | "tryParse" -> true
-        | _ -> funcName.Contains("OrNone") || 
-               funcName.Contains("OrError") || 
-               funcName.StartsWith("try") ||
-               funcName.Contains("Result")
-               
-    let isVariableNamed (name: string) (expr: OakExpression) =
-        match expr with
-        | Variable n when n = name -> true
-        | _ -> false
-    
-    let isApplicationOf (funcName: string) (expr: OakExpression) =
-        match expr with
-        | Application(Variable name, _) when name = funcName -> true
-        | _ -> false
-    
-    let isResultReturningApplication (expr: OakExpression) =
-        match expr with
-        | Application(Variable name, _) when isResultReturningFunction name -> true
-        | _ -> false
-    
-    let isResultMatchPattern (expr: OakExpression) =
-        match expr with
-        | Match(Application(Variable funcName, _), cases) when isResultReturningFunction funcName ->
-            cases |> List.exists (fun (pattern, _) ->
-                match pattern with
-                | PatternConstructor("Ok", _) -> true
-                | _ -> false) &&
-            cases |> List.exists (fun (pattern, _) ->
-                match pattern with
-                | PatternConstructor("Error", _) -> true
-                | _ -> false)
-        | _ -> false
-    
-    let isStringFormatPattern (expr: OakExpression) =
-        match expr with
-        | Application(Variable name, [Literal(StringLiteral _); _]) 
-            when name = "format" || name = "String.format" -> true
-        | _ -> false
-    
-    /// Core library of pattern-based transformations
-    let symbolPatternLibrary : SymbolPattern list = [
-        // Stack allocation pattern
-        {
-            Name = "stack-buffer-pattern"
-            Description = "Stack allocation of fixed-size buffer"
-            QualifiedNamePattern = "Alloy.Memory.stackBuffer"
-            OperationPattern = DialectOperation(
-                MLIRDialect.MemRef, 
-                "memref.alloca", 
-                Map.ofList [("element_type", "i8")]
-            )
-            TypeSignature = ([MLIRTypes.createInteger 32], MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [])
-            AstPattern = fun expr ->
-                match expr with
-                | Application(Variable "stackBuffer", [_]) -> true
-                | _ -> false
-        }
-        
-        // NativePtr.stackalloc pattern
-        {
-            Name = "nativeptr-stackalloc-pattern"
-            Description = "NativePtr.stackalloc with fixed size"
-            QualifiedNamePattern = "NativePtr.stackalloc"
-            OperationPattern = DialectOperation(
-                MLIRDialect.MemRef, 
-                "memref.alloca", 
-                Map.ofList [("element_type", "i8")]
-            )
-            TypeSignature = ([MLIRTypes.createInteger 32], MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [])
-            AstPattern = fun expr ->
-                match expr with
-                | Application(Variable "NativePtr.stackalloc", [_]) -> true
-                | _ -> false
-        }
-        
-        // String format pattern
-        {
-            Name = "string-format-pattern"
-            Description = "String formatting with format strings"
-            QualifiedNamePattern = "Alloy.IO.String.format"
-            OperationPattern = CompositePattern([
-                ExternalCall("sprintf", Some "libc")
-                CustomTransform("string_format", ["utf8_conversion"])
-            ])
-            TypeSignature = ([MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []; 
-                            MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []],
-                           MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [])
-            AstPattern = isStringFormatPattern
-        }
-        
-        // Console writeLine pattern
-        {
-            Name = "console-writeline-pattern"
-            Description = "Console output with writeLine"
-            QualifiedNamePattern = "Alloy.IO.Console.writeLine"
-            OperationPattern = ExternalCall("printf", Some "libc")
-            TypeSignature = ([MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []], MLIRTypes.createVoid ())
-            AstPattern = fun expr ->
-                match expr with
-                | Application(Variable "writeLine", [_]) -> true
-                | _ -> false
-        }
-        
-        // Console prompt pattern
-        {
-            Name = "console-prompt-pattern"
-            Description = "Console prompt function"
-            QualifiedNamePattern = "Alloy.IO.Console.prompt"
-            OperationPattern = ExternalCall("printf", Some "libc")
-            TypeSignature = ([MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []], MLIRTypes.createVoid ())
-            AstPattern = fun expr ->
-                match expr with
-                | Application(Variable "prompt", [_]) -> true
-                | _ -> false
-        }
-        
-        // Result-returning readInto pattern
-        {
-            Name = "readinto-pattern"
-            Description = "Console input with readInto returning Result"
-            QualifiedNamePattern = "Alloy.IO.Console.readInto"
-            OperationPattern = CompositePattern([
-                ExternalCall("fgets", Some "libc")
-                ExternalCall("strlen", Some "libc")
-                CustomTransform("result_wrapper", ["success_check"])
-            ])
-            TypeSignature = ([MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []], MLIRTypes.createInteger 32)
-            AstPattern = fun expr ->
-                match expr with
-                | Application(Variable "readInto", [_]) -> true
-                | _ -> false
-        }
-        
-        // Result match pattern for handling Ok/Error cases
-        {
-            Name = "result-match-pattern"
-            Description = "Match expression for Result type with Ok/Error cases"
-            QualifiedNamePattern = "Result.match"
-            OperationPattern = CustomTransform("result_match", ["ok_handler"; "error_handler"])
-            TypeSignature = ([MLIRTypes.createInteger 32], MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [])
-            AstPattern = isResultMatchPattern
-        }
-        
-        // spanToString pattern
-        {
-            Name = "span-to-string-pattern"
-            Description = "Convert Span to string with proper UTF8 handling"
-            QualifiedNamePattern = "Alloy.Memory.spanToString"
-            OperationPattern = CustomTransform("span_to_string", ["utf8_conversion"])
-            TypeSignature = ([MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []], 
-                           MLIRTypes.createMemRef (MLIRTypes.createInteger 8) [])
-            AstPattern = fun expr ->
-                match expr with
-                | Application(Variable "spanToString", [_]) -> true
-                | _ -> false
-        }
-        
-        // Console.readLine pattern
-        {
-            Name = "console-readline-pattern"
-            Description = "Read a line from the console into a buffer"
-            QualifiedNamePattern = "Alloy.IO.Console.readLine"
-            OperationPattern = CompositePattern([
-                ExternalCall("fgets", Some "libc")
-                ExternalCall("strlen", Some "libc")
-            ])
-            TypeSignature = ([MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []; MLIRTypes.createInteger 32],
-                           MLIRTypes.createInteger 32)
-            AstPattern = fun expr ->
-                match expr with
-                | Application(Variable "Console.readLine", [_; _]) -> true
-                | _ -> false
-        }
-    ]
-    
-    let findPatternByName (qualifiedName: string) : SymbolPattern option =
-        symbolPatternLibrary
-        |> List.tryFind (fun pattern -> 
-            pattern.QualifiedNamePattern = qualifiedName ||
-            qualifiedName.EndsWith(pattern.QualifiedNamePattern))
-    
-    let findPatternByExpression (expr: OakExpression) : SymbolPattern option =
-        symbolPatternLibrary
-        |> List.tryFind (fun pattern -> pattern.AstPattern expr)
 
 /// Symbol resolution functions
 module SymbolResolution =
@@ -308,7 +45,7 @@ module SymbolResolution =
         ActiveNamespaces = []
         TypeRegistry = Map.empty
         ActiveSymbols = []
-        PatternRegistry = PatternLibrary.symbolPatternLibrary
+        PatternRegistry = alloyPatterns
     }
     
     let registerSymbol (symbol: ResolvedSymbol) (state: SymbolResolutionState) : SymbolResolutionState =
@@ -326,7 +63,7 @@ module SymbolResolution =
         match Map.tryFind qualifiedName state.SymbolsByQualified with
         | Some symbol -> Success symbol
         | None -> 
-            match PatternLibrary.findPatternByName qualifiedName with
+            match findByName qualifiedName with
             | Some pattern ->
                 let symbol = {
                     QualifiedName = qualifiedName
@@ -334,18 +71,18 @@ module SymbolResolution =
                         if qualifiedName.Contains(".") then
                             qualifiedName.Split([|'.'|], StringSplitOptions.RemoveEmptyEntries) |> Array.last
                         else qualifiedName
-                    ParameterTypes = fst pattern.TypeSignature
-                    ReturnType = snd pattern.TypeSignature
-                    Operation = pattern.OperationPattern
+                    ParameterTypes = fst pattern.TypeSig
+                    ReturnType = snd pattern.TypeSig
+                    Operation = pattern.OpPattern
                     Namespace = 
                         if qualifiedName.Contains(".") then
                             qualifiedName.Substring(0, qualifiedName.LastIndexOf('.'))
                         else ""
                     SourceLibrary = "Alloy"
                     RequiresExternal = 
-                        match pattern.OperationPattern with
+                        match pattern.OpPattern with
                         | ExternalCall(_, Some _) -> true
-                        | CompositePattern patterns ->
+                        | Composite patterns ->
                             patterns |> List.exists (function
                                 | ExternalCall(_, Some _) -> true
                                 | _ -> false)
@@ -376,7 +113,7 @@ module SymbolResolution =
                 let patternMatch = 
                     state.PatternRegistry
                     |> List.tryFind (fun pattern -> 
-                        pattern.QualifiedNamePattern.EndsWith(shortName))
+                        pattern.QualifiedName.EndsWith(shortName))
                 
                 match patternMatch with
                 | Some pattern ->
@@ -387,15 +124,15 @@ module SymbolResolution =
                     let symbol = {
                         QualifiedName = qualifiedName
                         ShortName = shortName
-                        ParameterTypes = fst pattern.TypeSignature
-                        ReturnType = snd pattern.TypeSignature
-                        Operation = pattern.OperationPattern
+                        ParameterTypes = fst pattern.TypeSig
+                        ReturnType = snd pattern.TypeSig
+                        Operation = pattern.OpPattern
                         Namespace = if state.ActiveNamespaces.IsEmpty then "" else state.ActiveNamespaces.[0]
                         SourceLibrary = "Alloy"
                         RequiresExternal = 
-                            match pattern.OperationPattern with
+                            match pattern.OpPattern with
                             | ExternalCall(_, Some _) -> true
-                            | CompositePattern patterns ->
+                            | Composite patterns ->
                                 patterns |> List.exists (function
                                     | ExternalCall(_, Some _) -> true
                                     | _ -> false)
@@ -421,13 +158,9 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.Memory.stackBuffer"
             ShortName = "stackBuffer"
-            ParameterTypes = [MLIRTypes.createInteger 32]
-            ReturnType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
-            Operation = DialectOperation(
-                MLIRDialect.MemRef, 
-                "memref.alloca", 
-                Map.ofList [("element_type", "i8")]
-            )
+            ParameterTypes = [MLIRTypes.i32]
+            ReturnType = MLIRTypes.memref MLIRTypes.i8
+            Operation = DialectOp(MemRef, "memref.alloca", Map["element_type", "i8"])
             Namespace = "Alloy.Memory"
             SourceLibrary = "Alloy"
             RequiresExternal = false
@@ -435,9 +168,9 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.Memory.spanToString"
             ShortName = "spanToString"
-            ParameterTypes = [MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []]
-            ReturnType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
-            Operation = CustomTransform("span_to_string", ["utf8_conversion"])
+            ParameterTypes = [MLIRTypes.memref MLIRTypes.i8]
+            ReturnType = MLIRTypes.memref MLIRTypes.i8
+            Operation = Transform("span_to_string", ["utf8_conversion"])
             Namespace = "Alloy.Memory"
             SourceLibrary = "Alloy"
             RequiresExternal = false
@@ -445,13 +178,9 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.Memory.stackalloc"
             ShortName = "stackalloc"
-            ParameterTypes = [MLIRTypes.createInteger 32]
-            ReturnType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
-            Operation = DialectOperation(
-                MLIRDialect.MemRef,
-                "memref.alloca",
-                Map.ofList [("element_type", "i8")]
-            )
+            ParameterTypes = [MLIRTypes.i32]
+            ReturnType = MLIRTypes.memref MLIRTypes.i8
+            Operation = DialectOp(MemRef, "memref.alloca", Map["element_type", "i8"])
             Namespace = "Alloy.Memory"
             SourceLibrary = "Alloy"
             RequiresExternal = false
@@ -463,8 +192,8 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.IO.Console.prompt"
             ShortName = "prompt"
-            ParameterTypes = [MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []]
-            ReturnType = MLIRTypes.createVoid ()
+            ParameterTypes = [MLIRTypes.memref MLIRTypes.i8]
+            ReturnType = MLIRTypes.void_
             Operation = ExternalCall("printf", Some "libc")
             Namespace = "Alloy.IO.Console"
             SourceLibrary = "Alloy"
@@ -473,13 +202,13 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.IO.Console.readInto"
             ShortName = "readInto"
-            ParameterTypes = [MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []]
-            ReturnType = MLIRTypes.createInteger 32
-            Operation = CompositePattern([
+            ParameterTypes = [MLIRTypes.memref MLIRTypes.i8]
+            ReturnType = MLIRTypes.i32
+            Operation = Composite [
                 ExternalCall("fgets", Some "libc")
                 ExternalCall("strlen", Some "libc")
-                CustomTransform("result_wrapper", ["success_check"])
-            ])
+                Transform("result_wrapper", ["success_check"])
+            ]
             Namespace = "Alloy.IO.Console"
             SourceLibrary = "Alloy"
             RequiresExternal = true
@@ -487,8 +216,8 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.IO.Console.writeLine"
             ShortName = "writeLine"
-            ParameterTypes = [MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []]
-            ReturnType = MLIRTypes.createVoid ()
+            ParameterTypes = [MLIRTypes.memref MLIRTypes.i8]
+            ReturnType = MLIRTypes.void_
             Operation = ExternalCall("printf", Some "libc")
             Namespace = "Alloy.IO.Console"
             SourceLibrary = "Alloy"
@@ -498,14 +227,14 @@ module AlloySymbols =
             QualifiedName = "Alloy.IO.Console.readLine"
             ShortName = "readLine"
             ParameterTypes = [
-                MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
-                MLIRTypes.createInteger 32
+                MLIRTypes.memref MLIRTypes.i8
+                MLIRTypes.i32
             ]
-            ReturnType = MLIRTypes.createInteger 32
-            Operation = CompositePattern([
+            ReturnType = MLIRTypes.i32
+            Operation = Composite [
                 ExternalCall("fgets", Some "libc")
                 ExternalCall("strlen", Some "libc")
-            ])
+            ]
             Namespace = "Alloy.IO.Console"
             SourceLibrary = "Alloy"
             RequiresExternal = true
@@ -518,10 +247,10 @@ module AlloySymbols =
             QualifiedName = "Alloy.IO.String.format"
             ShortName = "format"
             ParameterTypes = [
-                MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
-                MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
+                MLIRTypes.memref MLIRTypes.i8
+                MLIRTypes.memref MLIRTypes.i8
             ] 
-            ReturnType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
+            ReturnType = MLIRTypes.memref MLIRTypes.i8
             Operation = ExternalCall("sprintf", Some "libc")
             Namespace = "Alloy.IO.String"
             SourceLibrary = "Alloy"
@@ -531,10 +260,10 @@ module AlloySymbols =
             QualifiedName = "Alloy.IO.String.concat"
             ShortName = "concat"
             ParameterTypes = [
-                MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
-                MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
+                MLIRTypes.memref MLIRTypes.i8
+                MLIRTypes.memref MLIRTypes.i8
             ]
-            ReturnType = MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []
+            ReturnType = MLIRTypes.memref MLIRTypes.i8
             Operation = ExternalCall("strcat", Some "libc")
             Namespace = "Alloy.IO.String"
             SourceLibrary = "Alloy"
@@ -543,8 +272,8 @@ module AlloySymbols =
         {
             QualifiedName = "Alloy.IO.String.length"
             ShortName = "length"
-            ParameterTypes = [MLIRTypes.createMemRef (MLIRTypes.createInteger 8) []]
-            ReturnType = MLIRTypes.createInteger 32
+            ParameterTypes = [MLIRTypes.memref MLIRTypes.i8]
+            ReturnType = MLIRTypes.i32
             Operation = ExternalCall("strlen", Some "libc")
             Namespace = "Alloy.IO.String"
             SourceLibrary = "Alloy"
@@ -552,7 +281,7 @@ module AlloySymbols =
         }
     ]
 
-/// Registry construction and management with pattern-based resolution
+/// Registry construction and management
 module RegistryConstruction =
     let buildAlloyRegistry() : CompilerResult<SymbolRegistry> =
         try
@@ -564,7 +293,7 @@ module RegistryConstruction =
                 AlloySymbols.createConsoleSymbols() @
                 AlloySymbols.createStringSymbols()
             
-            // Register all symbols - fixed fold implementation
+            // Register all symbols
             let finalState = 
                 (initialState, alloySymbols)
                 ||> List.fold (fun state symbol -> SymbolResolution.registerSymbol symbol state)
@@ -642,8 +371,8 @@ module MLIRGeneration =
             (List.forall fst typeChecks, typeChecks |> List.filter (not << fst) |> List.map snd)
     
     let generatePatternOperations (pattern: SymbolPattern) (args: string list) (resultId: string) : string list =
-        match pattern.OperationPattern with
-        | DialectOperation(dialect, operation, attributes) ->
+        match pattern.OpPattern with
+        | DialectOp(dialect, operation, attributes) ->
             let dialectPrefix = dialectToString dialect
             let attrStr = 
                 if attributes.IsEmpty then ""
@@ -655,14 +384,14 @@ module MLIRGeneration =
                     |> sprintf " {%s}"
             
             let argStr = if args.IsEmpty then "" else sprintf "(%s)" (String.concat ", " args)
-            let returnType = snd pattern.TypeSignature
+            let returnType = snd pattern.TypeSig
             let typeStr = mlirTypeToString returnType
             
             [sprintf "    %s = %s.%s%s : %s%s" resultId dialectPrefix operation argStr typeStr attrStr]
             
         | ExternalCall(funcName, _) ->
-            let paramTypes = fst pattern.TypeSignature
-            let returnType = snd pattern.TypeSignature
+            let paramTypes = fst pattern.TypeSig
+            let returnType = snd pattern.TypeSig
             
             let paramTypeStrs = 
                 if args.IsEmpty then ["void"]
@@ -675,18 +404,18 @@ module MLIRGeneration =
             [sprintf "    %s = func.call @%s(%s) : (%s) -> %s" 
                 resultId funcName argStr typeStr returnTypeStr]
             
-        | CompositePattern operations ->
+        | Composite operations ->
             operations
             |> List.mapi (fun i operation ->
                 let stepResultId = 
                     if i = operations.Length - 1 then resultId 
                     else sprintf "%s_step%d" resultId i
                 
-                let returnType = snd pattern.TypeSignature
+                let returnType = snd pattern.TypeSig
                 
                 match operation with
                 | ExternalCall(extFuncName, _) ->
-                    let paramTypes = fst pattern.TypeSignature
+                    let paramTypes = fst pattern.TypeSig
                     let paramTypeStrs = 
                         if args.IsEmpty then ["void"]
                         else paramTypes |> List.map mlirTypeToString
@@ -697,7 +426,7 @@ module MLIRGeneration =
                     sprintf "    %s = func.call @%s(%s) : (%s) -> %s" 
                         stepResultId extFuncName argStr typeStr (mlirTypeToString returnType)
                     
-                | CustomTransform(transformName, _) ->
+                | Transform(transformName, _) ->
                     sprintf "    %s = composite.%s%d : %s" 
                         stepResultId transformName i (mlirTypeToString returnType)
                     
@@ -705,7 +434,7 @@ module MLIRGeneration =
                     sprintf "    %s = arith.constant %d : i32 // Step %d" 
                         stepResultId i i)
             
-        | CustomTransform(transformName, _) ->
+        | Transform(transformName, _) ->
             match transformName with
             | "span_to_string" ->
                 let bufferArg = if args.IsEmpty then "%unknown_buffer" else args.[0]
@@ -726,14 +455,14 @@ module MLIRGeneration =
         let patternMatch = 
             registry.State.PatternRegistry
             |> List.tryFind (fun pattern -> 
-                pattern.QualifiedNamePattern = symbol.QualifiedName ||
-                symbol.QualifiedName.EndsWith(pattern.QualifiedNamePattern))
+                pattern.QualifiedName = symbol.QualifiedName ||
+                symbol.QualifiedName.EndsWith(pattern.QualifiedName))
         
         match patternMatch with
         | Some pattern -> Success (generatePatternOperations pattern args resultId, registry)
         | None ->
             match symbol.Operation with
-            | DialectOperation(dialect, operation, attributes) ->
+            | DialectOp(dialect, operation, attributes) ->
                 let dialectPrefix = dialectToString dialect
                 let attrStr = 
                     if attributes.IsEmpty then ""
@@ -756,10 +485,7 @@ module MLIRGeneration =
                 let callOp = sprintf "    %s = func.call @%s(%s) : (%s) -> %s" resultId funcName argStr paramTypes returnType
                 Success ([callOp], registry)
             
-            | CompositePattern operations ->
-                let mutable resultOps = []
-                let mutable tempRegistry = registry
-                
+            | Composite operations ->
                 let operationResults =
                     operations |> List.mapi (fun i operation ->
                         match operation with
@@ -770,7 +496,7 @@ module MLIRGeneration =
                                 tempResultId extFuncName (String.concat ", " args)
                                 paramTypes (mlirTypeToString symbol.ReturnType)
                             
-                        | CustomTransform(transformName, _) ->
+                        | Transform(transformName, _) ->
                             let tempResultId = if i = operations.Length - 1 then resultId else sprintf "%s_step%d" resultId i
                             sprintf "    %s = composite.%s%d : %s" 
                                 tempResultId transformName i (mlirTypeToString symbol.ReturnType)
@@ -780,9 +506,9 @@ module MLIRGeneration =
                             sprintf "    %s = arith.constant %d : i32 // Placeholder for operation %d" 
                                 tempResultId i i)
                 
-                Success (operationResults, tempRegistry)
+                Success (operationResults, registry)
                 
-            | CustomTransform(transformName, _) ->
+            | Transform(transformName, _) ->
                 match transformName with
                 | "span_to_string" ->
                     let bufferValue = 
@@ -807,17 +533,17 @@ module PublicInterface =
         | CompilerFailure _ ->
             registry.State.PatternRegistry
             |> List.tryFind (fun pattern -> 
-                pattern.QualifiedNamePattern = funcName ||
-                funcName.EndsWith(pattern.QualifiedNamePattern))
-            |> Option.map (fun pattern -> snd pattern.TypeSignature)
+                pattern.QualifiedName = funcName ||
+                funcName.EndsWith(pattern.QualifiedName))
+            |> Option.map (fun pattern -> snd pattern.TypeSig)
     
     let resolveFunctionCall (funcName: string) (args: string list) (resultId: string) (registry: SymbolRegistry)
                            : CompilerResult<string list * SymbolRegistry> =
         let patternMatch = 
             registry.State.PatternRegistry
             |> List.tryFind (fun pattern -> 
-                pattern.QualifiedNamePattern = funcName ||
-                funcName.EndsWith(pattern.QualifiedNamePattern))
+                pattern.QualifiedName = funcName ||
+                funcName.EndsWith(pattern.QualifiedName))
         
         match patternMatch with
         | Some pattern -> Success (MLIRGeneration.generatePatternOperations pattern args resultId, registry)
@@ -827,7 +553,7 @@ module PublicInterface =
                 let argTypes = 
                     args |> List.mapi (fun i _ ->
                         if i < symbol.ParameterTypes.Length then symbol.ParameterTypes.[i]
-                        else MLIRTypes.createInteger 32)
+                        else MLIRTypes.i32)
                 
                 let (typesValid, typeErrors) = MLIRGeneration.validateArgumentTypes symbol args argTypes
                 
@@ -865,8 +591,8 @@ module PublicInterface =
                 | CompilerFailure _ -> 
                     not (registry.State.PatternRegistry
                          |> List.exists (fun pattern -> 
-                             pattern.QualifiedNamePattern = symbolName ||
-                             symbolName.EndsWith(pattern.QualifiedNamePattern))))
+                             pattern.QualifiedName = symbolName ||
+                             symbolName.EndsWith(pattern.QualifiedName))))
         
         if missingSymbols.IsEmpty then Success ()
         else
@@ -883,9 +609,9 @@ module PublicInterface =
         | CompilerFailure _ -> 
             registry.State.PatternRegistry
             |> List.tryFind (fun pattern -> 
-                pattern.QualifiedNamePattern = funcName ||
-                funcName.EndsWith(pattern.QualifiedNamePattern))
-            |> Option.map (fun pattern -> fst pattern.TypeSignature)
+                pattern.QualifiedName = funcName ||
+                funcName.EndsWith(pattern.QualifiedName))
+            |> Option.map (fun pattern -> fst pattern.TypeSig)
         
     let areArgumentTypesCompatible (funcName: string) (argTypes: MLIRType list) (registry: SymbolRegistry) : bool =
         match getParameterTypes funcName registry with
@@ -895,6 +621,6 @@ module PublicInterface =
             |> List.forall (fun (paramType, argType) -> TypeAnalysis.canConvertTo argType paramType)
         | None -> false
     
-    let findPatternByExpression (expr: OakExpression) (registry: SymbolRegistry) : SymbolPattern option =
+    let findPatternByExpression (expr: SynExpr) (registry: SymbolRegistry) : SymbolPattern option =
         registry.State.PatternRegistry
-        |> List.tryFind (fun pattern -> pattern.AstPattern expr)
+        |> List.tryFind (fun pattern -> pattern.Matcher expr)

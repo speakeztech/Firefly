@@ -27,7 +27,9 @@ module TypeMetrics =
             |> Seq.sumBy sizeOf
         elif fsType.IsFunctionType then
             8 // Function pointer
-        elif fsType.IsArrayType then
+        elif fsType.HasTypeDefinition && 
+             (fsType.TypeDefinition.FullName.StartsWith("Microsoft.FSharp.Core.array") ||
+              fsType.TypeDefinition.FullName.StartsWith("System.Array")) then
             8 // Array reference
         else
             match fsType.TypeDefinition.TryFullName with
@@ -76,27 +78,27 @@ module UnionAnalysis =
         match cases with
         | [] -> None
         | [single] ->
-            match single.UnionCaseFields |> Seq.toList with
+            match single.Fields |> Seq.toList with
             | [] -> Some (Enum 1)
             | [field] -> Some (Single field.FieldType)
-            | _ -> 
-                let size = single.UnionCaseFields |> Seq.sumBy (fun f -> sizeOf f.FieldType)
+            | fields -> 
+                let size = fields |> List.sumBy (fun f -> sizeOf f.FieldType)
                 Some (Tagged(1, size))
         | _ ->
-            let allNullary = cases |> List.forall (fun c -> c.UnionCaseFields.Count = 0)
+            let allNullary = cases |> List.forall (fun c -> c.Fields.Count = 0)
             if allNullary then
                 Some (Enum cases.Length)
             else
                 match cases with
                 | [none; some] | [some; none] when none.Name = "None" && some.Name = "Some" ->
-                    some.UnionCaseFields 
+                    some.Fields
                     |> Seq.tryHead
                     |> Option.map (fun f -> Option f.FieldType)
                 | _ ->
                     let maxPayload = 
                         cases 
                         |> List.map (fun c ->
-                            c.UnionCaseFields |> Seq.sumBy (fun f -> sizeOf f.FieldType))
+                            c.Fields |> Seq.sumBy (fun f -> sizeOf f.FieldType))
                         |> List.fold max 0
                     let tagSize = if cases.Length <= 256 then 1 else 4
                     Some (Tagged(tagSize, maxPayload))
@@ -106,7 +108,7 @@ let analyze (fsType: FSharpType) : TypeLayout =
     let size = TypeMetrics.sizeOf fsType
     let alignment = TypeMetrics.alignmentOf fsType
     let strategy = 
-        if fsType.HasTypeDefinition && fsType.TypeDefinition.IsUnion then
+        if fsType.HasTypeDefinition && fsType.TypeDefinition.IsFSharpUnion then
             UnionAnalysis.analyzeStrategy fsType.TypeDefinition
         else None
     

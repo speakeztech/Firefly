@@ -23,6 +23,7 @@
       <!-- MLIR Core Types -->
       <Compile Include="Core/MLIRGeneration/Dialect.fs" />
       <Compile Include="Core/MLIRGeneration/MLIRContext.fs" />
+      <Compile Include="Core/MLIRGeneration/TypeSystem.fs" />
       
       <!-- Memory Layout (must come before TypeMapping) -->
       <Compile Include="Core/MemoryLayout/LayoutAnalyzer.fs" />
