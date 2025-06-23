@@ -3,6 +3,29 @@ module Dabbit.Analysis.ReachabilityAnalyzer
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Symbols
 
+/// Statistics for a single module
+type ModuleStats = {
+    Module: string
+    Total: int
+    Retained: int
+    Eliminated: int
+}
+
+/// Overall reachability statistics
+type ReachabilityStats = {
+    TotalSymbols: int
+    ReachableSymbols: int
+    EliminatedSymbols: int
+    ModuleBreakdown: Map<string, ModuleStats>
+}
+
+/// Result of reachability analysis
+type ReachabilityResult = {
+    Reachable: Set<string>
+    UnionCases: Map<string, Set<string>>
+    Statistics: ReachabilityStats
+}
+
 /// Enhanced dependency tracking
 type Dependency =
     | FunctionCall of string
