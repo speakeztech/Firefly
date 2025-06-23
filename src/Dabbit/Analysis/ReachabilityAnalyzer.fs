@@ -2,6 +2,7 @@ module Dabbit.Analysis.ReachabilityAnalyzer
 
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Symbols
+open FSharp.Compiler.Text
 
 /// Statistics for a single module
 type ModuleStats = {
@@ -101,15 +102,21 @@ let rec analyzeDependencies (expr: SynExpr) : Set<Dependency> =
     
     | SynExpr.Record(_, _, fields, _) ->
         fields 
-        |> List.choose (fun (SynExprRecordField(_, _, expr, _)) -> expr)
+        |> List.choose (function 
+            | SynExprRecordField((_, _), _, exprOpt, _) -> exprOpt)
         |> List.map analyzeDependencies
         |> Set.unionMany
     
     | SynExpr.New(_, _, expr, _) ->
         analyzeDependencies expr
     
-    | SynExpr.ObjExpr(_, argOpt, _, bindings, members, _, _, _) ->
-        let argDeps = argOpt |> Option.map (snd >> analyzeDependencies) |> Option.defaultValue Set.empty
+    | SynExpr.ObjExpr(objType, argOpt, withKeyword, bindings, members, extraImpls, newExprRange, range) ->
+        let argDeps = 
+            match argOpt with
+            | Some (expr, identOpt) -> 
+                // expr is the expression, identOpt is the optional identifier
+                analyzeDependencies expr
+            | None -> Set.empty
         let bindingDeps = 
             bindings 
             |> List.map (fun (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) -> 
@@ -127,12 +134,15 @@ let rec analyzeDependencies (expr: SynExpr) : Set<Dependency> =
     | SynExpr.While(_, whileExpr, doExpr, _) ->
         Set.union (analyzeDependencies whileExpr) (analyzeDependencies doExpr)
     
-    | SynExpr.For(_, _, _, _, toExpr, doExpr, _) ->
-        Set.union (analyzeDependencies toExpr) (analyzeDependencies doExpr)
-    
-    | SynExpr.ForEach(_, _, _, _, enumExpr, bodyExpr, _) ->
+    | SynExpr.For(spFor, ident, identBodyRange, spEquals, startExpr, direction, endExpr, doExpr, range) ->
+        let startDeps = analyzeDependencies startExpr
+        let endDeps = analyzeDependencies endExpr
+        let doDeps = analyzeDependencies doExpr
+        Set.unionMany [startDeps; endDeps; doDeps]
+      
+    | SynExpr.ForEach(forDebugPoint, inDebugPoint, seqExprOnly, isFromSource, pat, enumExpr, bodyExpr, range) ->
         Set.union (analyzeDependencies enumExpr) (analyzeDependencies bodyExpr)
-    
+     
     | SynExpr.TryWith(tryExpr, withClauses, _, _, _, _) ->
         let tryDeps = analyzeDependencies tryExpr
         let withDeps = 
@@ -170,14 +180,15 @@ let rec analyzeDependencies (expr: SynExpr) : Set<Dependency> =
     | SynExpr.DotSet(expr, _, rhsExpr, _) ->
         Set.union (analyzeDependencies expr) (analyzeDependencies rhsExpr)
     
-    | SynExpr.DotIndexedGet(expr, indexArgs, _, _) ->
+    // For FCS 43.9.300: DotIndexedGet and DotIndexedSet use SynExpr list
+    | SynExpr.DotIndexedGet(expr, indexExpr, _, _) ->
         let exprDeps = analyzeDependencies expr
-        let indexDeps = indexArgs |> List.map analyzeDependencies |> Set.unionMany
+        let indexDeps = analyzeDependencies indexExpr
         Set.union exprDeps indexDeps
     
-    | SynExpr.DotIndexedSet(expr, indexArgs, valueExpr, _, _, _) ->
+    | SynExpr.DotIndexedSet(expr, indexExpr, valueExpr, _, _, _) ->
         let exprDeps = analyzeDependencies expr
-        let indexDeps = indexArgs |> List.map analyzeDependencies |> Set.unionMany
+        let indexDeps = analyzeDependencies indexExpr
         let valueDeps = analyzeDependencies valueExpr
         Set.unionMany [exprDeps; indexDeps; valueDeps]
     
@@ -194,16 +205,16 @@ let rec analyzeDependencies (expr: SynExpr) : Set<Dependency> =
         let rhsDeps = analyzeDependencies rhsExpr
         let andBangDeps = 
             andBangs 
-            |> List.map (fun (SynExprAndBang(_, _, _, _, rhsExpr, _, _, _)) -> 
-                analyzeDependencies rhsExpr)
+            |> List.map (fun (SynExprAndBang(_, _, _, _, bodyExpr, _, _)) -> 
+                analyzeDependencies bodyExpr)
             |> Set.unionMany
         let bodyDeps = analyzeDependencies bodyExpr
         Set.unionMany [rhsDeps; andBangDeps; bodyDeps]
     
-    | SynExpr.DoBang(expr, _) ->
+    | SynExpr.DoBang(expr, _, _) ->
         analyzeDependencies expr
     
-    | SynExpr.CompExpr(_, _, expr, _) ->
+    | SynExpr.ComputationExpr(_, expr, _) ->
         analyzeDependencies expr
     
     | SynExpr.MatchBang(_, expr, clauses, _, _) ->
@@ -216,18 +227,18 @@ let rec analyzeDependencies (expr: SynExpr) : Set<Dependency> =
             |> Set.unionMany
         Set.union exprDeps clauseDeps
     
-    | SynExpr.YieldOrReturn(_, expr, _) ->
+    | SynExpr.YieldOrReturn(_, expr, _, _) ->
         analyzeDependencies expr
     
-    | SynExpr.YieldOrReturnFrom(_, expr, _) ->
+    | SynExpr.YieldOrReturnFrom(_, expr, _, _) ->
         analyzeDependencies expr
     
     | SynExpr.Paren(expr, _, _, _) ->
         analyzeDependencies expr
     
     | SynExpr.AnonRecd(_, copyInfo, fields, _, _) ->
-        let copyDeps = copyInfo |> Option.map (snd >> analyzeDependencies) |> Option.defaultValue Set.empty
-        let fieldDeps = fields |> List.map (snd >> snd >> analyzeDependencies) |> Set.unionMany
+        let copyDeps = copyInfo |> Option.map (fun (expr, _) -> analyzeDependencies expr) |> Option.defaultValue Set.empty
+        let fieldDeps = fields |> List.map (fun (_, _, expr) -> analyzeDependencies expr) |> Set.unionMany
         Set.union copyDeps fieldDeps
     
     | SynExpr.Typed(expr, _, _) ->
@@ -238,11 +249,9 @@ let rec analyzeDependencies (expr: SynExpr) : Set<Dependency> =
     
     | SynExpr.Null _ 
     | SynExpr.Const _ 
-    | SynExpr.Ident _ 
     | SynExpr.ImplicitZero _ 
     | SynExpr.MatchLambda _ 
     | SynExpr.Quote _ 
-    | SynExpr.TypeApp _ 
     | SynExpr.ArbitraryAfterError _ 
     | SynExpr.FromParseError _ 
     | SynExpr.LibraryOnlyILAssembly _ 
@@ -254,7 +263,13 @@ let rec analyzeDependencies (expr: SynExpr) : Set<Dependency> =
     | SynExpr.Fixed _ 
     | SynExpr.Assert _ 
     | SynExpr.Do _ 
-    | SynExpr.DiscardAfterMissingQualificationAfterDot _ ->
+    | SynExpr.DiscardAfterMissingQualificationAfterDot _ 
+    | SynExpr.IndexFromEnd _ 
+    | SynExpr.IndexRange _ 
+    | SynExpr.DebugPoint _ 
+    | SynExpr.Dynamic _ 
+    | SynExpr.Typar _ 
+    | SynExpr.WhileBang _ ->
         Set.empty
 
 /// Extract function body from parsed AST
