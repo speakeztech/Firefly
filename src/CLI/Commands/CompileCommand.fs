@@ -1,10 +1,14 @@
 ﻿module CLI.Commands.CompileCommand
 
+#nowarn "57" // Suppress experimental FCS API warnings
+
 open System
 open System.IO
 open Argu
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Text
+open FSharp.Compiler.Diagnostics
+open FSharp.Compiler.Syntax
 open Core.XParsec.Foundation
 open Core.FCSProcessing.ASTTransformer
 open Core.FCSProcessing.DependencyResolver
@@ -126,15 +130,35 @@ let private compilePipeline (ctx: CompilationContext) (sourceCode: string) : Com
     // Phase 1: Parse with FCS
     printfn "Phase 1: Parsing F# source..."
     let checker = FSharpChecker.Create()
-    let options = checker.GetProjectOptionsFromScript(ctx.InputPath, Text.SourceText.ofString sourceCode) |> Async.RunSynchronously
+    let sourceText = SourceText.ofString sourceCode
+    let (projectOptions, scriptDiagnostics) = 
+        checker.GetProjectOptionsFromScript(ctx.InputPath, sourceText) 
+        |> Async.RunSynchronously
     
-    match checker.ParseFile(ctx.InputPath, Text.SourceText.ofString sourceCode, options.OtherOptions |> FSharpParsingOptions.FromOtherOptions) |> Async.RunSynchronously with
-    | parseResults when parseResults.ParseHadErrors ->
+    // Create parsing options
+    let parsingOptions = { 
+        FSharpParsingOptions.Default with 
+            SourceFiles = [| ctx.InputPath |]
+            ConditionalDefines = []
+            DiagnosticOptions = FSharpDiagnosticOptions.Default
+            LangVersionText = "preview"
+            IsInteractive = false
+            CompilingFSharpCore = false
+            IsExe = true
+    }
+    
+    let parseResults = checker.ParseFile(ctx.InputPath, sourceText, parsingOptions) |> Async.RunSynchronously
+    
+    // Check for parse errors first
+    if parseResults.ParseHadErrors then
         let errors = parseResults.Diagnostics |> Array.map (fun d -> d.Message) |> String.concat "\n"
         CompilerFailure [SyntaxError({ Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 }, errors, ["FCS parsing"])]
-    | parseResults ->
-        match parseResults.ParseTree with
-        | None -> CompilerFailure [SyntaxError({ Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 }, "No parse tree generated", ["FCS parsing"])]
+    else
+        // Extract parse tree
+        let parseTreeOpt = parseResults.ParseTree
+        match parseTreeOpt with
+        | None -> 
+            CompilerFailure [SyntaxError({ Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 }, "No parse tree generated", ["FCS parsing"])]
         | Some parsedInput ->
             
             // Write FCS AST if keeping intermediates
@@ -142,7 +166,11 @@ let private compilePipeline (ctx: CompilationContext) (sourceCode: string) : Com
             
             // Phase 2: Type check
             printfn "Phase 2: Type checking..."
-            match checker.CheckFileInProject(parseResults, ctx.InputPath, 0, Text.SourceText.ofString sourceCode, options.OtherOptions.[0]) |> Async.RunSynchronously with
+            let checkResult = checker.CheckFileInProject(parseResults, ctx.InputPath, 0, sourceText, projectOptions) |> Async.RunSynchronously
+            
+            match checkResult with
+            | FSharpCheckFileAnswer.Aborted -> 
+                CompilerFailure [InternalError("type checking", "Type checking was aborted", None)]
             | FSharpCheckFileAnswer.Succeeded checkResults ->
                 
                 // Phase 3: Transform AST
@@ -202,7 +230,7 @@ let private compilePipeline (ctx: CompilationContext) (sourceCode: string) : Com
                         printfn "Phase 6: Optimizing..."
                         let optLevel = 
                             match ctx.OptimizeLevel.ToLowerInvariant() with
-                            | "none" -> OptimizationLevel.None
+                            | "none" -> OptimizationLevel.Zero
                             | "less" -> OptimizationLevel.Less
                             | "aggressive" -> OptimizationLevel.Aggressive
                             | "size" -> OptimizationLevel.Size
@@ -239,9 +267,6 @@ let private compilePipeline (ctx: CompilationContext) (sourceCode: string) : Com
                                     printfn "Phase 8: Invoking external tools..."
                                     printfn "TODO: Call clang/lld to produce final executable"
                                     Success ()
-            
-            | FSharpCheckFileAnswer.Aborted -> 
-                CompilerFailure [InternalError("type checking", "Type checking was aborted", None)]
 
 /// Compiles F# source to native executable
 let compile (args: ParseResults<CompileArgs>) =

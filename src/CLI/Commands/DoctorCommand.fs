@@ -1,9 +1,9 @@
 ﻿module CLI.Commands.DoctorCommand
 
 open System
+open System.Runtime.InteropServices
 open Argu
 open Core.XParsec.Foundation
-open CLI.Diagnostics.ToolchainVerification
 
 /// Command line arguments for the doctor command
 type DoctorArgs =
@@ -30,9 +30,9 @@ let doctor (args: ParseResults<DoctorArgs>) =
     
     // First, show basic system information
     printfn "System Information:"
-    printfn "  OS: %s" (RuntimeInformation.OSDescription)
+    printfn "  OS: %s" RuntimeInformation.OSDescription
     printfn "  Architecture: %s" (RuntimeInformation.OSArchitecture.ToString())
-    printfn "  .NET Runtime: %s" (RuntimeInformation.FrameworkDescription)
+    printfn "  .NET Runtime: %s" RuntimeInformation.FrameworkDescription
     
     // Detect MSYS2 environment if on Windows
     if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
@@ -48,7 +48,7 @@ let doctor (args: ParseResults<DoctorArgs>) =
     printfn ""
     
     // Run toolchain verification
-    match verifyToolchain verbose with
+    match CLI.Diagnostics.ToolChainVerification.verifyToolchain verbose with
     | Success () ->
         printfn ""
         printfn "✓ All checks passed! Firefly is ready to compile."
@@ -69,12 +69,17 @@ let doctor (args: ParseResults<DoctorArgs>) =
             printfn "Suggested fixes:"
             errors |> List.iter (fun error ->
                 match error with
-                | CompilerError(phase, message, Some details) ->
+                | ConversionError(phase, source, target, message) ->
                     printfn "  - %s: %s" phase message
-                    printfn "    %s" details
-                | CompilerError(phase, message, None) ->
+                | SyntaxError(pos, message, context) ->
+                    printfn "  - %s: %s" (String.concat " > " context) message
+                | TypeCheckError(construct, message, location) ->
+                    printfn "  - %s: %s" construct message
+                | InternalError(phase, message, details) ->
                     printfn "  - %s: %s" phase message
-                | _ -> ())
+                    match details with
+                    | Some d -> printfn "    %s" d
+                    | None -> ())
         
         // If on Windows with MSYS2, give specific guidance
         if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
@@ -92,7 +97,7 @@ let doctor (args: ParseResults<DoctorArgs>) =
 
 /// Provides a quick check that can be called from other commands
 let quickCheck() : bool =
-    match quickVerifyToolchain() with
+    match CLI.Diagnostics.ToolChainVerification.quickVerifyToolchain() with
     | true -> true
     | false ->
         printfn ""

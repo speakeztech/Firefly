@@ -6,7 +6,7 @@ open Core.XParsec.Foundation
 
 /// Optimization level for LLVM code generation
 type OptimizationLevel =
-    | None        // -O0
+    | Zero        // -O0
     | Less        // -O1  
     | Default     // -O2
     | Aggressive  // -O3
@@ -50,7 +50,7 @@ type OptimizationState = {
 /// Creates optimization pipeline based on level
 let createOptimizationPipeline (level: OptimizationLevel) : OptimizationPass list =
     match level with
-    | None -> []
+    | Zero -> []
     | Less -> [MemoryToReg; SimplifyCFG(false)]
     | Default -> [MemoryToReg; SimplifyCFG(false); InstCombine(1); ConstantFold]
     | Aggressive -> [MemoryToReg; SimplifyCFG(true); InstCombine(2); ConstantFold; DeadCodeElim(false); GVN(true)]
@@ -76,7 +76,7 @@ let passToOptArg (pass: OptimizationPass) : string =
 /// Convert optimization level to LLVM opt flag
 let levelToOptFlag (level: OptimizationLevel) : string =
     match level with
-    | None -> "-O0"
+    | Zero -> "-O0"
     | Less -> "-O1"
     | Default -> "-O2"
     | Aggressive -> "-O3"
