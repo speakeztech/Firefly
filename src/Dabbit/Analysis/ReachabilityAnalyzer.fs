@@ -1,54 +1,58 @@
-module Dabbit.TreeShaking.ReachabilityAnalyzer
+module Dabbit.Analysis.ReachabilityAnalyzer
 
-open System
-open System.Collections.Generic
-open Core.XParsec.Foundation
-open Dabbit.Parsing.OakAst
-
-/// Represents a dependency relationship in the program
-type Dependency =
-    | FunctionCall of caller: string * callee: string
-    | TypeUsage of user: string * typeName: string
-    | UnionCaseUsage of user: string * typeName: string * caseName: string
-    | FieldAccess of user: string * typeName: string * fieldName: string
-    | ModuleReference of user: string * moduleName: string
-
-/// Dependency graph for reachability analysis
-type DependencyGraph = {
-    /// Map from declaration name to its dependencies
-    Dependencies: Map<string, Set<Dependency>>
-    /// Map from declaration name to its AST node
-    Declarations: Map<string, OakDeclaration>
-    /// Entry points (main function, exported APIs)
-    EntryPoints: Set<string>
-    /// Module-qualified names
-    QualifiedNames: Map<string, string>
-}
+open FSharp.Compiler.Symbols
+open FSharp.Compiler.Syntax
 
 /// Reachability analysis result
 type ReachabilityResult = {
-    /// Set of reachable declaration names
-    ReachableDeclarations: Set<string>
-    /// Set of reachable type cases (for unions)
-    ReachableUnionCases: Map<string, Set<string>>
-    /// Set of reachable record fields
-    ReachableFields: Map<string, Set<string>>
-    /// Diagnostics about eliminated code
-    EliminationStats: EliminationStatistics
+    Reachable: Set<string>
+    UnionCases: Map<string, Set<string>>  // Type -> used cases
+    Statistics: ReachabilityStats
 }
 
-/// Statistics about eliminated code
-and EliminationStatistics = {
-    TotalDeclarations: int
-    ReachableDeclarations: int
-    EliminatedDeclarations: int
+and ReachabilityStats = {
+    TotalSymbols: int
+    ReachableSymbols: int
+    EliminatedSymbols: int
     ModuleBreakdown: Map<string, ModuleStats>
-    LargestEliminated: (string * int) list
 }
 
 and ModuleStats = {
-    ModuleName: string
-    TotalFunctions: int
-    RetainedFunctions: int
-    EliminatedFunctions: int
+    Module: string
+    Total: int
+    Retained: int
+    Eliminated: int
 }
+
+/// Build reachability worklist from entry points
+let analyze (symbols: Map<string, FSharpSymbol>) (deps: Map<string, Set<string>>) (entries: Set<string>) =
+    let rec reach visited queue =
+        match queue with
+        | [] -> visited
+        | sym :: rest when Set.contains sym visited -> reach visited rest
+        | sym :: rest ->
+            let visited' = Set.add sym visited
+            let neighbors = Map.tryFind sym deps |> Option.defaultValue Set.empty
+            reach visited' (Set.toList neighbors @ rest)
+    
+    let reachable = reach Set.empty (Set.toList entries)
+    
+    // Calculate statistics
+    let moduleStats = 
+        symbols 
+        |> Map.toList
+        |> List.groupBy (fun (name, _) -> name.Split('.').[0])
+        |> List.map (fun (modName, syms) ->
+            let total = syms.Length
+            let retained = syms |> List.filter (fun (n, _) -> Set.contains n reachable) |> List.length
+            (modName, { Module = modName; Total = total; Retained = retained; Eliminated = total - retained }))
+        |> Map.ofList
+    
+    { Reachable = reachable
+      UnionCases = Map.empty  // TODO: Track union case usage
+      Statistics = {
+          TotalSymbols = Map.count symbols
+          ReachableSymbols = Set.count reachable
+          EliminatedSymbols = Map.count symbols - Set.count reachable
+          ModuleBreakdown = moduleStats
+      }}

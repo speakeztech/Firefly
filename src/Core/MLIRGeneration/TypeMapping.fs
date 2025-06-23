@@ -1,122 +1,137 @@
-﻿module Core.MLIRGeneration.TypeSystem
+﻿module Core.MLIRGeneration.TypeMapping
 
-open Dabbit.Parsing.OakAst
+open FSharp.Compiler.Symbols
+open Core.MLIRGeneration.TypeSystem
 
-/// MLIR type categories
-type MLIRTypeCategory =
-    | Integer = 0
-    | Float = 1
-    | Void = 2
-    | MemRef = 3
-    | Function = 4
-    | Struct = 5
-
-/// Simplified MLIR type representation
-type MLIRType = {
-    Category: MLIRTypeCategory
-    Width: int option
-    ElementType: MLIRType option
-    Parameters: MLIRType list
-    ReturnType: MLIRType option
+/// Type mapping context preserving FCS information
+type TypeContext = {
+    TypeMap: Map<FSharpType, MLIRType>
+    Symbols: Map<string, FSharpSymbol>
+    Generics: Map<string, FSharpGenericParameter>
 }
 
-/// Type utility functions to simplify working with MLIR types
-module MLIRTypeUtils = 
-    /// Creates an integer type with specified width
-    let createInteger (width: int) = {
-        Category = MLIRTypeCategory.Integer
-        Width = Some width
-        ElementType = None
-        Parameters = []
-        ReturnType = None
+/// Map FSharp types to MLIR while preserving information
+module FSharpTypeMapper =
+    /// Create mapping for basic types
+    let private basicTypeMap = [
+        "System.Int32", MLIRTypes.i32
+        "System.Int64", MLIRTypes.i64
+        "System.Single", MLIRTypes.f32
+        "System.Double", MLIRTypes.f64
+        "System.Boolean", MLIRTypes.i1
+        "System.Byte", MLIRTypes.i8
+        "System.Void", MLIRTypes.void_
+        "System.String", MLIRTypes.memref MLIRTypes.i8
+    ] |> Map.ofList
+    
+    /// Map FSharp type to MLIR type
+    let rec mapType (ctx: TypeContext) (fsType: FSharpType) : MLIRType * TypeContext =
+        // Check cache first
+        match Map.tryFind fsType ctx.TypeMap with
+        | Some mlirType -> (mlirType, ctx)
+        | None ->
+            let (mlirType, ctx') = 
+                if fsType.IsAbbreviation then
+                    mapType ctx fsType.AbbreviatedType
+                
+                elif fsType.IsTupleType then
+                    let (elemTypes, ctx') = 
+                        fsType.GenericArguments 
+                        |> Seq.fold (fun (types, c) t ->
+                            let (mt, c') = mapType c t
+                            (mt :: types, c')) ([], ctx)
+                    (MLIRTypes.struct_ (List.rev elemTypes), ctx')
+                
+                elif fsType.IsFunctionType then
+                    let domain, range = fsType.GenericArguments |> Seq.toList |> function
+                        | [d; r] -> (d, r)
+                        | _ -> failwith "Invalid function type"
+                    let (domainType, ctx1) = mapType ctx domain
+                    let (rangeType, ctx2) = mapType ctx1 range
+                    (MLIRTypes.func [domainType] rangeType, ctx2)
+                
+                elif fsType.IsArrayType then
+                    let elemType = fsType.GenericArguments |> Seq.head
+                    let (mlirElem, ctx') = mapType ctx elemType
+                    (MLIRTypes.memref mlirElem, ctx')
+                
+                elif fsType.HasTypeDefinition then
+                    match fsType.TypeDefinition.TryFullName with
+                    | Some fullName when Map.containsKey fullName basicTypeMap ->
+                        (Map.find fullName basicTypeMap, ctx)
+                    | _ when fsType.TypeDefinition.IsValueType ->
+                        mapStructType ctx fsType
+                    | _ when fsType.TypeDefinition.IsUnion ->
+                        mapUnionType ctx fsType
+                    | _ ->
+                        (MLIRTypes.memref MLIRTypes.i8, ctx)  // Reference type
+                else
+                    (MLIRTypes.i64, ctx)  // Unknown type
+            
+            // Cache the result
+            let ctx'' = { ctx' with TypeMap = Map.add fsType mlirType ctx'.TypeMap }
+            (mlirType, ctx'')
+    
+    /// Map struct type preserving field information
+    and mapStructType ctx fsType =
+        let fields = fsType.TypeDefinition.FSharpFields |> Seq.toList
+        let (fieldTypes, ctx') = 
+            fields |> List.fold (fun (types, c) field ->
+                let (ft, c') = mapType c field.FieldType
+                (ft :: types, c')) ([], ctx)
+        (MLIRTypes.struct_ (List.rev fieldTypes), ctx')
+    
+    /// Map union type with layout optimization
+    and mapUnionType ctx fsType =
+        let cases = fsType.TypeDefinition.UnionCases |> Seq.toList
+        
+        match Core.MemoryLayout.LayoutAnalyzer.UnionAnalysis.analyzeStrategy fsType.TypeDefinition with
+        | Some (Core.MemoryLayout.LayoutAnalyzer.Enum _) -> 
+            (MLIRTypes.i32, ctx)
+        | Some (Core.MemoryLayout.LayoutAnalyzer.Single caseType) ->
+            mapType ctx caseType
+        | Some (Core.MemoryLayout.LayoutAnalyzer.Option someType) ->
+            let (someMLIR, ctx') = mapType ctx someType
+            (MLIRTypes.nullable someMLIR, ctx')
+        | _ ->
+            // Tagged union: tag + largest payload
+            let layout = Core.MemoryLayout.LayoutAnalyzer.analyze fsType
+            (MLIRTypes.struct_ [MLIRTypes.i32; MLIRTypes.array MLIRTypes.i8 layout.Size], ctx)
+
+/// Symbol type resolution
+module SymbolTypeResolver =
+    open FSharpTypeMapper
+    
+    /// Get MLIR type for a symbol
+    let resolveSymbolType (ctx: TypeContext) (symbol: FSharpSymbol) =
+        match symbol with
+        | :? FSharpMemberOrFunctionOrValue as mfv ->
+            mapType ctx mfv.FullType
+        
+        | :? FSharpEntity as entity when entity.IsValueType || entity.IsClass ->
+            let fsType = entity.AsType()
+            mapType ctx fsType
+        
+        | :? FSharpField as field ->
+            mapType ctx field.FieldType
+        
+        | _ -> (MLIRTypes.i64, ctx)
+
+/// Type context builder
+module TypeContextBuilder =
+    /// Create initial context
+    let create() = {
+        TypeMap = Map.empty
+        Symbols = Map.empty
+        Generics = Map.empty
     }
-
-    /// Creates a float type with specified width
-    let createFloat (width: int) = {
-        Category = MLIRTypeCategory.Float
-        Width = Some width
-        ElementType = None
-        Parameters = []
-        ReturnType = None
+    
+    /// Add symbol to context
+    let addSymbol name symbol ctx = {
+        ctx with Symbols = Map.add name symbol ctx.Symbols
     }
-
-    /// Creates a void type
-    let createVoid() = {
-        Category = MLIRTypeCategory.Void
-        Width = None
-        ElementType = None
-        Parameters = []
-        ReturnType = None
+    
+    /// Add generic parameter
+    let addGeneric name param ctx = {
+        ctx with Generics = Map.add name param ctx.Generics
     }
-
-    /// Creates a memory reference type with element type
-    let createMemRef (elementType: MLIRType) = {
-        Category = MLIRTypeCategory.MemRef
-        Width = None
-        ElementType = Some elementType
-        Parameters = []
-        ReturnType = None
-    }
-
-    /// Creates a function type with parameters and return type
-    let createFunction (inputTypes: MLIRType list) (returnType: MLIRType) = {
-        Category = MLIRTypeCategory.Function
-        Width = None
-        ElementType = None
-        Parameters = inputTypes
-        ReturnType = Some returnType
-    }
-
-    /// Checks if types are compatible for conversion
-    let canConvertTo (fromType: MLIRType) (toType: MLIRType) : bool =
-        fromType = toType || 
-        (fromType.Category = MLIRTypeCategory.Integer && toType.Category = MLIRTypeCategory.Integer) ||
-        (fromType.Category = MLIRTypeCategory.Float && toType.Category = MLIRTypeCategory.Float) ||
-        (fromType.Category = MLIRTypeCategory.Integer && toType.Category = MLIRTypeCategory.Float) ||
-        (fromType.Category = MLIRTypeCategory.MemRef && toType.Category = MLIRTypeCategory.MemRef)
-
-/// Converts Oak type to MLIR type
-let rec mapOakTypeToMLIR (oakType: OakType) : MLIRType =
-    match oakType with
-    | IntType -> MLIRTypeUtils.createInteger 32
-    | FloatType -> MLIRTypeUtils.createFloat 32  
-    | BoolType -> MLIRTypeUtils.createInteger 1
-    | StringType -> MLIRTypeUtils.createMemRef (MLIRTypeUtils.createInteger 8)
-    | UnitType -> MLIRTypeUtils.createVoid()
-    | ArrayType elemType -> MLIRTypeUtils.createMemRef (mapOakTypeToMLIR elemType)
-    | FunctionType(paramTypes, returnType) ->
-        MLIRTypeUtils.createFunction 
-            (paramTypes |> List.map mapOakTypeToMLIR) 
-            (mapOakTypeToMLIR returnType)
-    | StructType _ | UnionType _ -> 
-        // Simplified struct handling - could be expanded if needed
-        MLIRTypeUtils.createMemRef (MLIRTypeUtils.createInteger 8)
-
-/// Converts MLIR type to string representation
-let rec mlirTypeToString (mlirType: MLIRType) : string =
-    match mlirType.Category with
-    | MLIRTypeCategory.Integer -> 
-        match mlirType.Width with
-        | Some width -> sprintf "i%d" width
-        | None -> "i32"
-    | MLIRTypeCategory.Float -> 
-        match mlirType.Width with
-        | Some 32 -> "f32"
-        | Some 64 -> "f64"
-        | _ -> "f32"
-    | MLIRTypeCategory.Void -> "()"
-    | MLIRTypeCategory.MemRef -> 
-        match mlirType.ElementType with
-        | Some elemType -> sprintf "memref<?x%s>" (mlirTypeToString elemType)
-        | None -> "memref<?xi8>"
-    | MLIRTypeCategory.Function ->
-        let paramStr = 
-            mlirType.Parameters 
-            |> List.map mlirTypeToString 
-            |> String.concat ", "
-        let retStr = 
-            match mlirType.ReturnType with
-            | Some ret -> mlirTypeToString ret
-            | None -> "()"
-        sprintf "(%s) -> %s" paramStr retStr
-    | _ -> "!llvm.struct<()>" // Default for structs and other types
