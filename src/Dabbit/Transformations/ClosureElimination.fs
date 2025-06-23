@@ -111,9 +111,10 @@ let rec transform (state: ClosureState) expr =
                                          SynArgPats.Pats [], None, range),
                           None, body, range, DebugPointAtBinding.NoneAtInvisible, SynBindingTrivia.Zero)
             
-            let newState = { state with 
-                             Counter = state.Counter + 1
-                             Lifted = (liftedName, liftedBinding) :: state.Lifted }
+            let newState = 
+                { state with 
+                    Counter = state.Counter + 1
+                    Lifted = (liftedName, liftedBinding) :: state.Lifted }
             
             // Replace with application
             let replacement = 

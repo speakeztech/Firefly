@@ -128,7 +128,7 @@ and genBinding state binding =
     | _ -> state
 
 /// Generate MLIR module
-let generateModule (moduleName: string) (typeCtx: TypeContext) (input: ParsedInput) =
+and generateModule (moduleName: string) (typeCtx: TypeContext) (input: ParsedInput) =
     let state = {
         SSACounter = 0
         LocalScope = Map.empty

@@ -73,17 +73,32 @@ let buildFromModule (moduleName: string) (decls: SynModuleDecl list) =
                     { g with Edges = Map.add name deps g.Edges }
                 | _ -> g) graph
         
-        | SynModuleDecl.Types(types, _) ->
-            types |> List.fold (fun g typeDef ->
-                let (SynTypeDefn(SynComponentInfo(_, _, _, longId, _, _, _, _), _, members, _, _, _)) = typeDef
-                let typeName = longId |> List.map (fun i -> i.idText) |> String.concat "."
-                members |> List.fold (fun g2 member ->
-                    match member with
+        | SynModuleDecl.Types(typeDefs, _) ->
+            typeDefs |> List.fold (fun g typeDef ->
+                let (SynTypeDefn(componentInfo, _, memberDefns, _, _, _)) = typeDef
+                let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = componentInfo
+                let typeName = sprintf "%s.%s" moduleName (longId |> List.map (fun i -> i.idText) |> String.concat ".")
+                
+                // Process member definitions
+                memberDefns |> List.fold (fun g2 memberDefn ->
+                    match memberDefn with
                     | SynMemberDefn.Member(binding, _) ->
-                        let (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) = binding
+                        let (SynBinding(_, _, _, _, _, _, _, pat, _, expr, _, _, _)) = binding
+                        let memberName = 
+                            match pat with
+                            | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
+                                sprintf "%s.%s" typeName (ids |> List.map (fun i -> i.idText) |> String.concat ".")
+                            | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+                                sprintf "%s.%s" typeName ident.idText
+                            | _ -> typeName
                         let deps = analyzeDeps expr
-                        { g2 with Edges = Map.add typeName deps g2.Edges }
+                        { g2 with Edges = Map.add memberName deps g2.Edges }
                     | _ -> g2) g) graph
+        
+        | SynModuleDecl.NestedModule(componentInfo, _, nestedDecls, _, _, _) ->
+            let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = componentInfo
+            let nestedModuleName = sprintf "%s.%s" moduleName (longId |> List.map (fun i -> i.idText) |> String.concat ".")
+            nestedDecls |> List.fold processDecl graph
         
         | _ -> graph
     

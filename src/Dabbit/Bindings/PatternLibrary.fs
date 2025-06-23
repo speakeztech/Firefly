@@ -9,7 +9,7 @@ type MLIROperationPattern =
     | DialectOp of dialect: MLIRDialect * op: string * attrs: Map<string, string>
     | ExternalCall of func: string * lib: string option
     | Composite of MLIROperationPattern list
-    | Transform of name: string * params: string list
+    | Transform of name: string * parameters: string list
 
 /// Pattern matcher for FCS syntax expressions
 type ExprMatcher = SynExpr -> bool
