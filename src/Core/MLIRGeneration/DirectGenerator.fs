@@ -40,6 +40,15 @@ let emitInline mlirCode state =
     state.Output.Append(indentation + mlirCode) |> ignore
     state
 
+/// Convert MLIRType to MLIR string with proper LLVM dialect syntax
+let mlirTypeToStringWithLLVM (t: MLIRType) : string =
+    match t.Category with
+    | MLIRTypeCategory.MemRef ->
+        match t.ElementType with
+        | Some elem when elem = MLIRTypes.i8 -> "!llvm.ptr<i8>"  
+        | _ -> mlirTypeToString t
+    | _ -> mlirTypeToString t
+
 /// Forward declarations for mutual recursion
 let rec generateExpression state expr =
     match expr with
@@ -93,8 +102,8 @@ and generateConstant state = function
     
     | SynConst.String(text, _, _) ->
         let (ssa, s) = generateSSAName "str" state
-        // TODO: Proper string constant generation
-        let s1 = emit (sprintf "%s = llvm.mlir.undef : !llvm.ptr<i8>  // \"%s\"" ssa (text.Replace("\"", "\\\""))) s
+        // Use proper LLVM pointer type with address space
+        let s1 = emit (sprintf "%s = llvm.mlir.undef : !llvm.ptr<i8, 0>  // \"%s\"" ssa (text.Replace("\"", "\\\""))) s
         (ssa, MLIRTypes.memref MLIRTypes.i8, s1)
     
     | SynConst.Unit ->
@@ -147,7 +156,7 @@ and generateApplication state funcExpr argExpr =
         let (argSSA, argType, s2) = generateExpression s1 argExpr
         let (resultSSA, s3) = generateSSAName "app" s2
         let s4 = emit (sprintf "%s = func.call_indirect %s(%s) : (%s) -> i32" 
-                        resultSSA funcSSA argSSA (mlirTypeToString argType)) s3
+                        resultSSA funcSSA argSSA (mlirTypeToStringWithLLVM argType)) s3
         (resultSSA, MLIRTypes.i32, s4)
 
 /// Generate known function calls
@@ -163,7 +172,7 @@ and generateKnownCall state funcName argExpr =
         let (argSSA, _, s1) = generateExpression state argExpr
         let s2 = { s1 with RequiredExternals = Set.add "printf" s1.RequiredExternals }
         let (resultSSA, s3) = generateSSAName "io" s2
-        let s4 = emit (sprintf "%s = func.call @printf(%s) : (!llvm.ptr<i8>) -> i32" resultSSA argSSA) s3
+        let s4 = emit (sprintf "%s = func.call @printf(%s) : (!llvm.ptr<i8, 0>) -> i32" resultSSA argSSA) s3
         (resultSSA, MLIRTypes.i32, s4)
     
     | "readInto" ->
@@ -178,7 +187,7 @@ and generateKnownCall state funcName argExpr =
         match argExpr with
         | SynExpr.Const(SynConst.String(fmt, _, _), _) ->
             let (fmtSSA, s1) = generateSSAName "fmt" state
-            let s2 = emit (sprintf "%s = llvm.mlir.undef : !llvm.ptr<i8>  // \"%s\"" fmtSSA fmt) s1
+            let s2 = emit (sprintf "%s = llvm.mlir.undef : !llvm.ptr<i8, 0>  // \"%s\"" fmtSSA fmt) s1
             (fmtSSA, MLIRTypes.memref MLIRTypes.i8, s2)
         | _ ->
             generateExpression state argExpr
@@ -285,7 +294,7 @@ let rec generateFunction state functionName (attributes: SynAttributes) expressi
             |> emit (sprintf "func.return %s : i32" zeroSSA)
         | _ ->
             stateAfterBody
-            |> emit (sprintf "func.return %s : %s" resultSSA (mlirTypeToString resultType))
+            |> emit (sprintf "func.return %s : %s" resultSSA (mlirTypeToStringWithLLVM resultType))
     
     // Close function
     { stateWithReturn with 
@@ -359,15 +368,15 @@ let generateProgram (programName: string) (typeCtx: TypeContext) (symbolRegistry
             processInputFile currentState filePath parsedInput
         ) state
     
-    // Emit external function declarations
+    // Emit external function declarations with proper LLVM pointer types
     let finalState = 
         stateAfterInputs.RequiredExternals
         |> Set.fold (fun s ext ->
             match ext with
-            | "printf" -> emit "func.func private @printf(!llvm.ptr<i8>, ...) -> i32" s
-            | "sprintf" -> emit "func.func private @sprintf(!llvm.ptr<i8>, !llvm.ptr<i8>, ...) -> !llvm.ptr<i8>" s
-            | "fgets" -> emit "func.func private @fgets(!llvm.ptr<i8>, i32, !llvm.ptr<i8>) -> !llvm.ptr<i8>" s
-            | "strlen" -> emit "func.func private @strlen(!llvm.ptr<i8>) -> i32" s
+            | "printf" -> emit "func.func private @printf(!llvm.ptr<i8, 0>, ...) -> i32" s
+            | "sprintf" -> emit "func.func private @sprintf(!llvm.ptr<i8, 0>, !llvm.ptr<i8, 0>, ...) -> !llvm.ptr<i8, 0>" s
+            | "fgets" -> emit "func.func private @fgets(!llvm.ptr<i8, 0>, i32, !llvm.ptr<i8, 0>) -> !llvm.ptr<i8, 0>" s
+            | "strlen" -> emit "func.func private @strlen(!llvm.ptr<i8, 0>) -> i32" s
             | _ -> s
         ) stateAfterInputs
         |> fun s -> { s with IndentLevel = 0 }
