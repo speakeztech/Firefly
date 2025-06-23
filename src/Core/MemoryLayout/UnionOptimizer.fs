@@ -1,4 +1,4 @@
-﻿module Dabbit.UnionLayouts.FixedLayoutCompiler
+﻿module Dabbit.MemoryLayout.UnionOptimizer
 
 open System
 open Core.XParsec.Foundation
