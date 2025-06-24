@@ -39,7 +39,8 @@ and MLIRBuilderState = {
     LocalFunctions: Map<string, MLIRType>  
     CurrentModule: string list  // Module path for symbol resolution
     OpenedNamespaces: string list list  // List of opened namespaces
-    HasErrors: bool  
+    HasErrors: bool
+    ExpectedType: MLIRType option  // Add this for type context
 }
 
 /// MLIR builder computation expression
@@ -107,6 +108,10 @@ let failHard (phase: string) (message: string) : MLIRBuilder<'T> =
 let getState : MLIRBuilder<MLIRBuilderState> =
     fun state -> (state, state)
 
+/// Set state
+let setState (newState: MLIRBuilderState) : MLIRBuilder<unit> =
+    fun _ -> ((), newState)
+
 /// Update state
 let updateState (f: MLIRBuilderState -> MLIRBuilderState) : MLIRBuilder<unit> =
     fun state -> ((), f state)
@@ -165,7 +170,72 @@ let lookupLocal (name: string) : MLIRBuilder<(string * MLIRType) option> =
         return Map.tryFind name state.LocalVars
     }
 
-/// Resolve symbol in registry with namespace handling
+/// Convert F# type syntax to MLIR type
+let rec synTypeToMLIRType (synType: SynType) : MLIRType =
+    match synType with
+    | SynType.LongIdent(SynLongIdent(ids, _, _)) ->
+        let typeName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+        match typeName with
+        | "int" | "int32" -> MLIRTypes.i32
+        | "int64" -> MLIRTypes.i64
+        | "byte" | "uint8" -> MLIRTypes.i8
+        | "bool" -> MLIRTypes.i1
+        | "float" | "float32" -> MLIRTypes.f32
+        | "double" | "float64" -> MLIRTypes.f64
+        | "string" -> MLIRTypes.memref MLIRTypes.i8
+        | "unit" -> MLIRTypes.void_
+        | _ -> MLIRTypes.i32  // Default fallback
+            
+    | SynType.Array(rank, elementType, _) ->
+        let elemType = synTypeToMLIRType elementType
+        if rank = 1 then
+            MLIRTypes.memref elemType
+        else
+            MLIRTypes.memref elemType  // Simplified for multi-dim
+            
+    | SynType.App(typeName, _, typeArgs, _, _, _, _) ->
+        match typeName with
+        | SynType.LongIdent(SynLongIdent([id], _, _)) when id.idText = "Span" ->
+            match typeArgs with
+            | [elementType] -> MLIRTypes.memref (synTypeToMLIRType elementType)
+            | _ -> MLIRTypes.memref MLIRTypes.i8
+        | _ -> MLIRTypes.i32  // Default fallback
+        
+    | SynType.Fun(argType, returnType, _) ->
+        let argMLIR = synTypeToMLIRType argType
+        let retMLIR = synTypeToMLIRType returnType
+        MLIRTypes.func [argMLIR] retMLIR
+        
+    | SynType.Paren(innerType, _) ->
+        synTypeToMLIRType innerType
+        
+    | _ -> MLIRTypes.i32  // Default fallback
+
+/// Generate type conversion between MLIR types
+let generateTypeConversion (fromValue: string, fromType: MLIRType) (toType: MLIRType) : MLIRBuilder<string * MLIRType> =
+    mlir {
+        if fromType = toType then
+            return (fromValue, fromType)
+        else
+            match fromType.Category, toType.Category with
+            | MLIRTypeCategory.Integer, MLIRTypeCategory.Integer ->
+                let! resultName = nextSSA "cast"
+                if fromType.Width < toType.Width then
+                    do! emitLine (sprintf "%s = arith.extsi %s : %s to %s" 
+                                         resultName fromValue 
+                                         (mlirTypeToString fromType) 
+                                         (mlirTypeToString toType))
+                else
+                    do! emitLine (sprintf "%s = arith.trunci %s : %s to %s" 
+                                         resultName fromValue 
+                                         (mlirTypeToString fromType) 
+                                         (mlirTypeToString toType))
+                return (resultName, toType)
+            | _ ->
+                // For now, just return the value as-is
+                return (fromValue, toType)
+    }
+
 /// Resolve symbol in registry with namespace handling
 let resolveSymbol (name: string) : MLIRBuilder<ResolvedSymbol> =
     mlir {
@@ -464,6 +534,29 @@ and generateExpression (expr: SynExpr) : MLIRBuilder<string * MLIRType> =
             
         | SynExpr.Paren(inner, _, _, _) ->
             return! generateExpression inner
+            
+        | SynExpr.Typed(innerExpr, synType, _) ->
+            // Handle typed expressions with type preservation
+            let targetType = synTypeToMLIRType synType
+            
+            // Save current expected type
+            let! state = getState
+            let previousExpectedType = state.ExpectedType
+            
+            // Set expected type for inner expression
+            do! setState { state with ExpectedType = Some targetType }
+            
+            // Generate inner expression
+            let! (value, actualType) = generateExpression innerExpr
+            
+            // Restore previous expected type
+            do! updateState (fun s -> { s with ExpectedType = previousExpectedType })
+            
+            // Generate type conversion if needed
+            if actualType = targetType then
+                return (value, targetType)
+            else
+                return! generateTypeConversion (value, actualType) targetType
             
         | SynExpr.LongIdent(_, SynLongIdent(ids, _, _), _, _) ->
             let parts = ids |> List.map (fun id -> id.idText)
@@ -1056,6 +1149,7 @@ let generateProgram (programName: string) (typeCtx: TypeContext) (symbolRegistry
         CurrentModule = []
         OpenedNamespaces = []
         HasErrors = false
+        ExpectedType = None  // Initialize the new field
     }
     
     let builder = mlir {

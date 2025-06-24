@@ -201,88 +201,211 @@ let private resolveModulePath (moduleName: string) : string option =
     |> List.filter (fun p -> not (String.IsNullOrEmpty(p)))
     |> List.tryFind File.Exists
 
+/// Track search context through dependency resolution
+type SearchContext = {
+    SearchPaths: string list
+    ProcessedFiles: Set<string>
+    FailedFiles: string list
+}
+
+/// Extract #I and #load directives from source text
+let private extractDirectives (sourceText: string) =
+    let mutable searchPaths = []
+    let mutable loadPaths = []
+    let mutable inInteractive = false
+    
+    sourceText.Split('\n')
+    |> Array.iteri (fun lineNum line ->
+        let trimmed = line.Trim()
+        
+        if trimmed = "#if INTERACTIVE" then
+            inInteractive <- true
+        elif trimmed = "#endif" then
+            inInteractive <- false
+        elif inInteractive || not (trimmed.StartsWith("#if")) then
+            if trimmed.StartsWith("#I ") then
+                let path = trimmed.Substring(3).Trim().Trim('"')
+                searchPaths <- searchPaths @ [path]
+            elif trimmed.StartsWith("#load ") then
+                let path = trimmed.Substring(6).Trim().Trim('"')
+                loadPaths <- loadPaths @ [(lineNum + 1, path)]
+    )
+    
+    (searchPaths, loadPaths)
+
+/// Resolve a file by searching all possible locations
+let private resolveFile (basePath: string) (fileName: string) (searchPaths: string list) =
+    // Build all candidate paths
+    let candidates = 
+        // First, try relative to current directory
+        [Path.Combine(basePath, fileName)]
+        @ 
+        // Then try each search path
+        (searchPaths |> List.map (fun searchPath ->
+            let resolvedSearchPath = 
+                if Path.IsPathRooted(searchPath) then searchPath
+                else Path.Combine(basePath, searchPath)
+            Path.Combine(resolvedSearchPath, fileName)))
+        @
+        // Also try absolute path if provided
+        (if Path.IsPathRooted(fileName) then [fileName] else [])
+    
+    // Find first existing file
+    candidates 
+    |> List.distinct
+    |> List.tryFind File.Exists
+
+/// Recursively process a file and all its dependencies
+/// Recursively process a file and all its dependencies
+let rec private processFile (checker: FSharpChecker) (parsingOptions: FSharpParsingOptions) 
+                           (filePath: string) (searchContext: SearchContext) =
+    
+    if Set.contains filePath searchContext.ProcessedFiles then
+        // Already processed
+        Success ([], searchContext)
+    else
+        try
+            printfn "  Processing: %s" filePath
+            let source = File.ReadAllText(filePath)
+            let sourceText = SourceText.ofString source
+            let basePath = Path.GetDirectoryName(filePath)
+            
+            // Extract directives from this file
+            let (newSearchPaths, loadDirectives) = extractDirectives source
+            
+            // Add new search paths to context (relative to this file's location)
+            let updatedSearchPaths = 
+                searchContext.SearchPaths 
+                @ (newSearchPaths |> List.map (fun p -> 
+                    if Path.IsPathRooted(p) then p 
+                    else Path.Combine(basePath, p)))
+            
+            // Process each dependency first (depth-first)
+            let mutable currentContext = { searchContext with SearchPaths = updatedSearchPaths }
+            let mutable allParsedInputs = []
+            let mutable failureResult = None
+            
+            for (lineNum, loadPath) in loadDirectives do
+                if failureResult.IsNone then
+                    match resolveFile basePath loadPath currentContext.SearchPaths with
+                    | Some resolvedPath ->
+                        match processFile checker parsingOptions resolvedPath currentContext with
+                        | Success (depInputs, newContext) ->
+                            allParsedInputs <- allParsedInputs @ depInputs
+                            currentContext <- newContext
+                        | CompilerFailure errors ->
+                            failureResult <- Some (CompilerFailure errors)
+                    | None ->
+                        let msg = sprintf "Cannot resolve '#load \"%s\"' from %s (line %d). Searched in: %A" 
+                                         loadPath filePath lineNum
+                                         (basePath :: currentContext.SearchPaths)
+                        let error = SyntaxError(
+                            { Line = lineNum; Column = 0; File = filePath; Offset = 0 }, 
+                            msg, 
+                            []
+                        )
+                        failureResult <- Some (CompilerFailure [error])
+            
+            // Check if we had any failures
+            match failureResult with
+            | Some failure -> failure
+            | None ->
+                // Parse this file
+                let parseResults = checker.ParseFile(filePath, sourceText, parsingOptions) |> Async.RunSynchronously
+                
+                if parseResults.ParseHadErrors then
+                    let errors = parseResults.Diagnostics 
+                                |> Array.map (fun d -> 
+                                    SyntaxError(
+                                        { Line = d.StartLine; Column = d.StartColumn; File = filePath; Offset = 0 }, 
+                                        d.Message, 
+                                        []
+                                    ))
+                                |> Array.toList
+                    CompilerFailure errors
+                else
+                    // Add this file's parse result
+                    let updatedInputs = allParsedInputs @ [(filePath, parseResults.ParseTree)]
+                    let updatedContext = { currentContext with ProcessedFiles = Set.add filePath currentContext.ProcessedFiles }
+                    Success (updatedInputs, updatedContext)
+                    
+        with ex ->
+            let error = SyntaxError(
+                { Line = 0; Column = 0; File = filePath; Offset = 0 }, 
+                sprintf "Failed to read file '%s': %s" filePath ex.Message,
+                []
+            )
+            CompilerFailure [error]
+
 /// Phase 1: Parse F# source including all dependencies
 let private parseSource (ctx: CompilationContext) (sourceCode: string) : CompilerResult<ParsedProgram> =
-    printfn "Phase 1: Parsing F# source..."
+    printfn "Phase 1: Parsing F# source with full dependency resolution..."
     let checker = FSharpChecker.Create()
-    let sourceText = SourceText.ofString sourceCode
-    let (projectOptions, _) = 
-        checker.GetProjectOptionsFromScript(ctx.InputPath, sourceText) 
-        |> Async.RunSynchronously
     
     let parsingOptions = { 
         FSharpParsingOptions.Default with 
             SourceFiles = [| ctx.InputPath |]
-            ConditionalDefines = []
+            ConditionalDefines = ["INTERACTIVE"; "FIDELITY"; "ZERO_ALLOCATION"]
             DiagnosticOptions = FSharpDiagnosticOptions.Default
             LangVersionText = "preview"
-            IsInteractive = false
+            IsInteractive = true
             CompilingFSharpCore = false
             IsExe = true
     }
     
-    // Parse main file
-    let parseResults = checker.ParseFile(ctx.InputPath, sourceText, parsingOptions) |> Async.RunSynchronously
+    // Start with empty search context
+    let initialContext = {
+        SearchPaths = []
+        ProcessedFiles = Set.empty
+        FailedFiles = []
+    }
     
-    if parseResults.ParseHadErrors then
-        let errors = parseResults.Diagnostics |> Array.map (fun d -> d.Message) |> String.concat "\n"
-        CompilerFailure [SyntaxError({ Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 }, errors, ["FCS parsing"])]
-    else
-        let mainParsedInput = parseResults.ParseTree
-        let dependencies = extractOpenedModules mainParsedInput
+    // Process main file and all dependencies recursively
+    match processFile checker parsingOptions ctx.InputPath initialContext with
+    | CompilerFailure errors ->
+        printfn "Failed to resolve dependencies:"
+        errors |> List.iter (fun e -> printfn "  %A" e)
+        CompilerFailure errors
+    | Success (allParsedInputs, finalContext) ->
+        printfn "  Successfully resolved %d files" allParsedInputs.Length
         
-        // Parse each dependency, tracking which files we've already processed
-        let mutable allParsedInputs = [(ctx.InputPath, mainParsedInput)]
-        let mutable processedFiles = Set.singleton ctx.InputPath
-        let mutable failedDeps = []
+        // Extract opened modules from main file
+        let mainParsedInput = allParsedInputs |> List.find (fun (path, _) -> path = ctx.InputPath) |> snd
+        let openedModules = extractOpenedModules mainParsedInput
         
-        for dep in dependencies do
-            match resolveModulePath dep with
-            | Some filePath when not (Set.contains filePath processedFiles) ->
-                try
-                    let depSource = File.ReadAllText(filePath)
-                    let depSourceText = SourceText.ofString depSource
-                    let depParseResults = checker.ParseFile(filePath, depSourceText, parsingOptions) |> Async.RunSynchronously
-                    
-                    if not depParseResults.ParseHadErrors then
-                        allParsedInputs <- allParsedInputs @ [(filePath, depParseResults.ParseTree)]
-                        processedFiles <- Set.add filePath processedFiles
-                        
-                        // Also process transitive dependencies
-                        let transitiveDeps = extractOpenedModules depParseResults.ParseTree
-                        for transDep in transitiveDeps do
-                            match resolveModulePath transDep with
-                            | Some transFilePath when not (Set.contains transFilePath processedFiles) ->
-                                try
-                                    let transSource = File.ReadAllText(transFilePath)
-                                    let transSourceText = SourceText.ofString transSource
-                                    let transParseResults = checker.ParseFile(transFilePath, transSourceText, parsingOptions) |> Async.RunSynchronously
-                                    
-                                    if not transParseResults.ParseHadErrors then
-                                        allParsedInputs <- allParsedInputs @ [(transFilePath, transParseResults.ParseTree)]
-                                        processedFiles <- Set.add transFilePath processedFiles
-                                with ex ->
-                                    failedDeps <- failedDeps @ [sprintf "%s: %s" transDep ex.Message]
-                            | _ -> ()
-                    else
-                        failedDeps <- failedDeps @ [sprintf "%s: parse errors" dep]
-                with ex ->
-                    failedDeps <- failedDeps @ [sprintf "%s: %s" dep ex.Message]
-            | Some filePath when Set.contains filePath processedFiles ->
-                // Already processed, skip
-                ()
-            | None ->
-                failedDeps <- failedDeps @ [sprintf "%s: file not found" dep]
+        // Build ordered source files list
+        let orderedSourceFiles = allParsedInputs |> List.map fst |> Array.ofList
         
-        // Log any dependency issues but don't fail compilation
-        if not failedDeps.IsEmpty && ctx.Verbose then
-            printfn "  Warning: Could not parse some dependencies:"
-            failedDeps |> List.iter (printfn "    - %s")
+        // For now, just leave OriginalLoadReferences empty since we're manually handling it
+        // The proper range type is complex and not needed for our purposes
+        
+        // Construct clean project options
+        let projectOptions: FSharpProjectOptions = {
+            ProjectFileName = Path.ChangeExtension(ctx.InputPath, ".fsproj")
+            ProjectId = None
+            SourceFiles = orderedSourceFiles
+            OtherOptions = [|
+                "--noframework"
+                "--warn:3"
+                "--target:exe"
+                "--langversion:preview"
+                "--define:INTERACTIVE"
+                "--define:FIDELITY"
+                "--define:ZERO_ALLOCATION"
+            |]
+            ReferencedProjects = [||]
+            IsIncompleteTypeCheckEnvironment = false
+            UseScriptResolutionRules = true
+            LoadTime = DateTime.UtcNow
+            UnresolvedReferences = None
+            OriginalLoadReferences = []  // Empty for now
+            Stamp = None
+        }
         
         let parsedProgram = {
             MainFile = ctx.InputPath
             ParsedInputs = allParsedInputs
-            Dependencies = dependencies
+            Dependencies = openedModules
             Checker = checker
             ProjectOptions = projectOptions
         }
@@ -295,6 +418,7 @@ let private parseSource (ctx: CompilationContext) (sourceCode: string) : Compile
                 (sprintf "%A" parsedProgram)
         
         Success parsedProgram
+
 
 /// Remove .NET-specific constructs from AST
 let private removeNetConstructs (input: ParsedInput) : ParsedInput * string list =

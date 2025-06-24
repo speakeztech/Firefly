@@ -183,3 +183,46 @@ module TypeContextBuilder =
     let addGeneric name param ctx = {
         ctx with Generics = Map.add name param ctx.Generics
     }
+
+// In TypeMapping.fs
+module TypeConversion =
+    /// Convert F# AST type to MLIR type
+    let rec synTypeToMLIRType (synType: SynType) : MLIRType =
+        match synType with
+        | SynType.LongIdent(SynLongIdent(ids, _, _)) ->
+            let typeName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+            match typeName with
+            | "int" | "int32" -> MLIRTypes.i32
+            | "int64" -> MLIRTypes.i64
+            | "byte" | "uint8" -> MLIRTypes.i8
+            | "bool" -> MLIRTypes.i1
+            | "float" | "float32" -> MLIRTypes.f32
+            | "double" | "float64" -> MLIRTypes.f64
+            | "string" -> MLIRTypes.memref MLIRTypes.i8
+            | "unit" -> MLIRTypes.void_
+            | _ -> failwithf "Unknown type: %s" typeName
+            
+        | SynType.Array(rank, elementType, _) ->
+            let elemType = synTypeToMLIRType elementType
+            if rank = 1 then
+                MLIRTypes.memref elemType
+            else
+                failwithf "Multi-dimensional arrays not yet supported"
+                
+        | SynType.App(typeName, _, typeArgs, _, _, _, _) ->
+            match typeName with
+            | SynType.LongIdent(SynLongIdent([id], _, _)) when id.idText = "Span" ->
+                match typeArgs with
+                | [elementType] -> MLIRTypes.memref (synTypeToMLIRType elementType)
+                | _ -> failwith "Span must have exactly one type argument"
+            | _ -> failwithf "Unsupported generic type: %A" typeName
+            
+        | SynType.Fun(argType, returnType, _) ->
+            let argMLIR = synTypeToMLIRType argType
+            let retMLIR = synTypeToMLIRType returnType
+            MLIRTypes.func [argMLIR] retMLIR
+            
+        | SynType.Paren(innerType, _) ->
+            synTypeToMLIRType innerType
+            
+        | _ -> failwithf "Unsupported type pattern: %A" synType
