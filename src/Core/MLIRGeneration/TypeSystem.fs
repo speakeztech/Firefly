@@ -86,6 +86,9 @@ module MLIRTypes =
         ReturnType = None
     }
 
+    /// String type - represented as memory reference to bytes
+    let string_ = memref i8
+
     /// Creates a function type with parameters and return type
     let func inputTypes returnType = {
         Category = MLIRTypeCategory.Function

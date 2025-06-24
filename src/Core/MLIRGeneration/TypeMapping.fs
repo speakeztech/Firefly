@@ -1,6 +1,7 @@
 ﻿module Core.MLIRGeneration.TypeMapping
 
 open FSharp.Compiler.Symbols
+open FSharp.Compiler.Syntax
 open Core.MLIRGeneration.TypeSystem
 open Core.MemoryLayout.LayoutAnalyzer
 
@@ -217,7 +218,7 @@ module TypeConversion =
                 | _ -> failwith "Span must have exactly one type argument"
             | _ -> failwithf "Unsupported generic type: %A" typeName
             
-        | SynType.Fun(argType, returnType, _) ->
+        | SynType.Fun(argType, returnType, range, _trivia) ->
             let argMLIR = synTypeToMLIRType argType
             let retMLIR = synTypeToMLIRType returnType
             MLIRTypes.func [argMLIR] retMLIR
