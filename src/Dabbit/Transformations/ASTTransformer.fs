@@ -4,14 +4,23 @@ open FSharp.Compiler.Syntax
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.CodeAnalysis
 open Core.XParsec.Foundation
-open XParsec
+
+// Explicit imports from other modules
+open Dabbit.Bindings.SymbolRegistry
+open Dabbit.Analysis.ReachabilityAnalyzer
+open Dabbit.Analysis.AstPruner
+open Dabbit.Transformations.ClosureElimination
+open Dabbit.Transformations.StackAllocation
+
+// Import specific TypeMapping module for TypeContext
+open Dabbit.CodeGeneration.TypeMapping
 
 /// Transformation context flowing through pipeline
 type TransformContext = {
-    TypeContext: Dabbit.CodeGeneration.TypeMapping.TypeContext
-    SymbolRegistry: Dabbit.Bindings.SymbolRegistry.SymbolRegistry
-    Reachability: Dabbit.Analysis.ReachabilityAnalyzer.ReachabilityResult
-    ClosureState: Dabbit.Transformations.ClosureElimination.ClosureState
+    TypeContext: TypeContext
+    SymbolRegistry: SymbolRegistry
+    Reachability: ReachabilityResult
+    ClosureState: ClosureState
 }
 
 /// AST Transformer type - transforms one AST node to another
@@ -61,7 +70,7 @@ module ExprTransformers =
     
     /// Transform expressions with stack allocation
     let stackAllocTransform : ASTTransformer<SynExpr> =
-        lift Dabbit.Transformations.StackAllocation.StackTransform.transform
+        lift StackTransform.transform
     
     /// Transform a binding's expression
     let transformBinding : ASTTransformer<SynBinding> =
@@ -113,12 +122,20 @@ module ModuleTransformers =
                     | _ -> [])
             
             // Transform with closure elimination
-            let transformed = Dabbit.Transformations.ClosureElimination.transformModule bindings
+            let transformed = transformModule bindings
+            
+            // Check if we have any bindings after transformation
+            let transformedBindings = 
+                match transformed with
+                | [] -> []
+                | _ -> 
+                    // Closure elimination returns SynBinding list
+                    ClosureElimination.transformModule bindings
             
             // Reconstruct module
             let newDecls = 
-                if transformed.IsEmpty then decls
-                else [SynModuleDecl.Let(false, transformed, range)]
+                if List.isEmpty transformedBindings then decls
+                else [SynModuleDecl.Let(false, transformedBindings, range)]
             
             Success (SynModuleOrNamespace(lid, isRec, kind, newDecls, xml, attrs, access, range, trivia))
 
@@ -153,7 +170,7 @@ let transformAST (ctx: TransformContext) (input: ParsedInput) : ParsedInput =
     match pipeline input ctx with
     | Success result ->
         // Apply tree shaking
-        Dabbit.Analysis.AstPruner.prune ctx.Reachability.Reachable result
+        prune ctx.Reachability.Reachable result
     | CompilerFailure errors ->
         // Log errors and return original
         errors |> List.iter (fun e -> printfn "Transformation error: %A" e)
@@ -174,7 +191,7 @@ let verifyTransformations (input: ParsedInput) =
         | _ -> acc
     
     let exprs = extractExprs [] input
-    let results = exprs |> List.map Dabbit.Transformations.StackAllocation.StackSafety.verify
+    let results = exprs |> List.map StackSafety.verify
     
     match results |> List.tryFind Result.isError with
     | Some (Error msg) -> Error msg

@@ -50,11 +50,6 @@
       <Compile Include="Dabbit/Analysis/ReachabilityAnalyzer.fs" />
       <Compile Include="Dabbit/Analysis/AstPruner.fs" />
       
-      <!-- Transformations -->
-      <Compile Include="Dabbit/Transformations/ClosureElimination.fs" />
-      <Compile Include="Dabbit/Transformations/StackAllocation.fs" />
-      <Compile Include="Dabbit/Transformations/ASTTransformer.fs" />
-      
       <!-- Code Generation (Refactored from single MLIRGenerator.fs) -->
       <Compile Include="Dabbit/CodeGeneration/TypeMapping.fs" />           <!-- F# to MLIR types -->
       <Compile Include="Dabbit/CodeGeneration/MLIRSyntax.fs" />
@@ -66,6 +61,11 @@
       <Compile Include="Dabbit/CodeGeneration/MLIRControlFlow.fs" />       <!-- Control structures -->
       <Compile Include="Dabbit/CodeGeneration/MLIRExpressionGenerator.fs" /><!-- Expression gen -->
       <Compile Include="Dabbit/CodeGeneration/MLIRModuleGenerator.fs" />   <!-- Module/function gen -->
+      
+      <!-- Transformations -->
+      <Compile Include="Dabbit/Transformations/ClosureElimination.fs" />
+      <Compile Include="Dabbit/Transformations/StackAllocation.fs" />
+      <Compile Include="Dabbit/Transformations/ASTTransformer.fs" />
       
       <!-- Pipeline Orchestration -->
       <Compile Include="Dabbit/Pipeline/FCSPipeline.fs" />

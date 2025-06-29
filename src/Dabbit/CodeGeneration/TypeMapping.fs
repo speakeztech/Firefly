@@ -1,5 +1,6 @@
 ﻿module Dabbit.CodeGeneration.TypeMapping
 
+open System
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
 open Core.MemoryLayout.LayoutAnalyzer
@@ -29,8 +30,47 @@ let private basicTypeMap =
 let private getTypeKey (fsType: FSharpType) =
     fsType.Format(FSharpDisplayContext.Empty)
 
+/// Map a struct type to MLIR
+let rec private mapStructType (ctx: TypeContext) (fsType: FSharpType) : MLIRType * TypeContext =
+    let fields = 
+        match fsType.TypeDefinition with
+        | def when def.IsFSharpRecord ->
+            def.FSharpFields |> Seq.toList
+        | _ ->
+            fsType.TypeDefinition.FSharpFields |> Seq.toList
+    
+    let (fieldTypes, ctx') = 
+        fields |> List.fold (fun (types, c) field ->
+            let (ft, c') = mapType c field.FieldType
+            ((field.Name, ft) :: types, c')) ([], ctx)
+    
+    (MLIRTypes.struct_ (List.rev fieldTypes), ctx')
+
+/// Map a union type to MLIR
+and private mapUnionType (ctx: TypeContext) (entity: FSharpEntity) : MLIRType * TypeContext =
+    let cases = entity.UnionCases |> Seq.toList
+    
+    let (caseTypes, ctx') = 
+        cases |> List.fold (fun (types, c) case ->
+            let fields = case.Fields |> Seq.toList
+            let (fieldTypes, c') = 
+                fields |> List.fold (fun (ftypes, ctx'') field ->
+                    let (ft, ctx''') = mapType ctx'' field.FieldType
+                    ((field.Name, ft) :: ftypes, ctx''')) ([], c)
+            
+            let caseType = 
+                if List.isEmpty fieldTypes then
+                    MLIRTypes.i8  // Empty case, just a tag
+                else
+                    MLIRTypes.struct_ (List.rev fieldTypes)
+            
+            ((case.Name, caseType) :: types, c')) ([], ctx)
+    
+    // Create a union struct with tag and data fields
+    (MLIRTypes.struct_ [("tag", MLIRTypes.i8); ("data", MLIRTypes.struct_ (List.rev caseTypes))], ctx')
+
 /// Map FSharp type to MLIR type
-let rec mapType (ctx: TypeContext) (fsType: FSharpType) : MLIRType * TypeContext =
+and mapType (ctx: TypeContext) (fsType: FSharpType) : MLIRType * TypeContext =
     let typeKey = getTypeKey fsType
     
     // Check cache first
@@ -45,7 +85,7 @@ let rec mapType (ctx: TypeContext) (fsType: FSharpType) : MLIRType * TypeContext
                     fsType.GenericArguments 
                     |> Seq.fold (fun (types, c) t ->
                         let (mt, c') = mapType c t
-                        (mt :: types, c')) ([], ctx)
+                        ((sprintf "Item%d" (List.length types + 1), mt) :: types, c')) ([], ctx)
                 (MLIRTypes.struct_ (List.rev elemTypes), ctx')
             elif fsType.IsFunctionType then
                 let domain, range = 
@@ -77,51 +117,16 @@ let rec mapType (ctx: TypeContext) (fsType: FSharpType) : MLIRType * TypeContext
                     | _ when fsType.TypeDefinition.IsFSharpUnion ->
                         mapUnionType ctx fsType.TypeDefinition
                     | _ ->
-                        (MLIRTypes.memref MLIRTypes.i8, ctx)  // Reference type
+                        (MLIRTypes.memref MLIRTypes.i8, ctx)  // Reference types default to pointers
             else
-                (MLIRTypes.i64, ctx)  // Unknown type
+                (MLIRTypes.i32, ctx)  // Default fallback
         
         // Cache the result
-        let ctx'' = { ctx' with TypeMap = Map.add typeKey mlirType ctx'.TypeMap }
-        (mlirType, ctx'')
+        let updatedTypeMap = Map.add typeKey mlirType ctx'.TypeMap
+        (mlirType, { ctx' with TypeMap = updatedTypeMap })
 
-/// Map struct type preserving field information
-and mapStructType ctx fsType =
-    let fields = fsType.TypeDefinition.FSharpFields |> Seq.toList
-    let (fieldTypes, ctx') = 
-        fields |> List.fold (fun (types, c) field ->
-            let (ft, c') = mapType c field.FieldType
-            (ft :: types, c')) ([], ctx)
-    (MLIRTypes.struct_ (List.rev fieldTypes), ctx')
-
-/// Map union type with layout optimization
-and mapUnionType ctx (entity: FSharpEntity) =
-    let cases = entity.UnionCases |> Seq.toList
-    
-    match UnionAnalysis.analyzeStrategy entity with
-    | Some (Enum _) -> 
-        (MLIRTypes.i32, ctx)
-    | Some (Single caseType) ->
-        mapType ctx caseType
-    | Some (Option someType) ->
-        let (someMLIR, ctx') = mapType ctx someType
-        (MLIRTypes.nullable someMLIR, ctx')
-    | _ ->
-        // Tagged union: tag + largest payload
-        // Calculate the maximum size needed
-        let maxSize = 
-            cases 
-            |> List.map (fun case ->
-                case.Fields |> Seq.sumBy (fun f -> 
-                    let (t, _) = mapType ctx f.FieldType
-                    match t.Width with
-                    | Some w -> w
-                    | None -> 8))  // Default size
-            |> List.fold max 0
-        (MLIRTypes.struct_ [MLIRTypes.i32; MLIRTypes.array MLIRTypes.i8 maxSize], ctx)
-
-/// Get MLIR type for a symbol
-let resolveSymbolType (ctx: TypeContext) (symbol: FSharpSymbol) =
+/// Map F# symbol to MLIR type
+let mapSymbol (ctx: TypeContext) (symbol: FSharpSymbol) : MLIRType * TypeContext =
     match symbol with
     | :? FSharpMemberOrFunctionOrValue as mfv ->
         mapType ctx mfv.FullType
@@ -132,27 +137,21 @@ let resolveSymbolType (ctx: TypeContext) (symbol: FSharpSymbol) =
         elif entity.IsArrayType then
             // Array types need their element type
             match entity.ArrayRank with
-            | 1 -> (MLIRTypes.memref MLIRTypes.i8, ctx)  // Single dimension array
-            | n -> (MLIRTypes.memref MLIRTypes.i8, ctx)  // Multi-dimensional array
+            | 1 -> 
+                // Get element type if available
+                match entity.FSharpFields |> Seq.tryHead with
+                | Some field -> mapType ctx field.FieldType
+                | None -> (MLIRTypes.memref MLIRTypes.i8, ctx)  // Default
+            | _ -> (MLIRTypes.memref MLIRTypes.i8, ctx)  // Multi-dimensional array
         elif entity.IsFSharpRecord then
             // Record: struct of all fields
-            let fields = entity.FSharpFields |> Seq.toList
-            let (fieldTypes, ctx') = 
-                fields |> List.fold (fun (types, c) field ->
-                    let (ft, c') = mapType c field.FieldType
-                    (ft :: types, c')) ([], ctx)
-            (MLIRTypes.struct_ (List.rev fieldTypes), ctx')
+            mapStructType ctx (entity.AsType())
         elif entity.IsFSharpUnion then
             // Union: use our union analysis
             mapUnionType ctx entity
         elif entity.IsValueType then
             // Value type: struct of fields
-            let fields = entity.FSharpFields |> Seq.toList
-            let (fieldTypes, ctx') = 
-                fields |> List.fold (fun (types, c) field ->
-                    let (ft, c') = mapType c field.FieldType
-                    (ft :: types, c')) ([], ctx)
-            (MLIRTypes.struct_ (List.rev fieldTypes), ctx')
+            mapStructType ctx (entity.AsType())
         elif entity.IsClass then
             // Class: reference type
             (MLIRTypes.memref MLIRTypes.i8, ctx)
@@ -185,7 +184,7 @@ module TypeContextBuilder =
         ctx with Generics = Map.add name param ctx.Generics
     }
 
-// In TypeMapping.fs
+/// Type conversion functions
 module TypeConversion =
     /// Convert F# AST type to MLIR type
     let rec synTypeToMLIRType (synType: SynType) : MLIRType =
@@ -193,42 +192,50 @@ module TypeConversion =
         | SynType.LongIdent(SynLongIdent(ids, _, _)) ->
             let typeName = ids |> List.map (fun id -> id.idText) |> String.concat "."
             match typeName with
-            | "int" | "int32" -> MLIRTypes.i32
-            | "int64" -> MLIRTypes.i64
-            | "byte" | "uint8" -> MLIRTypes.i8
-            | "bool" -> MLIRTypes.i1
-            | "float" | "float32" -> MLIRTypes.f32
-            | "double" | "float64" -> MLIRTypes.f64
-            | "string" -> MLIRTypes.memref MLIRTypes.i8
-            | "unit" -> MLIRTypes.void_
-            | _ -> failwithf "Unknown type: %s" typeName
-            
+            | "int" | "System.Int32" -> MLIRTypes.i32
+            | "int64" | "System.Int64" -> MLIRTypes.i64
+            | "float" | "System.Double" -> MLIRTypes.f64
+            | "float32" | "single" | "System.Single" -> MLIRTypes.f32
+            | "bool" | "System.Boolean" -> MLIRTypes.i1
+            | "byte" | "System.Byte" -> MLIRTypes.i8
+            | "unit" | "System.Void" -> MLIRTypes.void_
+            | "string" | "System.String" -> MLIRTypes.memref MLIRTypes.i8
+            | _ -> MLIRTypes.i32  // Default
+        | SynType.App(typeName, _, innerTypes, _, _, _, _) ->
+            match typeName with
+            | SynType.LongIdent(SynLongIdent(ids, _, _)) ->
+                let typeName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+                match typeName with
+                | "array" | "System.Array" ->
+                    match innerTypes with
+                    | [innerType] -> 
+                        let elemType = synTypeToMLIRType innerType
+                        MLIRTypes.memref elemType
+                    | _ -> MLIRTypes.memref MLIRTypes.i8
+                | _ -> MLIRTypes.i32
+            | _ -> MLIRTypes.i32
         | SynType.Array(rank, elementType, _) ->
             let elemType = synTypeToMLIRType elementType
-            if rank = 1 then
-                MLIRTypes.memref elemType
-            else
-                failwithf "Multi-dimensional arrays not yet supported"
-                
-        | SynType.App(typeName, _, typeArgs, _, _, _, _) ->
-            match typeName with
-            | SynType.LongIdent(SynLongIdent([id], _, _)) when id.idText = "Span" ->
-                match typeArgs with
-                | [elementType] -> MLIRTypes.memref (synTypeToMLIRType elementType)
-                | _ -> failwith "Span must have exactly one type argument"
-            | _ -> failwithf "Unsupported generic type: %A" typeName
-            
-        | SynType.Fun(argType, returnType, range, _trivia) ->
-            let argMLIR = synTypeToMLIRType argType
-            let retMLIR = synTypeToMLIRType returnType
-            MLIRTypes.func [argMLIR] retMLIR
-            
+            MLIRTypes.memref elemType
+        | SynType.Tuple(isStruct, segments, _) ->
+            // Extract the actual types from segments
+            let fieldTypes = 
+                segments 
+                |> List.mapi (fun i segment -> 
+                    match segment with
+                    | SynTupleTypeSegment.Type(t) -> 
+                        (sprintf "Item%d" (i + 1), synTypeToMLIRType t))
+            MLIRTypes.struct_ fieldTypes
+        | SynType.Fun(argType, returnType, _, trivia) ->
+            let argType = synTypeToMLIRType argType
+            let retType = synTypeToMLIRType returnType
+            MLIRTypes.func [argType] retType
         | SynType.Paren(innerType, _) ->
             synTypeToMLIRType innerType
-            
-        | _ -> failwithf "Unsupported type pattern: %A" synType
+        | _ -> MLIRTypes.i32  // Default fallback
 
-    /// Convert to MLIR string representation
-    let synTypeToMLIRString (synType: SynType) : string =
-        let mlirType = synTypeToMLIRType synType
-        sprintf "%A" mlirType  // Simple for now
+    /// Get bit width of an MLIR type
+    let getBitWidth (t: MLIRType) : int =
+        match t.BitWidth with
+        | Some width -> width
+        | None -> 32  // Default

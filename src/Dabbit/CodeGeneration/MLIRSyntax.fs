@@ -35,16 +35,16 @@ let pDialect = function
 
 let pDot = pChar '.'
 
-let pEquals = pSpaces >>. pChar '=' <+> pSpaces
+let pEquals = pSpaces >>. pChar '=' >>. pSpaces
 
-let pColon = pSpaces >>. pChar ':' <+> pSpaces
+let pColon = pSpaces >>. pChar ':' >>. pSpaces
 
-let pComma = pSpaces >>. pChar ',' <+> pSpaces
+let pComma = pSpaces >>. pChar ',' >>. pSpaces
 
 let pExclaim = pChar '!'
 
 /// Type combinators
-let pMLIRType = 
+let rec pMLIRType = 
     choice [
         pString "i1" >>% "i1"
         pString "i8" >>% "i8"
@@ -56,71 +56,96 @@ let pMLIRType =
         pString "index" >>% "index"
         // Composite types
         pExclaim >>. pString "llvm.ptr" >>% "!llvm.ptr"
-        pExclaim >>. pString "llvm.array" >>. pBetween (pChar '<') (pChar '>') 
-            (pInt <+> pSpaces <+> pString "x" <+> pSpaces <+> pMLIRType) 
-            |>> (fun (count, _, _, _, elemType) -> sprintf "!llvm.array<%d x %s>" count elemType)
+        pExclaim >>. pString "llvm.array" >>. pBetween '<' '>' 
+            (pInt >>= fun count ->
+             pSpaces >>. pString "x" >>. pSpaces >>. pMLIRType >>= fun elemType ->
+             preturn (sprintf "!llvm.array<%d x %s>" count elemType))
         // Memref types
-        pString "memref" >>. pBetween (pChar '<') (pChar '>') pMLIRType
+        pString "memref" >>. pBetween '<' '>' pMLIRType
             |>> (fun elemType -> sprintf "memref<%s>" elemType)
     ]
 
 /// Function type: (type1, type2) -> returnType
 let pFuncType = 
-    pBetween (pChar '(') (pChar ')') (pSepBy pMLIRType pComma) <+>
-    pSpaces >>. pString "->" >>. pSpaces >>. pMLIRType
-    |>> (fun (parameterTypes, returnType) -> sprintf "(%s) -> %s" (String.concat ", " parameterTypes) returnType)
+    pBetween '(' ')' (pSepBy pMLIRType pComma) >>= fun paramTypes ->
+    pSpaces >>. pString "->" >>. pSpaces >>. pMLIRType >>= fun returnType ->
+    let paramTypeStr = String.concat ", " paramTypes
+    let funcTypeStr = sprintf "(%s) -> %s" paramTypeStr returnType
+    preturn funcTypeStr
 
-/// MLIR operation builders
-let buildFuncCall target funcName args resultType =
-    let argList = String.concat ", " args
-    sprintf "%s = func.call @%s(%s) : %s" target funcName argList resultType
+/// Attribute parser
+let pAttribute =
+    pString "#" >>. many1 (pChar (fun c -> c <> '=' && c <> ' ' && c <> ',')) >>= fun attrName ->
+    pEquals >>. pMLIRType >>= fun attrValue ->
+    let attrNameStr = new String(Array.ofList attrName)
+    preturn (attrNameStr, attrValue)
 
-let buildArithOp op result left right typ =
-    sprintf "%s = arith.%s %s, %s : %s" result op left right typ
+/// Operation parser for dialect.op
+let pOperation =
+    pDialect >>= fun dialectStr ->
+    pDot >>. many1 (pChar (fun c -> c <> ' ' && c <> '(' && c <> '<')) >>= fun opChars ->
+    let opStr = new String(Array.ofList opChars)
+    preturn (dialectStr, opStr)
 
-let buildSelect result condition trueVal falseVal typ =
-    sprintf "%s = arith.select %s, %s, %s : %s" result condition trueVal falseVal typ
+/// Result assignment
+let pResult =
+    pSSA >>= fun name ->
+    pEquals >>= fun _ ->
+    preturn name
 
-let buildAlloca result elemType size =
-    match size with
-    | Some s -> sprintf "%s = memref.alloca(%s) : memref<%s>" result s elemType
-    | None -> sprintf "%s = memref.alloca() : memref<1x%s>" result elemType
+/// Full operation
+let pFullOperation =
+    opt pResult >>= fun resultOpt ->
+    pOperation >>= fun (dialect, op) ->
+    opt (pBetween '(' ')' (pSepBy pAttribute pComma)) >>= fun attrsOpt ->
+    opt (pBetween '<' '>' (pSepBy pAttribute pComma)) >>= fun genAttrsOpt ->
+    pColon >>. pFuncType >>= fun funcType ->
+    let attrs = defaultArg attrsOpt []
+    let genAttrs = defaultArg genAttrsOpt []
+    let result = defaultArg resultOpt ""
+    preturn (result, dialect, op, attrs, genAttrs, funcType)
 
-let buildLoad result memref indices =
-    let indexList = String.concat ", " indices
-    sprintf "%s = memref.load %s[%s] : %s" result memref indexList "memref<?xi32>"  // Type would need to be tracked
+/// Format MLIR operation as string
+let formatOperation (indentLevel: int) (result: string) (dialect: MLIRDialect) (op: string) (attrs: (string * string) list) (funcType: string) =
+    let dialectStr = 
+        match dialect with
+        | Func -> "func"
+        | Arith -> "arith"
+        | LLVM -> "llvm"
+        | Memref -> "memref"
+        | Scf -> "scf"
+        | Cf -> "cf"
+        | Math -> "math"
+        | Vector -> "vector"
+        | Tensor -> "tensor"
+    
+    let resultPrefix = 
+        if String.IsNullOrEmpty(result) then "" 
+        else sprintf "%s = " result
+    
+    let attrsStr = 
+        if List.isEmpty attrs then ""
+        else 
+            let attrItems = attrs |> List.map (fun (name, value) -> sprintf "#%s = %s" name value)
+            sprintf "(%s)" (String.concat ", " attrItems)
+    
+    indent indentLevel (sprintf "%s%s.%s %s : %s" resultPrefix dialectStr op attrsStr funcType)
 
-let buildStore value memref indices =
-    let indexList = String.concat ", " indices
-    sprintf "memref.store %s, %s[%s] : %s" value memref indexList "memref<?xi32>"
+/// Format a basic block
+let formatBlock (indentLevel: int) (label: string) (operations: string list) =
+    let labelLine = indent indentLevel (sprintf "%s:" label)
+    let blockBody = operations |> List.map (indent (indentLevel + 1))
+    String.concat "\n" (labelLine :: blockBody)
 
-/// Global variable declarations
-let buildGlobalConstant name value typ =
-    sprintf "llvm.mlir.global internal constant @%s(%s) : %s" name value typ
+/// Format a function
+let formatFunction (name: string) (args: (string * string) list) (returnType: string) (body: string) =
+    let argStr = args |> List.map (fun (name, typ) -> sprintf "%s: %s" name typ) |> String.concat ", "
+    let header = sprintf "func.func @%s(%s) -> %s {" name argStr returnType
+    let footer = "}"
+    String.concat "\n" [header; body; footer]
 
-/// Block and region builders
-let buildBlock label ops =
-    sprintf "^%s:\n%s" label (String.concat "\n" ops |> String.indent 2)
-
-let buildRegion ops =
-    sprintf "{\n%s\n}" (String.concat "\n" ops |> String.indent 2)
-
-/// Higher-level operation patterns
-let funcCallPattern = 
-    pipe3
-        (pSSA "result")
-        (pEquals >>. pDialect Func >>. pDot >>. pString "call" >>. pSpaces >>. pAt >>. pIdentifier)
-        (pBetween (pChar '(') (pChar ')') (pSepBy (pSSA "arg") pComma) <+> pColon <+> pFuncType)
-        (fun result funcName (args, funcType) -> 
-            buildFuncCall result funcName args funcType)
-
-/// Combinator to generate and validate MLIR operations
-let generateMLIROp opBuilder =
-    // This would integrate with the MLIR emitter to ensure valid syntax
-    opBuilder |> Result.Ok
-
-/// Helper to indent strings
-module String =
-    let indent spaces (str: string) =
-        let lines = str.Split('\n')
-        lines |> Array.map (fun line -> String.replicate spaces " " + line) |> String.concat "\n"
+/// Format a module
+let formatModule (name: string) (body: string) =
+    let header = sprintf "module @%s {" name
+    let footer = "}"
+    String.concat "\n" [header; body; footer]

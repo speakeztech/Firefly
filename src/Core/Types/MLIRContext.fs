@@ -38,7 +38,7 @@ type MLIRContext = {
 }
 
 /// Maps dialect enum to string names for MLIR C API
-let private dialectToString (dialect: MLIRDialect) : string =
+let dialectToString (dialect: MLIRDialect) : string =
     match dialect with
     | Standard -> "std"
     | LLVM -> "llvm"
@@ -218,49 +218,3 @@ let ensureOperationAvailable (context: MLIRContext) (dialectOp: string) : MLIRCo
             context
     | None -> 
         failwithf "Unknown operation: %s" dialectOp
-
-/// Creates a diagnostic handler for MLIR errors
-type DiagnosticHandler = {
-    HandleError: string -> unit
-    HandleWarning: string -> unit
-    HandleNote: string -> unit
-}
-
-/// Default diagnostic handler that prints to console
-let defaultDiagnosticHandler = {
-    HandleError = fun msg -> eprintfn "MLIR Error: %s" msg
-    HandleWarning = fun msg -> printfn "MLIR Warning: %s" msg
-    HandleNote = fun msg -> printfn "MLIR Note: %s" msg
-}
-
-/// Module initialization check
-let isMLIRInitialized (context: MLIRContext) : bool =
-    context.IsInitialized && 
-    context.ContextHandle <> 0n
-
-/// Gets the context handle for low-level interop
-let getContextHandle (context: MLIRContext) : nativeint =
-    context.ContextHandle
-
-/// Creates a builder context for constructing MLIR modules
-type MLIRBuilder = {
-    Context: MLIRContext
-    CurrentModule: nativeint option
-    CurrentFunction: string option
-    SSACounter: int ref
-}
-
-/// Creates a new MLIR builder
-let createBuilder (context: MLIRContext) : MLIRBuilder = {
-    Context = context
-    CurrentModule = None
-    CurrentFunction = None
-    SSACounter = ref 0
-}
-
-/// Begins a new module in the builder
-let beginModule (builder: MLIRBuilder) : MLIRBuilder =
-    let moduleHandle = createEmptyModule builder.Context
-    { builder with 
-        CurrentModule = Some moduleHandle
-        Context = incrementModuleCount builder.Context }

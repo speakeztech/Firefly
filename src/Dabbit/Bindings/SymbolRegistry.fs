@@ -4,6 +4,7 @@ open System
 open FSharp.Compiler.Syntax
 open Core.XParsec.Foundation
 open Core.Types.TypeSystem
+open Core.Types.MLIRContext
 open Dabbit.Bindings.PatternLibrary
 
 /// Symbol with type safety and MLIR generation info
@@ -76,412 +77,230 @@ module SymbolResolution =
                     Namespace = 
                         if qualifiedName.Contains(".") then
                             qualifiedName.Substring(0, qualifiedName.LastIndexOf('.'))
-                        else ""
-                    SourceLibrary = "Alloy"
+                        else "Global"
+                    SourceLibrary = "alloy"
                     RequiresExternal = 
                         match pattern.OpPattern with
                         | ExternalCall(_, Some _) -> true
-                        | Composite patterns ->
-                            patterns |> List.exists (function
-                                | ExternalCall(_, Some _) -> true
-                                | _ -> false)
                         | _ -> false
                 }
+                
                 Success symbol
-            | None ->
-                CompilerFailure [ConversionError(
-                    "qualified symbol resolution",
-                    qualifiedName,
-                    "resolved symbol",
-                    sprintf "Symbol '%s' not found in qualified registry or pattern library" qualifiedName
-                )]
+            | None -> CompilerFailure [ConversionError("symbol_resolution", qualifiedName, "unknown", "Could not find symbol")]
     
-    let resolveUnqualified (shortName: string) (state: SymbolResolutionState) : CompilerResult<ResolvedSymbol> =
-        match Map.tryFind shortName state.SymbolsByShort with
+    let resolveFromNamespace (symbolName: string) (namespace': string) (state: SymbolResolutionState) : CompilerResult<ResolvedSymbol> =
+        let qualifiedName = sprintf "%s.%s" namespace' symbolName
+        resolveQualified qualifiedName state
+    
+    let resolveSymbol (symbolName: string) (state: SymbolResolutionState) : CompilerResult<ResolvedSymbol> =
+        // First try to find by short name directly
+        match Map.tryFind symbolName state.SymbolsByShort with
         | Some symbol -> Success symbol
         | None ->
-            let tryNamespaceResolution () =
-                state.ActiveNamespaces
-                |> List.tryPick (fun ns ->
-                    let qualifiedAttempt = sprintf "%s.%s" ns shortName
-                    Map.tryFind qualifiedAttempt state.SymbolsByQualified)
-            
-            match tryNamespaceResolution () with
-            | Some symbol -> Success symbol
-            | None ->
-                let patternMatch = 
-                    state.PatternRegistry
-                    |> List.tryFind (fun pattern -> 
-                        pattern.QualifiedName.EndsWith(shortName))
-                
-                match patternMatch with
-                | Some pattern ->
-                    let qualifiedName = 
-                        if state.ActiveNamespaces.IsEmpty then shortName
-                        else sprintf "%s.%s" state.ActiveNamespaces.[0] shortName
-                    
-                    let symbol = {
-                        QualifiedName = qualifiedName
-                        ShortName = shortName
-                        ParameterTypes = fst pattern.TypeSig
-                        ReturnType = snd pattern.TypeSig
-                        Operation = pattern.OpPattern
-                        Namespace = if state.ActiveNamespaces.IsEmpty then "" else state.ActiveNamespaces.[0]
-                        SourceLibrary = "Alloy"
-                        RequiresExternal = 
-                            match pattern.OpPattern with
-                            | ExternalCall(_, Some _) -> true
-                            | Composite patterns ->
-                                patterns |> List.exists (function
+            // Next try resolving as a qualified name
+            if symbolName.Contains(".") then
+                resolveQualified symbolName state
+            else
+                // Try all active namespaces
+                let rec tryNamespaces (namespaces: string list) =
+                    match namespaces with
+                    | [] -> 
+                        // Last resort, try to find pattern by name
+                        match findByName symbolName with
+                        | Some pattern ->
+                            let symbol = {
+                                QualifiedName = symbolName
+                                ShortName = symbolName
+                                ParameterTypes = fst pattern.TypeSig
+                                ReturnType = snd pattern.TypeSig
+                                Operation = pattern.OpPattern
+                                Namespace = "Global"
+                                SourceLibrary = "alloy"
+                                RequiresExternal = 
+                                    match pattern.OpPattern with
                                     | ExternalCall(_, Some _) -> true
-                                    | _ -> false)
-                            | _ -> false
-                    }
-                    Success symbol
-                | None ->
-                    CompilerFailure [ConversionError(
-                        "unqualified symbol resolution",
-                        shortName,
-                        "resolved symbol",
-                        sprintf "Symbol '%s' not found in any active namespace or pattern library" shortName
-                    )]
+                                    | _ -> false
+                            }
+                            Success symbol
+                        | None -> 
+                            CompilerFailure [ConversionError("symbol_resolution", symbolName, "active_namespaces", 
+                                                 sprintf "Could not find symbol in active namespaces: %s" 
+                                                     (String.concat ", " state.ActiveNamespaces))]
+                    | ns :: rest ->
+                        match resolveFromNamespace symbolName ns state with
+                        | Success symbol -> Success symbol
+                        | CompilerFailure _ -> tryNamespaces rest
+                
+                tryNamespaces state.ActiveNamespaces
     
-    let resolveSymbol (name: string) (state: SymbolResolutionState) : CompilerResult<ResolvedSymbol> =
-        if name.Contains('.') then
-            resolveQualified name state
+    let addNamespace (namespace': string) (state: SymbolResolutionState) : SymbolResolutionState =
+        { state with ActiveNamespaces = namespace' :: state.ActiveNamespaces |> List.distinct }
+        
+    let addNamespaces (namespaces: string list) (state: SymbolResolutionState) : SymbolResolutionState =
+        let updatedNamespaces = List.append namespaces state.ActiveNamespaces |> List.distinct
+        { state with ActiveNamespaces = updatedNamespaces }
+    
+    let createEmptyRegistry () : SymbolRegistry = {
+        State = createEmptyState()
+        ResolutionHistory = []
+    }
+
+/// Symbol operations for code generation
+module SymbolOperations =
+    let getBitWidth (t: MLIRType) : int =
+        match t.BitWidth with
+        | Some width -> width
+        | None -> 32  // Default to 32-bit integers
+    
+    let generateFunctionCall (funcName: string) (args: string list) (resultId: string) : string =
+        sprintf "    %s = call @%s(%s) : () -> ()" resultId funcName (String.concat ", " args)
+    
+    let generateDialectCall (dialect: MLIRDialect) (operation: string) (args: string list) (resultType: string) (resultId: string) : string =
+        let argsStr = if args.IsEmpty then "" else String.concat ", " args
+        sprintf "    %s = %s.%s %s : %s" resultId (dialectToString dialect) operation argsStr resultType
+    
+    let validateArgumentTypes (symbol: ResolvedSymbol) (args: string list) (argTypes: MLIRType list) : bool * string list =
+        if symbol.ParameterTypes.Length <> argTypes.Length then
+            false, [sprintf "Expected %d arguments, got %d" symbol.ParameterTypes.Length argTypes.Length]
         else
-            resolveUnqualified name state
-
-/// Type analysis functions
-module TypeAnalysis =
-    let rec canConvertTo (fromType: MLIRType) (toType: MLIRType) : bool =
-        match fromType.Category, toType.Category with
-        | MLIRTypeCategory.Integer, MLIRTypeCategory.Integer -> 
-            fromType.Width <= toType.Width
-        | MLIRTypeCategory.Float, MLIRTypeCategory.Float -> 
-            fromType.Width <= toType.Width
-        | MLIRTypeCategory.MemRef, MLIRTypeCategory.MemRef ->
-            match fromType.ElementType, toType.ElementType with
-            | Some f, Some t -> canConvertTo f t
-            | _ -> false
-        | _, _ -> fromType = toType
+            let typeResults = 
+                List.zip symbol.ParameterTypes argTypes
+                |> List.mapi (fun i (expected, actual) ->
+                    if expected.Category = actual.Category then
+                        match expected.Category with
+                        | Integer | Float ->
+                            let expectedWidth = getBitWidth expected
+                            let actualWidth = getBitWidth actual
+                            
+                            // For numeric types, we need to check bit width compatibility
+                            if expectedWidth = actualWidth then
+                                true, None
+                            else
+                                false, Some (sprintf "Argument %d: expected %d bits, got %d bits" 
+                                                (i + 1) expectedWidth actualWidth)
+                        | _ -> 
+                            // For other types, we just check category equality
+                            true, None
+                    else
+                        false, Some (sprintf "Argument %d: expected %s, got %s" 
+                                        (i + 1) (mlirTypeToString expected) (mlirTypeToString actual))
+                )
+            
+            let isValid = typeResults |> List.forall (fun (valid, _) -> valid)
+            let errors = typeResults |> List.choose (fun (_, err) -> err)
+            
+            isValid, errors
     
-    let inferType (expr: SynExpr) : MLIRType option =
-        match expr with
-        | SynExpr.Const(SynConst.Int32 _, _) -> Some MLIRTypes.i32
-        | SynExpr.Const(SynConst.String _, _) -> Some (MLIRTypes.memref MLIRTypes.i8)
-        | _ -> None
-
-/// Registry construction and management
-module RegistryConstruction =
-    let createInitialRegistry () : SymbolRegistry =
-        let state = SymbolResolution.createEmptyState ()
-        
-        let alloySymbols = [
-            { QualifiedName = "Alloy.Memory.stackBuffer"
-              ShortName = "stackBuffer"
-              ParameterTypes = [MLIRTypes.i32]
-              ReturnType = MLIRTypes.memref MLIRTypes.i8
-              Operation = DialectOp(MemRef, "alloca", Map["element_type", "i8"])
-              Namespace = "Alloy.Memory"
-              SourceLibrary = "Alloy"
-              RequiresExternal = false }
-            
-            { QualifiedName = "Alloy.IO.String.format"
-              ShortName = "format"
-              ParameterTypes = [MLIRTypes.memref MLIRTypes.i8; MLIRTypes.memref MLIRTypes.i8]
-              ReturnType = MLIRTypes.memref MLIRTypes.i8
-              Operation = ExternalCall("sprintf", Some "libc")
-              Namespace = "Alloy.IO.String"
-              SourceLibrary = "Alloy"
-              RequiresExternal = true }
-            
-            { QualifiedName = "Alloy.IO.Console.writeLine"
-              ShortName = "writeLine"
-              ParameterTypes = [MLIRTypes.memref MLIRTypes.i8]
-              ReturnType = MLIRTypes.void_
-              Operation = ExternalCall("printf", Some "libc")
-              Namespace = "Alloy.IO.Console"
-              SourceLibrary = "Alloy"
-              RequiresExternal = true }
-            
-            { QualifiedName = "NativePtr.stackalloc"
-              ShortName = "stackalloc"
-              ParameterTypes = [MLIRTypes.i32]
-              ReturnType = MLIRTypes.memref MLIRTypes.i8
-              Operation = DialectOp(MemRef, "alloca", Map["element_type", "i8"])
-              Namespace = "NativePtr"
-              SourceLibrary = "Alloy"
-              RequiresExternal = false }
-            
-            { QualifiedName = "Result.isOk"
-              ShortName = "isOk"
-              ParameterTypes = [MLIRTypes.i32]
-              ReturnType = MLIRTypes.i1
-              Operation = DialectOp(Arith, "cmpi", Map["predicate", "sge"])
-              Namespace = "Result"
-              SourceLibrary = "Alloy"
-              RequiresExternal = false }
-        ]
-        
-        let stateWithSymbols = 
-            alloySymbols 
-            |> List.fold (fun acc sym -> SymbolResolution.registerSymbol sym acc) state
-        
-        { State = stateWithSymbols; ResolutionHistory = [] }
-    
-    let buildAlloyRegistry () : CompilerResult<SymbolRegistry> =
-        try
-            let baseRegistry = createInitialRegistry ()
-            
-            let stateWithPatterns = {
-                baseRegistry.State with 
-                    PatternRegistry = alloyPatterns
+    let generateMLIROperation (symbol: ResolvedSymbol) (args: string list) (argTypes: MLIRType list) (resultId: string) (registry: SymbolRegistry) : CompilerResult<string list * SymbolRegistry> =
+        match symbol.Operation with
+        | DialectOp (dialect, operation, _) ->
+            let resultTypeStr = mlirTypeToString symbol.ReturnType
+            let op = generateDialectCall dialect operation args resultTypeStr resultId
+            let updatedRegistry = { 
+                registry with 
+                    ResolutionHistory = ("direct_operation", sprintf "Generated %s.%s" (dialectToString dialect) operation) :: registry.ResolutionHistory 
             }
+            Success ([op], updatedRegistry)
             
-            Success { 
-                State = stateWithPatterns
-                ResolutionHistory = [("initialization", "Registry created with Alloy symbols and patterns")]
+        | ExternalCall (funcName, _) ->
+            let op = generateFunctionCall funcName args resultId
+            let updatedRegistry = { 
+                registry with 
+                    ResolutionHistory = ("external_call", sprintf "Called external function %s" funcName) :: registry.ResolutionHistory 
             }
+            Success ([op], updatedRegistry)
             
-        with ex ->
-            CompilerFailure [InternalError(
-                "registry construction",
-                "Failed to build Alloy registry with pattern support",
-                Some ex.Message
-            )]
+        | Composite operations ->
+            // Handle a list of operations
+            let errorMsg = "Composite operations not yet fully implemented"
+            let updatedRegistry = { 
+                registry with 
+                    ResolutionHistory = ("warning", errorMsg) :: registry.ResolutionHistory 
+            }
+            let fallbackOp = sprintf "    %s = arith.constant 0 : i32 // Warning: %s" resultId errorMsg
+            Success ([fallbackOp], updatedRegistry)
             
-    let withNamespaceContext (namespaces: string list) (registry: SymbolRegistry) : SymbolRegistry =
-        { registry with 
-            State = { registry.State with ActiveNamespaces = namespaces @ registry.State.ActiveNamespaces }
-            ResolutionHistory = ("namespace_context", String.concat ", " namespaces) :: registry.ResolutionHistory
+        | Transform (name, params') ->
+            let op = sprintf "    %s = transform.%s(%s) : %s" resultId name (String.concat ", " params') (mlirTypeToString symbol.ReturnType)
+            let updatedRegistry = { 
+                registry with 
+                    ResolutionHistory = ("transform", sprintf "Applied transform %s" name) :: registry.ResolutionHistory 
+            }
+            Success ([op], updatedRegistry)
+
+/// Registry operations
+module Registry =
+    let createRegistry (initialPatterns: SymbolPattern list) : SymbolRegistry =
+        let state = {
+            SymbolsByQualified = Map.empty
+            SymbolsByShort = Map.empty
+            NamespaceMap = Map.empty
+            ActiveNamespaces = ["Alloy"; "Core"]
+            TypeRegistry = Map.empty
+            ActiveSymbols = []
+            PatternRegistry = initialPatterns
         }
+        
+        { State = state; ResolutionHistory = [] }
     
-    let trackActiveSymbol (symbolId: string) (registry: SymbolRegistry) : SymbolRegistry =
-        { registry with 
-            State = { registry.State with ActiveSymbols = symbolId :: registry.State.ActiveSymbols }
+    let registerFunction (qualifiedName: string) (paramTypes: MLIRType list) (returnType: MLIRType) (opPattern: MLIROperationPattern) (registry: SymbolRegistry) : SymbolRegistry =
+        let shortName = 
+            if qualifiedName.Contains(".") then
+                qualifiedName.Split([|'.'|], StringSplitOptions.RemoveEmptyEntries) |> Array.last
+            else qualifiedName
+            
+        let namespace' = 
+            if qualifiedName.Contains(".") then
+                qualifiedName.Substring(0, qualifiedName.LastIndexOf('.'))
+            else "Global"
+            
+        let symbol = {
+            QualifiedName = qualifiedName
+            ShortName = shortName
+            ParameterTypes = paramTypes
+            ReturnType = returnType
+            Operation = opPattern
+            Namespace = namespace'
+            SourceLibrary = "user"
+            RequiresExternal = false
         }
+        
+        let updatedState = SymbolResolution.registerSymbol symbol registry.State
+        { registry with State = updatedState }
     
-    let resolveSymbolInRegistry (symbolName: string) (registry: SymbolRegistry) : CompilerResult<ResolvedSymbol * SymbolRegistry> =
-        match SymbolResolution.resolveSymbol symbolName registry.State with
+    let addNamespace (namespace': string) (registry: SymbolRegistry) : SymbolRegistry =
+        let updatedState = SymbolResolution.addNamespace namespace' registry.State
+        { registry with State = updatedState }
+        
+    let generateMLIRCall (funcName: string) (args: string list) (argTypes: MLIRType list) (resultId: string) (registry: SymbolRegistry) : CompilerResult<string list * SymbolRegistry> =
+        match SymbolResolution.resolveSymbol funcName registry.State with
         | Success symbol ->
             let updatedRegistry = { 
                 registry with 
-                    ResolutionHistory = ("resolution", sprintf "%s -> %s" symbolName symbol.QualifiedName) :: registry.ResolutionHistory 
+                    ResolutionHistory = ("symbol_found", sprintf "Found symbol %s" funcName) :: registry.ResolutionHistory 
             }
-            Success (symbol, updatedRegistry)
-            
-        | CompilerFailure errors ->
+                
+            let (typesValid, typeErrors) = SymbolOperations.validateArgumentTypes symbol args argTypes
+                
+            if not typesValid then
+                let errorMsg = sprintf "Type validation failed for %s: %s" funcName (String.concat "; " typeErrors)
+                
+                let registry2 = { 
+                    updatedRegistry with 
+                        ResolutionHistory = ("type_warning", errorMsg) :: updatedRegistry.ResolutionHistory 
+                }
+                
+                SymbolOperations.generateMLIROperation symbol args argTypes resultId registry2
+            else
+                SymbolOperations.generateMLIROperation symbol args argTypes resultId updatedRegistry
+                
+        | CompilerFailure _ -> 
+            let defaultOp = sprintf "    %s = arith.constant 0 : i32 // Unknown function: %s" resultId funcName
             let updatedRegistry = { 
                 registry with 
-                    ResolutionHistory = ("resolution_failed", sprintf "Failed to resolve %s" symbolName) :: registry.ResolutionHistory 
+                    ResolutionHistory = ("resolution_fallback", sprintf "Created fallback for %s" funcName) :: registry.ResolutionHistory 
             }
-            CompilerFailure errors
-
-/// Symbol-specific MLIR operation generation from registry patterns
-/// This module handles generation of MLIR operations specifically from symbols
-/// and patterns in the registry, as opposed to Core.MLIRGeneration which
-/// provides general MLIR generation infrastructure
-module SymbolOperations =
-    let findActiveBuffer (activeSymbols: string list) : string =
-        activeSymbols 
-        |> List.tryFind (fun s -> s.Contains("buffer"))
-        |> Option.defaultValue "%unknown_buffer"
-    
-    let validateArgumentTypes (symbol: ResolvedSymbol) (argSSAValues: string list) (argTypes: MLIRType list) : bool * string list =
-        if argSSAValues.Length <> symbol.ParameterTypes.Length then
-            (false, [sprintf "Expected %d arguments for %s, got %d" 
-                    symbol.ParameterTypes.Length symbol.QualifiedName argSSAValues.Length])
-        else
-            let typeChecks = 
-                List.zip3 argSSAValues argTypes symbol.ParameterTypes
-                |> List.map (fun (argVal, actualType, expectedType) ->
-                    if TypeAnalysis.canConvertTo actualType expectedType then
-                        (true, "")
-                    else
-                        (false, sprintf "Type mismatch for %s: expected %s, got %s" 
-                            argVal (mlirTypeToString expectedType) (mlirTypeToString actualType)))
-            
-            (List.forall fst typeChecks, typeChecks |> List.filter (not << fst) |> List.map snd)
-    
-    let rec generatePatternOperations (pattern: SymbolPattern) (args: string list) (resultId: string) : string list =
-        match pattern.OpPattern with
-        | DialectOp(dialect, operation, attributes) ->
-            let dialectPrefix = dialectToString dialect
-            let attrStr = 
-                if attributes.IsEmpty then ""
-                else 
-                    attributes 
-                    |> Map.toList 
-                    |> List.map (fun (k, v) -> sprintf "%s = %s" k v)
-                    |> String.concat ", "
-                    |> sprintf " {%s}"
-            
-            let argStr = if args.IsEmpty then "" else sprintf "(%s)" (String.concat ", " args)
-            let (paramTypes, returnType) = pattern.TypeSig
-            let typeStr = mlirTypeToString returnType
-            
-            [sprintf "    %s = %s.%s%s : %s%s" resultId dialectPrefix operation argStr typeStr attrStr]
-            
-        | ExternalCall(funcName, _) ->
-            let (paramTypes, returnType) = pattern.TypeSig
-            
-            let paramTypeStr = 
-                if paramTypes.IsEmpty then ""
-                else sprintf "(%s)" (paramTypes |> List.map mlirTypeToString |> String.concat ", ")
-            
-            let returnTypeStr = mlirTypeToString returnType
-            
-            [sprintf "    %s = func.call @%s(%s) : %s -> %s" 
-                resultId funcName (String.concat ", " args) paramTypeStr returnTypeStr]
-                
-        | Composite operations ->
-            operations |> List.collect (fun op ->
-                let tempPattern = { pattern with OpPattern = op }
-                generatePatternOperations tempPattern args resultId)
-                
-        | Transform(transformName, parameters) ->
-            match transformName with
-            | "span_conversion" ->
-                let bufferArg = if args.IsEmpty then "%0" else args.[0]
-                [sprintf "    %s = memref.cast %s : memref<?xi8> to memref<?xi8>" resultId bufferArg]
-                
-            | "result_wrapper" ->
-                [sprintf "    %s = arith.addi %s, 0x10000 : i32" 
-                    resultId (if args.IsEmpty then "0" else args.[0])]
-                
-            | "result_match" ->
-                [sprintf "    %s = arith.constant 0 : i32 // Result match handled by pattern system" resultId]
-                
-            | _ ->
-                [sprintf "    %s = arith.constant 0 : i32 // Custom transform: %s" resultId transformName]
-
-    let rec generateMLIROperation (symbol: ResolvedSymbol) (args: string list) (argTypes: MLIRType list)
-                                (resultId: string) (registry: SymbolRegistry) : CompilerResult<string list * SymbolRegistry> =
-        let patternMatch = 
-            registry.State.PatternRegistry
-            |> List.tryFind (fun pattern -> 
-                pattern.QualifiedName = symbol.QualifiedName ||
-                symbol.QualifiedName.EndsWith(pattern.QualifiedName))
-        
-        match patternMatch with
-        | Some pattern -> 
-            Success (generatePatternOperations pattern args resultId, registry)
-        | None ->
-            match symbol.Operation with
-            | DialectOp(dialect, operation, attributes) ->
-                let dialectPrefix = dialectToString dialect
-                let attrStr = 
-                    if attributes.IsEmpty then ""
-                    else 
-                        attributes 
-                        |> Map.toList 
-                        |> List.map (fun (k, v) -> sprintf "%s = %s" k v)
-                        |> String.concat ", "
-                        |> sprintf " {%s}"
-                
-                let argStr = if args.IsEmpty then "" else sprintf "(%s)" (String.concat ", " args)
-                let typeStr = mlirTypeToString symbol.ReturnType
-                
-                let operationStr = sprintf "    %s = %s.%s%s : %s%s" resultId dialectPrefix operation argStr typeStr attrStr
-                Success ([operationStr], registry)
-                
-            | ExternalCall(funcName, _) ->
-                let updatedRegistry = { 
-                    registry with 
-                        State = { registry.State with ActiveSymbols = resultId :: registry.State.ActiveSymbols } 
-                }
-                
-                let paramTypeStr = 
-                    if argTypes.IsEmpty then ""
-                    else sprintf "(%s)" (argTypes |> List.map mlirTypeToString |> String.concat ", ")
-                
-                let returnTypeStr = mlirTypeToString symbol.ReturnType
-                
-                let callOp = 
-                    sprintf "    %s = func.call @%s(%s) : %s -> %s" 
-                        resultId funcName (String.concat ", " args) paramTypeStr returnTypeStr
-                    
-                Success ([callOp], updatedRegistry)
-                
-            | Composite operations ->
-                let foldResult = 
-                    operations |> List.fold (fun acc op ->
-                        match acc with
-                        | CompilerFailure _ -> acc
-                        | Success (ops, reg) ->
-                            let tempSymbol = { symbol with Operation = op }
-                            match generateMLIROperation tempSymbol args argTypes resultId reg with
-                            | Success (newOps, newReg) -> Success (ops @ newOps, newReg)
-                            | CompilerFailure errors -> CompilerFailure errors
-                    ) (Success ([], registry))
-                foldResult
-                
-            | Transform(transformName, _) ->
-                match transformName with
-                | "cast_to_span" ->
-                    let bufferValue = findActiveBuffer registry.State.ActiveSymbols
-                    let bitcastOp = sprintf "    %s = memref.cast %s : memref<?xi8> to memref<?xi8>" resultId bufferValue
-                    Success ([bitcastOp], registry)
-                    
-                | _ ->
-                    let constOp = sprintf "    %s = arith.constant 0 : i32" resultId
-                    Success ([constOp], registry)
-
-/// Type-aware external interface for integration with existing MLIR generation
-module PublicInterface =
-    let createStandardRegistry() : CompilerResult<SymbolRegistry> =
-        RegistryConstruction.buildAlloyRegistry()
-    
-    let getSymbolType (funcName: string) (registry: SymbolRegistry) : MLIRType option =
-        match RegistryConstruction.resolveSymbolInRegistry funcName registry with
-        | Success (symbol, _) -> Some symbol.ReturnType
-        | CompilerFailure _ ->
-            registry.State.PatternRegistry
-            |> List.tryFind (fun pattern -> 
-                pattern.QualifiedName = funcName ||
-                funcName.EndsWith(pattern.QualifiedName))
-            |> Option.map (fun pattern -> snd pattern.TypeSig)
-    
-    let resolveFunctionCall (funcName: string) (args: string list) (resultId: string) (registry: SymbolRegistry)
-                           : CompilerResult<string list * SymbolRegistry> =
-        let patternMatch = 
-            registry.State.PatternRegistry
-            |> List.tryFind (fun pattern -> 
-                pattern.QualifiedName = funcName ||
-                funcName.EndsWith(pattern.QualifiedName))
-        
-        match patternMatch with
-        | Some pattern -> Success (SymbolOperations.generatePatternOperations pattern args resultId, registry)
-        | None ->
-            match RegistryConstruction.resolveSymbolInRegistry funcName registry with
-            | Success (symbol, updatedRegistry) ->
-                let argTypes = 
-                    args |> List.mapi (fun i _ ->
-                        if i < symbol.ParameterTypes.Length then symbol.ParameterTypes.[i]
-                        else MLIRTypes.i32)
-                
-                let (typesValid, typeErrors) = SymbolOperations.validateArgumentTypes symbol args argTypes
-                
-                if not typesValid then
-                    let errorMsg = sprintf "Type validation failed for %s: %s" funcName (String.concat "; " typeErrors)
-                    
-                    let registry2 = { 
-                        updatedRegistry with 
-                            ResolutionHistory = ("type_warning", errorMsg) :: updatedRegistry.ResolutionHistory 
-                    }
-                    
-                    SymbolOperations.generateMLIROperation symbol args argTypes resultId registry2
-                else
-                    SymbolOperations.generateMLIROperation symbol args argTypes resultId updatedRegistry
-                
-            | CompilerFailure _ -> 
-                let defaultOp = sprintf "    %s = arith.constant 0 : i32 // Unknown function: %s" resultId funcName
-                let updatedRegistry = { 
-                    registry with 
-                        ResolutionHistory = ("resolution_fallback", sprintf "Created fallback for %s" funcName) :: registry.ResolutionHistory 
-                }
-                Success ([defaultOp], updatedRegistry)
+            Success ([defaultOp], updatedRegistry)
 
     let getNamespaceSymbols (namespaceName: string) (registry: SymbolRegistry) : string list =
         match Map.tryFind namespaceName registry.State.NamespaceMap with
@@ -506,27 +325,4 @@ module PublicInterface =
                 "symbol validation",
                 String.concat ", " missingSymbols,
                 "available symbols",
-                sprintf "Missing required symbols: %s" (String.concat ", " missingSymbols)
-            )]
-            
-    let getParameterTypes (funcName: string) (registry: SymbolRegistry) : MLIRType list option =
-        match RegistryConstruction.resolveSymbolInRegistry funcName registry with
-        | Success (symbol, _) -> Some symbol.ParameterTypes
-        | CompilerFailure _ -> 
-            registry.State.PatternRegistry
-            |> List.tryFind (fun pattern -> 
-                pattern.QualifiedName = funcName ||
-                funcName.EndsWith(pattern.QualifiedName))
-            |> Option.map (fun pattern -> fst pattern.TypeSig)
-        
-    let areArgumentTypesCompatible (funcName: string) (argTypes: MLIRType list) (registry: SymbolRegistry) : bool =
-        match getParameterTypes funcName registry with
-        | Some paramTypes ->
-            paramTypes.Length = argTypes.Length &&
-            List.zip paramTypes argTypes
-            |> List.forall (fun (paramType, argType) -> TypeAnalysis.canConvertTo argType paramType)
-        | None -> false
-    
-    let findPatternByExpression (expr: SynExpr) (registry: SymbolRegistry) : SymbolPattern option =
-        registry.State.PatternRegistry
-        |> List.tryFind (fun pattern -> pattern.Matcher expr)
+                sprintf "Missing required symbols: %s" (String.concat ", " missingSymbols))]
