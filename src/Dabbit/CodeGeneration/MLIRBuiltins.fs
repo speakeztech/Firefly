@@ -1,8 +1,8 @@
 module Dabbit.CodeGeneration.MLIRBuiltins
 
 open Core.Types.TypeSystem
+open Core.XParsec.Foundation
 open Dabbit.CodeGeneration.MLIREmitter
-open Dabbit.CodeGeneration.MLIRSyntax
 
 /// Built-in function registry using MLIRBuilder patterns
 type BuiltinSignature = {

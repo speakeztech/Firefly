@@ -2,6 +2,7 @@ module Dabbit.CodeGeneration.MLIRTypeOperations
 
 open FSharp.Compiler.Syntax
 open Core.Types.TypeSystem
+open Core.XParsec.Foundation
 open Dabbit.CodeGeneration.MLIREmitter
 open Dabbit.CodeGeneration.MLIRSyntax
 open Dabbit.CodeGeneration.MLIRBuiltins
@@ -27,94 +28,6 @@ let canConvertImplicitly (sourceType: MLIRType) (targetType: MLIRType): bool =
     | Float, Float -> true
     | Integer, Float -> true  // Widening conversion
     | _ -> false
-
-/// Convert F# SynType to MLIRType using proper Foundation patterns
-let rec synTypeToMLIR (synType: SynType): MLIRBuilder<MLIRType> =
-    mlir {
-        match synType with
-        | SynType.LongIdent(SynLongIdent([id], _, _)) ->
-            return! mapPrimitiveType id.idText
-            
-        | SynType.App(typeName, _, typeArgs, _, _, _, _) ->
-            return! mapGenericType typeName typeArgs
-            
-        | SynType.Fun(argType, returnType, _, _) ->
-            let! argMLIR = synTypeToMLIR argType
-            let! retMLIR = synTypeToMLIR returnType
-            return MLIRTypes.func [argMLIR] retMLIR
-            
-        | SynType.Paren(innerType, _) ->
-            return! synTypeToMLIR innerType
-            
-        | SynType.Tuple(isStruct, typeSegments, _) ->
-            let componentTypes = 
-                typeSegments 
-                |> List.choose (function 
-                    | SynTupleTypeSegment.Type(synType) -> Some synType
-                    | _ -> None)
-            let! mlirTypes = mapM synTypeToMLIR componentTypes
-            return MLIRTypes.struct_ (mlirTypes |> List.mapi (fun i t -> sprintf "field%d" i, t))
-            
-        | _ ->
-            return! failHard "type_mapping" (sprintf "Unsupported type pattern: %A" synType)
-    }
-
-/// Map primitive F# types to MLIR types
-let mapPrimitiveType (typeName: string): MLIRBuilder<MLIRType> =
-    mlir {
-        match typeName with
-        | "int" | "int32" -> return MLIRTypes.i32
-        | "int64" -> return MLIRTypes.i64
-        | "int16" -> return MLIRTypes.i16
-        | "int8" | "sbyte" -> return MLIRTypes.i8
-        | "uint32" -> return MLIRTypes.i32  // Treat as signed for now
-        | "uint64" -> return MLIRTypes.i64  // Treat as signed for now
-        | "uint16" -> return MLIRTypes.i16
-        | "byte" | "uint8" -> return MLIRTypes.i8
-        | "bool" -> return MLIRTypes.i1
-        | "float" | "float32" | "single" -> return MLIRTypes.f32
-        | "double" | "float64" -> return MLIRTypes.f64
-        | "string" -> return MLIRTypes.string_
-        | "unit" -> return MLIRTypes.void_
-        | "char" -> return MLIRTypes.i8  // UTF-8 character
-        | "nativeint" -> return MLIRTypes.i64  // Assume 64-bit target
-        | "unativeint" -> return MLIRTypes.i64 // Assume 64-bit target
-        | _ ->
-            return! failHard "primitive_type" (sprintf "Unknown primitive type: %s" typeName)
-    }
-
-/// Map generic F# types to MLIR types
-let mapGenericType (typeName: SynType) (typeArgs: SynType list): MLIRBuilder<MLIRType> =
-    mlir {
-        match typeName with
-        | SynType.LongIdent(SynLongIdent([id], _, _)) when id.idText = "Span" ->
-            match typeArgs with
-            | [elementType] ->
-                let! elemType = synTypeToMLIR elementType
-                return MLIRTypes.memref elemType
-            | _ ->
-                return! failHard "span_type" "Span must have exactly one type argument"
-                
-        | SynType.LongIdent(SynLongIdent([id], _, _)) when id.idText = "ReadOnlySpan" ->
-            match typeArgs with
-            | [elementType] ->
-                let! elemType = synTypeToMLIR elementType
-                return MLIRTypes.memref elemType  // Read-only spans still use memref
-            | _ ->
-                return! failHard "readonly_span_type" "ReadOnlySpan must have exactly one type argument"
-                
-        | SynType.LongIdent(SynLongIdent([id], _, _)) when id.idText = "option" ->
-            match typeArgs with
-            | [valueType] ->
-                let! valType = synTypeToMLIR valueType
-                // Option represented as struct with tag + value
-                return MLIRTypes.struct_ [("tag", MLIRTypes.i1); ("value", valType)]
-            | _ ->
-                return! failHard "option_type" "Option must have exactly one type argument"
-                
-        | _ ->
-            return! failHard "generic_type" (sprintf "Unsupported generic type: %A" typeName)
-    }
 
 /// Convert between integer types
 let convertInteger (sourceType: MLIRType) (targetType: MLIRType) (value: MLIRValue) (result: string): MLIRBuilder<MLIRValue> =
@@ -147,11 +60,9 @@ let convertFloat (sourceType: MLIRType) (targetType: MLIRType) (value: MLIRValue
         if sourceWidth = targetWidth then
             return value  // No conversion needed
         elif sourceWidth < targetWidth then
-            // Extend
             do! emitLine (sprintf "%s = arith.extf %s : %s to %s" result value.SSA sourceTypeStr targetTypeStr)
             return createValue result targetType
         else
-            // Truncate
             do! emitLine (sprintf "%s = arith.truncf %s : %s to %s" result value.SSA sourceTypeStr targetTypeStr)
             return createValue result targetType
     }
@@ -159,8 +70,9 @@ let convertFloat (sourceType: MLIRType) (targetType: MLIRType) (value: MLIRValue
 /// Convert between memref types
 let convertMemref (sourceType: MLIRType) (targetType: MLIRType) (value: MLIRValue) (result: string): MLIRBuilder<MLIRValue> =
     mlir {
+        let sourceTypeStr = mlirTypeToString sourceType
         let targetTypeStr = mlirTypeToString targetType
-        do! emitLine (sprintf "%s = memref.cast %s : %s to %s" result value.SSA (mlirTypeToString sourceType) targetTypeStr)
+        do! emitLine (sprintf "%s = memref.cast %s : %s to %s" result value.SSA sourceTypeStr targetTypeStr)
         return createValue result targetType
     }
 
@@ -199,55 +111,143 @@ let explicitConvert (sourceType: MLIRType) (targetType: MLIRType) (value: MLIRVa
                 (sprintf "Unsupported conversion from %s to %s" sourceTypeStr targetTypeStr)
     }
 
-/// Implicit type conversions between compatible types
-let implicitConvert (sourceType: MLIRType) (targetType: MLIRType) (value: MLIRValue): MLIRBuilder<MLIRValue> =
-    mlir {
-        if areTypesEqual sourceType targetType then
-            return value
-        elif canConvertImplicitly sourceType targetType then
-            return! explicitConvert sourceType targetType value
-        else
-            return! failHard "implicit_convert" 
-                (sprintf "Cannot implicitly convert %s to %s" 
-                 (mlirTypeToString sourceType) (mlirTypeToString targetType))
-    }
-
 /// Check if two types are compatible for operations
 let areCompatible (type1: MLIRType) (type2: MLIRType): bool =
     areTypesEqual type1 type2 || 
     canConvertImplicitly type1 type2 || 
     canConvertImplicitly type2 type1
 
-/// Validate function signature compatibility
-let validateFunctionCall (expectedParams: MLIRType list) (actualArgs: MLIRValue list): MLIRBuilder<MLIRValue list> =
+/// Implicit type conversions between compatible types
+let implicitConvert (sourceType: MLIRType) (targetType: MLIRType) (value: MLIRValue): MLIRBuilder<MLIRValue> =
     mlir {
-        if List.length expectedParams <> List.length actualArgs then
-            return! failHard "function_call" 
-                (sprintf "Expected %d arguments, got %d" (List.length expectedParams) (List.length actualArgs))
-        else
-            let argTypePairs = List.zip actualArgs expectedParams
-            let convertArg (arg, expectedType) = 
-                let argType = parseTypeFromString arg.Type
-                if areTypesEqual argType expectedType then
-                    mlir { return arg }
-                else
-                    implicitConvert argType expectedType arg
-            let! convertedArgs = mapM convertArg argTypePairs
-            return convertedArgs
+        // Check if the types are equal first
+        let! result = 
+            if areTypesEqual sourceType targetType then
+                // Just return the same value
+                mlir.Return value
+            elif canConvertImplicitly sourceType targetType then
+                // Apply the conversion
+                explicitConvert sourceType targetType value
+            else
+                // Format error message with pre-computed strings
+                let sourceTypeStr = mlirTypeToString sourceType
+                let targetTypeStr = mlirTypeToString targetType
+                let errorMsg = sprintf "Cannot implicitly convert %s to %s" sourceTypeStr targetTypeStr
+                failHard "implicit_convert" errorMsg
+                
+        return result
     }
 
 /// Validate assignment compatibility
 let validateAssignment (targetType: MLIRType) (sourceValue: MLIRValue): MLIRBuilder<MLIRValue> =
     mlir {
         let sourceType = parseTypeFromString sourceValue.Type
-        if areTypesEqual targetType sourceType then
-            return sourceValue
-        elif canConvertImplicitly sourceType targetType then
-            return! implicitConvert sourceType targetType sourceValue
-        else
-            return! failHard "assignment" 
-                (sprintf "Cannot assign %s to %s" 
-                 (mlirTypeToString sourceType) (mlirTypeToString targetType))
+        
+        // Use let! to ensure all branches return the same type
+        let! result = 
+            if areTypesEqual targetType sourceType then
+                // Use mlir.Return instead of return
+                mlir.Return sourceValue
+            elif canConvertImplicitly sourceType targetType then
+                // This already returns MLIRBuilder<MLIRValue>
+                implicitConvert sourceType targetType sourceValue
+            else
+                // Pre-compute formatted strings
+                let sourceTypeStr = mlirTypeToString sourceType
+                let targetTypeStr = mlirTypeToString targetType
+                let errorMsg = sprintf "Cannot assign %s to %s" sourceTypeStr targetTypeStr
+                // This returns MLIRBuilder<MLIRValue>
+                failHard "assignment" errorMsg
+                
+        return result
+    }
+
+/// Map primitive F# types to MLIR types
+let mapPrimitiveType (typeName: string): MLIRBuilder<MLIRType> =
+    mlir {
+        match typeName with
+        | "int" | "int32" -> return MLIRTypes.i32
+        | "int64" -> return MLIRTypes.i64
+        | "int16" -> return MLIRTypes.i16
+        | "int8" | "sbyte" -> return MLIRTypes.i8
+        | "uint32" -> return MLIRTypes.i32  // Treat as signed for now
+        | "uint64" -> return MLIRTypes.i64  // Treat as signed for now
+        | "uint16" -> return MLIRTypes.i16
+        | "byte" | "uint8" -> return MLIRTypes.i8
+        | "bool" -> return MLIRTypes.i1
+        | "float" | "float32" | "single" -> return MLIRTypes.f32
+        | "double" | "float64" -> return MLIRTypes.f64
+        | "string" -> return MLIRTypes.string_
+        | "unit" -> return MLIRTypes.void_
+        | "char" -> return MLIRTypes.i8  // UTF-8 character
+        | "nativeint" -> return MLIRTypes.i64  // Assume 64-bit target
+        | "unativeint" -> return MLIRTypes.i64 // Assume 64-bit target
+        | _ ->
+            return! failHard "primitive_type" (sprintf "Unknown primitive type: %s" typeName)
+    }
+
+/// Convert F# SynType to MLIRType using proper Foundation patterns
+let rec synTypeToMLIR (synType: SynType): MLIRBuilder<MLIRType> =
+    mlir {
+        match synType with
+        | SynType.LongIdent(SynLongIdent([id], _, _)) ->
+            return! mapPrimitiveType id.idText
+            
+        | SynType.App(typeName, _, typeArgs, _, _, _, _) ->
+            return! mapGenericType typeName typeArgs
+            
+        | SynType.Fun(argType, returnType, _, _) ->
+            let! argMLIR = synTypeToMLIR argType
+            let! retMLIR = synTypeToMLIR returnType
+            return MLIRTypes.func [argMLIR] retMLIR
+            
+        | SynType.Paren(innerType, _) ->
+            return! synTypeToMLIR innerType
+            
+        | SynType.Tuple(isStruct, typeSegments, _) ->
+            let componentTypes = 
+                typeSegments 
+                |> List.choose (function 
+                    | SynTupleTypeSegment.Type(synType) -> Some synType
+                    | _ -> None)
+            let! mlirTypes = mapM synTypeToMLIR componentTypes
+            return MLIRTypes.struct_ (mlirTypes |> List.mapi (fun i t -> sprintf "field%d" i, t))
+            
+        | _ ->
+            return! failHard "type_mapping" (sprintf "Unsupported type pattern: %A" synType)
+    }
+
+/// Map generic F# types to MLIR types
+and mapGenericType (typeName: SynType) (typeArgs: SynType list): MLIRBuilder<MLIRType> =
+    mlir {
+        match typeName with
+        | SynType.LongIdent(SynLongIdent([id], _, _)) when id.idText = "Span" ->
+            match typeArgs with
+            | [elementType] ->
+                let! elemType = synTypeToMLIR elementType
+                return MLIRTypes.memref elemType
+            | _ ->
+                return! failHard "span_type" "Span must have exactly one type argument"
+                
+        | SynType.LongIdent(SynLongIdent([id], _, _)) when id.idText = "ReadOnlySpan" ->
+            match typeArgs with
+            | [elementType] ->
+                let! elemType = synTypeToMLIR elementType
+                return MLIRTypes.memref elemType  // Read-only spans still use memref
+            | _ ->
+                return! failHard "readonly_span_type" "ReadOnlySpan must have exactly one type argument"
+                
+        | SynType.LongIdent(SynLongIdent([id], _, _)) when id.idText = "option" ->
+            match typeArgs with
+            | [valueType] ->
+                let! valType = synTypeToMLIR valueType
+                // Option represented as struct with tag + value
+                return MLIRTypes.struct_ [("tag", MLIRTypes.i1); ("value", valType)]
+            | _ ->
+                return! failHard "option_type" "Option must have exactly one type argument"
+                
+        | _ ->
+            return! failHard "generic_type" (sprintf "Unsupported generic type: %A" typeName)
     }
 
 /// Generate discriminated union type
@@ -281,11 +281,15 @@ let createUnionCase (unionType: MLIRType) (caseIndex: int) (caseData: MLIRValue 
         do! emitLine (sprintf "memref.store %s, %s[%s] : memref<%s>" tag.SSA unionPtr tagIndex.SSA (mlirTypeToString unionType))
         
         // Store case data using List operations
-        let! _ = mapM (fun (index, data) -> mlir {
-            let! dataIndex = Constants.intConstant (index + 1) 32  // Data starts at index 1
-            do! emitLine (sprintf "memref.store %s, %s[%s] : memref<%s>" data.SSA unionPtr dataIndex.SSA (mlirTypeToString unionType))
-            return ()
-        }) (caseData |> List.mapi (fun i d -> i, d))
+        let! _ = 
+            caseData 
+            |> List.mapi (fun i d -> i, d)
+            |> mapM (fun (index, data) -> 
+                mlir {
+                    let! dataIndex = Constants.intConstant (index + 1) 32  // Data starts at index 1
+                    do! emitLine (sprintf "memref.store %s, %s[%s] : memref<%s>" data.SSA unionPtr dataIndex.SSA (mlirTypeToString unionType))
+                    return ()
+                })
         
         // Load the complete union
         do! emitLine (sprintf "%s = memref.load %s : memref<%s>" result unionPtr (mlirTypeToString unionType))
@@ -350,7 +354,7 @@ let inferBinaryOpType (leftType: MLIRType) (rightType: MLIRType) (operator: stri
             return MLIRTypes.i1
         | _ ->
             return! failHard "binary_op_inference" (sprintf "Cannot infer type for operator %s with types %s and %s" 
-                                                           operator (mlirTypeToString leftType) (mlirTypeToString rightType))
+                                                        operator (mlirTypeToString leftType) (mlirTypeToString rightType))
     }
 
 /// Infer type from expression context
@@ -368,11 +372,16 @@ let alloca (typ: MLIRType) (count: MLIRValue option): MLIRBuilder<MLIRValue> =
         let! ptr = nextSSA "alloca"
         let typeStr = mlirTypeToString typ
         
-        match count with
-        | Some countVal ->
-            do! emitLine (sprintf "%s = memref.alloca(%s) : memref<%s>" ptr countVal.SSA typeStr)
-        | None ->
-            do! emitLine (sprintf "%s = memref.alloca() : memref<%s>" ptr typeStr)
+        // Create allocation command string outside the conditional
+        let allocCmd = 
+            match count with
+            | Some countVal -> 
+                sprintf "%s = memref.alloca(%s) : memref<%s>" ptr countVal.SSA typeStr
+            | None -> 
+                sprintf "%s = memref.alloca() : memref<%s>" ptr typeStr
+                
+        // Execute the command string - no conditional needed here
+        do! emitLine allocCmd
         
         return createValue ptr (MLIRTypes.memref typ)
     }

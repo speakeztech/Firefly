@@ -10,6 +10,13 @@ open XParsec.Parsers
 // Core Compiler Types
 // ===================================================================
 
+/// MLIR value representation
+type MLIRValue = {
+    SSA: string
+    Type: string
+    IsConstant: bool
+}
+
 /// Position information for error reporting
 type SourcePosition = {
     Line: int

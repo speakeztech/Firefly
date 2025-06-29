@@ -1,8 +1,8 @@
 module Dabbit.CodeGeneration.MLIROperatorGenerator
 
 open Core.Types.TypeSystem
+open Core.XParsec.Foundation
 open Dabbit.CodeGeneration.MLIREmitter
-open Dabbit.CodeGeneration.MLIRSyntax
 open Dabbit.CodeGeneration.MLIRBuiltins
 
 /// Operator classification for proper MLIR dialect mapping
@@ -21,18 +21,7 @@ type OperatorSignature = {
     Generator: MLIRValue list -> MLIRBuilder<MLIRValue>
 }
 
-/// Helper to parse type string back to MLIRType (temporary until better type system integration)
-let parseTypeFromString (typeStr: string): MLIRType =
-    match typeStr with
-    | "i1" -> MLIRTypes.i1
-    | "i8" -> MLIRTypes.i8
-    | "i16" -> MLIRTypes.i16
-    | "i32" -> MLIRTypes.i32
-    | "i64" -> MLIRTypes.i64
-    | "f32" -> MLIRTypes.f32
-    | "f64" -> MLIRTypes.f64
-    | "void" -> MLIRTypes.void_
-    | _ -> MLIRTypes.i32  
+
 
 /// Binary operation helper module
 module BinaryOps =

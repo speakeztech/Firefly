@@ -1,7 +1,7 @@
 module Dabbit.CodeGeneration.MLIRControlFlow
 
 open FSharp.Compiler.Syntax
-open Core.Types.TypeSystem
+open Core.XParsec.Foundation
 open MLIREmitter
 
 /// Utility functions

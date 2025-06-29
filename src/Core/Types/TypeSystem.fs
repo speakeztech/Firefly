@@ -1,5 +1,7 @@
 module Core.Types.TypeSystem
 
+open Core.XParsec.Foundation
+
 /// MLIR dialect definitions
 type MLIRDialect =
     | Standard
@@ -42,110 +44,6 @@ type MLIRType = {
     ReturnType: MLIRType option
     Fields: (string * MLIRType) list option
 }
-
-/// Helper function to get type from MLIRValue
-let parseTypeFromMLIRValue (value: MLIRValue): MLIRType =
-    match value.Type with
-    | "i1" -> MLIRTypes.i1
-    | "i8" -> MLIRTypes.i8
-    | "i16" -> MLIRTypes.i16
-    | "i32" -> MLIRTypes.i32
-    | "i64" -> MLIRTypes.i64
-    | "f32" -> MLIRTypes.f32
-    | "f64" -> MLIRTypes.f64
-    | "void" -> MLIRTypes.void_
-    | _ -> MLIRTypes.i32  // Default fallback
-
-/// Standard MLIR dialect operations
-module StandardOps =
-    let operations = [
-        { Dialect = Standard; OpName = "std.constant"; Description = "Constant value operation" }
-        { Dialect = Standard; OpName = "std.return"; Description = "Return from function" }
-        { Dialect = Standard; OpName = "std.call"; Description = "Direct function call" }
-        { Dialect = Standard; OpName = "std.br"; Description = "Unconditional branch" }
-        { Dialect = Standard; OpName = "std.cond_br"; Description = "Conditional branch" }
-    ]
-
-/// Arithmetic dialect operations
-module ArithOps =
-    let operations = [
-        { Dialect = Arith; OpName = "arith.constant"; Description = "Arithmetic constant" }
-        { Dialect = Arith; OpName = "arith.addi"; Description = "Integer addition" }
-        { Dialect = Arith; OpName = "arith.subi"; Description = "Integer subtraction" }
-        { Dialect = Arith; OpName = "arith.muli"; Description = "Integer multiplication" }
-        { Dialect = Arith; OpName = "arith.divsi"; Description = "Signed integer division" }
-        { Dialect = Arith; OpName = "arith.remsi"; Description = "Signed integer remainder" }
-        { Dialect = Arith; OpName = "arith.cmpi"; Description = "Integer comparison" }
-        { Dialect = Arith; OpName = "arith.addf"; Description = "Float addition" }
-        { Dialect = Arith; OpName = "arith.subf"; Description = "Float subtraction" }
-        { Dialect = Arith; OpName = "arith.mulf"; Description = "Float multiplication" }
-        { Dialect = Arith; OpName = "arith.divf"; Description = "Float division" }
-        { Dialect = Arith; OpName = "arith.cmpf"; Description = "Float comparison" }
-    ]
-
-/// Function dialect operations
-module FuncOps =
-    let operations = [
-        { Dialect = Func; OpName = "func.func"; Description = "Function definition" }
-        { Dialect = Func; OpName = "func.return"; Description = "Return from function" }
-        { Dialect = Func; OpName = "func.call"; Description = "Function call" }
-        { Dialect = Func; OpName = "func.call_indirect"; Description = "Indirect function call" }
-    ]
-
-/// LLVM dialect operations
-module LLVMOps =
-    let operations = [
-        { Dialect = LLVM; OpName = "llvm.func"; Description = "LLVM function" }
-        { Dialect = LLVM; OpName = "llvm.return"; Description = "LLVM return" }
-        { Dialect = LLVM; OpName = "llvm.call"; Description = "LLVM call" }
-        { Dialect = LLVM; OpName = "llvm.alloca"; Description = "Stack allocation" }
-        { Dialect = LLVM; OpName = "llvm.load"; Description = "Load from memory" }
-        { Dialect = LLVM; OpName = "llvm.store"; Description = "Store to memory" }
-        { Dialect = LLVM; OpName = "llvm.getelementptr"; Description = "Get element pointer" }
-        { Dialect = LLVM; OpName = "llvm.bitcast"; Description = "Bitcast operation" }
-        { Dialect = LLVM; OpName = "llvm.mlir.constant"; Description = "LLVM constant" }
-        { Dialect = LLVM; OpName = "llvm.mlir.null"; Description = "Null pointer" }
-        { Dialect = LLVM; OpName = "llvm.mlir.undef"; Description = "Undefined value" }
-        { Dialect = LLVM; OpName = "llvm.mlir.addressof"; Description = "Address of global" }
-        { Dialect = LLVM; OpName = "llvm.ptr"; Description = "LLVM pointer type" }
-        { Dialect = LLVM; OpName = "llvm.void"; Description = "LLVM void type" }
-    ]
-
-/// MemRef dialect operations
-module MemRefOps =
-    let operations = [
-        { Dialect = MLIRDialect.MemRef; OpName = "memref.alloc"; Description = "Allocate memory" }
-        { Dialect = MLIRDialect.MemRef; OpName = "memref.alloca"; Description = "Stack allocate memory" }
-        { Dialect = MLIRDialect.MemRef; OpName = "memref.dealloc"; Description = "Deallocate memory" }
-        { Dialect = MLIRDialect.MemRef; OpName = "memref.load"; Description = "Load from memref" }
-        { Dialect = MLIRDialect.MemRef; OpName = "memref.store"; Description = "Store to memref" }
-        { Dialect = MLIRDialect.MemRef; OpName = "memref.cast"; Description = "Cast memref type" }
-        { Dialect = MLIRDialect.MemRef; OpName = "memref.view"; Description = "Create view of memref" }
-        { Dialect = MLIRDialect.MemRef; OpName = "memref.subview"; Description = "Create subview" }
-    ]
-
-/// SCF (Structured Control Flow) dialect operations
-module SCFOps =
-    let operations = [
-        { Dialect = SCF; OpName = "scf.if"; Description = "If-then-else" }
-        { Dialect = SCF; OpName = "scf.for"; Description = "For loop" }
-        { Dialect = SCF; OpName = "scf.while"; Description = "While loop" }
-        { Dialect = SCF; OpName = "scf.condition"; Description = "While condition" }
-        { Dialect = SCF; OpName = "scf.yield"; Description = "Yield value" }
-    ]
-
-/// Get all operations for a dialect
-let getDialectOperations (dialect: MLIRDialect) : DialectOperation list =
-    match dialect with
-    | Standard -> StandardOps.operations
-    | Arith -> ArithOps.operations
-    | Func -> FuncOps.operations
-    | LLVM -> LLVMOps.operations
-    | MLIRDialect.MemRef -> MemRefOps.operations
-    | SCF -> SCFOps.operations
-    | MLIRDialect.Index -> []
-    | Affine -> []
-    | MLIRDialect.Builtin -> []
 
 /// Common MLIR type constructors
 module MLIRTypes =
@@ -243,6 +141,125 @@ module MLIRTypes =
     
     /// String type (alias for memref of i8)
     let string_ = memref i8
+
+/// Helper function to get type from MLIRValue
+let parseTypeFromMLIRValue (value: MLIRValue): MLIRType =
+    match value.Type with
+    | "i1" -> MLIRTypes.i1
+    | "i8" -> MLIRTypes.i8
+    | "i16" -> MLIRTypes.i16
+    | "i32" -> MLIRTypes.i32
+    | "i64" -> MLIRTypes.i64
+    | "f32" -> MLIRTypes.f32
+    | "f64" -> MLIRTypes.f64
+    | "void" -> MLIRTypes.void_
+    | _ -> MLIRTypes.i32  // Default fallback
+
+/// Helper to parse type string back to MLIRType (temporary until better type system integration)
+let parseTypeFromString (typeStr: string): MLIRType =
+    match typeStr with
+    | "i1" -> MLIRTypes.i1
+    | "i8" -> MLIRTypes.i8
+    | "i16" -> MLIRTypes.i16
+    | "i32" -> MLIRTypes.i32
+    | "i64" -> MLIRTypes.i64
+    | "f32" -> MLIRTypes.f32
+    | "f64" -> MLIRTypes.f64
+    | "void" -> MLIRTypes.void_
+    | _ -> MLIRTypes.i32  
+
+/// Standard MLIR dialect operations
+module StandardOps =
+    let operations = [
+        { Dialect = Standard; OpName = "std.constant"; Description = "Constant value operation" }
+        { Dialect = Standard; OpName = "std.return"; Description = "Return from function" }
+        { Dialect = Standard; OpName = "std.call"; Description = "Direct function call" }
+        { Dialect = Standard; OpName = "std.br"; Description = "Unconditional branch" }
+        { Dialect = Standard; OpName = "std.cond_br"; Description = "Conditional branch" }
+    ]
+
+/// Arithmetic dialect operations
+module ArithOps =
+    let operations = [
+        { Dialect = Arith; OpName = "arith.constant"; Description = "Arithmetic constant" }
+        { Dialect = Arith; OpName = "arith.addi"; Description = "Integer addition" }
+        { Dialect = Arith; OpName = "arith.subi"; Description = "Integer subtraction" }
+        { Dialect = Arith; OpName = "arith.muli"; Description = "Integer multiplication" }
+        { Dialect = Arith; OpName = "arith.divsi"; Description = "Signed integer division" }
+        { Dialect = Arith; OpName = "arith.remsi"; Description = "Signed integer remainder" }
+        { Dialect = Arith; OpName = "arith.cmpi"; Description = "Integer comparison" }
+        { Dialect = Arith; OpName = "arith.addf"; Description = "Float addition" }
+        { Dialect = Arith; OpName = "arith.subf"; Description = "Float subtraction" }
+        { Dialect = Arith; OpName = "arith.mulf"; Description = "Float multiplication" }
+        { Dialect = Arith; OpName = "arith.divf"; Description = "Float division" }
+        { Dialect = Arith; OpName = "arith.cmpf"; Description = "Float comparison" }
+    ]
+
+/// Function dialect operations
+module FuncOps =
+    let operations = [
+        { Dialect = Func; OpName = "func.func"; Description = "Function definition" }
+        { Dialect = Func; OpName = "func.return"; Description = "Return from function" }
+        { Dialect = Func; OpName = "func.call"; Description = "Function call" }
+        { Dialect = Func; OpName = "func.call_indirect"; Description = "Indirect function call" }
+    ]
+
+/// LLVM dialect operations
+module LLVMOps =
+    let operations = [
+        { Dialect = LLVM; OpName = "llvm.func"; Description = "LLVM function" }
+        { Dialect = LLVM; OpName = "llvm.return"; Description = "LLVM return" }
+        { Dialect = LLVM; OpName = "llvm.call"; Description = "LLVM call" }
+        { Dialect = LLVM; OpName = "llvm.alloca"; Description = "Stack allocation" }
+        { Dialect = LLVM; OpName = "llvm.load"; Description = "Load from memory" }
+        { Dialect = LLVM; OpName = "llvm.store"; Description = "Store to memory" }
+        { Dialect = LLVM; OpName = "llvm.getelementptr"; Description = "Get element pointer" }
+        { Dialect = LLVM; OpName = "llvm.bitcast"; Description = "Bitcast operation" }
+        { Dialect = LLVM; OpName = "llvm.mlir.constant"; Description = "LLVM constant" }
+        { Dialect = LLVM; OpName = "llvm.mlir.null"; Description = "Null pointer" }
+        { Dialect = LLVM; OpName = "llvm.mlir.undef"; Description = "Undefined value" }
+        { Dialect = LLVM; OpName = "llvm.mlir.addressof"; Description = "Address of global" }
+        { Dialect = LLVM; OpName = "llvm.ptr"; Description = "LLVM pointer type" }
+        { Dialect = LLVM; OpName = "llvm.void"; Description = "LLVM void type" }
+    ]
+
+/// MemRef dialect operations
+module MemRefOps =
+    let operations = [
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.alloc"; Description = "Allocate memory" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.alloca"; Description = "Stack allocate memory" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.dealloc"; Description = "Deallocate memory" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.load"; Description = "Load from memref" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.store"; Description = "Store to memref" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.cast"; Description = "Cast memref type" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.view"; Description = "Create view of memref" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.subview"; Description = "Create subview" }
+    ]
+
+/// SCF (Structured Control Flow) dialect operations
+module SCFOps =
+    let operations = [
+        { Dialect = SCF; OpName = "scf.if"; Description = "If-then-else" }
+        { Dialect = SCF; OpName = "scf.for"; Description = "For loop" }
+        { Dialect = SCF; OpName = "scf.while"; Description = "While loop" }
+        { Dialect = SCF; OpName = "scf.condition"; Description = "While condition" }
+        { Dialect = SCF; OpName = "scf.yield"; Description = "Yield value" }
+    ]
+
+/// Get all operations for a dialect
+let getDialectOperations (dialect: MLIRDialect) : DialectOperation list =
+    match dialect with
+    | Standard -> StandardOps.operations
+    | Arith -> ArithOps.operations
+    | Func -> FuncOps.operations
+    | LLVM -> LLVMOps.operations
+    | MLIRDialect.MemRef -> MemRefOps.operations
+    | SCF -> SCFOps.operations
+    | MLIRDialect.Index -> []
+    | Affine -> []
+    | MLIRDialect.Builtin -> []
+
+
 
 /// Convert MLIR type to string representation
 let rec mlirTypeToString (t: MLIRType) : string =

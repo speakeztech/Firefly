@@ -123,13 +123,6 @@ let pFullOperation () =
         Type = opType
     |}
 
-/// MLIR value representation
-type MLIRValue = {
-    SSA: string
-    Type: string
-    IsConstant: bool
-}
-
 /// MLIR instruction representation  
 type MLIRInstruction = {
     Results: string list
