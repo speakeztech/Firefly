@@ -2,7 +2,6 @@
 
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
-open Core.MLIRGeneration.TypeSystem
 open Core.MemoryLayout.LayoutAnalyzer
 
 /// Type mapping context preserving FCS information
