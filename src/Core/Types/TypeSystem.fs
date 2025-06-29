@@ -101,14 +101,14 @@ module LLVMOps =
 /// MemRef dialect operations
 module MemRefOps =
     let operations = [
-        { Dialect = MemRef; OpName = "memref.alloc"; Description = "Allocate memory" }
-        { Dialect = MemRef; OpName = "memref.alloca"; Description = "Stack allocate memory" }
-        { Dialect = MemRef; OpName = "memref.dealloc"; Description = "Deallocate memory" }
-        { Dialect = MemRef; OpName = "memref.load"; Description = "Load from memref" }
-        { Dialect = MemRef; OpName = "memref.store"; Description = "Store to memref" }
-        { Dialect = MemRef; OpName = "memref.cast"; Description = "Cast memref type" }
-        { Dialect = MemRef; OpName = "memref.view"; Description = "Create view of memref" }
-        { Dialect = MemRef; OpName = "memref.subview"; Description = "Create subview" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.alloc"; Description = "Allocate memory" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.alloca"; Description = "Stack allocate memory" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.dealloc"; Description = "Deallocate memory" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.load"; Description = "Load from memref" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.store"; Description = "Store to memref" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.cast"; Description = "Cast memref type" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.view"; Description = "Create view of memref" }
+        { Dialect = MLIRDialect.MemRef; OpName = "memref.subview"; Description = "Create subview" }
     ]
 
 /// SCF (Structured Control Flow) dialect operations
@@ -128,9 +128,11 @@ let getDialectOperations (dialect: MLIRDialect) : DialectOperation list =
     | Arith -> ArithOps.operations
     | Func -> FuncOps.operations
     | LLVM -> LLVMOps.operations
-    | MemRef -> MemRefOps.operations
+    | MLIRDialect.MemRef -> MemRefOps.operations
     | SCF -> SCFOps.operations
-    | _ -> []
+    | MLIRDialect.Index -> []
+    | Affine -> []
+    | MLIRDialect.Builtin -> []
 
 /// Common MLIR type constructors
 module MLIRTypes =
@@ -158,7 +160,7 @@ module MLIRTypes =
     let f64 = { void_ with Category = Float; BitWidth = Some 64 }
     
     /// Index type (architecture-dependent integer)
-    let index = { void_ with Category = Index }
+    let index = { void_ with Category = MLIRTypeCategory.Index }
     
     /// Create integer type with specified width
     let int (width: int) = { void_ with Category = Integer; BitWidth = Some width }
@@ -169,14 +171,14 @@ module MLIRTypes =
     /// Create memref type
     let memref (elementType: MLIRType) = {
         void_ with 
-            Category = MemRef
+            Category = MLIRTypeCategory.MemRef
             ElementType = Some elementType
     }
     
     /// Create shaped memref type
     let memrefWithShape (shape: int list) (elementType: MLIRType) = {
         void_ with 
-            Category = MemRef
+            Category = MLIRTypeCategory.MemRef
             ElementType = Some elementType
             Shape = Some shape
     }
@@ -219,6 +221,13 @@ module MLIRTypes =
             Fields = Some fields
     }
     
+    /// Create struct type without field names
+    let structNoNames (fieldTypes: MLIRType list) = {
+        void_ with 
+            Category = Struct
+            Fields = Some (fieldTypes |> List.mapi (fun i t -> sprintf "field%d" i, t))
+    }
+    
     /// String type (alias for memref of i8)
     let string_ = memref i8
 
@@ -234,8 +243,8 @@ let rec mlirTypeToString (t: MLIRType) : string =
         match t.BitWidth with
         | Some width -> sprintf "f%d" width
         | None -> "f32"  // Default float
-    | Index -> "index"
-    | MemRef ->
+    | MLIRTypeCategory.Index -> "index"
+    | MLIRTypeCategory.MemRef ->
         match t.ElementType, t.Shape with
         | Some elemType, Some shape ->
             let shapeStr = shape |> List.map string |> String.concat "x"
@@ -271,14 +280,15 @@ let rec mlirTypeToString (t: MLIRType) : string =
                 |> String.concat ", "
             sprintf "!llvm.struct<(%s)>" fieldStr
         | None -> "!llvm.struct<()>"
+    | MLIRTypeCategory.Builtin -> "builtin"
 
 /// Dialect-specific type conversions
 module DialectTypes =
     /// Convert to LLVM dialect type representation
     let toLLVMType (t: MLIRType) : string =
         match t.Category with
-        | MemRef when t.ElementType = Some MLIRTypes.i8 -> "!llvm.ptr"
-        | MemRef -> "!llvm.ptr"
+        | MLIRTypeCategory.MemRef when t.ElementType = Some MLIRTypes.i8 -> "!llvm.ptr"
+        | MLIRTypeCategory.MemRef -> "!llvm.ptr"
         | Void -> "!llvm.void"
         | Struct -> mlirTypeToString t  // Already in LLVM format
         | _ -> mlirTypeToString t
@@ -286,7 +296,7 @@ module DialectTypes =
     /// Check if type requires LLVM dialect
     let requiresLLVMDialect (t: MLIRType) : bool =
         match t.Category with
-        | MemRef -> true
+        | MLIRTypeCategory.MemRef -> true
         | Struct -> true
         | Void -> true
         | _ -> false
@@ -296,15 +306,81 @@ module TypeValidation =
     /// Check if type is valid for arithmetic operations
     let isArithmeticType (t: MLIRType) : bool =
         match t.Category with
-        | Integer | Float | Index -> true
+        | Integer | Float | MLIRTypeCategory.Index -> true
         | _ -> false
     
     /// Check if type is valid for comparison
     let isComparableType (t: MLIRType) : bool =
         match t.Category with
-        | Integer | Float | Index -> true
+        | Integer | Float | MLIRTypeCategory.Index -> true
         | _ -> false
     
     /// Check if types are compatible for operations
     let areCompatible (t1: MLIRType) (t2: MLIRType) : bool =
         t1.Category = t2.Category && t1.BitWidth = t2.BitWidth
+    
+    /// Get the result type for binary operations
+    let getBinaryOpResultType (op: string) (t1: MLIRType) (t2: MLIRType) : MLIRType option =
+        match op with
+        | "arith.addi" | "arith.subi" | "arith.muli" | "arith.divsi" | "arith.remsi" 
+            when t1.Category = Integer && areCompatible t1 t2 -> Some t1
+        | "arith.addf" | "arith.subf" | "arith.mulf" | "arith.divf"
+            when t1.Category = Float && areCompatible t1 t2 -> Some t1
+        | "arith.cmpi" when t1.Category = Integer && areCompatible t1 t2 -> Some MLIRTypes.i1
+        | "arith.cmpf" when t1.Category = Float && areCompatible t1 t2 -> Some MLIRTypes.i1
+        | _ -> None
+
+/// Type size and alignment calculations
+module TypeMetrics =
+    /// Get size of type in bytes
+    let rec sizeOf (t: MLIRType) : int =
+        match t.Category with
+        | Void -> 0
+        | Integer ->
+            match t.BitWidth with
+            | Some bits -> (bits + 7) / 8  // Round up to nearest byte
+            | None -> 4  // Default to 32-bit
+        | Float ->
+            match t.BitWidth with
+            | Some 16 -> 2
+            | Some 32 -> 4
+            | Some 64 -> 8
+            | _ -> 4  // Default to 32-bit
+        | MLIRTypeCategory.Index -> 8  // Assume 64-bit architecture
+        | MLIRTypeCategory.MemRef -> 8  // Pointer size
+        | Vector ->
+            match t.ElementType, t.Shape with
+            | Some elemType, Some [size] -> size * sizeOf elemType
+            | _ -> 8  // Default
+        | Struct ->
+            match t.Fields with
+            | Some fields ->
+                fields |> List.sumBy (fun (_, fieldType) -> sizeOf fieldType)
+            | None -> 0
+        | _ -> 8  // Default for unknown types
+    
+    /// Get alignment requirement in bytes
+    let rec alignmentOf (t: MLIRType) : int =
+        match t.Category with
+        | Void -> 1
+        | Integer ->
+            match t.BitWidth with
+            | Some bits when bits <= 8 -> 1
+            | Some bits when bits <= 16 -> 2
+            | Some bits when bits <= 32 -> 4
+            | _ -> 8
+        | Float ->
+            match t.BitWidth with
+            | Some 16 -> 2
+            | Some 32 -> 4
+            | Some 64 -> 8
+            | _ -> 4
+        | MLIRTypeCategory.Index -> 8
+        | MLIRTypeCategory.MemRef -> 8
+        | Vector -> alignmentOf (Option.defaultValue MLIRTypes.i32 t.ElementType)
+        | Struct ->
+            match t.Fields with
+            | Some fields when fields.Length > 0 ->
+                fields |> List.map (fun (_, ft) -> alignmentOf ft) |> List.max
+            | _ -> 1
+        | _ -> 8

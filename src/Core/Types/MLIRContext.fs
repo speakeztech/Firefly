@@ -2,6 +2,7 @@
 
 open System
 open System.Runtime.InteropServices
+open Core.Types.TypeSystem
 
 /// MLIR C API function imports
 [<DllImport("libMLIR-C.so", CallingConvention = CallingConvention.Cdecl)>]
@@ -43,9 +44,11 @@ let private dialectToString (dialect: MLIRDialect) : string =
     | LLVM -> "llvm"
     | Func -> "func"
     | Arith -> "arith"
-    | MemRef -> "memref"
+    | SCF -> "scf"
+    | MLIRDialect.MemRef -> "memref"
+    | MLIRDialect.Index -> "index"
     | Affine -> "affine"
-    | Vector -> "vector"
+    | MLIRDialect.Builtin -> "builtin"
 
 /// Registers a specific dialect with the MLIR context
 let private registerSingleDialect (contextHandle: nativeint) (dialect: MLIRDialect) : unit =
@@ -68,9 +71,9 @@ let createContext() : MLIRContext =
         LLVM
         Func
         Arith
-        MemRef
+        MLIRDialect.MemRef
         Affine
-        Vector
+        SCF
     ]
     
     // Explicitly load the dialects we need
@@ -112,7 +115,7 @@ let incrementModuleCount (context: MLIRContext) : MLIRContext =
 let validateContext (context: MLIRContext) : bool =
     context.IsInitialized && 
     context.ContextHandle <> 0n &&
-    not context.RegisteredDialects.IsEmpty
+    not (List.isEmpty context.RegisteredDialects)
 
 /// Creates an empty MLIR module in this context
 let createEmptyModule (context: MLIRContext) : nativeint =
@@ -152,7 +155,7 @@ let createContextWithDialects (dialects: MLIRDialect list) : MLIRContext =
 
 /// Verifies all required dialects are available for Firefly compilation
 let verifyFireflyDialects (context: MLIRContext) : bool =
-    let requiredForFirefly = [Standard; LLVM; Func; Arith; MemRef]
+    let requiredForFirefly = [Standard; LLVM; Func; Arith; MLIRDialect.MemRef]
     let requiredOps = [
         "func.func"
         "func.return"
@@ -180,3 +183,84 @@ let initializeMLIR() : MLIRContext =
         disposeContext context
         failwith "Failed to initialize required MLIR dialects for Firefly"
     context
+
+/// Gets a dialect-specific operation from the global registry
+let getDialectOperation (dialectOp: string) : DialectOperation option =
+    let parts = dialectOp.Split('.')
+    match parts with
+    | [|dialectStr; opName|] ->
+        // Map string back to dialect enum
+        let dialectOpt = 
+            match dialectStr with
+            | "std" -> Some Standard
+            | "llvm" -> Some LLVM
+            | "func" -> Some Func
+            | "arith" -> Some Arith
+            | "scf" -> Some SCF
+            | "memref" -> Some MLIRDialect.MemRef
+            | "index" -> Some MLIRDialect.Index
+            | "affine" -> Some Affine
+            | "builtin" -> Some MLIRDialect.Builtin
+            | _ -> None
+            
+        dialectOpt |> Option.bind (fun dialect ->
+            getDialectOperations dialect
+            |> List.tryFind (fun op -> op.OpName = dialectOp))
+    | _ -> None
+
+/// Ensures a specific operation is available in the context
+let ensureOperationAvailable (context: MLIRContext) (dialectOp: string) : MLIRContext =
+    match getDialectOperation dialectOp with
+    | Some op ->
+        if not (isDialectRegistered context op.Dialect) then
+            registerDialect context op.Dialect
+        else
+            context
+    | None -> 
+        failwithf "Unknown operation: %s" dialectOp
+
+/// Creates a diagnostic handler for MLIR errors
+type DiagnosticHandler = {
+    HandleError: string -> unit
+    HandleWarning: string -> unit
+    HandleNote: string -> unit
+}
+
+/// Default diagnostic handler that prints to console
+let defaultDiagnosticHandler = {
+    HandleError = fun msg -> eprintfn "MLIR Error: %s" msg
+    HandleWarning = fun msg -> printfn "MLIR Warning: %s" msg
+    HandleNote = fun msg -> printfn "MLIR Note: %s" msg
+}
+
+/// Module initialization check
+let isMLIRInitialized (context: MLIRContext) : bool =
+    context.IsInitialized && 
+    context.ContextHandle <> 0n
+
+/// Gets the context handle for low-level interop
+let getContextHandle (context: MLIRContext) : nativeint =
+    context.ContextHandle
+
+/// Creates a builder context for constructing MLIR modules
+type MLIRBuilder = {
+    Context: MLIRContext
+    CurrentModule: nativeint option
+    CurrentFunction: string option
+    SSACounter: int ref
+}
+
+/// Creates a new MLIR builder
+let createBuilder (context: MLIRContext) : MLIRBuilder = {
+    Context = context
+    CurrentModule = None
+    CurrentFunction = None
+    SSACounter = ref 0
+}
+
+/// Begins a new module in the builder
+let beginModule (builder: MLIRBuilder) : MLIRBuilder =
+    let moduleHandle = createEmptyModule builder.Context
+    { builder with 
+        CurrentModule = Some moduleHandle
+        Context = incrementModuleCount builder.Context }

@@ -31,12 +31,13 @@ let traverseExpr (order: TraversalOrder)
         // Helper to traverse a list of expressions
         let traverseList state exprs =
             exprs |> List.fold (fun (accState, accResults) expr ->
-                match traverse accState expr with
-                | newState, Continue result -> (newState, result :: accResults)
-                | newState, Skip result -> (newState, result :: accResults)
-                | newState, Stop result -> (newState, result :: accResults)
+                let newState, flow = traverse accState expr
+                match flow with
+                | Continue result -> (newState, result :: accResults)
+                | Skip result -> (newState, result :: accResults)
+                | Stop result -> (newState, result :: accResults)
             ) (state, [])
-            |> fun (s, results) -> s, List.rev results
+            |> fun (s, results) -> s, List.rev results |> List.map Continue
 
         // Helper to traverse optional expression
         let traverseOpt state = function
@@ -56,7 +57,7 @@ let traverseExpr (order: TraversalOrder)
         // Get children based on expression type
         let getChildren state =
             match expr with
-            | SynExpr.Paren(expr, _, _) ->
+            | SynExpr.Paren(expr, _, _, _) ->
                 let s, r = traverse state expr
                 s, [r]
                 
@@ -82,19 +83,28 @@ let traverseExpr (order: TraversalOrder)
                 let s, r = traverse state expr
                 s, [r]
                 
-            | SynExpr.ObjExpr(_, _, bindings, _, _, _) ->
-                let exprs = bindings |> List.map (fun (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) -> expr)
-                traverseList state exprs
+            | SynExpr.ObjExpr(_, argExprOpt, _, bindings, _, _, _, _) ->
+                let argExprs = 
+                    match argExprOpt with
+                    | Some argExpr -> [argExpr]
+                    | None -> []
+                let bindingExprs = bindings |> List.map (fun binding -> 
+                    match binding with
+                    | SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _) -> expr)
+                let s1, argResults = traverseList state argExprs
+                let s2, bindingResults = traverseList s1 bindingExprs
+                s2, argResults @ bindingResults
                 
             | SynExpr.While(_, whileExpr, doExpr, _) ->
                 let s1, r1 = traverse state whileExpr
                 let s2, r2 = traverse s1 doExpr
                 s2, [r1; r2]
                 
-            | SynExpr.For(_, _, _, _, _, toExpr, doExpr, _) ->
-                let s1, r1 = traverse state toExpr
-                let s2, r2 = traverse s1 doExpr
-                s2, [r1; r2]
+            | SynExpr.For(_, _, _, fromExpr, _, toExpr, doExpr, _) ->
+                let s1, r1 = traverse state fromExpr
+                let s2, r2 = traverse s1 toExpr
+                let s3, r3 = traverse s2 doExpr
+                s3, [r1; r2; r3]
                 
             | SynExpr.ForEach(_, _, _, _, _, enumExpr, bodyExpr, _) ->
                 let s1, r1 = traverse state enumExpr
@@ -107,14 +117,18 @@ let traverseExpr (order: TraversalOrder)
                 s2, [r1; r2]
                 
             | SynExpr.LetOrUse(_, _, bindings, bodyExpr, _, _) ->
-                let bindingExprs = bindings |> List.map (fun (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) -> expr)
+                let bindingExprs = bindings |> List.map (fun binding ->
+                    match binding with
+                    | SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _) -> expr)
                 let s1, bindingResults = traverseList state bindingExprs
                 let s2, bodyResult = traverse s1 bodyExpr
                 s2, bindingResults @ [bodyResult]
                 
             | SynExpr.TryWith(tryExpr, clauses, _, _, _, _) ->
                 let s1, r1 = traverse state tryExpr
-                let clauseExprs = clauses |> List.map (fun (SynMatchClause(_, _, expr, _, _, _)) -> expr)
+                let clauseExprs = clauses |> List.map (fun clause ->
+                    match clause with
+                    | SynMatchClause(_, _, expr, _, _, _) -> expr)
                 let s2, clauseResults = traverseList s1 clauseExprs
                 s2, r1 :: clauseResults
                 
@@ -191,14 +205,12 @@ let traverseExpr (order: TraversalOrder)
                 
             | SynExpr.DotIndexedGet(objectExpr, indexArgs, _, _) ->
                 let s1, r1 = traverse state objectExpr
-                let argExprs = indexArgs |> List.map (fun arg -> arg.Expr)
-                let s2, argResults = traverseList s1 argExprs
+                let s2, argResults = traverseList s1 indexArgs
                 s2, r1 :: argResults
                 
             | SynExpr.DotIndexedSet(objectExpr, indexArgs, valueExpr, _, _, _) ->
                 let s1, r1 = traverse state objectExpr
-                let argExprs = indexArgs |> List.map (fun arg -> arg.Expr)
-                let s2, argResults = traverseList s1 argExprs
+                let s2, argResults = traverseList s1 indexArgs
                 let s3, r3 = traverse s2 valueExpr
                 s3, r1 :: argResults @ [r3]
                 
@@ -214,26 +226,33 @@ let traverseExpr (order: TraversalOrder)
                 let s, r = traverse state expr
                 s, [r]
                 
-            | SynExpr.YieldOrReturn(_, expr, _) ->
+            | SynExpr.YieldOrReturn(_, expr, _, _) ->
                 let s, r = traverse state expr
                 s, [r]
                 
-            | SynExpr.YieldOrReturnFrom(_, expr, _) ->
+            | SynExpr.YieldOrReturnFrom(_, expr, _, _) ->
                 let s, r = traverse state expr
                 s, [r]
                 
-            | SynExpr.LetOrUseBang(_, _, _, _, _, rhsExpr, bodyExpr, _, _) ->
+            | SynExpr.LetOrUseBang(_, _, _, _, _, rhsExpr, andBangs, bodyExpr, _, _) ->
                 let s1, r1 = traverse state rhsExpr
-                let s2, r2 = traverse s1 bodyExpr
-                s2, [r1; r2]
+                // Process andBangs 
+                let andBangExprs = andBangs |> List.map (fun andBang ->
+                    match andBang with
+                    | SynExprAndBang(_, _, _, _, rhsExpr, _, _) -> rhsExpr)
+                let s2, andBangResults = traverseList s1 andBangExprs
+                let s3, bodyResult = traverse s2 bodyExpr
+                s3, r1 :: andBangResults @ [bodyResult]
                 
             | SynExpr.MatchBang(_, expr, clauses, _, _) ->
                 let s1, r1 = traverse state expr
-                let clauseExprs = clauses |> List.map (fun (SynMatchClause(_, _, expr, _, _, _)) -> expr)
+                let clauseExprs = clauses |> List.map (fun clause ->
+                    match clause with
+                    | SynMatchClause(_, _, expr, _, _, _) -> expr)
                 let s2, clauseResults = traverseList s1 clauseExprs
                 s2, r1 :: clauseResults
                 
-            | SynExpr.DoBang(expr, _) ->
+            | SynExpr.DoBang(expr, _, _) ->
                 let s, r = traverse state expr
                 s, [r]
                 
@@ -255,7 +274,53 @@ let traverseExpr (order: TraversalOrder)
             | SynExpr.FromParseError _
             | SynExpr.DiscardAfterMissingQualificationAfterDot _
             | SynExpr.Fixed _
-            | SynExpr.InterpolatedString _ ->
+            | SynExpr.InterpolatedString _
+            | SynExpr.DebugPoint _
+            | SynExpr.Dynamic _ ->
+                state, []
+                
+            // Other expressions
+            | SynExpr.AnonRecd(_, _, fields, _, _) ->
+                let exprs = fields |> List.map (fun (_, _, expr) -> expr)
+                traverseList state exprs
+                
+            | SynExpr.ComputationExpr(_, expr, _) ->
+                let s, r = traverse state expr
+                s, [r]
+                
+            | SynExpr.JoinIn(expr1, _, expr2, _) ->
+                let s1, r1 = traverse state expr1
+                let s2, r2 = traverse s1 expr2
+                s2, [r1; r2]
+                
+            | SynExpr.InferredUpcast(expr, _) ->
+                let s, r = traverse state expr
+                s, [r]
+                
+            | SynExpr.InferredDowncast(expr, _) ->
+                let s, r = traverse state expr
+                s, [r]
+                
+            | SynExpr.IndexRange(expr1Opt, _, expr2Opt, _, _, _) ->
+                let s1, results1 = 
+                    match expr1Opt with
+                    | Some e1 -> 
+                        let s, r = traverse state e1
+                        s, [r]
+                    | None -> state, []
+                let s2, results2 = 
+                    match expr2Opt with
+                    | Some e2 -> 
+                        let s, r = traverse s1 e2
+                        s, [r]
+                    | None -> s1, []
+                s2, results1 @ results2
+                
+            | SynExpr.IndexFromEnd(expr, _) ->
+                let s, r = traverse state expr
+                s, [r]
+                
+            | SynExpr.Typar _ ->
                 state, []
 
         // Execute traversal based on order
@@ -300,9 +365,10 @@ let rec traverseModuleDecl (order: TraversalOrder)
     match decl with
     | SynModuleDecl.Let(_, bindings, _) ->
         bindings |> List.fold (fun (accState, accResults) binding ->
-            let (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) = binding
-            let newState, result = traverseExpr order visitor combine accState expr
-            (newState, result :: accResults)
+            match binding with
+            | SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _) ->
+                let newState, result = traverseExpr order visitor combine accState expr
+                (newState, result :: accResults)
         ) (state, [])
         |> fun (s, results) -> s, List.rev results
         

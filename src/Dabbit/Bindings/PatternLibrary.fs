@@ -1,8 +1,8 @@
 module Dabbit.Bindings.PatternLibrary
 
 open FSharp.Compiler.Syntax
-open Core.MLIRGeneration.TypeSystem
-open Core.MLIRGeneration.Dialect
+open Dabbit.CodeGeneration.TypeMapping
+open Dabbit.CodeGeneration.MLIRDialect
 
 /// MLIR operation pattern for resolved symbols
 type MLIROperationPattern =
