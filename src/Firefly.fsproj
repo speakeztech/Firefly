@@ -16,47 +16,65 @@
   </PropertyGroup>
 
   <ItemGroup>
+      <!-- ===== CORE - Only primitives and pure functions ===== -->
+      
       <!-- Core Infrastructure -->
       <Compile Include="Core/Utilities/IntermediateWriter.fs" />
       <Compile Include="Core/Utilities/RemoveIntermediates.fs" />
       <Compile Include="Core/XParsec/Foundation.fs" />
       
-      <!-- MLIR Core Types -->
-      <Compile Include="Core/MLIRGeneration/Dialect.fs" />
-      <Compile Include="Core/MLIRGeneration/MLIRContext.fs" />
-      <Compile Include="Core/MLIRGeneration/TypeSystem.fs" />
+      <!-- Core Type System -->
+      <Compile Include="Core/Types/TypeSystem.fs" />        <!-- Contains MLIR types and dialects -->
+      <Compile Include="Core/Types/MLIRContext.fs" />       
       
-      <!-- Memory Layout (must come before TypeMapping) -->
+      <!-- Core AST -->
+      <Compile Include="Core/AST/Traversal.fs" />           <!-- Generic AST traversal engine -->
+      
+      <!-- Memory Layout -->
       <Compile Include="Core/MemoryLayout/LayoutAnalyzer.fs" />
+      <Compile Include="Core/MemoryLayout/UnionOptimizer.fs" />
       
-      <!-- Type Mapping (depends on LayoutAnalyzer) -->
-      <Compile Include="Core/MLIRGeneration/TypeMapping.fs" />
+      <!-- Pure FCS Processing -->
+      <Compile Include="Core/FCSProcessing/TypeExtractor.fs" />
+      <Compile Include="Core/FCSProcessing/DependencyResolver.fs" />
       
-      <!-- Pattern Library -->
+      <!-- ===== DABBIT - Orchestration and transformation ===== -->
+      
+      <!-- Bindings (Foundation for code generation) -->
       <Compile Include="Dabbit/Bindings/PatternLibrary.fs" />
       <Compile Include="Dabbit/Bindings/SymbolRegistry.fs" />
       <Compile Include="Dabbit/Bindings/BindingAttributes.fs" />
       
-      <!-- Analysis and Transformations -->
+      <!-- Analysis (Uses Core/AST/Traversal) -->
       <Compile Include="Dabbit/Analysis/DependencyGraphBuilder.fs" />
       <Compile Include="Dabbit/Analysis/ReachabilityAnalyzer.fs" />
       <Compile Include="Dabbit/Analysis/AstPruner.fs" />
+      
+      <!-- Transformations -->
       <Compile Include="Dabbit/Transformations/ClosureElimination.fs" />
       <Compile Include="Dabbit/Transformations/StackAllocation.fs" />
+      <Compile Include="Dabbit/Transformations/ASTTransformer.fs" />
       
-      <!-- FCS Processing Pipeline -->
-      <Compile Include="Core/FCSProcessing/TypeExtractor.fs" />
-      <Compile Include="Core/FCSProcessing/DependencyResolver.fs" />
-      <Compile Include="Core/FCSProcessing/ASTTransformer.fs" />
+      <!-- Code Generation (Refactored from single MLIRGenerator.fs) -->
+      <Compile Include="Dabbit/CodeGeneration/TypeMapping.fs" />           <!-- F# to MLIR types -->
+      <Compile Include="Dabbit/CodeGeneration/MLIREmitter.fs" />           <!-- Core builder monad -->
+      <Compile Include="Dabbit/CodeGeneration/MLIRBuiltins.fs" />          <!-- Built-in functions -->
+      <Compile Include="Dabbit/CodeGeneration/MLIROperatorGenerator.fs" /> <!-- Operator handling -->
+      <Compile Include="Dabbit/CodeGeneration/MLIRTypeOperations.fs" />    <!-- Type conversions -->
+      <Compile Include="Dabbit/CodeGeneration/MLIRControlFlow.fs" />       <!-- Control structures -->
+      <Compile Include="Dabbit/CodeGeneration/MLIRExpressionGenerator.fs" /><!-- Expression gen -->
+      <Compile Include="Dabbit/CodeGeneration/MLIRModuleGenerator.fs" />   <!-- Module/function gen -->
       
-      <!-- Direct MLIR Generation -->
-      <Compile Include="Core/MLIRGeneration/DirectGenerator.fs" />
+      <!-- Pipeline Orchestration -->
+      <Compile Include="Dabbit/Pipeline/FCSPipeline.fs" />
+      <Compile Include="Dabbit/Pipeline/LoweringPipeline.fs" />
+      <Compile Include="Dabbit/Pipeline/OptimizationPipeline.fs" />
       
-      <!-- Conversion Pipeline -->
-      <Compile Include="Core/Conversion/LoweringPipeline.fs" />
-      <Compile Include="Core/Conversion/OptimizationPipeline.fs" />
+      <!-- Integration -->
+      <Compile Include="Dabbit/Integration/AlloyBindings.fs" />
       
-      <!-- CLI -->
+      <!-- ===== CLI - Top level ===== -->
+      
       <Compile Include="CLI/Configurations/ProjectConfig.fs" />
       <Compile Include="CLI/Diagnostics/EnvironmentInfo.fs" />
       <Compile Include="CLI/Diagnostics/ToolchainVerification.fs" />
@@ -79,7 +97,6 @@
     <PackageReference Include="Fantomas.FCS" Version="6.2.3" />
 
     <!-- XParsec - Critical parser combinator library -->
-    <!-- NOTE: This is the heart of the Firefly architecture - NO SUBSTITUTIONS -->
     <PackageReference Include="XParsec" Version="0.1.0" />
     <PackageReference Include="Llvm.NET" Version="8.0.1" />
   </ItemGroup>
@@ -138,147 +155,3 @@
   </PropertyGroup>
 
 </Project>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -1,8 +1,7 @@
-﻿module Core.MLIRGeneration.MLIRContext
+﻿module Core.Types.MLIRContext
 
 open System
 open System.Runtime.InteropServices
-open Core.MLIRGeneration.Dialect
 
 /// MLIR C API function imports
 [<DllImport("libMLIR-C.so", CallingConvention = CallingConvention.Cdecl)>]
