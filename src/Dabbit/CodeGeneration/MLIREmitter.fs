@@ -3,6 +3,7 @@ module Dabbit.CodeGeneration.MLIREmitter
 open System.Text
 open Core.XParsec.Foundation
 open Core.Types.TypeSystem
+open Dabbit.Bindings.SymbolRegistry
 
 /// Critical error for undefined MLIR generation
 exception MLIRGenerationException of string * string option
@@ -17,7 +18,7 @@ and MLIRBuilderState = {
     SSACounter: int
     LocalVars: Map<string, (string * MLIRType)>  // SSA name and type
     TypeContext: TypeMapping.TypeContext
-    SymbolRegistry: Bindings.SymbolRegistry.SymbolRegistry
+    SymbolRegistry: SymbolRegistry
     RequiredExternals: Set<string>
     CurrentFunction: string option
     GeneratedFunctions: Set<string>
@@ -132,20 +133,16 @@ let emitAlloca (bufferSSA: string) (size: int) : MLIRBuilder<unit> =
         do! emitLine (sprintf "%s = memref.alloca() : memref<%dxi8>" bufferSSA size)
     }
 
-/// Resolve symbol using registry
-let resolveSymbol (name: string) : MLIRBuilder<Bindings.SymbolRegistry.ResolvedSymbol> =
+/// Resolve symbol using registry (placeholder implementation)
+let resolveSymbol (name: string) : MLIRBuilder<ResolvedSymbol> =
     mlir {
         let! state = getState
-        match Bindings.SymbolRegistry.Operations.resolveSymbolInRegistry name state.SymbolRegistry with
-        | Success (symbol, updatedRegistry) ->
-            do! updateState (fun s -> { s with SymbolRegistry = updatedRegistry })
-            return symbol
-        | CompilerFailure errors ->
-            return! failHard "Symbol Resolution" (sprintf "Failed to resolve symbol '%s'" name)
+        // TODO: Implement actual symbol resolution when SymbolRegistry module is complete
+        return! failHard "Symbol Resolution" (sprintf "Symbol resolution not yet implemented for '%s'" name)
     }
 
 /// Create initial state
-let createInitialState (typeCtx: TypeMapping.TypeContext) (symbolRegistry: Bindings.SymbolRegistry.SymbolRegistry) = {
+let createInitialState (typeCtx: TypeMapping.TypeContext) (symbolRegistry: SymbolRegistry) = {
     Output = StringBuilder()
     Indent = 1
     SSACounter = 0

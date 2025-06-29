@@ -1,41 +1,100 @@
 module Dabbit.CodeGeneration.MLIRBuiltins
 
 open Core.Types.TypeSystem
-open Core.XParsec.Foundation
-open MLIRSyntax
-open MLIREmitter
+open Dabbit.CodeGeneration.MLIREmitter
+open Dabbit.CodeGeneration.MLIRSyntax
 
-/// Built-in function registry using XParsec patterns
+/// Built-in function registry using MLIRBuilder patterns
 type BuiltinSignature = {
     Name: string
     ParameterTypes: MLIRType list
     ReturnType: MLIRType
-    Implementation: MLIRValue list -> MLIRCombinator<MLIRValue>
+    Implementation: MLIRValue list -> MLIRBuilder<MLIRValue>
 }
 
-/// Built-in function catalog using XParsec combinators
+/// Placeholder for missing build functions
+let buildFuncCall (result: string) (funcName: string) (args: string list) (signature: string) : string =
+    sprintf "%s = func.call @%s(%s) : %s" result funcName (String.concat ", " args) signature
+
+let buildArithOp (op: string) (result: string) (left: string) (right: string) (opInfo: string) : string =
+    sprintf "%s = arith.%s %s, %s : %s" result op left right opInfo
+
+let buildSelect (result: string) (condition: string) (trueVal: string) (falseVal: string) (typ: string) : string =
+    sprintf "%s = arith.select %s, %s, %s : %s" result condition trueVal falseVal typ
+
+let buildAlloca (result: string) (elemType: string) (count: string option) : string =
+    match count with
+    | Some c -> sprintf "%s = memref.alloca(%s) : memref<%s>" result c elemType
+    | None -> sprintf "%s = memref.alloca() : memref<%s>" result elemType
+
+let buildLoad (result: string) (source: string) (typ: string) : string =
+    sprintf "%s = memref.load %s : %s" result source typ
+
+let buildStore (value: string) (target: string) (typ: string) : string =
+    sprintf "memref.store %s, %s : %s" value target typ
+
+let buildGlobalConstant (name: string) (value: string) (typ: string) : string =
+    sprintf "llvm.mlir.global constant @%s(%s) : %s" name value typ
+
+/// Helper to create MLIR values
+let createValue (ssa: string) (typ: MLIRType) : MLIRValue = {
+    SSA = ssa
+    Type = match typ with
+           | Integer bits -> sprintf "i%d" bits
+           | Float bits -> sprintf "f%d" bits
+           | Pointer -> "!llvm.ptr"
+           | Void -> "void"
+    IsConstant = false
+}
+
+/// Placeholder Constants module
+module Constants =
+    let intConstant (value: int) (bits: int) : MLIRBuilder<MLIRValue> =
+        mlir {
+            let! ssa = nextSSA "const"
+            do! emitLine (sprintf "%s = arith.constant %d : i%d" ssa value bits)
+            return createValue ssa (Integer bits)
+        }
+    
+    let unitConstant : MLIRBuilder<MLIRValue> =
+        mlir {
+            return createValue "" Void
+        }
+
+/// Format type for MLIR output
+let formatType (typ: MLIRType) : string =
+    match typ with
+    | Integer bits -> sprintf "i%d" bits
+    | Float bits -> sprintf "f%d" bits
+    | Pointer -> "!llvm.ptr"
+    | Void -> "void"
+
+/// Emit comment helper
+let emitComment (comment: string) : MLIRBuilder<unit> =
+    emitLine (sprintf "// %s" comment)
+
+/// Built-in function catalog using MLIRBuilder combinators
 module Catalog =
     
-    /// String operations using XParsec combinators
-    let stringConcat (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    /// String operations using MLIRBuilder combinators
+    let stringConcat (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [left; right] ->
                 let! result = nextSSA "concat"
                 do! requireExternal "strcat"
                 
-                // Use XParsec to build the operation
                 let funcCallOp = buildFuncCall result "strcat" 
                                     [left.SSA; right.SSA] 
                                     "(!llvm.ptr, !llvm.ptr) -> !llvm.ptr"
                 
                 do! emitLine funcCallOp
-                return Core.createValue result MLIRTypes.string_
+                return createValue result Pointer
             | _ -> 
-                return! fail "string_concat" "Expected exactly 2 arguments"
+                return! failHard "string_concat" "Expected exactly 2 arguments"
         }
     
-    let stringLength (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let stringLength (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [str] ->
@@ -45,299 +104,137 @@ module Catalog =
                 let funcCallOp = buildFuncCall result "strlen" [str.SSA] "(!llvm.ptr) -> i32"
                 do! emitLine funcCallOp
                 
-                return Core.createValue result MLIRTypes.i32
+                return createValue result (Integer 32)
             | _ ->
-                return! fail "string_length" "Expected exactly 1 argument"
+                return! failHard "string_length" "Expected exactly 1 argument"
         }
     
-    /// Numeric operations using XParsec builders
-    let mathMin (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    /// Numeric operations using MLIRBuilder builders
+    let mathMin (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [left; right] ->
                 let! cmpResult = nextSSA "cmp"
                 let! minResult = nextSSA "min"
                 
-                // Build comparison operation
                 let cmpOp = buildArithOp "cmpi" cmpResult left.SSA right.SSA 
-                               (sprintf "slt, %s" (Core.formatType left.Type))
+                               (sprintf "slt, %s" (formatType (Integer 32)))
                 do! emitLine cmpOp
                 
-                // Build select operation
                 let selectOp = buildSelect minResult cmpResult left.SSA right.SSA 
-                                  (Core.formatType left.Type)
+                                  (formatType (Integer 32))
                 do! emitLine selectOp
                 
-                return Core.createValue minResult left.Type
+                return createValue minResult (Integer 32)
             | _ ->
-                return! fail "math_min" "Expected exactly 2 arguments"
+                return! failHard "math_min" "Expected exactly 2 arguments"
         }
     
-    let mathAbs (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let mathAbs (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [value] ->
                 let! zero = Constants.intConstant 0 32
-                let! cmpResult = nextSSA "is_neg"
-                let! negResult = nextSSA "neg"
+                let! cmpResult = nextSSA "cmp"
+                let! negResult = nextSSA "neg" 
                 let! absResult = nextSSA "abs"
                 
-                // Compare with zero
-                let cmpOp = buildArithOp "cmpi" cmpResult value.SSA zero.SSA 
-                               (sprintf "slt, %s" (Core.formatType value.Type))
+                let cmpOp = buildArithOp "cmpi" cmpResult value.SSA zero.SSA "slt, i32"
                 do! emitLine cmpOp
                 
-                // Negate value
-                let negOp = buildArithOp "subi" negResult zero.SSA value.SSA 
-                               (Core.formatType value.Type)
+                let negOp = buildArithOp "subi" negResult zero.SSA value.SSA "i32"
                 do! emitLine negOp
                 
-                // Select positive value
-                let selectOp = buildSelect absResult cmpResult negResult value.SSA 
-                                  (Core.formatType value.Type)
+                let selectOp = buildSelect absResult cmpResult negResult value.SSA "i32"
                 do! emitLine selectOp
                 
-                return Core.createValue absResult value.Type
+                return createValue absResult (Integer 32)
             | _ ->
-                return! fail "math_abs" "Expected exactly 1 argument"
+                return! failHard "math_abs" "Expected exactly 1 argument"
         }
     
-    /// Array operations using XParsec patterns
-    let arrayCreate (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    /// Memory operations
+    let memoryLoad (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [size; initValue] ->
-                let! arrayPtr = nextSSA "array"
-                
-                // Build memref allocation
-                let allocaOp = buildAlloca arrayPtr (Core.formatType initValue.Type) (Some size.SSA)
-                do! emitLine allocaOp
-                
-                // Initialize elements using scf.for loop
-                do! emitLine "// Array initialization loop"
-                let! idx = nextSSA "idx"
-                let! c0 = Constants.intConstant 0 32
-                let! c1 = Constants.intConstant 1 32
-                
-                // Build SCF for loop structure
-                do! emitLine (sprintf "scf.for %s = %s to %s step %s {" idx c0.SSA size.SSA c1.SSA)
-                do! emitLine (sprintf "  memref.store %s, %s[%s] : memref<?x%s>" 
-                    initValue.SSA arrayPtr idx (Core.formatType initValue.Type))
-                do! emitLine "}"
-                
-                return Core.createValue arrayPtr (MLIRTypes.memref initValue.Type)
-            | _ ->
-                return! fail "array_create" "Expected exactly 2 arguments (size, initial_value)"
-        }
-    
-    let arrayGet (args: MLIRValue list): MLIRCombinator<MLIRValue> =
-        mlir {
-            match args with
-            | [array; index] ->
-                let! result = nextSSA "elem"
-                
-                let loadOp = buildLoad result array.SSA [index.SSA]
+            | [ptr] ->
+                let! result = nextSSA "load"
+                let loadOp = buildLoad result ptr.SSA "!llvm.ptr"
                 do! emitLine loadOp
-                
-                // Extract element type from array type
-                let elemType = match array.Type with
-                               | MemRef et -> et
-                               | _ -> MLIRTypes.i32  // Default fallback
-                
-                return Core.createValue result elemType
+                return createValue result (Integer 32) // Simplified type
             | _ ->
-                return! fail "array_get" "Expected exactly 2 arguments (array, index)"
+                return! failHard "memory_load" "Expected exactly 1 argument"
         }
     
-    let arraySet (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let memoryStore (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [array; index; value] ->
-                let storeOp = buildStore value.SSA array.SSA [index.SSA]
+            | [value; ptr] ->
+                let storeOp = buildStore value.SSA ptr.SSA "!llvm.ptr"
                 do! emitLine storeOp
-                
                 return! Constants.unitConstant
             | _ ->
-                return! fail "array_set" "Expected exactly 3 arguments (array, index, value)"
+                return! failHard "memory_store" "Expected exactly 2 arguments"
         }
-
-/// Registry with XParsec-based implementations
-module Registry =
     
-    /// Helper to create array zero-initialization
-    let arrayZeroCreate (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    /// Type introspection (placeholder)
+    let getTypeInfo (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [size] ->
-                let! zero = Constants.intConstant 0 32
-                return! Catalog.arrayCreate [size; zero]
+            | [value] ->
+                // TODO: Implement proper type analysis when TypeAnalysis module exists
+                return! failHard "get_type_info" "Type analysis not yet implemented"
             | _ ->
-                return! fail "Array.zeroCreate" "Expected exactly 1 argument"
+                return! failHard "get_type_info" "Expected exactly 1 argument"
         }
     
-    /// All built-in functions with XParsec-based implementations
-    let builtinFunctions: Map<string, BuiltinSignature> = 
-        [
-            // String operations
-            ("concat", { 
-                Name = "concat"
-                ParameterTypes = [MLIRTypes.string_; MLIRTypes.string_]
-                ReturnType = MLIRTypes.string_
-                Implementation = Catalog.stringConcat
-            })
-            
-            ("length", { 
-                Name = "length"
-                ParameterTypes = [MLIRTypes.string_]
-                ReturnType = MLIRTypes.i32
-                Implementation = Catalog.stringLength
-            })
-            
-            // Math operations
-            ("min", { 
-                Name = "min"
-                ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
-                ReturnType = MLIRTypes.i32
-                Implementation = Catalog.mathMin
-            })
-            
-            ("abs", { 
-                Name = "abs"
-                ParameterTypes = [MLIRTypes.i32]
-                ReturnType = MLIRTypes.i32
-                Implementation = Catalog.mathAbs
-            })
-            
-            // Array operations
-            ("Array.create", { 
-                Name = "Array.create"
-                ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
-                ReturnType = MLIRTypes.memref MLIRTypes.i32
-                Implementation = Catalog.arrayCreate
-            })
-            
-            ("Array.zeroCreate", { 
-                Name = "Array.zeroCreate"
-                ParameterTypes = [MLIRTypes.i32]
-                ReturnType = MLIRTypes.memref MLIRTypes.i32
-                Implementation = arrayZeroCreate
-            })
-            
-            ("Array.get", { 
-                Name = "Array.get"
-                ParameterTypes = [MLIRTypes.memref MLIRTypes.i32; MLIRTypes.i32]
-                ReturnType = MLIRTypes.i32
-                Implementation = Catalog.arrayGet
-            })
-            
-            ("Array.set", { 
-                Name = "Array.set"
-                ParameterTypes = [MLIRTypes.memref MLIRTypes.i32; MLIRTypes.i32; MLIRTypes.i32]
-                ReturnType = MLIRTypes.void_
-                Implementation = Catalog.arraySet
-            })
-        ] 
-        |> Map.ofList
-    
-    /// Check if a function is a built-in
-    let isBuiltin (name: string): bool =
-        Map.containsKey name builtinFunctions
-    
-    /// Get built-in function signature
-    let getBuiltin (name: string): BuiltinSignature option =
-        Map.tryFind name builtinFunctions
-    
-    /// Generate call to built-in function using XParsec validation
-    let generateBuiltinCall (name: string) (args: MLIRValue list): MLIRCombinator<MLIRValue> =
-        mlir {
-            match getBuiltin name with
-            | Some signature ->
-                // Type check arguments
-                if args.Length <> signature.ParameterTypes.Length then
-                    return! fail "builtin_call" 
-                        (sprintf "Function '%s' expects %d arguments, got %d" 
-                         name signature.ParameterTypes.Length args.Length)
-                else
-                    // Validate argument types
-                    let typeMatches = 
-                        List.zip args signature.ParameterTypes
-                        |> List.forall (fun (arg, expectedType) -> 
-                            TypeAnalysis.canConvertTo arg.Type expectedType)
-                    
-                    if not typeMatches then
-                        return! fail "builtin_call" 
-                            (sprintf "Type mismatch in arguments for function '%s'" name)
-                    else
-                        return! signature.Implementation args
-            | None ->
-                return! fail "builtin_call" (sprintf "Unknown built-in function: %s" name)
-        }
-
-/// High-level operations using XParsec builders
-module Operations =
-    
-    /// Console I/O operations with proper MLIR syntax
-    let printInt (value: MLIRValue): MLIRCombinator<MLIRValue> =
+    /// IO operations using MLIRBuilder-validated operations
+    let printInt (value: MLIRValue): MLIRBuilder<MLIRValue> =
         mlir {
             do! requireExternal "printf"
             let! result = nextSSA "print"
             
-            // Get format string address
             let! fmtAddr = nextSSA "fmt_addr"
             do! emitLine (sprintf "%s = llvm.mlir.addressof @d_fmt : !llvm.ptr" fmtAddr)
             
-            // Build printf call
             let printOp = buildFuncCall result "printf" [fmtAddr; value.SSA] "(!llvm.ptr, i32) -> i32"
             do! emitLine printOp
             
             return! Constants.unitConstant
         }
     
-    let printString (value: MLIRValue): MLIRCombinator<MLIRValue> =
+    let printString (value: MLIRValue): MLIRBuilder<MLIRValue> =
         mlir {
             do! requireExternal "printf"
             let! result = nextSSA "print"
             
-            // Get format string address
             let! fmtAddr = nextSSA "fmt_addr"
             do! emitLine (sprintf "%s = llvm.mlir.addressof @s_fmt : !llvm.ptr" fmtAddr)
             
-            // Build printf call
             let printOp = buildFuncCall result "printf" [fmtAddr; value.SSA] "(!llvm.ptr, !llvm.ptr) -> i32"
             do! emitLine printOp
             
             return! Constants.unitConstant
         }
     
-    /// Memory management with XParsec-validated operations
-    let stackAlloc (elementType: MLIRType) (count: MLIRValue): MLIRCombinator<MLIRValue> =
+    /// Memory management with MLIRBuilder-validated operations
+    let stackAlloc (elementType: MLIRType) (count: MLIRValue): MLIRBuilder<MLIRValue> =
         mlir {
             let! ptr = nextSSA "stack_array"
             
-            let allocaOp = buildAlloca ptr (Core.formatType elementType) (Some count.SSA)
+            let allocaOp = buildAlloca ptr (formatType elementType) (Some count.SSA)
             do! emitLine allocaOp
-            do! Core.emitComment (sprintf "Stack allocated %s array" (Core.formatType elementType))
+            do! emitComment (sprintf "Stack allocated %s array" (formatType elementType))
             
-            return Core.createValue ptr (MLIRTypes.memref elementType)
+            return createValue ptr Pointer
         }
 
-/// Format string constants using XParsec builders
+/// Format string constants using MLIRBuilder builders
 module FormatStrings =
     
-    /// Helper to sequence a list of monadic operations
-    let rec sequenceM operations =
-        mlir {
-            match operations with
-            | [] -> return ()
-            | op :: rest ->
-                do! op
-                return! sequenceM rest
-        }
-    
     /// Emit format string globals with proper MLIR syntax
-    let emitFormatStrings: MLIRCombinator<unit> =
+    let emitFormatStrings: MLIRBuilder<unit> =
         mlir {
-            // Build global constants using XParsec combinators
             let globalDeclarations = [
                 buildGlobalConstant "d_fmt" "\"%d\\00\"" "!llvm.array<4 x i8>"
                 buildGlobalConstant "s_fmt" "\"%s\\00\"" "!llvm.array<4 x i8>"  
@@ -346,10 +243,10 @@ module FormatStrings =
                 buildGlobalConstant "newline_fmt" "\"\\n\\00\"" "!llvm.array<3 x i8>"
             ]
             
-            // Emit all global declarations
-            do! sequenceM (globalDeclarations |> List.map emitLine)
+            for decl in globalDeclarations do
+                do! emitLine decl
             
-            // Mark these as external symbols we depend on
             let externalSymbols = ["d_fmt"; "s_fmt"; "ld_fmt"; "f_fmt"; "newline_fmt"]
-            do! sequenceM (externalSymbols |> List.map requireExternal)
+            for symbol in externalSymbols do
+                do! requireExternal symbol
         }
