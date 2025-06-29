@@ -22,6 +22,10 @@ type OperatorSignature = {
     Generator: MLIRValue list -> MLIRCombinator<MLIRValue>
 }
 
+
+
+
+
 /// Arithmetic operators using Foundation combinators
 module Arithmetic =
     
@@ -256,10 +260,10 @@ module Bitwise =
                 let typeStr = Core.formatType value.Type
                 // XOR with all ones to flip all bits
                 let allOnes = match value.Type.Width with
-                            | Some 32 -> -1
-                            | Some 64 -> -1L |> int
-                            | Some 8 -> 255
-                            | _ -> -1
+                                | Some 32 -> -1
+                                | Some 64 -> -1L |> int
+                                | Some 8 -> 255
+                                | _ -> -1
                 let! onesConst = Constants.intConstant allOnes (value.Type.Width |> Option.defaultValue 32)
                 do! emitLine (sprintf "%s = arith.xori %s, %s : %s" result value.SSA onesConst.SSA typeStr)
                 return Core.createValue result value.Type
@@ -291,186 +295,69 @@ module Bitwise =
 /// Operator registry using XParsec patterns
 module Registry =
     
-    /// Complete operator registry with all F# operators
-    let operators: Map<string, OperatorSignature> = [
-        // Arithmetic operators
-        ("+", {
-            Symbol = "+"
-            Class = Arithmetic "addi"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i32
-            Generator = Arithmetic.intAdd
+    /// Helper to create operator signatures
+    let createOp symbol opClass inputTypes outputType generator =
+        (symbol, {
+            Symbol = symbol
+            Class = opClass
+            InputTypes = inputTypes
+            OutputType = outputType
+            Generator = generator
         })
-        ("-", {
-            Symbol = "-"
-            Class = Arithmetic "subi"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i32
-            Generator = Arithmetic.intSub
-        })
-        ("*", {
-            Symbol = "*"
-            Class = Arithmetic "muli"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i32
-            Generator = Arithmetic.intMul
-        })
-        ("/", {
-            Symbol = "/"
-            Class = Arithmetic "divsi"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i32
-            Generator = Arithmetic.intDiv
-        })
-        ("%", {
-            Symbol = "%"
-            Class = Arithmetic "remsi"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i32
-            Generator = Arithmetic.intMod
-        })
-        
-        // Float arithmetic
-        ("+.", {
-            Symbol = "+."
-            Class = Arithmetic "addf"
-            InputTypes = [MLIRTypes.f32; MLIRTypes.f32]
-            OutputType = MLIRTypes.f32
-            Generator = Arithmetic.floatAdd
-        })
-        ("-.", {
-            Symbol = "-."
-            Class = Arithmetic "subf"
-            InputTypes = [MLIRTypes.f32; MLIRTypes.f32]
-            OutputType = MLIRTypes.f32
-            Generator = Arithmetic.floatSub
-        })
-        ("*.", {
-            Symbol = "*."
-            Class = Arithmetic "mulf"
-            InputTypes = [MLIRTypes.f32; MLIRTypes.f32]
-            OutputType = MLIRTypes.f32
-            Generator = Arithmetic.floatMul
-        })
-        ("/.", {
-            Symbol = "/."
-            Class = Arithmetic "divf"
-            InputTypes = [MLIRTypes.f32; MLIRTypes.f32]
-            OutputType = MLIRTypes.f32
-            Generator = Arithmetic.floatDiv
-        })
-        
-        // Comparison operators
-        ("=", {
-            Symbol = "="
-            Class = Comparison "eq"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i1
-            Generator = Comparison.intEqual
-        })
-        ("<>", {
-            Symbol = "<>"
-            Class = Comparison "ne"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i1
-            Generator = Comparison.intNotEqual
-        })
-        ("<", {
-            Symbol = "<"
-            Class = Comparison "slt"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i1
-            Generator = Comparison.intLessThan
-        })
-        ("<=", {
-            Symbol = "<="
-            Class = Comparison "sle"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i1
-            Generator = Comparison.intLessEqual
-        })
-        (">", {
-            Symbol = ">"
-            Class = Comparison "sgt"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i1
-            Generator = Comparison.intGreaterThan
-        })
-        (">=", {
-            Symbol = ">="
-            Class = Comparison "sge"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i1
-            Generator = Comparison.intGreaterEqual
-        })
-        
-        // Logical operators
-        ("&&", {
-            Symbol = "&&"
-            Class = Logical "andi"
-            InputTypes = [MLIRTypes.i1; MLIRTypes.i1]
-            OutputType = MLIRTypes.i1
-            Generator = Logical.logicalAnd
-        })
-        ("||", {
-            Symbol = "||"
-            Class = Logical "ori"
-            InputTypes = [MLIRTypes.i1; MLIRTypes.i1]
-            OutputType = MLIRTypes.i1
-            Generator = Logical.logicalOr
-        })
-        ("not", {
-            Symbol = "not"
-            Class = Logical "xori"
-            InputTypes = [MLIRTypes.i1]
-            OutputType = MLIRTypes.i1
-            Generator = Logical.logicalNot
-        })
-        
-        // Bitwise operators
-        ("&&&", {
-            Symbol = "&&&"
-            Class = Bitwise "andi"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i32
-            Generator = Bitwise.bitwiseAnd
-        })
-        ("|||", {
-            Symbol = "|||"
-            Class = Bitwise "ori"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i32
-            Generator = Bitwise.bitwiseOr
-        })
-        ("^^^", {
-            Symbol = "^^^"
-            Class = Bitwise "xori"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i32
-            Generator = Bitwise.bitwiseXor
-        })
-        ("~~~", {
-            Symbol = "~~~"
-            Class = Bitwise "xori"
-            InputTypes = [MLIRTypes.i32]
-            OutputType = MLIRTypes.i32
-            Generator = Bitwise.bitwiseNot
-        })
-        ("<<<", {
-            Symbol = "<<<"
-            Class = Bitwise "shli"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i32
-            Generator = Bitwise.shiftLeft
-        })
-        (">>>", {
-            Symbol = ">>>"
-            Class = Bitwise "shrsi"
-            InputTypes = [MLIRTypes.i32; MLIRTypes.i32]
-            OutputType = MLIRTypes.i32
-            Generator = Bitwise.shiftRight
-        })
-    ] |> Map.ofList
+    
+    /// Arithmetic operators
+    let arithmeticOps = [
+        createOp "+" (Arithmetic "addi") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i32 Arithmetic.intAdd
+        createOp "-" (Arithmetic "subi") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i32 Arithmetic.intSub
+        createOp "*" (Arithmetic "muli") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i32 Arithmetic.intMul
+        createOp "/" (Arithmetic "divsi") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i32 Arithmetic.intDiv
+        createOp "%" (Arithmetic "remsi") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i32 Arithmetic.intMod
+    ]
+    
+    /// Float arithmetic operators
+    let floatArithmeticOps = [
+        createOp "+." (Arithmetic "addf") [MLIRTypes.f32; MLIRTypes.f32] MLIRTypes.f32 Arithmetic.floatAdd
+        createOp "-." (Arithmetic "subf") [MLIRTypes.f32; MLIRTypes.f32] MLIRTypes.f32 Arithmetic.floatSub
+        createOp "*." (Arithmetic "mulf") [MLIRTypes.f32; MLIRTypes.f32] MLIRTypes.f32 Arithmetic.floatMul
+        createOp "/." (Arithmetic "divf") [MLIRTypes.f32; MLIRTypes.f32] MLIRTypes.f32 Arithmetic.floatDiv
+    ]
+    
+    /// Comparison operators
+    let comparisonOps = [
+        createOp "=" (Comparison "eq") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i1 Comparison.intEqual
+        createOp "<>" (Comparison "ne") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i1 Comparison.intNotEqual
+        createOp "<" (Comparison "slt") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i1 Comparison.intLessThan
+        createOp "<=" (Comparison "sle") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i1 Comparison.intLessEqual
+        createOp ">" (Comparison "sgt") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i1 Comparison.intGreaterThan
+        createOp ">=" (Comparison "sge") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i1 Comparison.intGreaterEqual
+    ]
+    
+    /// Logical operators
+    let logicalOps = [
+        createOp "&&" (Logical "andi") [MLIRTypes.i1; MLIRTypes.i1] MLIRTypes.i1 Logical.logicalAnd
+        createOp "||" (Logical "ori") [MLIRTypes.i1; MLIRTypes.i1] MLIRTypes.i1 Logical.logicalOr
+        createOp "not" (Logical "xori") [MLIRTypes.i1] MLIRTypes.i1 Logical.logicalNot
+    ]
+    
+    /// Bitwise operators
+    let bitwiseOps = [
+        createOp "&&&" (Bitwise "andi") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i32 Bitwise.bitwiseAnd
+        createOp "|||" (Bitwise "ori") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i32 Bitwise.bitwiseOr
+        createOp "^^^" (Bitwise "xori") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i32 Bitwise.bitwiseXor
+        createOp "~~~" (Bitwise "xori") [MLIRTypes.i32] MLIRTypes.i32 Bitwise.bitwiseNot
+        createOp "<<<" (Bitwise "shli") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i32 Bitwise.shiftLeft
+        createOp ">>>" (Bitwise "shrsi") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i32 Bitwise.shiftRight
+    ]
+    
+    /// Complete operator registry combining all categories
+    let operators: Map<string, OperatorSignature> = 
+        List.concat [
+            arithmeticOps
+            floatArithmeticOps
+            comparisonOps
+            logicalOps
+            bitwiseOps
+        ] |> Map.ofList
     
     /// Check if an operator exists
     let hasOperator (symbol: string): bool =
@@ -495,70 +382,4 @@ module Registry =
                     return! op.Generator args
             | None ->
                 return! fail "operator_call" (sprintf "Unknown operator: %s" symbol)
-        }
-
-/// Higher-level operator patterns using Foundation
-module Patterns =
-    
-    /// Handle unary operator application
-    let unaryOp (symbol: string) (operand: MLIRValue): MLIRCombinator<MLIRValue> =
-        Registry.generateOperator symbol [operand]
-    
-    /// Handle binary operator application
-    let binaryOp (symbol: string) (left: MLIRValue) (right: MLIRValue): MLIRCombinator<MLIRValue> =
-        Registry.generateOperator symbol [left; right]
-    
-    /// Handle operator chaining (left-associative)
-    let chainLeft (symbol: string) (operands: MLIRValue list): MLIRCombinator<MLIRValue> =
-        mlir {
-            match operands with
-            | [] -> return! fail "chain_left" "No operands provided"
-            | [single] -> return single
-            | head :: tail ->
-                let! result = tail |> List.fold (fun acc next ->
-                    mlir {
-                        let! current = acc
-                        return! binaryOp symbol current next
-                    }) (lift head)
-                return result
-        }
-    
-    /// Handle conditional operator (ternary)
-    let conditional (condition: MLIRValue) (trueVal: MLIRValue) (falseVal: MLIRValue): MLIRCombinator<MLIRValue> =
-        mlir {
-            let! result = nextSSA "select"
-            let typeStr = Core.formatType trueVal.Type
-            do! emitLine (sprintf "%s = arith.select %s, %s, %s : %s" 
-                         result condition.SSA trueVal.SSA falseVal.SSA typeStr)
-            return Core.createValue result trueVal.Type
-        }
-    
-    /// Handle type conversion operators
-    let typeConvert (fromType: MLIRType) (toType: MLIRType) (value: MLIRValue): MLIRCombinator<MLIRValue> =
-        mlir {
-            if TypeAnalysis.areEqual fromType toType then
-                return value  // No conversion needed
-            else
-                let! result = nextSSA "convert"
-                let fromTypeStr = Core.formatType fromType
-                let toTypeStr = Core.formatType toType
-                
-                match fromType.Category, toType.Category with
-                | MLIRTypeCategory.Integer, MLIRTypeCategory.Integer ->
-                    // Integer width conversion
-                    do! emitLine (sprintf "%s = arith.extsi %s : %s to %s" result value.SSA fromTypeStr toTypeStr)
-                | MLIRTypeCategory.Integer, MLIRTypeCategory.Float ->
-                    // Int to float conversion
-                    do! emitLine (sprintf "%s = arith.sitofp %s : %s to %s" result value.SSA fromTypeStr toTypeStr)
-                | MLIRTypeCategory.Float, MLIRTypeCategory.Integer ->
-                    // Float to int conversion
-                    do! emitLine (sprintf "%s = arith.fptosi %s : %s to %s" result value.SSA fromTypeStr toTypeStr)
-                | MLIRTypeCategory.Float, MLIRTypeCategory.Float ->
-                    // Float precision conversion
-                    do! emitLine (sprintf "%s = arith.extf %s : %s to %s" result value.SSA fromTypeStr toTypeStr)
-                | _ ->
-                    return! fail "type_convert" 
-                        (sprintf "Unsupported conversion from %s to %s" fromTypeStr toTypeStr)
-                
-                return Core.createValue result toType
         }

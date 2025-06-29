@@ -7,6 +7,17 @@ open MLIREmitter
 /// Type mapping from F# SynType to MLIR using Foundation patterns
 module Mapping =
     
+    /// Monadic map for lists
+    let rec mapM (f: 'a -> MLIRCombinator<'b>) (list: 'a list): MLIRCombinator<'b list> =
+        mlir {
+            match list with
+            | [] -> return []
+            | head :: tail ->
+                let! mappedHead = f head
+                let! mappedTail = mapM f tail
+                return mappedHead :: mappedTail
+        }
+    
     /// Convert F# SynType to MLIR type using combinators
     let rec synTypeToMLIR (synType: SynType): MLIRCombinator<MLIRType> =
         mlir {
@@ -33,8 +44,9 @@ module Mapping =
             | SynType.Paren(innerType, _) ->
                 return! synTypeToMLIR innerType
                 
-            | SynType.Tuple(types, _) ->
-                let! mlirTypes = mapM synTypeToMLIR types
+            | SynType.Tuple(isStruct, types, _) ->
+                let componentTypes = types |> List.map snd  // Extract SynType from SynTupleTypeSegment
+                let! mlirTypes = mapM synTypeToMLIR componentTypes
                 return MLIRTypes.struct_ mlirTypes
                 
             | _ ->
@@ -111,8 +123,8 @@ module Mapping =
 /// Type conversion operations using Foundation combinators
 module Conversions =
     
-    /// Implicit type conversions (widening)
-    let implicitConvert (sourceType: MLIRType) (targetType: MLIRType) (value: MLIRValue): MLIRCombinator<MLIRValue> =
+    /// Forward declarations for mutual recursion
+    let rec implicitConvert (sourceType: MLIRType) (targetType: MLIRType) (value: MLIRValue): MLIRCombinator<MLIRValue> =
         mlir {
             if TypeAnalysis.areEqual sourceType targetType then
                 return value
@@ -213,6 +225,20 @@ module Conversions =
 /// Type checking and validation using Foundation patterns
 module Validation =
     
+    /// Lift a value into the MLIRCombinator monad
+    let lift value = mlir { return value }
+    
+    /// Monadic map for lists
+    let rec mapM (f: 'a -> MLIRCombinator<'b>) (list: 'a list): MLIRCombinator<'b list> =
+        mlir {
+            match list with
+            | [] -> return []
+            | head :: tail ->
+                let! mappedHead = f head
+                let! mappedTail = mapM f tail
+                return mappedHead :: mappedTail
+        }
+    
     /// Check if two types are compatible for operations
     let areCompatible (type1: MLIRType) (type2: MLIRType): bool =
         TypeAnalysis.areEqual type1 type2 || 
@@ -226,12 +252,14 @@ module Validation =
                 return! fail "function_call" 
                     (sprintf "Expected %d arguments, got %d" expectedParams.Length actualArgs.Length)
             else
-                let! convertedArgs = Utilities.mapM (fun (arg, expectedType) ->
+                let argTypePairs = List.zip actualArgs expectedParams
+                let convertArg (arg, expectedType) = mlir {
                     if TypeAnalysis.areEqual arg.Type expectedType then
-                        lift arg
+                        return arg
                     else
-                        Conversions.implicitConvert arg.Type expectedType arg
-                ) (List.zip actualArgs expectedParams)
+                        return! Conversions.implicitConvert arg.Type expectedType arg
+                }
+                let! convertedArgs = mapM convertArg argTypePairs
                 return convertedArgs
         }
     
@@ -247,7 +275,7 @@ module Validation =
                     (sprintf "Cannot assign %s to %s" 
                      (Core.formatType sourceValue.Type) (Core.formatType targetType))
         }
-
+    
 /// Discriminated union and pattern matching support
 module UnionTypes =
     

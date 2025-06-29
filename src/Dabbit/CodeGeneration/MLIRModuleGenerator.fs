@@ -1,5 +1,6 @@
 module Dabbit.CodeGeneration.MLIRModuleGenerator
 
+open System
 open System.Text
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
@@ -9,9 +10,23 @@ open MLIREmitter
 open MLIRBuiltins
 open MLIRExpressionGenerator
 open MLIRTypeOperations
+open MLIRControlFlow
+
+/// Utility functions
+let lift value = mlir { return value }
+
+let rec mapM (f: 'a -> MLIRCombinator<'b>) (list: 'a list): MLIRCombinator<'b list> =
+    mlir {
+        match list with
+        | [] -> return []
+        | head :: tail ->
+            let! mappedHead = f head
+            let! mappedTail = mapM f tail
+            return mappedHead :: mappedTail
+    }
 
 /// Module-level constructs using Foundation patterns
-module ModuleConstruction =
+module rec ModuleConstruction =
     
     /// Generate top-level module
     let generateModule (moduleName: string) (declarations: SynModuleDecl list): MLIRCombinator<unit> =
@@ -32,60 +47,60 @@ module ModuleConstruction =
         }
     
     /// Generate individual module declarations
-    and generateModuleDeclaration (decl: SynModuleDecl): MLIRCombinator<unit> =
+    let generateModuleDeclaration (decl: SynModuleDecl): MLIRCombinator<unit> =
         mlir {
             match decl with
             | SynModuleDecl.Let(_, bindings, _) ->
                 for binding in bindings do
-                    do! generateTopLevelBinding binding
+                    do! FunctionGeneration.generateTopLevelBinding binding
                     
-            | SynModuleDecl.DoExpr(_, expr, _) ->
-                do! generateDoExpression expr
+            | SynModuleDecl.Expr(_, expr, _) ->
+                do! DoExpressions.generateDoExpression expr
                 
             | SynModuleDecl.Types(typeDefs, _) ->
                 for typeDef in typeDefs do
-                    do! generateTypeDefinition typeDef
+                    do! TypeGeneration.generateTypeDefinition typeDef
                     
             | SynModuleDecl.Open(target, _) ->
-                do! generateOpenDeclaration target
+                do! NamespaceGeneration.generateOpenDeclaration target
                 
             | SynModuleDecl.ModuleAbbrev(ident, longIdent, _) ->
-                do! generateModuleAbbreviation ident longIdent
+                do! NamespaceGeneration.generateModuleAbbreviation ident longIdent
                 
-            | SynModuleDecl.NestedModule(SynComponentInfo(_, _, _, longIdent, _, _, _, _), _, nestedDecls, _, _, _) ->
+            | SynModuleDecl.NestedModule(componentInfo, _, nestedDecls, _, _, _) ->
+                let (SynComponentInfo(_, _, _, longIdent, _, _, _, _)) = componentInfo
                 let moduleName = longIdent |> List.map (fun id -> id.idText) |> String.concat "_"
-                do! generateNestedModule moduleName nestedDecls
+                do! NamespaceGeneration.generateNestedModule moduleName nestedDecls
                 
             | SynModuleDecl.Exception(exnDef, _) ->
-                do! generateExceptionDefinition exnDef
+                do! ExceptionGeneration.generateExceptionDefinition exnDef
                 
             | _ ->
                 do! Core.emitComment (sprintf "Unsupported module declaration: %A" decl)
         }
 
 /// Function definitions using Foundation combinators
-module FunctionGeneration =
+module rec FunctionGeneration =
     
     /// Generate top-level function binding
     let generateTopLevelBinding (binding: SynBinding): MLIRCombinator<unit> =
         mlir {
-            match binding with
-            | SynBinding(_, kind, _, _, _, _, valData, headPat, returnInfo, expr, _, _, _) ->
-                match headPat with
-                | SynPat.LongIdent(SynLongIdent([ident], _, _), _, _, argPats, _, _) ->
-                    // Function definition
-                    return! generateFunctionDefinition ident argPats returnInfo expr (kind = SynBindingKind.InlineBinding)
-                    
-                | SynPat.Named(SynIdent(ident, _), _, _, _) ->
-                    // Value binding
-                    return! generateValueBinding ident expr
-                    
-                | _ ->
-                    do! Core.emitComment "Complex pattern binding not fully supported"
+            let (SynBinding(_, kind, _, _, _, _, valData, headPat, returnInfo, expr, _, _, _)) = binding
+            match headPat with
+            | SynPat.LongIdent(SynLongIdent([ident], _, _), _, _, argPats, _, _) ->
+                // Function definition
+                return! generateFunctionDefinition ident argPats returnInfo expr (kind = SynBindingKind.Inline)
+                
+            | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+                // Value binding
+                return! generateValueBinding ident expr
+                
+            | _ ->
+                do! Core.emitComment "Complex pattern binding not fully supported"
         }
     
     /// Generate function definition with parameters
-    and generateFunctionDefinition (ident: Ident) (argPats: SynArgPats) (returnInfo: SynBindingReturnInfo option) 
+    let generateFunctionDefinition (ident: Ident) (argPats: SynArgPats) (returnInfo: SynBindingReturnInfo option) 
                                    (bodyExpr: SynExpr) (isInline: bool): MLIRCombinator<unit> =
         mlir {
             let funcName = ident.idText
@@ -101,10 +116,11 @@ module FunctionGeneration =
                 let! bodyResult = Core.generateExpression bodyExpr
                 
                 // Ensure return type compatibility
-                let! finalResult = if TypeAnalysis.areEqual bodyResult.Type returnType then
-                                      lift bodyResult
-                                   else
-                                      Conversions.implicitConvert bodyResult.Type returnType bodyResult
+                let! finalResult = 
+                    if TypeAnalysis.areEqual bodyResult.Type returnType then
+                        lift bodyResult
+                    else
+                        Conversions.implicitConvert bodyResult.Type returnType bodyResult
                 
                 do! Functions.return' (Some finalResult)
                 return ()
@@ -115,20 +131,21 @@ module FunctionGeneration =
         }
     
     /// Extract parameter information from argument patterns
-    and extractParameters (argPats: SynArgPats): MLIRCombinator<(string * MLIRType) list> =
+    let extractParameters (argPats: SynArgPats): MLIRCombinator<(string * MLIRType) list> =
         mlir {
             match argPats with
             | SynArgPats.Pats(patterns) ->
-                return! Utilities.mapM extractParameterFromPattern patterns
+                return! mapM extractParameterFromPattern patterns
                 
             | SynArgPats.NamePatPairs(pairs, _) ->
-                return! pairs |> Utilities.mapM (fun (ident, pat) ->
+                let extractPair (pair: SynIdent * _ * SynPat) =
+                    let (_, _, pat) = pair
                     extractParameterFromPattern pat
-                )
+                return! mapM extractPair pairs
         }
     
     /// Extract parameter from pattern
-    and extractParameterFromPattern (pattern: SynPat): MLIRCombinator<string * MLIRType> =
+    let extractParameterFromPattern (pattern: SynPat): MLIRCombinator<string * MLIRType> =
         mlir {
             match pattern with
             | SynPat.Named(SynIdent(ident, _), _, _, _) ->
@@ -147,7 +164,7 @@ module FunctionGeneration =
         }
     
     /// Determine function return type
-    and determineReturnType (returnInfo: SynBindingReturnInfo option) (bodyExpr: SynExpr): MLIRCombinator<MLIRType> =
+    let determineReturnType (returnInfo: SynBindingReturnInfo option) (bodyExpr: SynExpr): MLIRCombinator<MLIRType> =
         mlir {
             match returnInfo with
             | Some (SynBindingReturnInfo(synType, _, _)) ->
@@ -158,7 +175,7 @@ module FunctionGeneration =
         }
     
     /// Generate simple value binding
-    and generateValueBinding (ident: Ident) (expr: SynExpr): MLIRCombinator<unit> =
+    let generateValueBinding (ident: Ident) (expr: SynExpr): MLIRCombinator<unit> =
         mlir {
             let! value = Core.generateExpression expr
             
@@ -171,28 +188,28 @@ module FunctionGeneration =
         }
 
 /// Type definitions using Foundation patterns
-module TypeGeneration =
+module rec TypeGeneration =
     
     /// Generate type definition
     let generateTypeDefinition (typeDef: SynTypeDefn): MLIRCombinator<unit> =
         mlir {
-            match typeDef with
-            | SynTypeDefn(SynComponentInfo(_, _, _, longIdent, _, _, _, _), repr, _, _, _, _) ->
-                let typeName = longIdent |> List.map (fun id -> id.idText) |> String.concat "_"
+            let (SynTypeDefn(componentInfo, repr, _, _, _, _)) = typeDef
+            let (SynComponentInfo(_, _, _, longIdent, _, _, _, _)) = componentInfo
+            let typeName = longIdent |> List.map (fun id -> id.idText) |> String.concat "_"
+            
+            match repr with
+            | SynTypeDefnRepr.Simple(simpleRepr, _) ->
+                do! generateSimpleTypeRepr typeName simpleRepr
                 
-                match repr with
-                | SynTypeDefnRepr.Simple(simpleRepr, _) ->
-                    do! generateSimpleTypeRepr typeName simpleRepr
-                    
-                | SynTypeDefnRepr.ObjectModel(_, members, _) ->
-                    do! generateObjectModel typeName members
-                    
-                | _ ->
-                    do! Core.emitComment (sprintf "Unsupported type representation for %s" typeName)
+            | SynTypeDefnRepr.ObjectModel(_, members, _) ->
+                do! generateObjectModel typeName members
+                
+            | _ ->
+                do! Core.emitComment (sprintf "Unsupported type representation for %s" typeName)
         }
     
     /// Generate simple type representations
-    and generateSimpleTypeRepr (typeName: string) (simpleRepr: SynTypeDefnSimpleRepr): MLIRCombinator<unit> =
+    let generateSimpleTypeRepr (typeName: string) (simpleRepr: SynTypeDefnSimpleRepr): MLIRCombinator<unit> =
         mlir {
             match simpleRepr with
             | SynTypeDefnSimpleRepr.Record(_, fields, _) ->
@@ -209,81 +226,81 @@ module TypeGeneration =
         }
     
     /// Generate record type definition
-    and generateRecordType (typeName: string) (fields: SynField list): MLIRCombinator<unit> =
+    let generateRecordType (typeName: string) (fields: SynField list): MLIRCombinator<unit> =
         mlir {
             do! Core.emitComment (sprintf "Record type: %s" typeName)
             
-            let! fieldTypes = fields |> Utilities.mapM (fun field ->
-                match field with
-                | SynField(_, _, fieldIdOpt, fieldType, _, _, _, _) ->
-                    let fieldName = match fieldIdOpt with
-                                   | Some id -> id.idText
-                                   | None -> "anonymous"
-                    
-                    mlir {
-                        let! mlirType = Mapping.synTypeToMLIR fieldType
-                        return (fieldName, mlirType)
-                    }
-            )
+            let extractField (field: SynField) =
+                let (SynField(_, _, fieldIdOpt, fieldType, _, _, _, _, _)) = field
+                let fieldName = 
+                    match fieldIdOpt with
+                    | Some id -> id.idText
+                    | None -> "anonymous"
+                
+                mlir {
+                    let! mlirType = Mapping.synTypeToMLIR fieldType
+                    return (fieldName, mlirType)
+                }
+                
+            let! fieldTypes = mapM extractField fields
             
             let! structType = StructTypes.createStructType fieldTypes
             do! Core.emitComment (sprintf "Struct type %s: %s" typeName (Core.formatType structType))
         }
     
     /// Generate discriminated union type
-    and generateUnionType (typeName: string) (cases: SynUnionCase list): MLIRCombinator<unit> =
+    let generateUnionType (typeName: string) (cases: SynUnionCase list): MLIRCombinator<unit> =
         mlir {
             do! Core.emitComment (sprintf "Union type: %s" typeName)
             
-            let! caseTypes = cases |> Utilities.mapM (fun case ->
-                match case with
-                | SynUnionCase(_, SynIdent(ident, _), caseType, _, _, _) ->
-                    let caseName = ident.idText
-                    
-                    mlir {
-                        match caseType with
-                        | SynUnionCaseKind.Fields(fields) ->
-                            let! fieldTypes = fields |> Utilities.mapM (fun field ->
-                                match field with
-                                | SynField(_, _, _, fieldType, _, _, _, _) ->
-                                    Mapping.synTypeToMLIR fieldType
-                            )
-                            return (caseName, fieldTypes)
-                            
-                        | SynUnionCaseKind.FullType(synType, _) ->
-                            let! caseType = Mapping.synTypeToMLIR synType
-                            return (caseName, [caseType])
-                    }
-            )
+            let extractCase (case: SynUnionCase) =
+                let (SynUnionCase(_, SynIdent(ident, _), caseType, _, _, _, _)) = case
+                let caseName = ident.idText
+                
+                mlir {
+                    match caseType with
+                    | SynUnionCaseKind.Fields(fields) ->
+                        let extractFieldType (field: SynField) =
+                            let (SynField(_, _, _, fieldType, _, _, _, _, _)) = field
+                            Mapping.synTypeToMLIR fieldType
+                        let! fieldTypes = mapM extractFieldType fields
+                        return (caseName, fieldTypes)
+                        
+                    | SynUnionCaseKind.FullType(synType, _) ->
+                        let! caseType = Mapping.synTypeToMLIR synType
+                        return (caseName, [caseType])
+                }
+                
+            let! caseTypes = mapM extractCase cases
             
             let! unionType = UnionTypes.createUnionType caseTypes
             do! Core.emitComment (sprintf "Union type %s: %s" typeName (Core.formatType unionType))
         }
     
     /// Generate type alias
-    and generateTypeAlias (typeName: string) (synType: SynType): MLIRCombinator<unit> =
+    let generateTypeAlias (typeName: string) (synType: SynType): MLIRCombinator<unit> =
         mlir {
             let! mlirType = Mapping.synTypeToMLIR synType
             do! Core.emitComment (sprintf "Type alias %s = %s" typeName (Core.formatType mlirType))
         }
     
     /// Generate object model (classes, interfaces)
-    and generateObjectModel (typeName: string) (members: SynMemberDefn list): MLIRCombinator<unit> =
+    let generateObjectModel (typeName: string) (members: SynMemberDefn list): MLIRCombinator<unit> =
         mlir {
             do! Core.emitComment (sprintf "Object model for %s not fully supported" typeName)
             
-            for member in members do
-                do! generateMemberDefinition typeName member
+            for memberDef in members do
+                do! generateMemberDefinition typeName memberDef
         }
     
     /// Generate member definition
-    and generateMemberDefinition (typeName: string) (member: SynMemberDefn): MLIRCombinator<unit> =
+    let generateMemberDefinition (typeName: string) (memberDef: SynMemberDefn): MLIRCombinator<unit> =
         mlir {
-            match member with
+            match memberDef with
             | SynMemberDefn.Member(binding, _) ->
-                do! generateTopLevelBinding binding
+                do! FunctionGeneration.generateTopLevelBinding binding
                 
-            | SynMemberDefn.ImplicitCtor(_, _, ctorArgs, _, _) ->
+            | SynMemberDefn.ImplicitCtor(_, _, ctorArgs, _, _, _) ->
                 do! Core.emitComment (sprintf "Constructor for %s" typeName)
                 
             | _ ->
@@ -296,25 +313,25 @@ module ExceptionGeneration =
     /// Generate exception definition
     let generateExceptionDefinition (exnDef: SynExceptionDefn): MLIRCombinator<unit> =
         mlir {
-            match exnDef with
-            | SynExceptionDefn(SynExceptionDefnRepr(_, SynUnionCase(_, SynIdent(ident, _), caseType, _, _, _), _, _, _, _), _, _) ->
-                let exnName = ident.idText
-                do! Core.emitComment (sprintf "Exception definition: %s" exnName)
+            let (SynExceptionDefn(exnRepr, _, _)) = exnDef
+            let (SynExceptionDefnRepr(_, unionCase, _, _, _, _)) = exnRepr
+            let (SynUnionCase(_, SynIdent(ident, _), caseType, _, _, _, _)) = unionCase
+            let exnName = ident.idText
+            do! Core.emitComment (sprintf "Exception definition: %s" exnName)
+            
+            // Exceptions represented as tagged unions
+            match caseType with
+            | SynUnionCaseKind.Fields(fields) ->
+                let extractFieldType (field: SynField) =
+                    let (SynField(_, _, _, fieldType, _, _, _, _, _)) = field
+                    Mapping.synTypeToMLIR fieldType
+                let! fieldTypes = mapM extractFieldType fields
                 
-                // Exceptions represented as tagged unions
-                match caseType with
-                | SynUnionCaseKind.Fields(fields) ->
-                    let! fieldTypes = fields |> Utilities.mapM (fun field ->
-                        match field with
-                        | SynField(_, _, _, fieldType, _, _, _, _) ->
-                            Mapping.synTypeToMLIR fieldType
-                    )
-                    
-                    let! exnType = UnionTypes.createUnionType [(exnName, fieldTypes)]
-                    do! Core.emitComment (sprintf "Exception type: %s" (Core.formatType exnType))
-                    
-                | _ ->
-                    do! Core.emitComment "Simple exception (no data)"
+                let! exnType = UnionTypes.createUnionType [(exnName, fieldTypes)]
+                do! Core.emitComment (sprintf "Exception type: %s" (Core.formatType exnType))
+                
+            | _ ->
+                do! Core.emitComment "Simple exception (no data)"
         }
 
 /// Namespace and module organization
@@ -339,7 +356,7 @@ module NamespaceGeneration =
     /// Generate module abbreviation
     let generateModuleAbbreviation (ident: Ident) (longIdent: SynLongIdent): MLIRCombinator<unit> =
         mlir {
-            let SynLongIdent(ids, _, _) = longIdent
+            let (SynLongIdent(ids, _, _)) = longIdent
             let fullName = ids |> List.map (fun id -> id.idText) |> String.concat "."
             do! Core.emitComment (sprintf "Module abbreviation: %s = %s" ident.idText fullName)
         }
@@ -350,7 +367,7 @@ module NamespaceGeneration =
             do! Core.emitComment (sprintf "Nested module: %s" moduleName)
             
             for decl in declarations do
-                do! generateModuleDeclaration decl
+                do! ModuleConstruction.generateModuleDeclaration decl
         }
 
 /// Top-level do expressions
@@ -381,10 +398,11 @@ module EntryPoints =
                     let! result = Core.generateExpression expr
                     
                     // Ensure main returns i32
-                    let! exitCode = if TypeAnalysis.areEqual result.Type MLIRTypes.i32 then
-                                       lift result
-                                    else
-                                       Constants.intConstant 0 32
+                    let! exitCode = 
+                        if TypeAnalysis.areEqual result.Type MLIRTypes.i32 then
+                            lift result
+                        else
+                            Constants.intConstant 0 32
                     
                     do! Functions.return' (Some exitCode)
                     return ()
@@ -399,7 +417,7 @@ module EntryPoints =
         }
 
 /// Complete program generation orchestration
-module ProgramGeneration =
+module rec ProgramGeneration =
     
     /// Generate complete MLIR program from F# parsed input
     let generateProgram (programName: string) (parsedInputs: (string * ParsedInput) list): MLIRCombinator<string> =
@@ -425,26 +443,28 @@ module ProgramGeneration =
         }
     
     /// Process individual input file
-    and processInputFile (parsedInput: ParsedInput): MLIRCombinator<unit> =
+    let processInputFile (parsedInput: ParsedInput): MLIRCombinator<unit> =
         mlir {
             match parsedInput with
-            | ParsedInput.ImplFile(ParsedImplFileInput(fileName, _, _, _, _, modules, _)) ->
-                for SynModuleOrNamespace(longIdent, _, kind, declarations, _, _, _, _) in modules do
+            | ParsedInput.ImplFile(implFile) ->
+                let (ParsedImplFileInput(fileName, _, _, _, _, modules, _)) = implFile
+                for moduleOrNamespace in modules do
+                    let (SynModuleOrNamespace(longIdent, _, kind, declarations, _, _, _, _, _)) = moduleOrNamespace
                     let moduleName = longIdent |> List.map (fun id -> id.idText) |> String.concat "_"
                     
                     match kind with
                     | SynModuleOrNamespaceKind.NamedModule ->
-                        do! generateNestedModule moduleName declarations
+                        do! NamespaceGeneration.generateNestedModule moduleName declarations
                     | SynModuleOrNamespaceKind.AnonModule ->
                         for decl in declarations do
-                            do! generateModuleDeclaration decl
+                            do! ModuleConstruction.generateModuleDeclaration decl
                     | SynModuleOrNamespaceKind.DeclaredNamespace ->
                         do! Core.emitComment (sprintf "Namespace: %s" moduleName)
                         for decl in declarations do
-                            do! generateModuleDeclaration decl
+                            do! ModuleConstruction.generateModuleDeclaration decl
                     | SynModuleOrNamespaceKind.GlobalNamespace ->
                         for decl in declarations do
-                            do! generateModuleDeclaration decl
+                            do! ModuleConstruction.generateModuleDeclaration decl
                             
             | ParsedInput.SigFile(_) ->
                 do! Core.emitComment "Signature files not processed in code generation"
@@ -463,18 +483,19 @@ module Utilities =
         let combinator = ProgramGeneration.generateProgram programName parsedInputs
         
         match runMLIRCombinator combinator initialState with
-        | Success(_, output) -> Ok output
-        | CompilerFailure errors -> Error (errors |> List.map string)
+        | Success(output, state) -> Ok output
+        | Failure errors -> Error (errors |> List.map (fun e -> e.ToString()))
     
     /// Validate generated MLIR (basic syntax check)
     let validateMLIR (mlirCode: string): Result<unit, string list> =
         // Basic validation - check for balanced braces
-        let braceBalance = mlirCode.ToCharArray()
-                          |> Array.fold (fun acc c ->
-                              match c with
-                              | '{' -> acc + 1
-                              | '}' -> acc - 1
-                              | _ -> acc) 0
+        let braceBalance = 
+            mlirCode.ToCharArray()
+            |> Array.fold (fun acc c ->
+                match c with
+                | '{' -> acc + 1
+                | '}' -> acc - 1
+                | _ -> acc) 0
         
         if braceBalance = 0 then
             Ok ()

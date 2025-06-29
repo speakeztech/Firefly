@@ -258,8 +258,8 @@ let rec mlirTypeToString (t: MLIRType) : string =
         | _ -> "vector<?x?>"
     | Function ->
         match t.ParameterTypes, t.ReturnType with
-        | Some params, Some ret ->
-            let paramStr = params |> List.map mlirTypeToString |> String.concat ", "
+        | Some parameters, Some ret ->
+            let paramStr = parameters |> List.map mlirTypeToString |> String.concat ", "
             sprintf "(%s) -> %s" paramStr (mlirTypeToString ret)
         | _ -> "(?) -> ?"
     | Struct ->

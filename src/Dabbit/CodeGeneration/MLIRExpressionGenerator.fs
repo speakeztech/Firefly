@@ -9,11 +9,30 @@ open MLIROperatorGenerator
 open MLIRTypeOperations
 open MLIRControlFlow
 
-/// Main expression generation using Foundation combinators
-module Core =
+/// Utility functions
+let lift value = mlir { return value }
+
+let rec mapM (f: 'a -> MLIRCombinator<'b>) (list: 'a list): MLIRCombinator<'b list> =
+    mlir {
+        match list with
+        | [] -> return []
+        | head :: tail ->
+            let! mappedHead = f head
+            let! mappedTail = mapM f tail
+            return mappedHead :: mappedTail
+    }
+
+let (|>>) (m: MLIRCombinator<'a>) (f: 'a -> 'b): MLIRCombinator<'b> =
+    mlir {
+        let! value = m
+        return f value
+    }
+
+/// Core expression generation functions
+module rec Core =
     
     /// Generate MLIR for any F# expression
-    let rec generateExpression (expr: SynExpr): MLIRCombinator<MLIRValue> =
+    let generateExpression (expr: SynExpr): MLIRCombinator<MLIRValue> =
         mlir {
             match expr with
             | SynExpr.Const(constant, _) ->
@@ -27,71 +46,68 @@ module Core =
                 return! generateQualifiedIdentifier qualifiedName
                 
             | SynExpr.App(_, _, funcExpr, argExpr, _) ->
-                return! generateApplication funcExpr argExpr
+                return! Applications.generateApplication funcExpr argExpr
                 
             | SynExpr.Paren(innerExpr, _, _, _) ->
                 return! generateExpression innerExpr
                 
             | SynExpr.Tuple(_, exprs, _, _) ->
-                return! generateTuple exprs
+                return! Construction.generateTuple exprs
                 
             | SynExpr.ArrayOrList(_, exprs, _) ->
-                return! generateArray exprs
+                return! Construction.generateArray exprs
                 
             | SynExpr.Record(_, _, fields, _) ->
-                return! generateRecord fields
+                return! Construction.generateRecord fields
                 
             | SynExpr.AnonRecd(_, _, fields, _) ->
-                return! generateAnonymousRecord fields
+                return! Construction.generateAnonymousRecord fields
                 
             | SynExpr.Sequential(_, _, expr1, expr2, _) ->
                 return! Sequences.sequential (generateExpression expr1) (generateExpression expr2)
                 
             | SynExpr.IfThenElse(condExpr, thenExpr, elseExprOpt, _, _, _, _) ->
-                return! generateIfThenElse condExpr thenExpr elseExprOpt
+                return! ControlFlow.generateIfThenElse condExpr thenExpr elseExprOpt
                 
             | SynExpr.Match(_, expr, clauses, _) ->
-                return! generateMatch expr clauses
+                return! ControlFlow.generateMatch expr clauses
                 
-            | SynExpr.For(_, ident, startExpr, _, endExpr, bodyExpr, _) ->
-                return! generateFor ident startExpr endExpr bodyExpr
+            | SynExpr.For(_, _, ident, startExpr, _, endExpr, bodyExpr, _) ->
+                return! ControlFlow.generateFor ident startExpr endExpr bodyExpr
                 
             | SynExpr.ForEach(_, _, _, _, _, expr, bodyExpr, _) ->
-                return! generateForEach expr bodyExpr
+                return! ControlFlow.generateForEach expr bodyExpr
                 
-            | SynExpr.While(_, condExpr, bodyExpr, _) ->
-                return! generateWhile condExpr bodyExpr
+            | SynExpr.While(_, whileExpr, doExpr, _) ->
+                return! ControlFlow.generateWhile whileExpr doExpr
                 
-            | SynExpr.TryWith(tryExpr, _, withCases, _, _, _, _) ->
-                return! generateTryWith tryExpr withCases
+            | SynExpr.TryWith(tryExpr, clauses, _, _, _, _) ->
+                return! ExceptionHandling.generateTryWith tryExpr clauses
                 
-            | SynExpr.TryFinally(tryExpr, finallyExpr, _, _, _) ->
-                return! generateTryFinally tryExpr finallyExpr
+            | SynExpr.TryFinally(tryExpr, finallyExpr, _, _, _, _) ->
+                return! ExceptionHandling.generateTryFinally tryExpr finallyExpr
                 
             | SynExpr.Lambda(_, _, args, bodyExpr, _, _, _) ->
-                return! generateLambda args bodyExpr
-                
-            | SynExpr.Let(_, bindings, bodyExpr, _, _) ->
-                return! generateLet bindings bodyExpr
+                return! Lambdas.generateLambda args bodyExpr
                 
             | SynExpr.LetOrUse(_, _, bindings, bodyExpr, _, _) ->
-                return! generateLet bindings bodyExpr
+                return! LetBindings.generateLet bindings bodyExpr
                 
             | SynExpr.DotGet(expr, _, SynLongIdent(ids, _, _), _) ->
-                return! generateFieldAccess expr ids
+                return! FieldAccess.generateFieldAccess expr ids
                 
             | SynExpr.DotSet(expr, SynLongIdent(ids, _, _), valueExpr, _) ->
-                return! generateFieldSet expr ids valueExpr
+                return! FieldAccess.generateFieldSet expr ids valueExpr
                 
             | SynExpr.New(_, typeName, argExpr, _) ->
-                return! generateNew typeName argExpr
+                return! ObjectConstruction.generateNew typeName argExpr
                 
             | _ ->
                 return! fail "expression_generation" (sprintf "Unsupported expression type: %A" expr)
         }
     
     /// Generate constant expressions
-    and generateConstant (constant: SynConst): MLIRCombinator<MLIRValue> =
+    let generateConstant (constant: SynConst): MLIRCombinator<MLIRValue> =
         mlir {
             match constant with
             | SynConst.Int32 n -> return! Constants.intConstant n 32
@@ -112,13 +128,13 @@ module Core =
         }
     
     /// Generate identifier lookup
-    and generateIdentifier (ident: Ident): MLIRCombinator<MLIRValue> =
+    let generateIdentifier (ident: Ident): MLIRCombinator<MLIRValue> =
         mlir {
             // Check if it's a built-in function first
             if Registry.isBuiltin ident.idText then
                 // Return function reference - simplified for now
                 let! funcRef = nextSSA (sprintf "%s_ref" ident.idText)
-                return Core.createValue funcRef (MLIRTypes.func [] MLIRTypes.void_)
+                return createValue funcRef (MLIRTypes.func [] MLIRTypes.void_)
             else
                 // Check local variables
                 let! maybeLocal = lookupLocal ident.idText
@@ -126,24 +142,24 @@ module Core =
                 | Some (ssa, typeStr) ->
                     // Parse type string back to MLIRType (simplified)
                     let mlirType = parseTypeString typeStr
-                    return Core.createValue ssa mlirType
+                    return createValue ssa mlirType
                 | None ->
                     return! fail "identifier_lookup" (sprintf "Unbound identifier '%s'" ident.idText)
         }
     
     /// Generate qualified identifier lookup
-    and generateQualifiedIdentifier (qualifiedName: string): MLIRCombinator<MLIRValue> =
+    let generateQualifiedIdentifier (qualifiedName: string): MLIRCombinator<MLIRValue> =
         mlir {
             // Check if it's a built-in function
             if Registry.isBuiltin qualifiedName then
                 let! funcRef = nextSSA (sprintf "%s_ref" (qualifiedName.Replace(".", "_")))
-                return Core.createValue funcRef (MLIRTypes.func [] MLIRTypes.void_)
+                return createValue funcRef (MLIRTypes.func [] MLIRTypes.void_)
             else
                 return! fail "qualified_identifier" (sprintf "Unknown qualified identifier: %s" qualifiedName)
         }
     
     /// Helper to parse type strings back to MLIRType
-    and parseTypeString (typeStr: string): MLIRType =
+    let parseTypeString (typeStr: string): MLIRType =
         match typeStr with
         | "i32" -> MLIRTypes.i32
         | "i64" -> MLIRTypes.i64
@@ -155,9 +171,14 @@ module Core =
         | "void" -> MLIRTypes.void_
         | _ when typeStr.StartsWith("memref") -> MLIRTypes.string_  // Simplified
         | _ -> MLIRTypes.i32  // Default fallback
+    
+    /// Helper functions from Core module
+    let createValue ssa mlirType = { SSA = ssa; Type = mlirType }
+    let ssaOf (value: MLIRValue) = value.SSA
+    let typeOf (value: MLIRValue) = value.Type
 
 /// Function application and calls
-module Applications =
+module rec Applications =
     
     /// Generate function application
     let generateApplication (funcExpr: SynExpr) (argExpr: SynExpr): MLIRCombinator<MLIRValue> =
@@ -189,7 +210,7 @@ module Applications =
         }
     
     /// Collect arguments from curried application
-    and collectApplicationArgs (expr: SynExpr) (accArgs: SynExpr list): MLIRCombinator<SynExpr list> =
+    let collectApplicationArgs (expr: SynExpr) (accArgs: SynExpr list): MLIRCombinator<SynExpr list> =
         mlir {
             match expr with
             | SynExpr.App(_, _, funcExpr, argExpr, _) ->
@@ -199,10 +220,10 @@ module Applications =
         }
     
     /// Generate curried function call
-    and generateCurriedCall (funcExpr: SynExpr) (argExprs: SynExpr list): MLIRCombinator<MLIRValue> =
+    let generateCurriedCall (funcExpr: SynExpr) (argExprs: SynExpr list): MLIRCombinator<MLIRValue> =
         mlir {
             let! func = Core.generateExpression funcExpr
-            let! args = Utilities.mapM Core.generateExpression argExprs
+            let! args = mapM Core.generateExpression argExprs
             
             match funcExpr with
             | SynExpr.Ident(ident) ->
@@ -212,7 +233,7 @@ module Applications =
         }
     
     /// Generate regular function call
-    and generateFunctionCall (funcName: string) (argExpr: SynExpr): MLIRCombinator<MLIRValue> =
+    let generateFunctionCall (funcName: string) (argExpr: SynExpr): MLIRCombinator<MLIRValue> =
         mlir {
             let! arg = Core.generateExpression argExpr
             return! Functions.call funcName [arg] MLIRTypes.void_  // TODO: Look up actual return type
@@ -254,7 +275,8 @@ module Construction =
     /// Generate tuple construction
     let generateTuple (exprs: SynExpr list): MLIRCombinator<MLIRValue> =
         mlir {
-            let! values = Utilities.mapM Core.generateExpression exprs
+            let componentExprs = exprs |> List.map snd  // Extract expressions from SynTupleExpr
+            let! values = mapM Core.generateExpression componentExprs
             let types = values |> List.map Core.typeOf
             let tupleType = MLIRTypes.struct_ types
             
@@ -264,7 +286,7 @@ module Construction =
     /// Generate array construction
     let generateArray (exprs: SynExpr list): MLIRCombinator<MLIRValue> =
         mlir {
-            let! values = Utilities.mapM Core.generateExpression exprs
+            let! values = mapM Core.generateExpression exprs
             
             match values with
             | [] ->
@@ -287,13 +309,16 @@ module Construction =
         }
     
     /// Generate record construction
-    let generateRecord (fields: (RecordFieldName * SynExpr option * BlockSeparator option) list): MLIRCombinator<MLIRValue> =
+    let generateRecord (fields: SynExprRecordField list): MLIRCombinator<MLIRValue> =
         mlir {
-            let! fieldValues = fields |> Utilities.mapM (fun (_, exprOpt, _) ->
-                match exprOpt with
-                | Some expr -> Core.generateExpression expr
-                | None -> fail "record_field" "Missing field value"
-            )
+            let extractField (field: SynExprRecordField) =
+                match field with
+                | SynExprRecordField(fieldName, _, exprOpt, _) ->
+                    match exprOpt with
+                    | Some expr -> Core.generateExpression expr
+                    | None -> fail "record_field" "Missing field value"
+                    
+            let! fieldValues = mapM extractField fields
             
             let fieldTypes = fieldValues |> List.map Core.typeOf
             let recordType = MLIRTypes.struct_ fieldTypes
@@ -304,9 +329,7 @@ module Construction =
     /// Generate anonymous record construction
     let generateAnonymousRecord (fields: (Ident * SynExpr) list): MLIRCombinator<MLIRValue> =
         mlir {
-            let! fieldValues = fields |> Utilities.mapM (fun (_, expr) ->
-                Core.generateExpression expr
-            )
+            let! fieldValues = mapM (fun (_, expr) -> Core.generateExpression expr) fields
             
             let fieldTypes = fieldValues |> List.map Core.typeOf
             let recordType = MLIRTypes.struct_ fieldTypes
@@ -322,9 +345,10 @@ module ControlFlow =
         mlir {
             let! condition = Core.generateExpression condExpr
             let thenBody = Core.generateExpression thenExpr
-            let elseBody = match elseExprOpt with
-                          | Some expr -> Core.generateExpression expr |>> Some
-                          | None -> lift None
+            let elseBody = 
+                match elseExprOpt with
+                | Some expr -> Core.generateExpression expr |>> Some
+                | None -> lift None
             
             return! Conditionals.ifThenElse condition thenBody elseBody
         }
@@ -333,12 +357,13 @@ module ControlFlow =
     let generateMatch (expr: SynExpr) (clauses: SynMatchClause list): MLIRCombinator<MLIRValue> =
         mlir {
             let! scrutinee = Core.generateExpression expr
-            let cases = clauses |> List.map (fun clause ->
-                match clause with
-                | SynMatchClause(pat, whenExpr, resultExpr, _, _) ->
-                    // TODO: Handle guard expressions (whenExpr)
-                    (pat, Core.generateExpression resultExpr)
-            )
+            
+            let extractClause (clause: SynMatchClause) =
+                let (SynMatchClause(pat, whenExpr, resultExpr, _, _, _)) = clause
+                // TODO: Handle guard expressions (whenExpr)
+                (pat, Core.generateExpression resultExpr)
+                
+            let cases = clauses |> List.map extractClause
             
             return! Patterns.matchExpression scrutinee cases
         }
@@ -381,11 +406,12 @@ module ExceptionHandling =
     let generateTryWith (tryExpr: SynExpr) (withCases: SynMatchClause list): MLIRCombinator<MLIRValue> =
         mlir {
             let tryBody = Core.generateExpression tryExpr
-            let handlers = withCases |> List.map (fun clause ->
-                match clause with
-                | SynMatchClause(pat, _, resultExpr, _, _) ->
-                    (pat, Core.generateExpression resultExpr)
-            )
+            
+            let extractHandler (clause: SynMatchClause) =
+                let (SynMatchClause(pat, _, resultExpr, _, _, _)) = clause
+                (pat, Core.generateExpression resultExpr)
+                
+            let handlers = withCases |> List.map extractHandler
             
             return! Exceptions.tryWith tryBody handlers
         }
@@ -412,7 +438,7 @@ module Lambdas =
             // Full implementation would handle closure capture
             
             let! lambdaName = nextSSA "lambda"
-            do! Core.emitComment "Lambda expression (simplified as function reference)"
+            do! emitComment "Lambda expression (simplified as function reference)"
             
             // TODO: Extract argument patterns and types
             // TODO: Generate function with captured variables as parameters
@@ -428,10 +454,9 @@ module LetBindings =
         mlir {
             // Process each binding
             for binding in bindings do
-                match binding with
-                | SynBinding(_, _, _, _, _, _, _, pat, _, expr, _, _, _) ->
-                    let! value = Core.generateExpression expr
-                    do! Bindings.bindPattern pat value
+                let (SynBinding(_, _, _, _, _, _, _, pat, _, expr, _, _, _)) = binding
+                let! value = Core.generateExpression expr
+                do! Bindings.bindPattern pat value
             
             // Generate body with bindings in scope
             return! Core.generateExpression bodyExpr

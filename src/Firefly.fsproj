@@ -57,6 +57,8 @@
       
       <!-- Code Generation (Refactored from single MLIRGenerator.fs) -->
       <Compile Include="Dabbit/CodeGeneration/TypeMapping.fs" />           <!-- F# to MLIR types -->
+      <Compile Include="Dabbit/CodeGeneration/MLIRSyntax.fs" />
+      <Compile Include="Dabbit/CodeGeneration/MLIRDialects.fs" />
       <Compile Include="Dabbit/CodeGeneration/MLIREmitter.fs" />           <!-- Core builder monad -->
       <Compile Include="Dabbit/CodeGeneration/MLIRBuiltins.fs" />          <!-- Built-in functions -->
       <Compile Include="Dabbit/CodeGeneration/MLIROperatorGenerator.fs" /> <!-- Operator handling -->

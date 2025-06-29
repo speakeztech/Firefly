@@ -4,6 +4,25 @@ open FSharp.Compiler.Syntax
 open Core.Types.TypeSystem
 open MLIREmitter
 
+/// Utility functions
+let lift value = mlir { return value }
+
+let rec mapM (f: 'a -> MLIRCombinator<'b>) (list: 'a list): MLIRCombinator<'b list> =
+    mlir {
+        match list with
+        | [] -> return []
+        | head :: tail ->
+            let! mappedHead = f head
+            let! mappedTail = mapM f tail
+            return mappedHead :: mappedTail
+    }
+
+let (|>>) (m: MLIRCombinator<'a>) (f: 'a -> 'b): MLIRCombinator<'b> =
+    mlir {
+        let! value = m
+        return f value
+    }
+
 /// Control flow patterns using Foundation combinators
 module Conditionals =
     
@@ -47,7 +66,7 @@ module Conditionals =
         ifThenElse condition thenBody (lift None)
     
     /// Generate if-then-elif-else chain
-    let ifThenElifElse (conditions: MLIRValue list) (bodies: MLIRCombinator<MLIRValue> list) (elseBody: MLIRCombinator<MLIRValue> option): MLIRCombinator<MLIRValue> =
+    let rec ifThenElifElse (conditions: MLIRValue list) (bodies: MLIRCombinator<MLIRValue> list) (elseBody: MLIRCombinator<MLIRValue> option): MLIRCombinator<MLIRValue> =
         mlir {
             match conditions, bodies with
             | [], [] ->
@@ -157,8 +176,18 @@ module Loops =
 /// Pattern matching using Foundation patterns
 module Patterns =
     
+    /// Monadic fold for combining conditions
+    let rec foldM (f: 'a -> 'b -> MLIRCombinator<'a>) (acc: 'a) (list: 'b list): MLIRCombinator<'a> =
+        mlir {
+            match list with
+            | [] -> return acc
+            | head :: tail ->
+                let! newAcc = f acc head
+                return! foldM f newAcc tail
+        }
+    
     /// Generate pattern match expression
-    let matchExpression (scrutinee: MLIRValue) (cases: (SynPat * MLIRCombinator<MLIRValue>) list): MLIRCombinator<MLIRValue> =
+    let rec matchExpression (scrutinee: MLIRValue) (cases: (SynPat * MLIRCombinator<MLIRValue>) list): MLIRCombinator<MLIRValue> =
         mlir {
             let! result = nextSSA "match_result"
             
@@ -216,8 +245,9 @@ module Patterns =
                 let caseName = ids |> List.map (fun id -> id.idText) |> String.concat "."
                 return! generateUnionPatternTest scrutinee caseName argPats
                 
-            | SynPat.Tuple(patterns, _) ->
-                return! generateTuplePatternTest scrutinee patterns
+            | SynPat.Tuple(isStruct, patterns, _) ->
+                let patternList = patterns |> List.map snd  // Extract patterns from SynTuplePatternSegment
+                return! generateTuplePatternTest scrutinee patternList
                 
             | _ ->
                 return! fail "pattern_test" (sprintf "Unsupported pattern: %A" pattern)
@@ -243,13 +273,14 @@ module Patterns =
     and generateTuplePatternTest (scrutinee: MLIRValue) (patterns: SynPat list): MLIRCombinator<MLIRValue option> =
         mlir {
             // For tuple patterns, we extract each element and test recursively
-            let! conditions = Utilities.mapM (fun (i, pattern) ->
+            let testPattern (i, pattern) = 
                 mlir {
                     let! index = Constants.intConstant i 32
                     let! element = Memory.load scrutinee [index]
                     return! generatePatternTest element pattern
                 }
-            ) (List.indexed patterns)
+            
+            let! conditions = mapM testPattern (List.indexed patterns)
             
             // Combine all conditions with AND
             let someConditions = conditions |> List.choose id
@@ -257,15 +288,15 @@ module Patterns =
             match someConditions with
             | [] -> return None  // All patterns are wildcards
             | [single] -> return Some single
-            | multiple ->
-                // Chain AND operations
-                let! finalCondition = multiple |> List.reduce (fun acc cond ->
+            | first :: rest ->
+                // Chain AND operations using monadic fold
+                let combineConditions acc cond = 
                     mlir {
-                        let! left = acc
-                        let! right = cond
-                        return! Logical.logicalAnd [left; right]
+                        let! result = nextSSA "and"
+                        do! emitLine (sprintf "%s = arith.andi %s, %s : i1" result acc.SSA cond.SSA)
+                        return Core.createValue result MLIRTypes.i1
                     }
-                )
+                let! finalCondition = foldM combineConditions first rest
                 return Some finalCondition
         }
     
@@ -282,7 +313,7 @@ module Patterns =
         }
 
 /// Let bindings and local variables
-module Bindings =
+module rec Bindings =
     
     /// Generate let binding
     let letBinding (pattern: SynPat) (value: MLIRValue) (body: MLIRCombinator<MLIRValue>): MLIRCombinator<MLIRValue> =
@@ -314,7 +345,7 @@ module Bindings =
         }
     
     /// Bind a pattern to a value
-    and bindPattern (pattern: SynPat) (value: MLIRValue): MLIRCombinator<unit> =
+    let bindPattern (pattern: SynPat) (value: MLIRValue): MLIRCombinator<unit> =
         mlir {
             match pattern with
             | SynPat.Wild _ ->
@@ -324,9 +355,10 @@ module Bindings =
             | SynPat.Named(SynIdent(ident, _), _, _, _) ->
                 do! bindLocal ident.idText value.SSA (Core.formatType value.Type)
                 
-            | SynPat.Tuple(patterns, _) ->
+            | SynPat.Tuple(isStruct, patterns, _) ->
                 // Destructure tuple
-                for i, subPattern in List.indexed patterns do
+                let patternList = patterns |> List.map snd  // Extract patterns from SynTuplePatternSegment
+                for i, subPattern in List.indexed patternList do
                     let! index = Constants.intConstant i 32
                     let! element = Memory.load value [index]
                     do! bindPattern subPattern element
@@ -341,7 +373,7 @@ module Bindings =
         }
     
     /// Create placeholder for recursive binding
-    and createRecursivePlaceholder (pattern: SynPat): MLIRCombinator<unit> =
+    let createRecursivePlaceholder (pattern: SynPat): MLIRCombinator<unit> =
         mlir {
             match pattern with
             | SynPat.Named(SynIdent(ident, _), _, _, _) ->
@@ -354,7 +386,7 @@ module Bindings =
         }
     
     /// Destructure discriminated union case
-    and destructureUnionCase (unionValue: MLIRValue) (caseName: string) (argPats: SynArgPats): MLIRCombinator<unit> =
+    let destructureUnionCase (unionValue: MLIRValue) (caseName: string) (argPats: SynArgPats): MLIRCombinator<unit> =
         mlir {
             match argPats with
             | SynArgPats.Pats patterns ->
@@ -366,7 +398,8 @@ module Bindings =
                     
             | SynArgPats.NamePatPairs(pairs, _) ->
                 // Named field destructuring
-                for i, (_, pattern) in List.indexed pairs do
+                for i, pair in List.indexed pairs do
+                    let (_, pattern) = pair
                     let! dataIndex = Constants.intConstant (i + 1) 32
                     let! caseData = Memory.load unionValue [dataIndex]
                     do! bindPattern pattern caseData
@@ -412,11 +445,12 @@ module Sequences =
             match expressions with
             | [] -> return! Constants.unitConstant
             | [single] -> return! single
-            | expressions ->
+            | _ ->
                 // Execute all but last for side effects
-                for expr in expressions |> List.rev |> List.tail |> List.rev do
+                let init = expressions |> List.rev |> List.tail |> List.rev
+                for expr in init do
                     let! _ = expr
-                    return ()
+                    ()
                 
                 // Return result of last expression
                 return! List.last expressions

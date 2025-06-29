@@ -148,11 +148,15 @@ let traverseExpr (order: TraversalOrder)
                 
             | SynExpr.Match(_, matchExpr, clauses, _, _) ->
                 let s1, r1 = traverse state matchExpr
-                let clauseExprs = clauses |> List.map (fun (SynMatchClause(_, whenOpt, resultExpr, _, _, _)) -> 
-                    match whenOpt with
-                    | Some whenExpr -> [whenExpr; resultExpr]
-                    | None -> [resultExpr]
-                ) |> List.concat
+                let clauseExprs = 
+                    clauses 
+                    |> List.map (fun clause -> 
+                        match clause with
+                        | SynMatchClause(_, whenOpt, resultExpr, _, _, _) ->
+                            match whenOpt with
+                            | Some whenExpr -> [whenExpr; resultExpr]
+                            | None -> [resultExpr])
+                    |> List.concat
                 let s2, clauseResults = traverseList s1 clauseExprs
                 s2, r1 :: clauseResults
                 
@@ -251,8 +255,7 @@ let traverseExpr (order: TraversalOrder)
             | SynExpr.FromParseError _
             | SynExpr.DiscardAfterMissingQualificationAfterDot _
             | SynExpr.Fixed _
-            | SynExpr.InterpolatedString _
-            | SynExpr.Sequential _ ->  // Already handled above
+            | SynExpr.InterpolatedString _ ->
                 state, []
 
         // Execute traversal based on order
