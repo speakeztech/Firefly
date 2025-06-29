@@ -43,6 +43,19 @@ type MLIRType = {
     Fields: (string * MLIRType) list option
 }
 
+/// Helper function to get type from MLIRValue
+let parseTypeFromMLIRValue (value: MLIRValue): MLIRType =
+    match value.Type with
+    | "i1" -> MLIRTypes.i1
+    | "i8" -> MLIRTypes.i8
+    | "i16" -> MLIRTypes.i16
+    | "i32" -> MLIRTypes.i32
+    | "i64" -> MLIRTypes.i64
+    | "f32" -> MLIRTypes.f32
+    | "f64" -> MLIRTypes.f64
+    | "void" -> MLIRTypes.void_
+    | _ -> MLIRTypes.i32  // Default fallback
+
 /// Standard MLIR dialect operations
 module StandardOps =
     let operations = [

@@ -36,42 +36,35 @@ let buildStore (value: string) (target: string) (typ: string) : string =
 let buildGlobalConstant (name: string) (value: string) (typ: string) : string =
     sprintf "llvm.mlir.global constant @%s(%s) : %s" name value typ
 
-/// Helper to create MLIR values
+/// Helper to create MLIR values using proper TypeSystem functions
 let createValue (ssa: string) (typ: MLIRType) : MLIRValue = {
     SSA = ssa
-    Type = match typ with
-           | Integer bits -> sprintf "i%d" bits
-           | Float bits -> sprintf "f%d" bits
-           | Pointer -> "!llvm.ptr"
-           | Void -> "void"
+    Type = mlirTypeToString typ
     IsConstant = false
 }
 
-/// Placeholder Constants module
-module Constants =
-    let intConstant (value: int) (bits: int) : MLIRBuilder<MLIRValue> =
-        mlir {
-            let! ssa = nextSSA "const"
-            do! emitLine (sprintf "%s = arith.constant %d : i%d" ssa value bits)
-            return createValue ssa (Integer bits)
-        }
-    
-    let unitConstant : MLIRBuilder<MLIRValue> =
-        mlir {
-            return createValue "" Void
-        }
-
-/// Format type for MLIR output
+/// Format type for MLIR output using TypeSystem
 let formatType (typ: MLIRType) : string =
-    match typ with
-    | Integer bits -> sprintf "i%d" bits
-    | Float bits -> sprintf "f%d" bits
-    | Pointer -> "!llvm.ptr"
-    | Void -> "void"
+    mlirTypeToString typ
 
 /// Emit comment helper
 let emitComment (comment: string) : MLIRBuilder<unit> =
     emitLine (sprintf "// %s" comment)
+
+/// Constants module for generating constant values
+module Constants =
+    let intConstant (value: int) (bits: int) : MLIRBuilder<MLIRValue> =
+        mlir {
+            let! ssa = nextSSA "const"
+            let intType = MLIRTypes.int bits
+            do! emitLine (sprintf "%s = arith.constant %d : %s" ssa value (mlirTypeToString intType))
+            return createValue ssa intType
+        }
+    
+    let unitConstant : MLIRBuilder<MLIRValue> =
+        mlir {
+            return createValue "" MLIRTypes.void_
+        }
 
 /// Built-in function catalog using MLIRBuilder combinators
 module Catalog =
@@ -89,7 +82,7 @@ module Catalog =
                                     "(!llvm.ptr, !llvm.ptr) -> !llvm.ptr"
                 
                 do! emitLine funcCallOp
-                return createValue result Pointer
+                return createValue result (MLIRTypes.memref MLIRTypes.i8)
             | _ -> 
                 return! failHard "string_concat" "Expected exactly 2 arguments"
         }
@@ -104,7 +97,7 @@ module Catalog =
                 let funcCallOp = buildFuncCall result "strlen" [str.SSA] "(!llvm.ptr) -> i32"
                 do! emitLine funcCallOp
                 
-                return createValue result (Integer 32)
+                return createValue result MLIRTypes.i32
             | _ ->
                 return! failHard "string_length" "Expected exactly 1 argument"
         }
@@ -118,14 +111,14 @@ module Catalog =
                 let! minResult = nextSSA "min"
                 
                 let cmpOp = buildArithOp "cmpi" cmpResult left.SSA right.SSA 
-                               (sprintf "slt, %s" (formatType (Integer 32)))
+                               (sprintf "slt, %s" (formatType MLIRTypes.i32))
                 do! emitLine cmpOp
                 
                 let selectOp = buildSelect minResult cmpResult left.SSA right.SSA 
-                                  (formatType (Integer 32))
+                                  (formatType MLIRTypes.i32)
                 do! emitLine selectOp
                 
-                return createValue minResult (Integer 32)
+                return createValue minResult MLIRTypes.i32
             | _ ->
                 return! failHard "math_min" "Expected exactly 2 arguments"
         }
@@ -148,7 +141,7 @@ module Catalog =
                 let selectOp = buildSelect absResult cmpResult negResult value.SSA "i32"
                 do! emitLine selectOp
                 
-                return createValue absResult (Integer 32)
+                return createValue absResult MLIRTypes.i32
             | _ ->
                 return! failHard "math_abs" "Expected exactly 1 argument"
         }
@@ -161,7 +154,7 @@ module Catalog =
                 let! result = nextSSA "load"
                 let loadOp = buildLoad result ptr.SSA "!llvm.ptr"
                 do! emitLine loadOp
-                return createValue result (Integer 32) // Simplified type
+                return createValue result MLIRTypes.i32 // Simplified type
             | _ ->
                 return! failHard "memory_load" "Expected exactly 1 argument"
         }
@@ -181,7 +174,7 @@ module Catalog =
     let getTypeInfo (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [value] ->
+            | [_] ->
                 // TODO: Implement proper type analysis when TypeAnalysis module exists
                 return! failHard "get_type_info" "Type analysis not yet implemented"
             | _ ->
@@ -226,7 +219,7 @@ module Catalog =
             do! emitLine allocaOp
             do! emitComment (sprintf "Stack allocated %s array" (formatType elementType))
             
-            return createValue ptr Pointer
+            return createValue ptr (MLIRTypes.memref elementType)
         }
 
 /// Format string constants using MLIRBuilder builders
@@ -243,10 +236,130 @@ module FormatStrings =
                 buildGlobalConstant "newline_fmt" "\"\\n\\00\"" "!llvm.array<3 x i8>"
             ]
             
-            for decl in globalDeclarations do
-                do! emitLine decl
+            // Emit all global declarations using List operations instead of for loop
+            let rec emitDeclarations declarations =
+                mlir {
+                    match declarations with
+                    | [] -> return ()
+                    | decl :: rest ->
+                        do! emitLine decl
+                        return! emitDeclarations rest
+                }
+            
+            do! emitDeclarations globalDeclarations
             
             let externalSymbols = ["d_fmt"; "s_fmt"; "ld_fmt"; "f_fmt"; "newline_fmt"]
-            for symbol in externalSymbols do
-                do! requireExternal symbol
+            
+            // Process external symbols using List operations
+            let rec requireExternals symbols =
+                mlir {
+                    match symbols with
+                    | [] -> return ()
+                    | symbol :: rest ->
+                        do! requireExternal symbol
+                        return! requireExternals rest
+                }
+            
+            do! requireExternals externalSymbols
+        }
+
+/// Registry for built-in functions with proper typing
+module Registry =
+    
+    /// Core arithmetic operations
+    let arithmeticBuiltins: BuiltinSignature list = [
+        {
+            Name = "min"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Implementation = Catalog.mathMin
+        }
+        {
+            Name = "abs"
+            ParameterTypes = [MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Implementation = Catalog.mathAbs
+        }
+    ]
+    
+    /// String operations
+    let stringBuiltins: BuiltinSignature list = [
+        {
+            Name = "concat"
+            ParameterTypes = [MLIRTypes.string_; MLIRTypes.string_]
+            ReturnType = MLIRTypes.string_
+            Implementation = Catalog.stringConcat
+        }
+        {
+            Name = "length"
+            ParameterTypes = [MLIRTypes.string_]
+            ReturnType = MLIRTypes.i32
+            Implementation = Catalog.stringLength
+        }
+    ]
+    
+    /// Memory operations
+    let memoryBuiltins: BuiltinSignature list = [
+        {
+            Name = "load"
+            ParameterTypes = [MLIRTypes.memref MLIRTypes.i32]
+            ReturnType = MLIRTypes.i32
+            Implementation = Catalog.memoryLoad
+        }
+        {
+            Name = "store"
+            ParameterTypes = [MLIRTypes.i32; MLIRTypes.memref MLIRTypes.i32]
+            ReturnType = MLIRTypes.void_
+            Implementation = Catalog.memoryStore
+        }
+    ]
+    
+    /// All built-in functions registry
+    let allBuiltins: BuiltinSignature list =
+        arithmeticBuiltins @ stringBuiltins @ memoryBuiltins
+    
+    /// Lookup built-in function by name
+    let tryFindBuiltin (name: string) : BuiltinSignature option =
+        allBuiltins |> List.tryFind (fun b -> b.Name = name)
+    
+    /// Check if function name is a built-in
+    let isBuiltin (name: string) : bool =
+        allBuiltins |> List.exists (fun b -> b.Name = name)
+
+/// Built-in function generation utilities
+module Generation =
+    
+    /// Generate call to built-in function
+    let generateBuiltinCall (name: string) (args: MLIRValue list) : MLIRBuilder<MLIRValue> =
+        mlir {
+            match Registry.tryFindBuiltin name with
+            | Some builtin ->
+                if List.length args = List.length builtin.ParameterTypes then
+                    return! builtin.Implementation args
+                else
+                    let errorMsg = sprintf "Function '%s' expects %d arguments but got %d" 
+                                          name (List.length builtin.ParameterTypes) (List.length args)
+                    return! failHard "builtin_call" errorMsg
+            | None ->
+                return! failHard "builtin_call" (sprintf "Unknown built-in function: %s" name)
+        }
+    
+    /// Generate type signatures for built-in functions (for external declarations)
+    let generateBuiltinSignatures : MLIRBuilder<unit> =
+        mlir {
+            do! emitComment "Built-in function signatures"
+            
+            let rec emitSignatures builtins =
+                mlir {
+                    match builtins with
+                    | [] -> return ()
+                    | builtin :: rest ->
+                        let paramTypeStrs = builtin.ParameterTypes |> List.map mlirTypeToString
+                        let returnTypeStr = mlirTypeToString builtin.ReturnType
+                        let signature = sprintf "(%s) -> %s" (String.concat ", " paramTypeStrs) returnTypeStr
+                        do! emitLine (sprintf "func.func private @%s%s" builtin.Name signature)
+                        return! emitSignatures rest
+                }
+            
+            do! emitSignatures Registry.allBuiltins
         }

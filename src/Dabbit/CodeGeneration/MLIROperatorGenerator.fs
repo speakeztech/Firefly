@@ -1,298 +1,336 @@
 module Dabbit.CodeGeneration.MLIROperatorGenerator
 
-open FSharp.Compiler.Syntax
 open Core.Types.TypeSystem
-open MLIREmitter
+open Dabbit.CodeGeneration.MLIREmitter
+open Dabbit.CodeGeneration.MLIRSyntax
+open Dabbit.CodeGeneration.MLIRBuiltins
 
-/// Operator classification for different MLIR dialects
+/// Operator classification for proper MLIR dialect mapping
 type OperatorClass =
-    | Arithmetic of string  // arith dialect
-    | Comparison of string  // arith.cmpi
-    | Logical of string     // arith dialect boolean ops
-    | Bitwise of string     // arith dialect bitwise
-    | Memory of string      // memref dialect
-    | Control of string     // scf/cf dialects
+    | Arithmetic of string  // arith dialect operation
+    | Comparison of string  // arith comparison operation
+    | Logical of string     // logical operation
+    | Bitwise of string     // bitwise operation
 
-/// Operator signature using XParsec patterns
+/// Operator signature with type information
 type OperatorSignature = {
     Symbol: string
     Class: OperatorClass
     InputTypes: MLIRType list
     OutputType: MLIRType
-    Generator: MLIRValue list -> MLIRCombinator<MLIRValue>
+    Generator: MLIRValue list -> MLIRBuilder<MLIRValue>
 }
 
+/// Helper to parse type string back to MLIRType (temporary until better type system integration)
+let parseTypeFromString (typeStr: string): MLIRType =
+    match typeStr with
+    | "i1" -> MLIRTypes.i1
+    | "i8" -> MLIRTypes.i8
+    | "i16" -> MLIRTypes.i16
+    | "i32" -> MLIRTypes.i32
+    | "i64" -> MLIRTypes.i64
+    | "f32" -> MLIRTypes.f32
+    | "f64" -> MLIRTypes.f64
+    | "void" -> MLIRTypes.void_
+    | _ -> MLIRTypes.i32  
+
+/// Binary operation helper module
+module BinaryOps =
+
+    
+    /// Generate binary arithmetic operation
+    let binaryArithOp (op: string) (left: MLIRValue) (right: MLIRValue): MLIRBuilder<MLIRValue> =
+        mlir {
+            let! result = nextSSA (op.Replace(".", "_"))
+            let leftTypeStr = left.Type
+            do! emitLine (sprintf "%s = arith.%s %s, %s : %s" result op left.SSA right.SSA leftTypeStr)
+            return createValue result (parseTypeFromString left.Type)
+        }
+    
+    /// Generate comparison operation
+    let compare (predicate: string) (left: MLIRValue) (right: MLIRValue): MLIRBuilder<MLIRValue> =
+        mlir {
+            let! result = nextSSA "cmp"
+            let leftTypeStr = left.Type
+            do! emitLine (sprintf "%s = arith.cmpi %s, %s, %s : %s" result predicate left.SSA right.SSA leftTypeStr)
+            return createValue result MLIRTypes.i1
+        }
+    
+    /// Generate floating point comparison
+    let compareFloat (predicate: string) (left: MLIRValue) (right: MLIRValue): MLIRBuilder<MLIRValue> =
+        mlir {
+            let! result = nextSSA "fcmp"
+            let leftTypeStr = left.Type
+            do! emitLine (sprintf "%s = arith.cmpf %s, %s, %s : %s" result predicate left.SSA right.SSA leftTypeStr)
+            return createValue result MLIRTypes.i1
+        }
 
 
 
-
-/// Arithmetic operators using Foundation combinators
+/// Integer arithmetic operations using Foundation patterns
 module Arithmetic =
     
-    /// Integer arithmetic operations
-    let intAdd (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let intAdd (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [left; right] -> return! BinaryOps.add left right
-            | _ -> return! fail "int_add" "Expected exactly 2 arguments"
+            | [left; right] -> return! BinaryOps.binaryArithOp "addi" left right
+            | _ -> return! failHard "int_add" "Expected exactly 2 arguments"
         }
     
-    let intSub (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let intSub (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [left; right] -> return! BinaryOps.sub left right
-            | _ -> return! fail "int_sub" "Expected exactly 2 arguments"
+            | [left; right] -> return! BinaryOps.binaryArithOp "subi" left right
+            | _ -> return! failHard "int_sub" "Expected exactly 2 arguments"
         }
     
-    let intMul (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let intMul (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [left; right] -> return! BinaryOps.mul left right
-            | _ -> return! fail "int_mul" "Expected exactly 2 arguments"
+            | [left; right] -> return! BinaryOps.binaryArithOp "muli" left right
+            | _ -> return! failHard "int_mul" "Expected exactly 2 arguments"
         }
     
-    let intDiv (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let intDiv (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [left; right] -> return! BinaryOps.div left right
-            | _ -> return! fail "int_div" "Expected exactly 2 arguments"
+            | [left; right] -> return! BinaryOps.binaryArithOp "divsi" left right
+            | _ -> return! failHard "int_div" "Expected exactly 2 arguments"
         }
     
-    let intMod (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let intMod (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [left; right] ->
-                let! result = nextSSA "mod"
-                let typeStr = Core.formatType left.Type
-                do! emitLine (sprintf "%s = arith.remsi %s, %s : %s" result left.SSA right.SSA typeStr)
-                return Core.createValue result left.Type
-            | _ -> return! fail "int_mod" "Expected exactly 2 arguments"
+            | [left; right] -> return! BinaryOps.binaryArithOp "remsi" left right
+            | _ -> return! failHard "int_mod" "Expected exactly 2 arguments"
         }
     
     /// Float arithmetic operations
-    let floatAdd (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let floatAdd (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [left; right] ->
-                let! result = nextSSA "fadd"
-                let typeStr = Core.formatType left.Type
-                do! emitLine (sprintf "%s = arith.addf %s, %s : %s" result left.SSA right.SSA typeStr)
-                return Core.createValue result left.Type
-            | _ -> return! fail "float_add" "Expected exactly 2 arguments"
+            | [left; right] -> return! BinaryOps.binaryArithOp "addf" left right
+            | _ -> return! failHard "float_add" "Expected exactly 2 arguments"
         }
     
-    let floatSub (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let floatSub (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [left; right] ->
-                let! result = nextSSA "fsub"
-                let typeStr = Core.formatType left.Type
-                do! emitLine (sprintf "%s = arith.subf %s, %s : %s" result left.SSA right.SSA typeStr)
-                return Core.createValue result left.Type
-            | _ -> return! fail "float_sub" "Expected exactly 2 arguments"
+            | [left; right] -> return! BinaryOps.binaryArithOp "subf" left right
+            | _ -> return! failHard "float_sub" "Expected exactly 2 arguments"
         }
     
-    let floatMul (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let floatMul (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [left; right] ->
-                let! result = nextSSA "fmul"
-                let typeStr = Core.formatType left.Type
-                do! emitLine (sprintf "%s = arith.mulf %s, %s : %s" result left.SSA right.SSA typeStr)
-                return Core.createValue result left.Type
-            | _ -> return! fail "float_mul" "Expected exactly 2 arguments"
+            | [left; right] -> return! BinaryOps.binaryArithOp "mulf" left right
+            | _ -> return! failHard "float_mul" "Expected exactly 2 arguments"
         }
     
-    let floatDiv (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let floatDiv (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [left; right] ->
-                let! result = nextSSA "fdiv"
-                let typeStr = Core.formatType left.Type
-                do! emitLine (sprintf "%s = arith.divf %s, %s : %s" result left.SSA right.SSA typeStr)
-                return Core.createValue result left.Type
-            | _ -> return! fail "float_div" "Expected exactly 2 arguments"
+            | [left; right] -> return! BinaryOps.binaryArithOp "divf" left right
+            | _ -> return! failHard "float_div" "Expected exactly 2 arguments"
         }
 
 /// Comparison operators using Foundation patterns
 module Comparison =
     
-    let intEqual (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let intEqual (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [left; right] -> return! BinaryOps.compare "eq" left right
-            | _ -> return! fail "int_equal" "Expected exactly 2 arguments"
+            | _ -> return! failHard "int_equal" "Expected exactly 2 arguments"
         }
     
-    let intNotEqual (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let intNotEqual (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [left; right] -> return! BinaryOps.compare "ne" left right
-            | _ -> return! fail "int_not_equal" "Expected exactly 2 arguments"
+            | _ -> return! failHard "int_not_equal" "Expected exactly 2 arguments"
         }
     
-    let intLessThan (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let intLessThan (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [left; right] -> return! BinaryOps.compare "slt" left right
-            | _ -> return! fail "int_less_than" "Expected exactly 2 arguments"
+            | _ -> return! failHard "int_less_than" "Expected exactly 2 arguments"
         }
     
-    let intLessEqual (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let intLessEqual (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [left; right] -> return! BinaryOps.compare "sle" left right
-            | _ -> return! fail "int_less_equal" "Expected exactly 2 arguments"
+            | _ -> return! failHard "int_less_equal" "Expected exactly 2 arguments"
         }
     
-    let intGreaterThan (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let intGreaterThan (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [left; right] -> return! BinaryOps.compare "sgt" left right
-            | _ -> return! fail "int_greater_than" "Expected exactly 2 arguments"
+            | _ -> return! failHard "int_greater_than" "Expected exactly 2 arguments"
         }
     
-    let intGreaterEqual (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let intGreaterEqual (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [left; right] -> return! BinaryOps.compare "sge" left right
-            | _ -> return! fail "int_greater_equal" "Expected exactly 2 arguments"
+            | _ -> return! failHard "int_greater_equal" "Expected exactly 2 arguments"
         }
     
     /// Float comparison operations
-    let floatEqual (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let floatEqual (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [left; right] ->
-                let! result = nextSSA "fcmp"
-                let typeStr = Core.formatType left.Type
-                do! emitLine (sprintf "%s = arith.cmpf oeq, %s, %s : %s" result left.SSA right.SSA typeStr)
-                return Core.createValue result MLIRTypes.i1
-            | _ -> return! fail "float_equal" "Expected exactly 2 arguments"
+            | [left; right] -> return! BinaryOps.compareFloat "oeq" left right
+            | _ -> return! failHard "float_equal" "Expected exactly 2 arguments"
         }
     
-    let floatLessThan (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let floatLessThan (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
-            | [left; right] ->
-                let! result = nextSSA "fcmp"
-                let typeStr = Core.formatType left.Type
-                do! emitLine (sprintf "%s = arith.cmpf olt, %s, %s : %s" result left.SSA right.SSA typeStr)
-                return Core.createValue result MLIRTypes.i1
-            | _ -> return! fail "float_less_than" "Expected exactly 2 arguments"
+            | [left; right] -> return! BinaryOps.compareFloat "olt" left right
+            | _ -> return! failHard "float_less_than" "Expected exactly 2 arguments"
+        }
+    
+    let floatLessEqual (args: MLIRValue list): MLIRBuilder<MLIRValue> =
+        mlir {
+            match args with
+            | [left; right] -> return! BinaryOps.compareFloat "ole" left right
+            | _ -> return! failHard "float_less_equal" "Expected exactly 2 arguments"
+        }
+    
+    let floatGreaterThan (args: MLIRValue list): MLIRBuilder<MLIRValue> =
+        mlir {
+            match args with
+            | [left; right] -> return! BinaryOps.compareFloat "ogt" left right
+            | _ -> return! failHard "float_greater_than" "Expected exactly 2 arguments"
+        }
+    
+    let floatGreaterEqual (args: MLIRValue list): MLIRBuilder<MLIRValue> =
+        mlir {
+            match args with
+            | [left; right] -> return! BinaryOps.compareFloat "oge" left right
+            | _ -> return! failHard "float_greater_equal" "Expected exactly 2 arguments"
         }
 
 /// Logical operators using combinators
 module Logical =
     
-    let logicalAnd (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let logicalAnd (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [left; right] ->
                 let! result = nextSSA "and"
                 do! emitLine (sprintf "%s = arith.andi %s, %s : i1" result left.SSA right.SSA)
-                return Core.createValue result MLIRTypes.i1
-            | _ -> return! fail "logical_and" "Expected exactly 2 arguments"
+                return createValue result MLIRTypes.i1
+            | _ -> return! failHard "logical_and" "Expected exactly 2 arguments"
         }
     
-    let logicalOr (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let logicalOr (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [left; right] ->
                 let! result = nextSSA "or"
                 do! emitLine (sprintf "%s = arith.ori %s, %s : i1" result left.SSA right.SSA)
-                return Core.createValue result MLIRTypes.i1
-            | _ -> return! fail "logical_or" "Expected exactly 2 arguments"
+                return createValue result MLIRTypes.i1
+            | _ -> return! failHard "logical_or" "Expected exactly 2 arguments"
         }
     
-    let logicalNot (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let logicalNot (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [value] ->
-                let! trueConst = Constants.boolConstant true
                 let! result = nextSSA "not"
+                let! trueConst = Constants.intConstant 1 1
                 do! emitLine (sprintf "%s = arith.xori %s, %s : i1" result value.SSA trueConst.SSA)
-                return Core.createValue result MLIRTypes.i1
-            | _ -> return! fail "logical_not" "Expected exactly 1 argument"
+                return createValue result MLIRTypes.i1
+            | _ -> return! failHard "logical_not" "Expected exactly 1 argument"
         }
 
 /// Bitwise operators using Foundation patterns
 module Bitwise =
     
-    let bitwiseAnd (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let bitwiseAnd (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [left; right] ->
                 let! result = nextSSA "band"
-                let typeStr = Core.formatType left.Type
+                let typeStr = left.Type
                 do! emitLine (sprintf "%s = arith.andi %s, %s : %s" result left.SSA right.SSA typeStr)
-                return Core.createValue result left.Type
-            | _ -> return! fail "bitwise_and" "Expected exactly 2 arguments"
+                return createValue result (parseTypeFromString left.Type)
+            | _ -> return! failHard "bitwise_and" "Expected exactly 2 arguments"
         }
     
-    let bitwiseOr (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let bitwiseOr (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [left; right] ->
                 let! result = nextSSA "bor"
-                let typeStr = Core.formatType left.Type
+                let typeStr = left.Type
                 do! emitLine (sprintf "%s = arith.ori %s, %s : %s" result left.SSA right.SSA typeStr)
-                return Core.createValue result left.Type
-            | _ -> return! fail "bitwise_or" "Expected exactly 2 arguments"
+                return createValue result (parseTypeFromString left.Type)
+            | _ -> return! failHard "bitwise_or" "Expected exactly 2 arguments"
         }
     
-    let bitwiseXor (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let bitwiseXor (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [left; right] ->
                 let! result = nextSSA "bxor"
-                let typeStr = Core.formatType left.Type
+                let typeStr = left.Type
                 do! emitLine (sprintf "%s = arith.xori %s, %s : %s" result left.SSA right.SSA typeStr)
-                return Core.createValue result left.Type
-            | _ -> return! fail "bitwise_xor" "Expected exactly 2 arguments"
+                return createValue result (parseTypeFromString left.Type)
+            | _ -> return! failHard "bitwise_xor" "Expected exactly 2 arguments"
         }
     
-    let bitwiseNot (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let bitwiseNot (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [value] ->
                 let! result = nextSSA "bnot"
-                let typeStr = Core.formatType value.Type
+                let typeStr = value.Type
+                let valueType = parseTypeFromString value.Type
+                
                 // XOR with all ones to flip all bits
-                let allOnes = match value.Type.Width with
+                let allOnes = match valueType.BitWidth with
                                 | Some 32 -> -1
-                                | Some 64 -> -1L |> int
+                                | Some 64 -> -1
+                                | Some 16 -> 65535
                                 | Some 8 -> 255
+                                | Some 1 -> 1
                                 | _ -> -1
-                let! onesConst = Constants.intConstant allOnes (value.Type.Width |> Option.defaultValue 32)
+                let bitWidth = valueType.BitWidth |> Option.defaultValue 32
+                let! onesConst = Constants.intConstant allOnes bitWidth
                 do! emitLine (sprintf "%s = arith.xori %s, %s : %s" result value.SSA onesConst.SSA typeStr)
-                return Core.createValue result value.Type
-            | _ -> return! fail "bitwise_not" "Expected exactly 1 argument"
+                return createValue result valueType
+            | _ -> return! failHard "bitwise_not" "Expected exactly 1 argument"
         }
     
-    let shiftLeft (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let shiftLeft (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [value; amount] ->
                 let! result = nextSSA "shl"
-                let typeStr = Core.formatType value.Type
+                let typeStr = value.Type
                 do! emitLine (sprintf "%s = arith.shli %s, %s : %s" result value.SSA amount.SSA typeStr)
-                return Core.createValue result value.Type
-            | _ -> return! fail "shift_left" "Expected exactly 2 arguments"
+                return createValue result (parseTypeFromString value.Type)
+            | _ -> return! failHard "shift_left" "Expected exactly 2 arguments"
         }
     
-    let shiftRight (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    let shiftRight (args: MLIRValue list): MLIRBuilder<MLIRValue> =
         mlir {
             match args with
             | [value; amount] ->
                 let! result = nextSSA "shr"
-                let typeStr = Core.formatType value.Type
+                let typeStr = value.Type
                 do! emitLine (sprintf "%s = arith.shrsi %s, %s : %s" result value.SSA amount.SSA typeStr)
-                return Core.createValue result value.Type
-            | _ -> return! fail "shift_right" "Expected exactly 2 arguments"
+                return createValue result (parseTypeFromString value.Type)
+            | _ -> return! failHard "shift_right" "Expected exactly 2 arguments"
         }
 
-/// Operator registry using XParsec patterns
+/// Operator registry using proper Foundation patterns
 module Registry =
     
     /// Helper to create operator signatures
@@ -332,6 +370,15 @@ module Registry =
         createOp ">=" (Comparison "sge") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i1 Comparison.intGreaterEqual
     ]
     
+    /// Float comparison operators
+    let floatComparisonOps = [
+        createOp "=." (Comparison "oeq") [MLIRTypes.f32; MLIRTypes.f32] MLIRTypes.i1 Comparison.floatEqual
+        createOp "<." (Comparison "olt") [MLIRTypes.f32; MLIRTypes.f32] MLIRTypes.i1 Comparison.floatLessThan
+        createOp "<=." (Comparison "ole") [MLIRTypes.f32; MLIRTypes.f32] MLIRTypes.i1 Comparison.floatLessEqual
+        createOp ">." (Comparison "ogt") [MLIRTypes.f32; MLIRTypes.f32] MLIRTypes.i1 Comparison.floatGreaterThan
+        createOp ">=." (Comparison "oge") [MLIRTypes.f32; MLIRTypes.f32] MLIRTypes.i1 Comparison.floatGreaterEqual
+    ]
+    
     /// Logical operators
     let logicalOps = [
         createOp "&&" (Logical "andi") [MLIRTypes.i1; MLIRTypes.i1] MLIRTypes.i1 Logical.logicalAnd
@@ -349,37 +396,82 @@ module Registry =
         createOp ">>>" (Bitwise "shrsi") [MLIRTypes.i32; MLIRTypes.i32] MLIRTypes.i32 Bitwise.shiftRight
     ]
     
-    /// Complete operator registry combining all categories
-    let operators: Map<string, OperatorSignature> = 
-        List.concat [
-            arithmeticOps
-            floatArithmeticOps
-            comparisonOps
-            logicalOps
-            bitwiseOps
-        ] |> Map.ofList
+    /// All operators registry
+    let allOperators: Map<string, OperatorSignature> =
+        (arithmeticOps @ floatArithmeticOps @ comparisonOps @ floatComparisonOps @ logicalOps @ bitwiseOps)
+        |> Map.ofList
     
-    /// Check if an operator exists
-    let hasOperator (symbol: string): bool =
-        Map.containsKey symbol operators
+    /// Lookup operator by symbol
+    let tryFindOperator (symbol: string) : OperatorSignature option =
+        Map.tryFind symbol allOperators
     
-    /// Get operator signature
-    let getOperator (symbol: string): OperatorSignature option =
-        Map.tryFind symbol operators
+    /// Check if symbol is a known operator
+    let isOperator (symbol: string) : bool =
+        Map.containsKey symbol allOperators
     
-    /// Generate operator call using combinators
-    let generateOperator (symbol: string) (args: MLIRValue list): MLIRCombinator<MLIRValue> =
+    /// Get all operators of a specific class
+    let getOperatorsByClass (opClass: OperatorClass) : OperatorSignature list =
+        allOperators
+        |> Map.toList
+        |> List.map snd
+        |> List.filter (fun op -> op.Class = opClass)
+
+/// Operator generation utilities
+module Generation =
+    
+    /// Generate call to operator function
+    let generateOperatorCall (symbol: string) (args: MLIRValue list) : MLIRBuilder<MLIRValue> =
         mlir {
-            match getOperator symbol with
+            match Registry.tryFindOperator symbol with
             | Some op ->
-                // Type checking
-                if args.Length <> op.InputTypes.Length then
-                    return! fail "operator_call" 
-                        (sprintf "Operator '%s' expects %d operands, got %d" 
-                         symbol op.InputTypes.Length args.Length)
-                else
-                    // Generate the operation
+                if List.length args = List.length op.InputTypes then
                     return! op.Generator args
+                else
+                    let errorMsg = sprintf "Operator '%s' expects %d operands, got %d" 
+                                          symbol (List.length op.InputTypes) (List.length args)
+                    return! failHard "operator_call" errorMsg
             | None ->
-                return! fail "operator_call" (sprintf "Unknown operator: %s" symbol)
+                return! failHard "operator_call" (sprintf "Unknown operator: %s" symbol)
         }
+    
+    /// Generate type signatures for operators (for external declarations)
+    let generateOperatorSignatures : MLIRBuilder<unit> =
+        mlir {
+            do! emitComment "Operator function signatures"
+            
+            let rec emitSignatures operators =
+                mlir {
+                    match operators with
+                    | [] -> return ()
+                    | (_, op) :: rest ->
+                        let paramTypeStrs = op.InputTypes |> List.map mlirTypeToString
+                        let returnTypeStr = mlirTypeToString op.OutputType
+                        let signature = sprintf "(%s) -> %s" (String.concat ", " paramTypeStrs) returnTypeStr
+                        do! emitComment (sprintf "Operator %s: %s" op.Symbol signature)
+                        return! emitSignatures rest
+                }
+            
+            do! emitSignatures (Map.toList Registry.allOperators)
+        }
+    
+    /// Check operator precedence and associativity
+    let getOperatorPrecedence (symbol: string) : int =
+        match symbol with
+        | "*" | "/" | "%" | "*." | "/." -> 10
+        | "+" | "-" | "+." | "-." -> 9
+        | "<<<" | ">>>" -> 8
+        | "&&&" -> 7
+        | "^^^" -> 6
+        | "|||" -> 5
+        | "=" | "<>" | "<" | "<=" | ">" | ">=" -> 4
+        | "=." | "<." | "<=." | ">." | ">=." -> 4
+        | "&&" -> 3
+        | "||" -> 2
+        | "not" | "~~~" -> 15  // Unary operators have highest precedence
+        | _ -> 1  // Default low precedence
+    
+    /// Check if operator is left-associative
+    let isLeftAssociative (symbol: string) : bool =
+        match symbol with
+        | "not" | "~~~" -> false  // Unary operators are right-associative
+        | _ -> true  // Most binary operators are left-associative
