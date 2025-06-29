@@ -1,4 +1,4 @@
-module Core.FCSProcessing.Pipeline
+module Dabbit.Pipeline.FCSPipeline
 
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Symbols
@@ -8,7 +8,7 @@ open FSharp.Compiler.CodeAnalysis
 type ProcessingContext = {
     Checker: FSharpChecker
     Options: FSharpProjectOptions
-    TypeCtx: Core.MLIRGeneration.TypeMapping.TypeContext
+    TypeCtx: Dabbit.CodeGeneration.TypeMapping.TypeContext
     SymbolRegistry: Dabbit.Bindings.SymbolRegistry.SymbolRegistry
 }
 
@@ -31,7 +31,7 @@ let processCompilationUnit (ctx: ProcessingContext) (input: ParsedInput) = async
     // Update type context
     let typeCtx = 
         symbols |> Map.fold (fun ctx name sym ->
-            Core.MLIRGeneration.TypeMapping.TypeContextBuilder.addSymbol name sym ctx) ctx.TypeCtx
+            Dabbit.CodeGeneration.TypeMapping.TypeContextBuilder.addSymbol name sym ctx) ctx.TypeCtx
     
     // Apply transformations
     let transformed = 

@@ -3,8 +3,7 @@ module Dabbit.Bindings.SymbolRegistry
 open System
 open FSharp.Compiler.Syntax
 open Core.XParsec.Foundation
-open Core.MLIRGeneration.TypeSystem
-open Core.MLIRGeneration.Dialect
+open Core.Types.TypeSystem
 open Dabbit.Bindings.PatternLibrary
 
 /// Symbol with type safety and MLIR generation info

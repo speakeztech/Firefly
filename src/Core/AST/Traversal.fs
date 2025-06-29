@@ -83,10 +83,11 @@ let traverseExpr (order: TraversalOrder)
                 let s, r = traverse state expr
                 s, [r]
                 
-            | SynExpr.ObjExpr(_, argExprOpt, _, bindings, _, _, _, _) ->
+            // ObjExpr - FCS 43.9.300 has 8 parameters
+            | SynExpr.ObjExpr(objType, argOpt, withKeyword, bindings, members, extraImpls, newExprRange, range) ->
                 let argExprs = 
-                    match argExprOpt with
-                    | Some argExpr -> [argExpr]
+                    match argOpt with
+                    | Some (argExpr, _) -> [argExpr]  // Extract expr from tuple (SynExpr * Ident option)
                     | None -> []
                 let bindingExprs = bindings |> List.map (fun binding -> 
                     match binding with
@@ -100,7 +101,7 @@ let traverseExpr (order: TraversalOrder)
                 let s2, r2 = traverse s1 doExpr
                 s2, [r1; r2]
                 
-            | SynExpr.For(_, _, _, fromExpr, _, toExpr, doExpr, _) ->
+            | SynExpr.For(_, _, _, _, fromExpr, _, toExpr, doExpr, _) ->
                 let s1, r1 = traverse state fromExpr
                 let s2, r2 = traverse s1 toExpr
                 let s3, r3 = traverse s2 doExpr
@@ -203,16 +204,18 @@ let traverseExpr (order: TraversalOrder)
                 let s2, r2 = traverse s1 expr2
                 s2, [r1; r2]
                 
+            // DotIndexedGet - indexArgs is a single SynExpr in FCS 43.9.300
             | SynExpr.DotIndexedGet(objectExpr, indexArgs, _, _) ->
                 let s1, r1 = traverse state objectExpr
-                let s2, argResults = traverseList s1 indexArgs
-                s2, r1 :: argResults
+                let s2, r2 = traverse s1 indexArgs
+                s2, [r1; r2]
                 
+            // DotIndexedSet - indexArgs is a single SynExpr
             | SynExpr.DotIndexedSet(objectExpr, indexArgs, valueExpr, _, _, _) ->
                 let s1, r1 = traverse state objectExpr
-                let s2, argResults = traverseList s1 indexArgs
+                let s2, r2 = traverse s1 indexArgs
                 let s3, r3 = traverse s2 valueExpr
-                s3, r1 :: argResults @ [r3]
+                s3, [r1; r2; r3]
                 
             | SynExpr.TypeTest(expr, _, _) ->
                 let s, r = traverse state expr
@@ -234,9 +237,10 @@ let traverseExpr (order: TraversalOrder)
                 let s, r = traverse state expr
                 s, [r]
                 
-            | SynExpr.LetOrUseBang(_, _, _, _, _, rhsExpr, andBangs, bodyExpr, _, _) ->
+            // LetOrUseBang
+            | SynExpr.LetOrUseBang(spBind, isUse, isFromSource, pat, rhsExpr, andBangs, bodyExpr, range, trivia) ->
                 let s1, r1 = traverse state rhsExpr
-                // Process andBangs 
+                // Process andBangs - SynExprAndBang
                 let andBangExprs = andBangs |> List.map (fun andBang ->
                     match andBang with
                     | SynExprAndBang(_, _, _, _, rhsExpr, _, _) -> rhsExpr)

@@ -13,10 +13,9 @@ open Core.XParsec.Foundation
 open Core.Utilities.RemoveIntermediates
 open Core.FCSProcessing.ASTTransformer
 open Core.FCSProcessing.DependencyResolver
-open Core.MLIRGeneration.DirectGenerator
-open Core.MLIRGeneration.TypeMapping
-open Core.Conversion.LoweringPipeline
-open Core.Conversion.OptimizationPipeline
+open Dabbit.CodeGeneration.TypeMapping
+open Dabbit.Pipeline.LoweringPipeline
+open Dabbit.Pipeline.OptimizationPipeline
 open CLI.Configurations.ProjectConfig
 open Dabbit.Bindings.SymbolRegistry
 open Dabbit.Analysis.ReachabilityAnalyzer

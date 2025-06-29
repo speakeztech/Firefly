@@ -1,8 +1,9 @@
-﻿module Core.MLIRGeneration.TypeMapping
+﻿module Dabbit.CodeGeneration.TypeMapping
 
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.Syntax
 open Core.MemoryLayout.LayoutAnalyzer
+open Core.Types.TypeSystem  // Import MLIRType from Core
 
 /// Type mapping context preserving FCS information
 type TypeContext = {
@@ -226,3 +227,8 @@ module TypeConversion =
             synTypeToMLIRType innerType
             
         | _ -> failwithf "Unsupported type pattern: %A" synType
+
+    /// Convert to MLIR string representation
+    let synTypeToMLIRString (synType: SynType) : string =
+        let mlirType = synTypeToMLIRType synType
+        sprintf "%A" mlirType  // Simple for now

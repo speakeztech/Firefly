@@ -1,4 +1,4 @@
-module Core.FCSProcessing.ASTTransformer
+module Dabbit.Transformations.ASTTransformer
 
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Symbols
@@ -8,7 +8,7 @@ open XParsec
 
 /// Transformation context flowing through pipeline
 type TransformContext = {
-    TypeContext: Core.MLIRGeneration.TypeMapping.TypeContext
+    TypeContext: Dabbit.CodeGeneration.TypeMapping.TypeContext
     SymbolRegistry: Dabbit.Bindings.SymbolRegistry.SymbolRegistry
     Reachability: Dabbit.Analysis.ReachabilityAnalyzer.ReachabilityResult
     ClosureState: Dabbit.Transformations.ClosureElimination.ClosureState

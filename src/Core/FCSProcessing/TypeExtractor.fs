@@ -2,7 +2,6 @@ module Core.FCSProcessing.TypeExtractor
 
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.CodeAnalysis
-open Dabbit.CodeGeneration.TypeMapping
 
 /// Extract and catalog all type information
 type ExtractedTypes = {
@@ -57,21 +56,6 @@ let extractFromCheckResults (checkResults: FSharpCheckFileAnswer) =
         |> Some
     
     | _ -> None
-
-/// Build type context from extracted types
-let buildTypeContext (extracted: ExtractedTypes) =
-    let ctx = TypeContextBuilder.create()
-    
-    // Add all entities to context
-    let ctx' = 
-        extracted.Entities 
-        |> Map.fold (fun c name entity ->
-            TypeContextBuilder.addSymbol name (entity :> FSharpSymbol) c) ctx
-    
-    // Add all members to context
-    extracted.Members
-    |> Map.fold (fun c name mfv ->
-        TypeContextBuilder.addSymbol name (mfv :> FSharpSymbol) c) ctx'
 
 /// Get entity by name
 let getEntity (extracted: ExtractedTypes) (name: string) : FSharpEntity option =
