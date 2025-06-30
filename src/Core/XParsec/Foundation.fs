@@ -11,13 +11,6 @@ open Core.Types.TypeSystem
 // Core Compiler Types
 // ===================================================================
 
-/// MLIR value representation
-type MLIRValue = {
-    SSA: string
-    Type: string
-    IsConstant: bool
-}
-
 /// Position information for error reporting
 type SourcePosition = {
     Line: int
@@ -267,9 +260,9 @@ let mlirBinaryOp (op: string) (left: MLIRValue) (right: MLIRValue) (resultType: 
     }
 
 /// Generate function declaration
-let mlirFuncDecl (name: string) (params: (string * MLIRType) list) (returnTypes: MLIRType list) : MLIRCombinator<unit> =
+let mlirFuncDecl (name: string) (parameters: (string * MLIRType) list) (returnTypes: MLIRType list) : MLIRCombinator<unit> =
     mlir {
-        let paramStr = params |> List.map (fun (n, t) -> sprintf "%%%s: %s" n (mlirTypeToString t)) |> String.concat ", "
+        let paramStr = parameters |> List.map (fun (n, t) -> sprintf "%%%s: %s" n (mlirTypeToString t)) |> String.concat ", "
         let returnStr = 
             match returnTypes with
             | [] -> ""

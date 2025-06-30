@@ -1,8 +1,7 @@
 module Core.Types.TypeSystem
 
 open Dialects
-open Core.XParsec.Foundation
-    
+
 /// Dialect-specific operation registry
 type DialectOperation = {
     Dialect: MLIRDialect
@@ -32,6 +31,13 @@ type MLIRType = {
     ParameterTypes: MLIRType list option
     ReturnType: MLIRType option
     Fields: (string * MLIRType) list option
+}
+
+/// MLIR value representation
+type MLIRValue = {
+    SSA: string
+    Type: string
+    IsConstant: bool
 }
 
 /// Common MLIR type constructors
