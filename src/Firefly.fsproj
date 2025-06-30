@@ -27,6 +27,7 @@
       <Compile Include="Core/Types/TypeSystem.fs" />   
       <Compile Include="Core/Types/MLIRContext.fs" />   
       <Compile Include="Core/XParsec/Foundation.fs" />  
+      <Compile Include="Core/Utilities/ReadSourceFile.fs" />
       
       <!-- Core AST -->
       <Compile Include="Core/AST/Traversal.fs" />           <!-- Generic AST traversal engine -->

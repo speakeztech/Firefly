@@ -1,4 +1,4 @@
-﻿module Core.Conversion.LoweringPipeline
+﻿module Dabbit.Pipeline.LoweringPipeline
 
 open System
 open System.IO

@@ -1,4 +1,4 @@
-﻿module Core.Conversion.OptimizationPipeline
+﻿module Dabbit.Pipeline.OptimizationPipeline
 
 open System
 open System.IO
