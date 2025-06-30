@@ -80,8 +80,8 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
         
         let checker = FSharpChecker.Create(keepAssemblyContents = true)
         
-        // Use DependencyExtractor to build project options with all dependencies
-        let projectOptions = 
+        // Use FCS's built-in script resolution
+        let! projectOptions = 
             buildProjectOptionsWithDependencies ctx.InputPath checker
         
         if ctx.Verbose then
@@ -89,19 +89,13 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
             for file in projectOptions.SourceFiles do
                 printfn "    - %s" file
         
-        // Create parsing options
-        let parsingOptions = {
-            FSharpParsingOptions.Default with 
-                SourceFiles = projectOptions.SourceFiles
-                ConditionalDefines = ["ZERO_ALLOCATION"; "FIDELITY"]
-                LangVersionText = "preview"
-                IsInteractive = false
-                CompilingFSharpCore = false
-                IsExe = true
-                ApplyLineDirectives = true  
-                IndentationAwareSyntax = Some true
-                StrictIndentation = Some true
-        }
+        // GetParsingOptionsFromProjectOptions returns a tuple!
+        let (parsingOptions, parsingDiagnostics) = checker.GetParsingOptionsFromProjectOptions projectOptions
+        
+        if parsingDiagnostics.Length > 0 then
+            printfn "  Parsing option diagnostics:"
+            for diag in parsingDiagnostics do
+                printfn "    %s" diag.Message
         
         // Parse all files to build consolidated AST
         let! parseResults = 
@@ -113,10 +107,7 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
                             File.ReadAllText(file) 
                             |> SourceText.ofString
                         let! result = 
-                            checker.ParseFile(
-                                file, 
-                                sourceText,
-                                parsingOptions)  // Use our parsing options
+                            checker.ParseFile(file, sourceText, parsingOptions)
                         return Some result
                     with ex ->
                         printfn "  ERROR parsing %s: %s" file ex.Message
