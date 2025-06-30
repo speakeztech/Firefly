@@ -58,13 +58,11 @@ type CompilationContext = {
     Config: FireflyConfig
     KeepIntermediates: bool
     Verbose: bool
-    IntermediatesDir: string
+    IntermediatesDir: string option
 }
 
 /// Helper functions
 module Helpers =
-    
-
     let getDefaultTarget() =
         if RuntimeInformation.IsOSPlatform OSPlatform.Windows then
             "x86_64-pc-windows-msvc"
@@ -82,27 +80,23 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
         
         let checker = FSharpChecker.Create(keepAssemblyContents = true)
         let sourceText = SourceText.ofString sourceCode
-        let projectOptions = {
-            ProjectFileName = "firefly.fsproj"
-            ProjectId = None
-            SourceFiles = [| ctx.InputPath |]
-            OtherOptions = [| 
-                "--target:exe"
-                "--noframework"
-                "--nowin32manifest"
-                "--define:ZERO_ALLOCATION"
-                "--define:FIDELITY"
-            |]
-            ReferencedProjects = [||]
-            IsIncompleteTypeCheckEnvironment = false
-            UseScriptResolutionRules = false
-            LoadTime = DateTime.Now
-            UnresolvedReferences = None
-            OriginalLoadReferences = []
-            Stamp = None
+        let defaultOptions = FSharpParsingOptions.Default
+        
+        // Create parsing options from project options
+        let parsingOptions = {
+            defaultOptions with 
+                SourceFiles = [| ctx.InputPath |]
+                ConditionalDefines = ["ZERO_ALLOCATION"; "FIDELITY"]
+                LangVersionText = "preview"
+                IsInteractive = false
+                CompilingFSharpCore = false
+                IsExe = true
+                ApplyLineDirectives = true  
+                IndentationAwareSyntax = Some true
+                StrictIndentation = Some true
         }
         
-        let! parseResult = checker.ParseFile(ctx.InputPath, sourceText, projectOptions)
+        let! parseResult = checker.ParseFile(ctx.InputPath, sourceText, parsingOptions)
         
         if parseResult.ParseHadErrors then
             let errors = parseResult.Diagnostics |> Array.map (fun d ->
@@ -111,6 +105,27 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
                            ["parsing"]))
             return CompilerFailure (Array.toList errors)
         else
+            // Create project options for type checking
+            let projectOptions = {
+                ProjectFileName = "firefly.fsproj"
+                ProjectId = None
+                SourceFiles = [| ctx.InputPath |]
+                OtherOptions = [| 
+                    "--target:exe"
+                    "--noframework"
+                    "--nowin32manifest"
+                    "--define:ZERO_ALLOCATION"
+                    "--define:FIDELITY"
+                |]
+                ReferencedProjects = [||]
+                IsIncompleteTypeCheckEnvironment = false
+                UseScriptResolutionRules = false
+                LoadTime = DateTime.Now
+                UnresolvedReferences = None
+                OriginalLoadReferences = []
+                Stamp = None
+            }
+            
             let! checkAnswer = checker.CheckFileInProject(parseResult, ctx.InputPath, 0, sourceText, projectOptions)
             match checkAnswer with
             | FSharpCheckFileAnswer.Succeeded checkResults ->
@@ -131,7 +146,8 @@ let private processAndTransform (ctx: CompilationContext) (checkResults: FSharpC
         let typeCtx = TypeContextBuilder.create()
         let symbolRegistry = 
             let registry = Registry.createRegistry alloyPatterns
-            registerAlloySymbols registry
+            registerAlloySymbols registry |> ignore
+            registry
             
         let processingCtx = {
             Checker = FSharpChecker.Create()
@@ -144,23 +160,30 @@ let private processAndTransform (ctx: CompilationContext) (checkResults: FSharpC
         let! processed = processCompilationUnit processingCtx ast
         
         if ctx.KeepIntermediates then
+            let dir = 
+                match ctx.IntermediatesDir with
+                | Some d -> d
+                | None -> failwith "IntermediatesDir should be Some when KeepIntermediates is true"
             let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
-            writeFile ctx.IntermediatesDir baseName ".processed.fcs" (sprintf "%A" processed.Input)
-        
-        return Success processed
+            writeFile dir baseName ".processed.fcs" (sprintf "%A" processed.Input)
+
+        return Success (processed, symbolRegistry)
     }
 
 /// Phase 3: Generate MLIR
-let private generateMLIR (ctx: CompilationContext) (processed: {| Input: ParsedInput; TypeContext: TypeContext; Reachability: ReachabilityResult; Symbols: Map<string,obj> |}) : CompilerResult<string> =
+let private generateMLIR (ctx: CompilationContext) (processed: {| Input: ParsedInput; TypeContext: TypeContext; Reachability: ReachabilityResult; Symbols: Map<string,obj> |}, symbolRegistry) : CompilerResult<string> =
     printfn "Phase 3: Generating MLIR..."
     
     try
-        let mlirText = generateModuleFromAST processed.Input processed.TypeContext processed.Reachability.Registry
+        let mlirText = generateModuleFromAST processed.Input processed.TypeContext symbolRegistry
         
         if ctx.KeepIntermediates then
+            let dir = 
+                match ctx.IntermediatesDir with
+                | Some d -> d
+                | None -> failwith "IntermediatesDir should be Some when KeepIntermediates is true"
             let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
-            writeFile ctx.IntermediatesDir baseName ".mlir" mlirText
-        
+            writeFile dir baseName ".mlir" mlirText
         Success mlirText
     with ex ->
         CompilerFailure [ConversionError("mlir_generation", "ast", "mlir", ex.Message)]
@@ -194,12 +217,16 @@ let private lowerAndOptimize (ctx: CompilationContext) (mlirText: string) : Comp
         | CompilerFailure errors -> CompilerFailure errors
         | Success optimized ->
             // Convert to LLVM IR
-            match translateToLLVMIR optimized.LLVMIRText  (Some ctx.IntermediatesDir) with
+            match translateToLLVMIR optimized.LLVMIRText ctx.IntermediatesDir with
             | CompilerFailure errors -> CompilerFailure errors
             | Success llvmIR ->
                 if ctx.KeepIntermediates then
-                    let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
-                    writeFile ctx.IntermediatesDir baseName ".ll" llvmIR
+                        let dir = 
+                            match ctx.IntermediatesDir with
+                            | Some d -> d
+                            | None -> failwith "IntermediatesDir should be Some when KeepIntermediates is true"
+                        let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
+                        writeFile dir baseName ".ll" llvmIR
                 Success llvmIR
 
 /// Phase 8: Validate and finalize
@@ -228,9 +255,9 @@ let private compilePipeline (ctx: CompilationContext) (sourceCode: string) : Asy
             let! processResult = processAndTransform ctx (checkResults, ast)
             match processResult with
             | CompilerFailure errors -> return CompilerFailure errors
-            | Success processed ->
+            | Success (processed, symbolRegistry) ->
                 // Phase 3: Generate MLIR
-                match generateMLIR ctx processed with
+                match generateMLIR ctx (processed, symbolRegistry) with
                 | CompilerFailure errors -> return CompilerFailure errors
                 | Success mlirText ->
                     // Phases 4-7: Lower and optimize

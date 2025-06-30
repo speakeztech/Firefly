@@ -61,3 +61,4 @@ src/directory_structure.txt
 
 .fake
 src/file_sizes.csv
+.vscode/settings.json
