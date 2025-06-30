@@ -3,6 +3,7 @@ module Dabbit.Bindings.SymbolRegistry
 open System
 open FSharp.Compiler.Syntax
 open Core.XParsec.Foundation
+open Core.Types.Dialects
 open Core.Types.TypeSystem
 open Core.Types.MLIRContext
 open Dabbit.Bindings.PatternLibrary

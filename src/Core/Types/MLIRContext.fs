@@ -2,7 +2,8 @@
 
 open System
 open System.Runtime.InteropServices
-open Core.Types.TypeSystem
+open Dialects
+open TypeSystem
 
 /// MLIR C API function imports
 [<DllImport("libMLIR-C.so", CallingConvention = CallingConvention.Cdecl)>]

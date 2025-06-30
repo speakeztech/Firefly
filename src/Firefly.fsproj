@@ -23,9 +23,10 @@
       <Compile Include="Core/Utilities/RemoveIntermediates.fs" />
       
       <!-- Core Type System --> 
+      <Compile Include="Core/Types/Dialects.fs" />
+      <Compile Include="Core/Types/TypeSystem.fs" />   
       <Compile Include="Core/Types/MLIRContext.fs" />   
-      <Compile Include="Core/Types/TypeSystem.fs" /> 
-      <Compile Include="Core/XParsec/Foundation.fs" />    
+      <Compile Include="Core/XParsec/Foundation.fs" />  
       
       <!-- Core AST -->
       <Compile Include="Core/AST/Traversal.fs" />           <!-- Generic AST traversal engine -->

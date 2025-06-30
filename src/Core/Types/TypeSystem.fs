@@ -1,18 +1,7 @@
 module Core.Types.TypeSystem
 
-open MLIRContext
-
-/// MLIR dialect definitions
-type MLIRDialect =
-    | Standard
-    | LLVM
-    | Func
-    | Arith
-    | SCF
-    | MemRef
-    | Index
-    | Affine
-    | Builtin
+open Dialects
+open Core.XParsec.Foundation
     
 /// Dialect-specific operation registry
 type DialectOperation = {

@@ -1,6 +1,7 @@
 module Dabbit.Bindings.PatternLibrary
 
 open FSharp.Compiler.Syntax
+open Core.Types.Dialects
 open Core.Types.TypeSystem  // Use Core types since TypeMapping comes after this file
 
 /// MLIR operation pattern for resolved symbols
