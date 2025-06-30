@@ -5,6 +5,7 @@ open System.Text
 open XParsec
 open XParsec.CharParsers
 open XParsec.Parsers
+open Core.Types.TypeSystem
 
 // ===================================================================
 // Core Compiler Types
@@ -235,3 +236,85 @@ let runMLIRCombinator (combinator: MLIRCombinator<'T>) (initialState: MLIRBuilde
 let isNullOrEmpty (str: string) = String.IsNullOrEmpty(str)
 let isNullOrWhiteSpace (str: string) = String.IsNullOrWhiteSpace(str)
 let indent (level: int) : string = String.replicate (level * 2) " "
+
+// ===================================================================
+// TYPED MLIR GENERATION PRIMITIVES - Using TypeSystem Types
+// ===================================================================
+
+/// Create typed MLIR value
+let mlirValue (ssa: string) (typ: MLIRType) (isConst: bool) : MLIRValue = {
+    SSA = ssa
+    Type = mlirTypeToString typ
+    IsConstant = isConst
+}
+
+/// Generate MLIR constant with type
+let mlirConstant (value: string) (typ: MLIRType) : MLIRCombinator<MLIRValue> =
+    mlir {
+        let! ssa = MLIRCombinators.nextSSA "const"
+        let formattedType = mlirTypeToString typ
+        do! MLIRCombinators.emitLine (sprintf "%s = arith.constant %s : %s" ssa value formattedType)
+        return mlirValue ssa typ true
+    }
+
+/// Generate typed binary operation
+let mlirBinaryOp (op: string) (left: MLIRValue) (right: MLIRValue) (resultType: MLIRType) : MLIRCombinator<MLIRValue> =
+    mlir {
+        let! ssa = MLIRCombinators.nextSSA "op"
+        let typeStr = mlirTypeToString resultType
+        do! MLIRCombinators.emitLine (sprintf "%s = %s %s, %s : %s" ssa op left.SSA right.SSA typeStr)
+        return mlirValue ssa resultType false
+    }
+
+/// Generate function declaration
+let mlirFuncDecl (name: string) (params: (string * MLIRType) list) (returnTypes: MLIRType list) : MLIRCombinator<unit> =
+    mlir {
+        let paramStr = params |> List.map (fun (n, t) -> sprintf "%%%s: %s" n (mlirTypeToString t)) |> String.concat ", "
+        let returnStr = 
+            match returnTypes with
+            | [] -> ""
+            | types -> " -> " + (types |> List.map mlirTypeToString |> String.concat ", ")
+        do! MLIRCombinators.emitLine (sprintf "func.func @%s(%s)%s {" name paramStr returnStr)
+    }
+
+/// Generate type alias
+let mlirTypeAlias (name: string) (typ: MLIRType) : MLIRCombinator<unit> =
+    mlir {
+        do! MLIRCombinators.emitLine (sprintf "!%s = type %s" name (mlirTypeToString typ))
+    }
+
+/// Begin a new MLIR block
+let mlirBeginBlock (label: string option) : MLIRCombinator<unit> =
+    mlir {
+        match label with
+        | Some l -> do! MLIRCombinators.emitLine (sprintf "^%s:" l)
+        | None -> return ()
+    }
+
+/// Generate return operation
+let mlirReturn (values: MLIRValue list) : MLIRCombinator<unit> =
+    mlir {
+        match values with
+        | [] -> do! MLIRCombinators.emitLine "func.return"
+        | vals -> 
+            let valueStr = vals |> List.map (fun v -> v.SSA) |> String.concat ", "
+            let typeStr = vals |> List.map (fun v -> v.Type) |> String.concat ", "
+            do! MLIRCombinators.emitLine (sprintf "func.return %s : %s" valueStr typeStr)
+    }
+
+/// Generate struct type definition
+let mlirStructType (name: string) (fields: (string * MLIRType) list) : MLIRCombinator<unit> =
+    mlir {
+        let structType = MLIRTypes.struct_ fields
+        do! mlirTypeAlias name structType
+    }
+
+/// Increase indentation for nested scope
+let indentScope (builder: MLIRCombinator<'T>) : MLIRCombinator<'T> =
+    fun state ->
+        let newState = { state with MLIR = { state.MLIR with Indent = state.MLIR.Indent + 1 } }
+        match builder newState with
+        | Success(result, finalState) ->
+            let restoredState = { finalState with MLIR = { finalState.MLIR with Indent = state.MLIR.Indent } }
+            Success(result, restoredState)
+        | failure -> failure

@@ -21,11 +21,11 @@
       <!-- Core Infrastructure -->
       <Compile Include="Core/Utilities/IntermediateWriter.fs" />
       <Compile Include="Core/Utilities/RemoveIntermediates.fs" />
-      <Compile Include="Core/XParsec/Foundation.fs" />
       
-      <!-- Core Type System -->
-      <Compile Include="Core/Types/TypeSystem.fs" />        <!-- Contains MLIR types and dialects -->
-      <Compile Include="Core/Types/MLIRContext.fs" />       
+      <!-- Core Type System --> 
+      <Compile Include="Core/Types/MLIRContext.fs" />   
+      <Compile Include="Core/Types/TypeSystem.fs" /> 
+      <Compile Include="Core/XParsec/Foundation.fs" />    
       
       <!-- Core AST -->
       <Compile Include="Core/AST/Traversal.fs" />           <!-- Generic AST traversal engine -->

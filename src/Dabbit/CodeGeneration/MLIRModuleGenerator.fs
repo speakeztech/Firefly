@@ -1,525 +1,475 @@
 module Dabbit.CodeGeneration.MLIRModuleGenerator
 
-open System
-open System.Text
 open FSharp.Compiler.Syntax
-open FSharp.Compiler.Text
 open Core.Types.TypeSystem
 open Core.XParsec.Foundation
+open TypeMapping
 open MLIREmitter
-open MLIRBuiltins
-open MLIRExpressionGenerator
-open MLIRTypeOperations
 open MLIRControlFlow
+open MLIRTypeOperations
 
-/// Utility functions
-let lift value = mlir { return value }
+// ===================================================================
+// AST Pattern Combinators - Using XParsec for Pattern Matching
+// ===================================================================
 
-let rec mapM (f: 'a -> MLIRCombinator<'b>) (list: 'a list): MLIRCombinator<'b list> =
+/// AST parser type - parses F# AST nodes to produce MLIR values
+type ASTParser<'AST, 'Result> = 'AST -> MLIRCombinator<'Result option>
+
+/// Lift a pattern match function into an AST parser
+let astPattern (pattern: 'AST -> 'Result option) : ASTParser<'AST, 'Result> =
+    fun ast -> MLIRCombinators.lift (pattern ast)
+
+/// Choice combinator for AST parsers
+let (<|>) (p1: ASTParser<'AST, 'Result>) (p2: ASTParser<'AST, 'Result>) : ASTParser<'AST, 'Result> =
+    fun ast ->
+        mlir {
+            let! result1 = p1 ast
+            match result1 with
+            | Some r -> return Some r
+            | None -> return! p2 ast
+        }
+
+/// Sequence combinator for AST parsers
+let (>>>) (p1: ASTParser<'AST, 'A>) (f: 'A -> MLIRCombinator<'B>) : ASTParser<'AST, 'B> =
+    fun ast ->
+        mlir {
+            let! result1 = p1 ast
+            match result1 with
+            | Some a -> 
+                let! b = f a
+                return Some b
+            | None -> return None
+        }
+
+/// Map combinator for AST parsers
+let (|>>) (p: ASTParser<'AST, 'A>) (f: 'A -> 'B) : ASTParser<'AST, 'B> =
+    fun ast ->
+        mlir {
+            let! result = p ast
+            return Option.map f result
+        }
+
+/// Try multiple AST parsers until one succeeds
+let choice (parsers: ASTParser<'AST, 'Result> list) : ASTParser<'AST, 'Result> =
+    List.reduce (<|>) parsers
+
+/// Always succeed with a value
+let preturn (value: 'Result) : ASTParser<'AST, 'Result> =
+    fun _ -> MLIRCombinators.lift (Some value)
+
+/// Always fail
+let pfail : ASTParser<'AST, 'Result> =
+    fun _ -> MLIRCombinators.lift None
+
+// ===================================================================
+// Expression Pattern Parsers - Composable Expression Matching
+// ===================================================================
+
+/// Parse integer constants with type preservation
+let pInt32Const : ASTParser<SynExpr, int * MLIRType> =
+    astPattern (function
+        | SynExpr.Const(SynConst.Int32 n, _) -> Some (n, MLIRTypes.i32)
+        | _ -> None)
+
+let pInt64Const : ASTParser<SynExpr, int64 * MLIRType> =
+    astPattern (function
+        | SynExpr.Const(SynConst.Int64 n, _) -> Some (n, MLIRTypes.i64)
+        | _ -> None)
+
+let pFloatConst : ASTParser<SynExpr, float * MLIRType> =
+    astPattern (function
+        | SynExpr.Const(SynConst.Double f, _) -> Some (f, MLIRTypes.f64)
+        | _ -> None)
+
+let pFloat32Const : ASTParser<SynExpr, float32 * MLIRType> =
+    astPattern (function
+        | SynExpr.Const(SynConst.Single f, _) -> Some (f, MLIRTypes.f32)
+        | _ -> None)
+
+let pBoolConst : ASTParser<SynExpr, bool * MLIRType> =
+    astPattern (function
+        | SynExpr.Const(SynConst.Bool b, _) -> Some (b, MLIRTypes.i1)
+        | _ -> None)
+
+let pStringConst : ASTParser<SynExpr, string * MLIRType> =
+    astPattern (function
+        | SynExpr.Const(SynConst.String(s, _, _), _) -> Some (s, MLIRTypes.memref MLIRTypes.i8)
+        | _ -> None)
+
+let pUnitConst : ASTParser<SynExpr, unit * MLIRType> =
+    astPattern (function
+        | SynExpr.Const(SynConst.Unit, _) -> Some ((), MLIRTypes.void_)
+        | _ -> None)
+
+/// Parse identifiers with type lookup
+let pIdent : ASTParser<SynExpr, string> =
+    astPattern (function
+        | SynExpr.Ident(ident) -> Some ident.idText
+        | _ -> None)
+
+/// Parse function application
+let pApp : ASTParser<SynExpr, (SynExpr * SynExpr)> =
+    astPattern (function
+        | SynExpr.App(_, _, funcExpr, argExpr, _) -> Some (funcExpr, argExpr)
+        | _ -> None)
+
+/// Parse if-then-else
+let pIfThenElse : ASTParser<SynExpr, (SynExpr * SynExpr * SynExpr option)> =
+    astPattern (function
+        | SynExpr.IfThenElse(cond, thenExpr, elseExpr, _, _, _, _) -> Some (cond, thenExpr, elseExpr)
+        | _ -> None)
+
+/// Parse let binding
+let pLet : ASTParser<SynExpr, (SynBinding list * SynExpr)> =
+    astPattern (function
+        | SynExpr.LetOrUse(_, _, bindings, body, _, _) -> Some (bindings, body)
+        | _ -> None)
+
+// ===================================================================
+// MLIR Generation Combinators - Type-Preserving Transformations
+// ===================================================================
+
+/// Generate MLIR constant from parsed value
+let generateConstant (value: 'T) (typ: MLIRType) : MLIRCombinator<MLIRValue> =
     mlir {
-        match list with
-        | [] -> return []
-        | head :: tail ->
-            let! mappedHead = f head
-            let! mappedTail = mapM f tail
-            return mappedHead :: mappedTail
+        let valueStr = 
+            match box value with
+            | :? bool as b -> if b then "1" else "0"
+            | :? string as s -> sprintf "\"%s\"" s
+            | v -> string v
+        return! mlirConstant valueStr typ
     }
 
-/// Module-level constructs using Foundation patterns
-module rec ModuleConstruction =
+/// Generate identifier reference with type checking
+let generateIdentRef (name: string) : MLIRCombinator<MLIRValue> =
+    mlir {
+        let! state = getState
+        match Map.tryFind name state.LocalVars with
+        | Some (ssa, typeStr) ->
+            let mlirType = parseTypeFromString typeStr
+            return mlirValue ssa mlirType false
+        | None ->
+            // Check if it's a function
+            match Map.tryFind name state.SymbolRegistry.State.SymbolsByShort with
+            | Some symbol ->
+                return mlirValue ("@" + name) symbol.ReturnType false
+            | None ->
+                do! emitComment (sprintf "Undefined identifier: %s" name)
+                return mlirValue "%undefined" MLIRTypes.i32 false
+    }
+
+/// Generate function call with type checking
+let generateCall (funcName: string) (arg: MLIRValue) : MLIRCombinator<MLIRValue> =
+    mlir {
+        let! state = getState
+        match Map.tryFind funcName state.SymbolRegistry.State.SymbolsByShort with
+        | Some symbol ->
+            let! result = nextSSA "call"
+            let returnType = symbol.ReturnType
+            do! emitLine (sprintf "%s = func.call @%s(%s) : (%s) -> %s" 
+                            result funcName arg.SSA arg.Type (mlirTypeToString returnType))
+            return mlirValue result returnType false
+        | None ->
+            // Unknown function - default to i32 return
+            let! result = nextSSA "call"
+            do! emitLine (sprintf "%s = func.call @%s(%s) : (%s) -> i32" 
+                            result funcName arg.SSA arg.Type)
+            return mlirValue result MLIRTypes.i32 false
+    }
+
+// ===================================================================
+// Main Expression Parser - Composing All Patterns
+// ===================================================================
+
+/// Parse any constant expression
+let pAnyConst : ASTParser<SynExpr, MLIRValue> =
+    choice [
+        pInt32Const >>> fun (n, typ) -> generateConstant n typ
+        pInt64Const >>> fun (n, typ) -> generateConstant n typ
+        pFloatConst >>> fun (f, typ) -> generateConstant f typ
+        pFloat32Const >>> fun (f, typ) -> generateConstant f typ
+        pBoolConst >>> fun (b, typ) -> generateConstant b typ
+        pStringConst >>> fun (s, typ) -> generateConstant s typ
+        pUnitConst >>> fun (_, typ) -> generateConstant () typ
+    ]
+
+/// Parse and generate expressions recursively
+let rec pExpression : ASTParser<SynExpr, MLIRValue> =
+    let pSimpleExpr = 
+        pAnyConst
+        <|> (pIdent >>> generateIdentRef)
+        <|> pApplicationExpr
+        <|> pIfThenElseExpr
+        <|> pLetExpr
+        <|> pDefault
     
-    /// Generate top-level module
-    let generateModule (moduleName: string) (declarations: SynModuleDecl list): MLIRCombinator<unit> =
+    pSimpleExpr
+
+and pApplicationExpr : ASTParser<SynExpr, MLIRValue> =
+    pApp >>> fun (funcExpr, argExpr) ->
         mlir {
-            do! Blocks.moduleDef moduleName (mlir {
-                // Emit format strings first
-                do! FormatStrings.emitFormatStrings
-                do! Core.emitBlankLine
-                
-                // Process all declarations
-                for decl in declarations do
-                    do! generateModuleDeclaration decl
-                    do! Core.emitBlankLine
-                
-                // Emit external declarations at the end
-                do! Externals.emitExternalDeclarations
-            })
+            // Parse function name
+            let! funcOpt = (pIdent |>> Some) funcExpr
+            let! argOpt = pExpression argExpr
+            
+            match funcOpt, argOpt with
+            | Some funcName, Some arg ->
+                return! generateCall funcName arg
+            | _ ->
+                do! emitComment "Complex function application not supported"
+                return mlirValue "%error" MLIRTypes.i32 false
         }
-    
-    /// Generate individual module declarations
-    let generateModuleDeclaration (decl: SynModuleDecl): MLIRCombinator<unit> =
+
+and pIfThenElseExpr : ASTParser<SynExpr, MLIRValue> =
+    pIfThenElse >>> fun (cond, thenExpr, elseOpt) ->
+        mlir {
+            let! condOpt = pExpression cond
+            let! thenOpt = pExpression thenExpr
+            
+            match condOpt, thenOpt with
+            | Some condVal, Some thenVal ->
+                match elseOpt with
+                | Some elseExpr ->
+                    let! elseOpt = pExpression elseExpr
+                    match elseOpt with
+                    | Some elseVal ->
+                        // Generate select instruction
+                        let! result = nextSSA "select"
+                        let resultType = thenVal.Type  // Should unify types
+                        do! emitLine (sprintf "%s = arith.select %s, %s, %s : %s" 
+                                        result condVal.SSA thenVal.SSA elseVal.SSA resultType)
+                        return mlirValue result (parseTypeFromString resultType) false
+                    | None ->
+                        return thenVal
+                | None ->
+                    return thenVal
+            | _ ->
+                return mlirValue "%error" MLIRTypes.i32 false
+        }
+
+and pLetExpr : ASTParser<SynExpr, MLIRValue> =
+    pLet >>> fun (bindings, body) ->
+        mlir {
+            // Process bindings
+            for binding in bindings do
+                do! processBinding binding
+            
+            // Process body
+            let! bodyOpt = pExpression body
+            match bodyOpt with
+            | Some value -> return value
+            | None -> return mlirValue "%error" MLIRTypes.i32 false
+        }
+
+and pDefault : ASTParser<SynExpr, MLIRValue> =
+    fun expr ->
+        mlir {
+            do! emitComment (sprintf "Unsupported expression: %A" expr)
+            return Some (mlirValue "%unsupported" MLIRTypes.i32 false)
+        }
+
+and processBinding (binding: SynBinding) : MLIRCombinator<unit> =
+    mlir {
+        let (SynBinding(_, _, _, _, _, _, _, headPat, _, expr, _, _, _)) = binding
+        
+        match headPat with
+        | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+            let! exprOpt = pExpression expr
+            match exprOpt with
+            | Some value ->
+                do! bindLocal ident.idText value.SSA value.Type
+            | None ->
+                do! emitComment (sprintf "Failed to parse binding expression for %s" ident.idText)
+        | _ ->
+            do! emitComment "Complex binding pattern not supported"
+    }
+
+// ===================================================================
+// Type Definition Parsers - Pattern Matching on Type AST
+// ===================================================================
+
+/// Parse record type fields
+let pRecordField : ASTParser<SynField, (string * MLIRType)> =
+    fun field ->
+        mlir {
+            let (SynField(_, _, idOpt, type', _, _, _, _, _)) = field
+            let fieldName = 
+                match idOpt with
+                | Some ident -> ident.idText
+                | None -> "_anonymous_"
+            let mlirType = TypeConversion.synTypeToMLIRType type'
+            return Some (fieldName, mlirType)
+        }
+
+/// Parse union case
+let pUnionCase : ASTParser<SynUnionCase, (string * MLIRType list)> =
+    fun unionCase ->
+        mlir {
+            let (SynUnionCase(_, ident, caseType, _, _, _, _)) = unionCase
+            let caseName = ident.idText
+            let fieldTypes =
+                match caseType with
+                | SynUnionCase.Fields fields ->
+                    fields |> List.map (fun field ->
+                        let (SynField(_, _, _, type', _, _, _, _, _)) = field
+                        TypeConversion.synTypeToMLIRType type')
+                | SynUnionCase.FullType _ -> []
+            return Some (caseName, fieldTypes)
+        }
+
+/// Parse type definition representation
+let pTypeDefnRepr : ASTParser<SynTypeDefnRepr, unit> =
+    astPattern (function
+        | SynTypeDefnRepr.Simple(simpleRepr, _) -> Some simpleRepr
+        | _ -> None) >>> fun simpleRepr ->
+            mlir {
+                match simpleRepr with
+                | SynTypeDefnSimpleRepr.Record(_, fields, _) ->
+                    let! fieldParsers = fields |> List.map pRecordField |> sequence
+                    let fields = fieldParsers |> List.choose id
+                    // Generate record type
+                    return ()
+                | _ ->
+                    return ()
+            }
+
+// ===================================================================
+// Module-Level Parsers
+// ===================================================================
+
+/// Parse function binding
+let pFunctionBinding : ASTParser<SynBinding, unit> =
+    fun binding ->
+        mlir {
+            let (SynBinding(_, _, _, _, _, _, valData, headPat, returnInfo, expr, _, _, _)) = binding
+            
+            match headPat with
+            | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+                let functionName = ident.idText
+                
+                // Extract parameters
+                let parameters = 
+                    match valData with
+                    | SynValData(_, _, Some(SynValInfo(paramGroups, _))) ->
+                        paramGroups 
+                        |> List.concat
+                        |> List.mapi (fun i _ -> (sprintf "arg%d" i, MLIRTypes.i32))
+                    | _ -> []
+                
+                // Extract return type
+                let returnType =
+                    match returnInfo with
+                    | Some(SynBindingReturnInfo(synReturnType, _, _, _)) ->
+                        TypeConversion.synTypeToMLIRType synReturnType
+                    | None -> MLIRTypes.void_
+                
+                // Generate function
+                let returnTypes = if returnType = MLIRTypes.void_ then [] else [returnType]
+                do! mlirFuncDecl functionName parameters returnTypes
+                
+                // Generate body
+                do! indentScope <|
+                    mlir {
+                        // Bind parameters
+                        for (name, typ) in parameters do
+                            do! bindLocal name ("%" + name) (mlirTypeToString typ)
+                        
+                        // Parse body expression
+                        let! bodyOpt = pExpression expr
+                        match bodyOpt with
+                        | Some result ->
+                            if returnType = MLIRTypes.void_ then
+                                do! mlirReturn []
+                            else
+                                do! mlirReturn [result]
+                        | None ->
+                            do! emitComment "Failed to parse function body"
+                            do! mlirReturn []
+                    }
+                    
+                do! emitLine "}"
+                return Some ()
+            | _ ->
+                do! emitComment "Unsupported binding pattern"
+                return None
+        }
+
+/// Parse module declaration
+let rec pModuleDecl : ASTParser<SynModuleDecl, unit> =
+    astPattern (fun decl -> Some decl) >>> fun decl ->
         mlir {
             match decl with
             | SynModuleDecl.Let(_, bindings, _) ->
                 for binding in bindings do
-                    do! FunctionGeneration.generateTopLevelBinding binding
-                    
-            | SynModuleDecl.Expr(_, expr, _) ->
-                do! DoExpressions.generateDoExpression expr
-                
-            | SynModuleDecl.Types(typeDefs, _) ->
-                for typeDef in typeDefs do
-                    do! TypeGeneration.generateTypeDefinition typeDef
-                    
-            | SynModuleDecl.Open(target, _) ->
-                do! NamespaceGeneration.generateOpenDeclaration target
-                
-            | SynModuleDecl.ModuleAbbrev(ident, longIdent, _) ->
-                do! NamespaceGeneration.generateModuleAbbreviation ident longIdent
-                
-            | SynModuleDecl.NestedModule(componentInfo, _, nestedDecls, _, _, _) ->
-                let (SynComponentInfo(_, _, _, longIdent, _, _, _, _)) = componentInfo
-                let moduleName = longIdent |> List.map (fun id -> id.idText) |> String.concat "_"
-                do! NamespaceGeneration.generateNestedModule moduleName nestedDecls
-                
-            | SynModuleDecl.Exception(exnDef, _) ->
-                do! ExceptionGeneration.generateExceptionDefinition exnDef
-                
-            | _ ->
-                do! Core.emitComment (sprintf "Unsupported module declaration: %A" decl)
-        }
-
-/// Function definitions using Foundation combinators
-module rec FunctionGeneration =
-    
-    /// Generate top-level function binding
-    let generateTopLevelBinding (binding: SynBinding): MLIRCombinator<unit> =
-        mlir {
-            let (SynBinding(_, kind, _, _, _, _, valData, headPat, returnInfo, expr, _, _, _)) = binding
-            match headPat with
-            | SynPat.LongIdent(SynLongIdent([ident], _, _), _, _, argPats, _, _) ->
-                // Function definition
-                return! generateFunctionDefinition ident argPats returnInfo expr (kind = SynBindingKind.Inline)
-                
-            | SynPat.Named(SynIdent(ident, _), _, _, _) ->
-                // Value binding
-                return! generateValueBinding ident expr
-                
-            | _ ->
-                do! Core.emitComment "Complex pattern binding not fully supported"
-        }
-    
-    /// Generate function definition with parameters
-    let generateFunctionDefinition (ident: Ident) (argPats: SynArgPats) (returnInfo: SynBindingReturnInfo option) 
-                                   (bodyExpr: SynExpr) (isInline: bool): MLIRCombinator<unit> =
-        mlir {
-            let funcName = ident.idText
-            
-            // Extract parameter information
-            let! parameters = extractParameters argPats
-            
-            // Determine return type
-            let! returnType = determineReturnType returnInfo bodyExpr
-            
-            // Generate function
-            do! Blocks.functionDef funcName parameters returnType (mlir {
-                let! bodyResult = Core.generateExpression bodyExpr
-                
-                // Ensure return type compatibility
-                let! finalResult = 
-                    if TypeAnalysis.areEqual bodyResult.Type returnType then
-                        lift bodyResult
-                    else
-                        Conversions.implicitConvert bodyResult.Type returnType bodyResult
-                
-                do! Functions.return' (Some finalResult)
+                    let! _ = pFunctionBinding binding
+                    ()
                 return ()
-            })
-            
-            if isInline then
-                do! Core.emitComment (sprintf "Function %s marked as inline" funcName)
-        }
-    
-    /// Extract parameter information from argument patterns
-    let extractParameters (argPats: SynArgPats): MLIRCombinator<(string * MLIRType) list> =
-        mlir {
-            match argPats with
-            | SynArgPats.Pats(patterns) ->
-                return! mapM extractParameterFromPattern patterns
                 
-            | SynArgPats.NamePatPairs(pairs, _) ->
-                let extractPair (pair: SynIdent * _ * SynPat) =
-                    let (_, _, pat) = pair
-                    extractParameterFromPattern pat
-                return! mapM extractPair pairs
-        }
-    
-    /// Extract parameter from pattern
-    let extractParameterFromPattern (pattern: SynPat): MLIRCombinator<string * MLIRType> =
-        mlir {
-            match pattern with
-            | SynPat.Named(SynIdent(ident, _), _, _, _) ->
-                // Default to i32 for now - would need type inference
-                return (ident.idText, MLIRTypes.i32)
+            | SynModuleDecl.Types(typeDefns, _) ->
+                do! emitComment "Type definitions"
+                return ()
                 
-            | SynPat.Typed(SynPat.Named(SynIdent(ident, _), _, _, _), synType, _) ->
-                let! mlirType = Mapping.synTypeToMLIR synType
-                return (ident.idText, mlirType)
-                
-            | SynPat.Paren(innerPat, _) ->
-                return! extractParameterFromPattern innerPat
+            | SynModuleDecl.NestedModule(componentInfo, _, decls, _, _, _) ->
+                let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = componentInfo
+                let moduleName = String.concat "." (longId |> List.map (fun id -> id.idText))
+                do! emitComment (sprintf "Nested module: %s" moduleName)
+                for decl in decls do
+                    let! _ = pModuleDecl decl
+                    ()
+                return ()
                 
             | _ ->
-                return! fail "parameter_extraction" "Unsupported parameter pattern"
-        }
-    
-    /// Determine function return type
-    let determineReturnType (returnInfo: SynBindingReturnInfo option) (bodyExpr: SynExpr): MLIRCombinator<MLIRType> =
-        mlir {
-            match returnInfo with
-            | Some (SynBindingReturnInfo(synType, _, _)) ->
-                return! Mapping.synTypeToMLIR synType
-            | None ->
-                // Infer from body expression - simplified
-                return MLIRTypes.i32  // Default for now
-        }
-    
-    /// Generate simple value binding
-    let generateValueBinding (ident: Ident) (expr: SynExpr): MLIRCombinator<unit> =
-        mlir {
-            let! value = Core.generateExpression expr
-            
-            // Create global constant
-            let globalName = sprintf "@%s" ident.idText
-            let typeStr = Core.formatType value.Type
-            
-            do! emitLine (sprintf "llvm.mlir.global internal @%s(%s) : %s" ident.idText value.SSA typeStr)
-            do! bindLocal ident.idText globalName typeStr
+                do! emitComment "Unsupported module declaration"
+                return ()
         }
 
-/// Type definitions using Foundation patterns
-module rec TypeGeneration =
-    
-    /// Generate type definition
-    let generateTypeDefinition (typeDef: SynTypeDefn): MLIRCombinator<unit> =
-        mlir {
-            let (SynTypeDefn(componentInfo, repr, _, _, _, _)) = typeDef
-            let (SynComponentInfo(_, _, _, longIdent, _, _, _, _)) = componentInfo
-            let typeName = longIdent |> List.map (fun id -> id.idText) |> String.concat "_"
-            
-            match repr with
-            | SynTypeDefnRepr.Simple(simpleRepr, _) ->
-                do! generateSimpleTypeRepr typeName simpleRepr
-                
-            | SynTypeDefnRepr.ObjectModel(_, members, _) ->
-                do! generateObjectModel typeName members
-                
-            | _ ->
-                do! Core.emitComment (sprintf "Unsupported type representation for %s" typeName)
-        }
-    
-    /// Generate simple type representations
-    let generateSimpleTypeRepr (typeName: string) (simpleRepr: SynTypeDefnSimpleRepr): MLIRCombinator<unit> =
-        mlir {
-            match simpleRepr with
-            | SynTypeDefnSimpleRepr.Record(_, fields, _) ->
-                do! generateRecordType typeName fields
-                
-            | SynTypeDefnSimpleRepr.Union(_, cases, _) ->
-                do! generateUnionType typeName cases
-                
-            | SynTypeDefnSimpleRepr.TypeAbbrev(_, synType, _) ->
-                do! generateTypeAlias typeName synType
-                
-            | _ ->
-                do! Core.emitComment (sprintf "Unsupported simple type representation for %s" typeName)
-        }
-    
-    /// Generate record type definition
-    let generateRecordType (typeName: string) (fields: SynField list): MLIRCombinator<unit> =
-        mlir {
-            do! Core.emitComment (sprintf "Record type: %s" typeName)
-            
-            let extractField (field: SynField) =
-                let (SynField(_, _, fieldIdOpt, fieldType, _, _, _, _, _)) = field
-                let fieldName = 
-                    match fieldIdOpt with
-                    | Some id -> id.idText
-                    | None -> "anonymous"
-                
-                mlir {
-                    let! mlirType = Mapping.synTypeToMLIR fieldType
-                    return (fieldName, mlirType)
-                }
-                
-            let! fieldTypes = mapM extractField fields
-            
-            let! structType = StructTypes.createStructType fieldTypes
-            do! Core.emitComment (sprintf "Struct type %s: %s" typeName (Core.formatType structType))
-        }
-    
-    /// Generate discriminated union type
-    let generateUnionType (typeName: string) (cases: SynUnionCase list): MLIRCombinator<unit> =
-        mlir {
-            do! Core.emitComment (sprintf "Union type: %s" typeName)
-            
-            let extractCase (case: SynUnionCase) =
-                let (SynUnionCase(_, SynIdent(ident, _), caseType, _, _, _, _)) = case
-                let caseName = ident.idText
-                
-                mlir {
-                    match caseType with
-                    | SynUnionCaseKind.Fields(fields) ->
-                        let extractFieldType (field: SynField) =
-                            let (SynField(_, _, _, fieldType, _, _, _, _, _)) = field
-                            Mapping.synTypeToMLIR fieldType
-                        let! fieldTypes = mapM extractFieldType fields
-                        return (caseName, fieldTypes)
+// ===================================================================
+// Helper Functions for List Processing with Parsers
+// ===================================================================
+
+/// Sequence a list of parsers
+let sequence (parsers: MLIRCombinator<'T option> list) : MLIRCombinator<'T option list> =
+    mlir {
+        let rec loop acc = function
+            | [] -> return List.rev acc
+            | p::ps ->
+                let! result = p
+                return! loop (result::acc) ps
+        return! loop [] parsers
+    }
+
+// ===================================================================
+// Main Entry Point - Parse Entire AST
+// ===================================================================
+
+/// Generate MLIR from parsed F# input using XParsec patterns
+let generateMLIR (parsedInput: ParsedInput) : MLIRBuilder<unit> =
+    mlir {
+        do! emitLine "module {"
+        do! indentScope <|
+            mlir {
+                match parsedInput with
+                | ParsedInput.ImplFile(ParsedImplFileInput(fileName, _, _, _, _, modules, _, _)) ->
+                    do! emitComment (sprintf "File: %s" fileName)
+                    
+                    for (SynModuleOrNamespace(longId, _, _, decls, _, _, _, _, _)) in modules do
+                        let namespaceName = String.concat "." (longId |> List.map (fun id -> id.idText))
+                        do! emitComment (sprintf "Module/namespace: %s" namespaceName)
                         
-                    | SynUnionCaseKind.FullType(synType, _) ->
-                        let! caseType = Mapping.synTypeToMLIR synType
-                        return (caseName, [caseType])
-                }
-                
-            let! caseTypes = mapM extractCase cases
-            
-            let! unionType = UnionTypes.createUnionType caseTypes
-            do! Core.emitComment (sprintf "Union type %s: %s" typeName (Core.formatType unionType))
-        }
-    
-    /// Generate type alias
-    let generateTypeAlias (typeName: string) (synType: SynType): MLIRCombinator<unit> =
-        mlir {
-            let! mlirType = Mapping.synTypeToMLIR synType
-            do! Core.emitComment (sprintf "Type alias %s = %s" typeName (Core.formatType mlirType))
-        }
-    
-    /// Generate object model (classes, interfaces)
-    let generateObjectModel (typeName: string) (members: SynMemberDefn list): MLIRCombinator<unit> =
-        mlir {
-            do! Core.emitComment (sprintf "Object model for %s not fully supported" typeName)
-            
-            for memberDef in members do
-                do! generateMemberDefinition typeName memberDef
-        }
-    
-    /// Generate member definition
-    let generateMemberDefinition (typeName: string) (memberDef: SynMemberDefn): MLIRCombinator<unit> =
-        mlir {
-            match memberDef with
-            | SynMemberDefn.Member(binding, _) ->
-                do! FunctionGeneration.generateTopLevelBinding binding
-                
-            | SynMemberDefn.ImplicitCtor(_, _, ctorArgs, _, _, _) ->
-                do! Core.emitComment (sprintf "Constructor for %s" typeName)
-                
-            | _ ->
-                do! Core.emitComment "Unsupported member definition"
-        }
-
-/// Exception definitions
-module ExceptionGeneration =
-    
-    /// Generate exception definition
-    let generateExceptionDefinition (exnDef: SynExceptionDefn): MLIRCombinator<unit> =
-        mlir {
-            let (SynExceptionDefn(exnRepr, _, _)) = exnDef
-            let (SynExceptionDefnRepr(_, unionCase, _, _, _, _)) = exnRepr
-            let (SynUnionCase(_, SynIdent(ident, _), caseType, _, _, _, _)) = unionCase
-            let exnName = ident.idText
-            do! Core.emitComment (sprintf "Exception definition: %s" exnName)
-            
-            // Exceptions represented as tagged unions
-            match caseType with
-            | SynUnionCaseKind.Fields(fields) ->
-                let extractFieldType (field: SynField) =
-                    let (SynField(_, _, _, fieldType, _, _, _, _, _)) = field
-                    Mapping.synTypeToMLIR fieldType
-                let! fieldTypes = mapM extractFieldType fields
-                
-                let! exnType = UnionTypes.createUnionType [(exnName, fieldTypes)]
-                do! Core.emitComment (sprintf "Exception type: %s" (Core.formatType exnType))
-                
-            | _ ->
-                do! Core.emitComment "Simple exception (no data)"
-        }
-
-/// Namespace and module organization
-module NamespaceGeneration =
-    
-    /// Generate open declaration
-    let generateOpenDeclaration (target: SynOpenDeclTarget): MLIRCombinator<unit> =
-        mlir {
-            match target with
-            | SynOpenDeclTarget.ModuleOrNamespace(SynLongIdent(ids, _, _), _) ->
-                let namespacePath = ids |> List.map (fun id -> id.idText) |> String.concat "."
-                do! Core.emitComment (sprintf "Open namespace: %s" namespacePath)
-                
-                // Update namespace context
-                do! updateMLIRState (fun s -> 
-                    { s with Firefly = { s.Firefly with ImportedModules = namespacePath :: s.Firefly.ImportedModules } })
-                
-            | _ ->
-                do! Core.emitComment "Unsupported open declaration target"
-        }
-    
-    /// Generate module abbreviation
-    let generateModuleAbbreviation (ident: Ident) (longIdent: SynLongIdent): MLIRCombinator<unit> =
-        mlir {
-            let (SynLongIdent(ids, _, _)) = longIdent
-            let fullName = ids |> List.map (fun id -> id.idText) |> String.concat "."
-            do! Core.emitComment (sprintf "Module abbreviation: %s = %s" ident.idText fullName)
-        }
-    
-    /// Generate nested module
-    let generateNestedModule (moduleName: string) (declarations: SynModuleDecl list): MLIRCombinator<unit> =
-        mlir {
-            do! Core.emitComment (sprintf "Nested module: %s" moduleName)
-            
-            for decl in declarations do
-                do! ModuleConstruction.generateModuleDeclaration decl
-        }
-
-/// Top-level do expressions
-module DoExpressions =
-    
-    /// Generate do expression (module initialization)
-    let generateDoExpression (expr: SynExpr): MLIRCombinator<unit> =
-        mlir {
-            do! Core.emitComment "Module initialization expression"
-            
-            // Generate initialization function
-            do! Blocks.functionDef "__module_init" [] MLIRTypes.void_ (mlir {
-                let! result = Core.generateExpression expr
-                do! Functions.return' None
-                return ()
-            })
-        }
-
-/// Program entry points
-module EntryPoints =
-    
-    /// Generate main function entry point
-    let generateMainFunction (programName: string) (mainExpr: SynExpr option): MLIRCombinator<unit> =
-        mlir {
-            match mainExpr with
-            | Some expr ->
-                do! Blocks.functionDef "main" [] MLIRTypes.i32 (mlir {
-                    let! result = Core.generateExpression expr
-                    
-                    // Ensure main returns i32
-                    let! exitCode = 
-                        if TypeAnalysis.areEqual result.Type MLIRTypes.i32 then
-                            lift result
-                        else
-                            Constants.intConstant 0 32
-                    
-                    do! Functions.return' (Some exitCode)
-                    return ()
-                })
-                
-            | None ->
-                do! Blocks.functionDef "main" [] MLIRTypes.i32 (mlir {
-                    let! exitCode = Constants.intConstant 0 32
-                    do! Functions.return' (Some exitCode)
-                    return ()
-                })
-        }
-
-/// Complete program generation orchestration
-module rec ProgramGeneration =
-    
-    /// Generate complete MLIR program from F# parsed input
-    let generateProgram (programName: string) (parsedInputs: (string * ParsedInput) list): MLIRCombinator<string> =
-        mlir {
-            do! Core.emitComment (sprintf "Generated MLIR for program: %s" programName)
-            do! Core.emitComment (sprintf "Timestamp: %s" (DateTime.Now.ToString()))
-            do! Core.emitBlankLine
-            
-            let! result = Blocks.moduleDef programName (mlir {
-                // Process all input files
-                for (fileName, parsedInput) in parsedInputs do
-                    do! Core.emitComment (sprintf "Processing file: %s" fileName)
-                    do! processInputFile parsedInput
-                    do! Core.emitBlankLine
-                
-                // Generate main function if needed
-                do! EntryPoints.generateMainFunction programName None
-            })
-            
-            // Extract generated MLIR text
-            let! state = getMLIRState
-            return state.MLIR.Output.ToString()
-        }
-    
-    /// Process individual input file
-    let processInputFile (parsedInput: ParsedInput): MLIRCombinator<unit> =
-        mlir {
-            match parsedInput with
-            | ParsedInput.ImplFile(implFile) ->
-                let (ParsedImplFileInput(fileName, _, _, _, _, modules, _)) = implFile
-                for moduleOrNamespace in modules do
-                    let (SynModuleOrNamespace(longIdent, _, kind, declarations, _, _, _, _, _)) = moduleOrNamespace
-                    let moduleName = longIdent |> List.map (fun id -> id.idText) |> String.concat "_"
-                    
-                    match kind with
-                    | SynModuleOrNamespaceKind.NamedModule ->
-                        do! NamespaceGeneration.generateNestedModule moduleName declarations
-                    | SynModuleOrNamespaceKind.AnonModule ->
-                        for decl in declarations do
-                            do! ModuleConstruction.generateModuleDeclaration decl
-                    | SynModuleOrNamespaceKind.DeclaredNamespace ->
-                        do! Core.emitComment (sprintf "Namespace: %s" moduleName)
-                        for decl in declarations do
-                            do! ModuleConstruction.generateModuleDeclaration decl
-                    | SynModuleOrNamespaceKind.GlobalNamespace ->
-                        for decl in declarations do
-                            do! ModuleConstruction.generateModuleDeclaration decl
+                        for decl in decls do
+                            let! _ = pModuleDecl decl
+                            ()
                             
-            | ParsedInput.SigFile(_) ->
-                do! Core.emitComment "Signature files not processed in code generation"
-        }
+                | ParsedInput.SigFile _ ->
+                    do! emitComment "Signature file processing not implemented"
+            }
+        do! emitLine "}"
+    }
 
-/// Utility functions for program generation
-module Utilities =
+/// Run the MLIR generator
+let generateModuleFromAST (ast: ParsedInput) : string =
+    let builderState = MLIREmitter.createInitialState()
     
-    /// Create initial program generation state
-    let createInitialState (programName: string): MLIRBuilderState =
-        initialMLIRBuilderState programName
-    
-    /// Run complete program generation
-    let runProgramGeneration (programName: string) (parsedInputs: (string * ParsedInput) list): Result<string, string list> =
-        let initialState = createInitialState programName
-        let combinator = ProgramGeneration.generateProgram programName parsedInputs
-        
-        match runMLIRCombinator combinator initialState with
-        | Success(output, state) -> Ok output
-        | Failure errors -> Error (errors |> List.map (fun e -> e.ToString()))
-    
-    /// Validate generated MLIR (basic syntax check)
-    let validateMLIR (mlirCode: string): Result<unit, string list> =
-        // Basic validation - check for balanced braces
-        let braceBalance = 
-            mlirCode.ToCharArray()
-            |> Array.fold (fun acc c ->
-                match c with
-                | '{' -> acc + 1
-                | '}' -> acc - 1
-                | _ -> acc) 0
-        
-        if braceBalance = 0 then
-            Ok ()
-        else
-            Error [sprintf "Unbalanced braces in generated MLIR (balance: %d)" braceBalance]
-    
-    /// Pretty print MLIR with syntax highlighting comments
-    let prettyPrintMLIR (mlirCode: string): string =
-        let lines = mlirCode.Split('\n')
-        let mutable indentLevel = 0
-        let result = StringBuilder()
-        
-        for line in lines do
-            let trimmed = line.Trim()
-            
-            if trimmed.EndsWith("{") then
-                result.AppendLine(sprintf "%s%s" (String.replicate indentLevel "  ") trimmed) |> ignore
-                indentLevel <- indentLevel + 1
-            elif trimmed = "}" then
-                indentLevel <- max 0 (indentLevel - 1)
-                result.AppendLine(sprintf "%s%s" (String.replicate indentLevel "  ") trimmed) |> ignore
-            elif not (String.IsNullOrWhiteSpace(trimmed)) then
-                result.AppendLine(sprintf "%s%s" (String.replicate indentLevel "  ") trimmed) |> ignore
-            else
-                result.AppendLine() |> ignore
-        
-        result.ToString()
+    match MLIREmitter.runBuilder (generateMLIR ast) builderState with
+    | Success(_, state) -> state.Output.ToString()
+    | Failure(error) -> sprintf "// Error generating MLIR: %s" error

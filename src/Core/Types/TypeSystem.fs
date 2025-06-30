@@ -1,6 +1,6 @@
 module Core.Types.TypeSystem
 
-open Core.XParsec.Foundation
+open MLIRContext
 
 /// MLIR dialect definitions
 type MLIRDialect =
