@@ -1,4 +1,4 @@
-module Core.Utilities
+namespace Core.Utilities
 
 open System
 open System.IO
