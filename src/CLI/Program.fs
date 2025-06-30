@@ -46,7 +46,7 @@ let main argv =
             let compileParser = ArgumentParser.Create<CompileArgs>(programName = "firefly compile", errorHandler = errorHandler)
             let compileArgs = Array.skip 1 argv
             let compileResults = compileParser.ParseCommandLine(compileArgs)
-            compile compileResults
+            execute compileResults
         elif argv.[0] = "verify" then
             let verifyParser = ArgumentParser.Create<VerifyArgs>(programName = "firefly verify", errorHandler = errorHandler)
             let verifyArgs = Array.skip 1 argv
