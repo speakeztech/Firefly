@@ -10,13 +10,64 @@ type DependencyInfo = {
     ModuleDeps: Map<string, Set<string>>
 }
 
+/// Private helper to add a dependency to a map
+let private addDependency (fromSymbol: string) (toSymbol: string) (deps: Map<string, Set<string>>) =
+    let currentDeps = 
+        Map.tryFind fromSymbol deps 
+        |> Option.defaultValue Set.empty
+    Map.add fromSymbol (Set.add toSymbol currentDeps) deps
+
 /// Resolve dependencies from type-checked results
 let resolveDependencies (checkResults: FSharpCheckFileResults) =
-    let empty = { DirectDeps = Map.empty; TypeDeps = Map.empty; ModuleDeps = Map.empty }
-    
-    // Simply return empty for now - this needs proper implementation
-    // but we'll keep it simple to avoid syntax issues
-    empty
+    try
+        let allUses = checkResults.GetAllUsesOfAllSymbolsInFile()
+        
+        let mutable directDeps = Map.empty
+        let mutable typeDeps = Map.empty
+        let mutable moduleDeps = Map.empty
+        
+        for symbolUse in allUses do
+            let fromSymbol = symbolUse.Symbol.FullName
+            
+            match symbolUse.Symbol with
+            | :? FSharpMemberOrFunctionOrValue as mfv ->
+                // Function/value dependencies
+                for paramGroup in mfv.CurriedParameterGroups do
+                    for param in paramGroup do
+                        if param.Type.HasTypeDefinition then
+                            let typeName = param.Type.TypeDefinition.FullName
+                            typeDeps <- addDependency fromSymbol typeName typeDeps
+                
+                // Return type dependencies
+                if mfv.ReturnParameter.Type.HasTypeDefinition then
+                    let returnType = mfv.ReturnParameter.Type.TypeDefinition.FullName
+                    typeDeps <- addDependency fromSymbol returnType typeDeps
+                    
+            | :? FSharpEntity as entity ->
+                // Type/module dependencies
+                if entity.IsFSharpModule then  // Correct property name
+                    moduleDeps <- addDependency fromSymbol entity.FullName moduleDeps
+                else
+                    // Track type inheritance/implementation
+                    for iface in entity.AllInterfaces do
+                        if iface.HasTypeDefinition then
+                            typeDeps <- addDependency entity.FullName iface.TypeDefinition.FullName typeDeps
+                        
+            | _ -> ()
+            
+            // Track direct call dependencies
+            if symbolUse.IsFromUse then
+                directDeps <- addDependency "current" fromSymbol directDeps
+        
+        { 
+            DirectDeps = directDeps
+            TypeDeps = typeDeps
+            ModuleDeps = moduleDeps 
+        }
+    with ex ->
+        // Return empty on failure but log the error
+        printfn "Error resolving dependencies: %s" ex.Message
+        { DirectDeps = Map.empty; TypeDeps = Map.empty; ModuleDeps = Map.empty }
 
 /// Find entry points in the checked file
 let findEntryPoints (checkResults: FSharpCheckFileResults) : Set<string> =

@@ -13,8 +13,8 @@ open Core.Utilities.IntermediateWriter
 open Core.Utilities.RemoveIntermediates
 open Core.Utilities.ReadSourceFile
 open Core.XParsec.Foundation
-open Core.FCSProcessing.DependencyResolver
-open Core.FCSProcessing.TypeExtractor
+open Core.FCSProcessing.AstMerger
+open Core.FCSProcessing.DependencyExtractor
 open Dabbit.CodeGeneration.TypeMapping
 open Dabbit.CodeGeneration.MLIRModuleGenerator
 open Dabbit.Bindings.SymbolRegistry
@@ -73,67 +73,77 @@ module Helpers =
         else
             "x86_64-unknown-unknown"
 
-/// Phase 1: Parse and check source
+/// Phase 1: Parse and check source with all dependencies
 let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async<CompilerResult<FSharpCheckFileResults * ParsedInput>> =
     async {
         printfn "Phase 1: Parsing and type checking..."
         
         let checker = FSharpChecker.Create(keepAssemblyContents = true)
-        let sourceText = SourceText.ofString sourceCode
-        let defaultOptions = FSharpParsingOptions.Default
         
-        // Create parsing options from project options
-        let parsingOptions = {
-            defaultOptions with 
-                SourceFiles = [| ctx.InputPath |]
-                ConditionalDefines = ["ZERO_ALLOCATION"; "FIDELITY"]
-                LangVersionText = "preview"
-                IsInteractive = false
-                CompilingFSharpCore = false
-                IsExe = true
-                ApplyLineDirectives = true  
-                IndentationAwareSyntax = Some true
-                StrictIndentation = None
-        }
+        // Use DependencyExtractor to build project options with all dependencies
+        let projectOptions = 
+            buildProjectOptionsWithDependencies ctx.InputPath checker
         
-        let! parseResult = checker.ParseFile(ctx.InputPath, sourceText, parsingOptions)
+        if ctx.Verbose then
+            printfn "  Discovered source files:"
+            for file in projectOptions.SourceFiles do
+                printfn "    - %s" file
         
-        if parseResult.ParseHadErrors then
-            let errors = parseResult.Diagnostics |> Array.map (fun d ->
-                SyntaxError({ Line = d.StartLine; Column = d.StartColumn; File = ctx.InputPath; Offset = 0 },
+        // Parse all files to build consolidated AST
+        let! parseResults = 
+            projectOptions.SourceFiles 
+            |> Array.map (fun file ->
+                async {
+                    let sourceText = 
+                        File.ReadAllText(file) 
+                        |> SourceText.ofString
+                    let! result = 
+                        checker.ParseFile(
+                            file, 
+                            sourceText,
+                            FSharpParsingOptions.Default)
+                    return result
+                })
+            |> Async.Parallel
+        
+        // Check for parse errors in any file
+        let parseErrors = 
+            parseResults 
+            |> Array.collect (fun r -> 
+                if r.ParseHadErrors then r.Diagnostics else [||])
+        
+        if parseErrors.Length > 0 then
+            let errors = parseErrors |> Array.map (fun d ->
+                SyntaxError({ Line = d.StartLine; Column = d.StartColumn; File = d.FileName; Offset = 0 },
                            d.Message,
                            ["parsing"]))
             return CompilerFailure (Array.toList errors)
         else
-            // Create project options for type checking
-            let projectOptions = {
-                ProjectFileName = "firefly.fsproj"
-                ProjectId = None
-                SourceFiles = [| ctx.InputPath |]
-                OtherOptions = [| 
-                    "--target:exe"
-                    "--noframework"
-                    "--nowin32manifest"
-                    "--define:ZERO_ALLOCATION"
-                    "--define:FIDELITY"
-                |]
-                ReferencedProjects = [||]
-                IsIncompleteTypeCheckEnvironment = false
-                UseScriptResolutionRules = false
-                LoadTime = DateTime.Now
-                UnresolvedReferences = None
-                OriginalLoadReferences = []
-                Stamp = None
-            }
+            // Merge all parsed inputs into consolidated AST
+            let consolidatedAst = mergeParseResults parseResults
             
-            let! checkAnswer = checker.CheckFileInProject(parseResult, ctx.InputPath, 0, sourceText, projectOptions)
+            // Write consolidated AST if keeping intermediates
+            if ctx.KeepIntermediates then
+                let dir = 
+                    match ctx.IntermediatesDir with
+                    | Some d -> d
+                    | None -> "."
+                let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
+                writeFile dir baseName ".raw.fcs" (sprintf "%A" consolidatedAst)
+            
+            // Type check the main file with all dependencies available
+            let mainFileText = SourceText.ofString sourceCode
+            let! checkAnswer = 
+                checker.CheckFileInProject(
+                    parseResults.[0],  // Main file's parse result
+                    ctx.InputPath, 
+                    0, 
+                    mainFileText, 
+                    projectOptions)
+                    
             match checkAnswer with
             | FSharpCheckFileAnswer.Succeeded checkResults ->
-                if ctx.KeepIntermediates then
-                    let dir = ctx.IntermediatesDir |> Option.defaultValue "."
-                    let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
-                    writeFile dir baseName ".raw.fcs" (sprintf "%A" parseResult.ParseTree)
-                return Success (checkResults, parseResult.ParseTree)
+                return Success (checkResults, consolidatedAst)
             | _ ->
                 return CompilerFailure [SyntaxError(
                     { Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 },
