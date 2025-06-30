@@ -93,7 +93,7 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
                 IsExe = true
                 ApplyLineDirectives = true  
                 IndentationAwareSyntax = Some true
-                StrictIndentation = Some true
+                StrictIndentation = None
         }
         
         let! parseResult = checker.ParseFile(ctx.InputPath, sourceText, parsingOptions)
@@ -129,6 +129,10 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
             let! checkAnswer = checker.CheckFileInProject(parseResult, ctx.InputPath, 0, sourceText, projectOptions)
             match checkAnswer with
             | FSharpCheckFileAnswer.Succeeded checkResults ->
+                if ctx.KeepIntermediates then
+                    let dir = ctx.IntermediatesDir |> Option.defaultValue "."
+                    let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
+                    writeFile dir baseName ".raw.fcs" (sprintf "%A" parseResult.ParseTree)
                 return Success (checkResults, parseResult.ParseTree)
             | _ ->
                 return CompilerFailure [SyntaxError(
