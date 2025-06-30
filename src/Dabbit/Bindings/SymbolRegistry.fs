@@ -345,16 +345,15 @@ module Registry =
                         bindings |> List.choose (function
                             | SynBinding(_, _, _, _, attrs, _, _, SynPat.Named(SynIdent(ident, _), _, _, _), _, _, _, _, _) ->
                                 let hasEntryPoint = 
-                                    attrs |> List.exists (function
-                                        | { Attributes = attrList } ->
-                                            attrList |> List.exists (fun attr ->
-                                                match attr.TypeName with
-                                                | SynLongIdent(longId, _, _) ->
-                                                    let name = longId |> List.map (fun id -> id.idText) |> String.concat "."
-                                                    name = "EntryPoint" || name = "System.EntryPoint" || name = "EntryPointAttribute"
-                                                | _ -> false))
+                                    attrs |> List.exists (fun attr ->
+                                        attr.Attributes |> List.exists (fun attr ->
+                                            match attr.TypeName with
+                                            | SynLongIdent(longId, _, _) ->
+                                                let name = longId |> List.map (fun id -> id.idText) |> String.concat "."
+                                                name = "EntryPoint" || name = "System.EntryPoint" || name = "EntryPointAttribute"
+                                            ))
                                 if hasEntryPoint then Some ident.idText else None
                             | _ -> None)
-                    | _ -> []))
+                    ))
             |> Set.ofList
         | _ -> Set.empty
