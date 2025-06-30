@@ -333,7 +333,7 @@ let buildDependencyGraph (parsedInputs: (string * ParsedInput) list) : (Resoluti
     (ctx, dependencies, entryPoints)
 
 /// Perform reachability analysis
-let analyze (symbols: Map<string, FSharpSymbol>) (dependencies: Map<string, Set<string>>) (entryPoints: Set<string>) : ReachabilityResult =
+let analyze (symbols: Map<string, obj>) (dependencies: Map<string, Set<string>>) (entryPoints: Set<string>) : ReachabilityResult =
     // Note: This function signature is kept for compatibility, but we'll use our own graph
     let mutable reachable = Set.empty
     let mutable worklist = entryPoints |> Set.toList

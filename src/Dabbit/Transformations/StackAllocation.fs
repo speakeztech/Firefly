@@ -68,6 +68,23 @@ module StackTransform =
         SynBinding(access, kind, isInline, isMut, attrs, xmlDoc, valData,
                    headPat, retInfo, transform expr, range, sp, trivia)
 
+    /// Transform a module's declarations
+    let rec transformModuleDecl = function
+        | SynModuleDecl.Let(isRec, bindings, range) ->
+            let bindings' = bindings |> List.map transformBinding
+            SynModuleDecl.Let(isRec, bindings', range)
+        | SynModuleDecl.Expr(expr, range) ->
+            SynModuleDecl.Expr(transform expr, range)
+        | SynModuleDecl.NestedModule(componentInfo, isRec, decls, isCont, range, trivia) ->
+            let decls' = decls |> List.map transformModuleDecl
+            SynModuleDecl.NestedModule(componentInfo, isRec, decls', isCont, range, trivia)
+        | other -> other
+
+    /// Transform an entire module
+    let transformModule (SynModuleOrNamespace(lid, isRec, kind, decls, xml, attrs, access, range, trivia)) =
+        let decls' = decls |> List.map transformModuleDecl
+        SynModuleOrNamespace(lid, isRec, kind, decls', xml, attrs, access, range, trivia)
+
 /// Verify stack safety
 module StackSafety =
     /// Check if expression only uses stack allocations

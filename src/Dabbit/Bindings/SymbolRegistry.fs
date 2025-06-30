@@ -327,3 +327,34 @@ module Registry =
                 String.concat ", " missingSymbols,
                 "available symbols",
                 sprintf "Missing required symbols: %s" (String.concat ", " missingSymbols))]
+    
+    /// Get all resolved symbols for reachability analysis
+    /// Returns a map that's compatible with ReachabilityAnalyzer's signature
+    let getAllSymbols (registry: SymbolRegistry) : Map<string, obj> =
+        registry.State.SymbolsByQualified
+        |> Map.map (fun _ symbol -> symbol :> obj)
+
+    /// Extract entry points from parsed AST
+    let getEntryPoints (input: ParsedInput) : Set<string> =
+        match input with
+        | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
+            modules 
+            |> List.collect (fun (SynModuleOrNamespace(_, _, _, decls, _, _, _, _, _)) ->
+                decls |> List.collect (function
+                    | SynModuleDecl.Let(_, bindings, _) ->
+                        bindings |> List.choose (function
+                            | SynBinding(_, _, _, _, attrs, _, _, SynPat.Named(SynIdent(ident, _), _, _, _), _, _, _, _, _) ->
+                                let hasEntryPoint = 
+                                    attrs |> List.exists (function
+                                        | { Attributes = attrList } ->
+                                            attrList |> List.exists (fun attr ->
+                                                match attr.TypeName with
+                                                | SynLongIdent(longId, _, _) ->
+                                                    let name = longId |> List.map (fun id -> id.idText) |> String.concat "."
+                                                    name = "EntryPoint" || name = "System.EntryPoint" || name = "EntryPointAttribute"
+                                                | _ -> false))
+                                if hasEntryPoint then Some ident.idText else None
+                            | _ -> None)
+                    | _ -> []))
+            |> Set.ofList
+        | _ -> Set.empty

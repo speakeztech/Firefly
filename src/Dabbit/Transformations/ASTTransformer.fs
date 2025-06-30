@@ -122,20 +122,19 @@ module ModuleTransformers =
                     | _ -> [])
             
             // Transform with closure elimination
-            let transformed = transformModule bindings
-            
-            // Check if we have any bindings after transformation
             let transformedBindings = 
-                match transformed with
-                | [] -> []
-                | _ -> 
+                if List.isEmpty bindings then 
+                    []
+                else 
                     // Closure elimination returns SynBinding list
                     ClosureElimination.transformModule bindings
             
             // Reconstruct module
             let newDecls = 
-                if List.isEmpty transformedBindings then decls
-                else [SynModuleDecl.Let(false, transformedBindings, range)]
+                if List.isEmpty transformedBindings then 
+                    decls
+                else 
+                    [SynModuleDecl.Let(false, transformedBindings, range)]
             
             Success (SynModuleOrNamespace(lid, isRec, kind, newDecls, xml, attrs, access, range, trivia))
 
