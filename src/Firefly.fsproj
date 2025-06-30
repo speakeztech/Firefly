@@ -7,7 +7,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.2.051</Version>
+    <Version>0.2.053</Version>
     <Description>F# to Native Compiler with Zero-Allocation Guarantees using XParsec</Description>
     <Authors>Speakez LLC</Authors>
     <PackageTags>fsharp;compiler;native;zero-allocation;xparsec;mlir;llvm</PackageTags>
@@ -161,6 +161,8 @@
   </PropertyGroup>
 
 </Project>
+
+
 
 
 

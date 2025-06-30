@@ -89,66 +89,96 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
             for file in projectOptions.SourceFiles do
                 printfn "    - %s" file
         
+        // Create parsing options
+        let parsingOptions = {
+            FSharpParsingOptions.Default with 
+                SourceFiles = projectOptions.SourceFiles
+                ConditionalDefines = ["ZERO_ALLOCATION"; "FIDELITY"]
+                LangVersionText = "preview"
+                IsInteractive = false
+                CompilingFSharpCore = false
+                IsExe = true
+                ApplyLineDirectives = true  
+                IndentationAwareSyntax = Some true
+                StrictIndentation = Some true
+        }
+        
         // Parse all files to build consolidated AST
         let! parseResults = 
             projectOptions.SourceFiles 
             |> Array.map (fun file ->
                 async {
-                    let sourceText = 
-                        File.ReadAllText(file) 
-                        |> SourceText.ofString
-                    let! result = 
-                        checker.ParseFile(
-                            file, 
-                            sourceText,
-                            FSharpParsingOptions.Default)
-                    return result
+                    try
+                        let sourceText = 
+                            File.ReadAllText(file) 
+                            |> SourceText.ofString
+                        let! result = 
+                            checker.ParseFile(
+                                file, 
+                                sourceText,
+                                parsingOptions)  // Use our parsing options
+                        return Some result
+                    with ex ->
+                        printfn "  ERROR parsing %s: %s" file ex.Message
+                        return None
                 })
             |> Async.Parallel
         
-        // Check for parse errors in any file
-        let parseErrors = 
+        // Filter out failed parses
+        let successfulParses = 
             parseResults 
-            |> Array.collect (fun r -> 
-                if r.ParseHadErrors then r.Diagnostics else [||])
+            |> Array.choose id
         
-        if parseErrors.Length > 0 then
-            let errors = parseErrors |> Array.map (fun d ->
-                SyntaxError({ Line = d.StartLine; Column = d.StartColumn; File = d.FileName; Offset = 0 },
-                           d.Message,
-                           ["parsing"]))
-            return CompilerFailure (Array.toList errors)
+        if successfulParses.Length = 0 then
+            return CompilerFailure [SyntaxError(
+                { Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 },
+                "Failed to parse any files",
+                ["parsing"])]
         else
-            // Merge all parsed inputs into consolidated AST
-            let consolidatedAst = mergeParseResults parseResults
+            // Check for parse errors in successfully parsed files
+            let parseErrors = 
+                successfulParses 
+                |> Array.collect (fun r -> 
+                    if r.ParseHadErrors then r.Diagnostics else [||])
             
-            // Write consolidated AST if keeping intermediates
-            if ctx.KeepIntermediates then
-                let dir = 
-                    match ctx.IntermediatesDir with
-                    | Some d -> d
-                    | None -> "."
-                let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
-                writeFile dir baseName ".raw.fcs" (sprintf "%A" consolidatedAst)
-            
-            // Type check the main file with all dependencies available
-            let mainFileText = SourceText.ofString sourceCode
-            let! checkAnswer = 
-                checker.CheckFileInProject(
-                    parseResults.[0],  // Main file's parse result
-                    ctx.InputPath, 
-                    0, 
-                    mainFileText, 
-                    projectOptions)
-                    
-            match checkAnswer with
-            | FSharpCheckFileAnswer.Succeeded checkResults ->
-                return Success (checkResults, consolidatedAst)
-            | _ ->
-                return CompilerFailure [SyntaxError(
-                    { Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 },
-                    "Type checking failed",
-                    ["type checking"])]
+            if parseErrors.Length > 0 then
+                let errors = parseErrors |> Array.map (fun d ->
+                    SyntaxError({ Line = d.StartLine; Column = d.StartColumn; File = d.FileName; Offset = 0 },
+                               d.Message,
+                               ["parsing"]))
+                return CompilerFailure (Array.toList errors)
+            else
+                // Merge all parsed inputs into consolidated AST
+                let consolidatedAst = mergeParseResults successfulParses
+                
+                // Write consolidated AST if keeping intermediates
+                if ctx.KeepIntermediates then
+                    let dir = 
+                        match ctx.IntermediatesDir with
+                        | Some d -> d
+                        | None -> "."
+                    let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
+                    writeFile dir baseName ".raw.fcs" (sprintf "%A" consolidatedAst)
+                
+                // Type check the main file with all dependencies available
+                let mainFileText = SourceText.ofString sourceCode
+                let mainParseResult = successfulParses.[0]  // Main file is first
+                let! checkAnswer = 
+                    checker.CheckFileInProject(
+                        mainParseResult,
+                        ctx.InputPath, 
+                        0, 
+                        mainFileText, 
+                        projectOptions)
+                        
+                match checkAnswer with
+                | FSharpCheckFileAnswer.Succeeded checkResults ->
+                    return Success (checkResults, consolidatedAst)
+                | _ ->
+                    return CompilerFailure [SyntaxError(
+                        { Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 },
+                        "Type checking failed",
+                        ["type checking"])]
     }
 
 /// Phase 2: Process compilation unit with transformations
