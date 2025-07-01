@@ -276,3 +276,66 @@ let getFileStats (analysis: CompilationUnitAnalysis) (filePath: string) : (int *
 /// Check if the main file requires multi-file analysis
 let requiresMultiFileAnalysis (ast: ParsedInput) : bool =
     not (List.isEmpty (extractLoadDirectives ast))
+
+/// Build compilation unit from pre-parsed ASTs
+let buildCompilationUnitFromParsed (parsedUnits: (string * ParsedInput) list) : Async<CompilerResult<CompilationUnit>> = async {
+    match parsedUnits with
+    | [] -> return CompilerFailure [InternalError("buildCompilationUnitFromParsed", "No parsed units provided", None)]
+    | (mainPath, mainAst) :: rest ->
+        // Extract information from main file
+        let mainLoads = extractLoadDirectives mainAst
+        let mainModulePath = extractModulePath mainAst
+        let mainSymbols = extractFileSymbols mainModulePath mainAst
+        
+        let mainSourceFile = {
+            Path = mainPath
+            Ast = mainAst
+            LoadedFiles = mainLoads |> List.map (fun f ->
+                if Path.IsPathRooted(f) then f
+                else Path.Combine(Path.GetDirectoryName(mainPath), f))
+            ModulePath = mainModulePath
+            DefinedSymbols = mainSymbols
+        }
+        
+        // Build source files map from all parsed units
+        let allSourceFiles = 
+            parsedUnits
+            |> List.map (fun (path, ast) ->
+                let loads = extractLoadDirectives ast
+                let modulePath = extractModulePath ast
+                let symbols = extractFileSymbols modulePath ast
+                
+                let sourceFile = {
+                    Path = path
+                    Ast = ast
+                    LoadedFiles = loads |> List.map (fun f ->
+                        if Path.IsPathRooted(f) then f
+                        else Path.Combine(Path.GetDirectoryName(path), f))
+                    ModulePath = modulePath
+                    DefinedSymbols = symbols
+                }
+                (path, sourceFile))
+            |> Map.ofList
+        
+        // Build symbol to file mapping
+        let symbolToFile =
+            allSourceFiles 
+            |> Map.toList
+            |> List.collect (fun (filePath, sourceFile) ->
+                sourceFile.DefinedSymbols 
+                |> Set.toList
+                |> List.map (fun symbol -> (symbol, filePath)))
+            |> Map.ofList
+        
+        // Build file dependency graph
+        let fileDeps =
+            allSourceFiles
+            |> Map.map (fun _ sourceFile -> Set.ofList sourceFile.LoadedFiles)
+        
+        return Success {
+            MainFile = mainPath
+            SourceFiles = allSourceFiles
+            SymbolToFile = symbolToFile
+            FileDependencies = fileDeps
+        }
+}

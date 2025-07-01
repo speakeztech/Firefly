@@ -20,7 +20,7 @@ type CompilationConfig = {
 }
 
 /// Complete Firefly project configuration
-type FireflyConfig = {
+type AppConfig = {
     PackageName: string
     Version: string
     Dependencies: DependencyBinding list
@@ -111,7 +111,7 @@ let getInt (map: Map<string, TOMLValue>) (path: string) : int option =
     | _ -> None
 
 /// Parses a TOML configuration file
-let parseConfigFile (filePath: string) : CompilerResult<FireflyConfig> =
+let parseConfigFile (filePath: string) : CompilerResult<AppConfig> =
     try
         if not (File.Exists(filePath)) then
             Success defaultConfig
@@ -151,7 +151,7 @@ let parseConfigFile (filePath: string) : CompilerResult<FireflyConfig> =
             ["config parsing"])]
 
 /// Validates configuration for consistency
-let validateConfig (config: FireflyConfig) : CompilerResult<FireflyConfig> =
+let validateConfig (config: AppConfig) : CompilerResult<AppConfig> =
     if String.IsNullOrWhiteSpace(config.PackageName) then
         CompilerFailure [SyntaxError(
             { Line = 0; Column = 0; File = ""; Offset = 0 },
@@ -166,7 +166,7 @@ let validateConfig (config: FireflyConfig) : CompilerResult<FireflyConfig> =
         Success config
 
 /// Main entry point for loading and validating configuration
-let loadAndValidateConfig (filePath: string) : CompilerResult<FireflyConfig> =
+let loadAndValidateConfig (filePath: string) : CompilerResult<AppConfig> =
     match parseConfigFile filePath with
     | Success config -> validateConfig config
     | CompilerFailure errors -> CompilerFailure errors

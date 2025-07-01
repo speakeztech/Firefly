@@ -6,7 +6,7 @@ open CLI.Commands.CompileCommand
 open CLI.Commands.VerifyCommand
 
 /// Command line arguments for Firefly CLI - simplified approach
-type FireflyArgs =
+type ToolArgs =
     | Version
 with
     interface IArgParserTemplate with

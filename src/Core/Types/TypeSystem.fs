@@ -9,7 +9,6 @@ type DialectOperation = {
     Description: string
 }
 
-/// Core MLIR type categories
 type MLIRTypeCategory =
     | Builtin
     | Integer
@@ -21,6 +20,9 @@ type MLIRTypeCategory =
     | Function
     | Struct
     | Void
+    | Tuple      
+    | Variant    
+    | Opaque     
     
 /// Core MLIR type representation
 type MLIRType = {
@@ -136,6 +138,40 @@ module MLIRTypes =
     
     /// String type (alias for memref of i8)
     let string_ = memref i8
+
+    /// Create tuple type (ordered, unnamed fields)
+    let tuple (elementTypes: MLIRType list) = {
+        Category = Tuple
+        BitWidth = None
+        ElementType = None
+        Shape = None
+        ParameterTypes = Some elementTypes  // Reuse for tuple elements
+        ReturnType = None
+        Fields = None
+    }
+    
+    /// Create variant type (discriminated union)
+    let variant (cases: (string * MLIRType) list) = {
+        Category = Variant
+        BitWidth = None
+        ElementType = None
+        Shape = None
+        ParameterTypes = None
+        ReturnType = None
+        Fields = Some cases  // Reuse for variant cases
+    }
+    
+    /// Create opaque type (for unresolved or generic types)
+    let opaque (name: string) = {
+        Category = Opaque
+        BitWidth = None
+        ElementType = None
+        Shape = None
+        ParameterTypes = None
+        ReturnType = None
+        Fields = Some [(name, void_)]  // Store type name as single field
+    }
+
 
 /// Helper function to get type from MLIRValue
 let parseTypeFromMLIRValue (value: MLIRValue): MLIRType =
@@ -256,39 +292,40 @@ let getDialectOperations (dialect: MLIRDialect) : DialectOperation list =
 
 
 
-/// Convert MLIR type to string representation
 let rec mlirTypeToString (t: MLIRType) : string =
     match t.Category with
     | Void -> "void"
     | Integer ->
         match t.BitWidth with
         | Some width -> sprintf "i%d" width
-        | None -> "i32"  // Default integer
+        | None -> "i32"
     | Float ->
         match t.BitWidth with
-        | Some width -> sprintf "f%d" width
-        | None -> "f32"  // Default float
+        | Some 16 -> "f16"
+        | Some 32 -> "f32"
+        | Some 64 -> "f64"
+        | _ -> "f32"
     | MLIRTypeCategory.Index -> "index"
     | MLIRTypeCategory.MemRef ->
         match t.ElementType, t.Shape with
-        | Some elemType, Some shape ->
+        | Some elem, Some shape ->
             let shapeStr = shape |> List.map string |> String.concat "x"
-            sprintf "memref<%sx%s>" shapeStr (mlirTypeToString elemType)
-        | Some elemType, None ->
-            sprintf "memref<?x%s>" (mlirTypeToString elemType)
-        | _ -> "memref<?x?>"
+            sprintf "memref<%sx%s>" shapeStr (mlirTypeToString elem)
+        | Some elem, None ->
+            sprintf "memref<?x%s>" (mlirTypeToString elem)
+        | None, _ -> "memref<?x?>"
     | Tensor ->
         match t.ElementType, t.Shape with
-        | Some elemType, Some shape ->
+        | Some elem, Some shape ->
             let shapeStr = shape |> List.map string |> String.concat "x"
-            sprintf "tensor<%sx%s>" shapeStr (mlirTypeToString elemType)
-        | Some elemType, None ->
-            sprintf "tensor<?x%s>" (mlirTypeToString elemType)
-        | _ -> "tensor<?x?>"
+            sprintf "tensor<%sx%s>" shapeStr (mlirTypeToString elem)
+        | Some elem, None ->
+            sprintf "tensor<?x%s>" (mlirTypeToString elem)
+        | None, _ -> "tensor<?x?>"
     | Vector ->
         match t.ElementType, t.Shape with
-        | Some elemType, Some [size] ->
-            sprintf "vector<%dx%s>" size (mlirTypeToString elemType)
+        | Some elem, Some [size] ->
+            sprintf "vector<%dx%s>" size (mlirTypeToString elem)
         | _ -> "vector<?x?>"
     | Function ->
         match t.ParameterTypes, t.ReturnType with
@@ -305,7 +342,27 @@ let rec mlirTypeToString (t: MLIRType) : string =
                 |> String.concat ", "
             sprintf "!llvm.struct<(%s)>" fieldStr
         | None -> "!llvm.struct<()>"
+    | Tuple ->
+        match t.ParameterTypes with
+        | Some types ->
+            let typeStr = types |> List.map mlirTypeToString |> String.concat ", "
+            sprintf "tuple<%s>" typeStr
+        | None -> "tuple<>"
+    | Variant ->
+        match t.Fields with
+        | Some cases ->
+            let caseStr = 
+                cases 
+                |> List.map (fun (name, typ) -> sprintf "%s: %s" name (mlirTypeToString typ))
+                |> String.concat " | "
+            sprintf "!variant<%s>" caseStr
+        | None -> "!variant<>"
+    | Opaque ->
+        match t.Fields with
+        | Some [(name, _)] -> sprintf "!opaque<%s>" name
+        | _ -> "!opaque<unknown>"
     | MLIRTypeCategory.Builtin -> "builtin"
+
 
 /// Dialect-specific type conversions
 module DialectTypes =
@@ -354,35 +411,23 @@ module TypeValidation =
         | "arith.cmpi" when t1.Category = Integer && areCompatible t1 t2 -> Some MLIRTypes.i1
         | "arith.cmpf" when t1.Category = Float && areCompatible t1 t2 -> Some MLIRTypes.i1
         | _ -> None
+    
+    /// Check if type is a composite type
+    let isCompositeType (t: MLIRType) : bool =
+        match t.Category with
+        | Struct | Tuple | Variant -> true
+        | _ -> false
+    
+    /// Get element types from composite type
+    let getElementTypes (t: MLIRType) : MLIRType list option =
+        match t.Category with
+        | Tuple -> t.ParameterTypes
+        | Struct | Variant -> 
+            t.Fields |> Option.map (List.map snd)
+        | _ -> None
 
 /// Type size and alignment calculations
 module TypeMetrics =
-    /// Get size of type in bytes
-    let rec sizeOf (t: MLIRType) : int =
-        match t.Category with
-        | Void -> 0
-        | Integer ->
-            match t.BitWidth with
-            | Some bits -> (bits + 7) / 8  // Round up to nearest byte
-            | None -> 4  // Default to 32-bit
-        | Float ->
-            match t.BitWidth with
-            | Some 16 -> 2
-            | Some 32 -> 4
-            | Some 64 -> 8
-            | _ -> 4  // Default to 32-bit
-        | MLIRTypeCategory.Index -> 8  // Assume 64-bit architecture
-        | MLIRTypeCategory.MemRef -> 8  // Pointer size
-        | Vector ->
-            match t.ElementType, t.Shape with
-            | Some elemType, Some [size] -> size * sizeOf elemType
-            | _ -> 8  // Default
-        | Struct ->
-            match t.Fields with
-            | Some fields ->
-                fields |> List.sumBy (fun (_, fieldType) -> sizeOf fieldType)
-            | None -> 0
-        | _ -> 8  // Default for unknown types
     
     /// Get alignment requirement in bytes
     let rec alignmentOf (t: MLIRType) : int =
@@ -409,3 +454,42 @@ module TypeMetrics =
                 fields |> List.map (fun (_, ft) -> alignmentOf ft) |> List.max
             | _ -> 1
         | _ -> 8
+
+    /// Get size of type in bytes
+    let rec sizeOf (t: MLIRType) : int =
+        match t.Category with
+        | Void -> 0
+        | Integer ->
+            match t.BitWidth with
+            | Some bits -> (bits + 7) / 8  // Round up to nearest byte
+            | None -> 4  // Default to 32-bit
+        | Float ->
+            match t.BitWidth with
+            | Some 16 -> 2
+            | Some 32 -> 4
+            | Some 64 -> 8
+            | _ -> 4
+        | MLIRTypeCategory.Index -> 8  // Typically pointer-sized
+        | MLIRTypeCategory.MemRef -> 8  // Pointer size
+        | Tuple ->
+            match t.ParameterTypes with
+            | Some types -> types |> List.sumBy sizeOf
+            | None -> 0
+        | Struct ->
+            match t.Fields with
+            | Some fields -> 
+                fields |> List.sumBy (fun (_, typ) -> sizeOf typ)
+            | None -> 0
+        | Variant ->
+            // Tag + largest case
+            match t.Fields with
+            | Some cases ->
+                let tagSize = 4  // 32-bit discriminator
+                let maxCaseSize = 
+                    cases 
+                    |> List.map (fun (_, typ) -> sizeOf typ) 
+                    |> List.fold max 0
+                tagSize + maxCaseSize
+            | None -> 4  // Just the tag
+        | Opaque -> 0  // Unknown size
+        | _ -> 0

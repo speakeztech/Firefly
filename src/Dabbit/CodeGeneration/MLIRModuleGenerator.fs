@@ -1,7 +1,11 @@
 module Dabbit.CodeGeneration.MLIRModuleGenerator
 
+open System.IO
 open FSharp.Compiler.Syntax
 open Core.Types.TypeSystem
+open Dabbit.Analysis.CompilationUnit
+open Dabbit.Bindings.SymbolRegistry
+open TypeMapping
 open MLIREmitter
 open MLIRBuiltins
 
@@ -450,3 +454,55 @@ let generateModuleFromAST (ast: ParsedInput) (typeCtx: TypeMapping.TypeContext) 
     
     let (_, finalState) = runBuilder (generateMLIR ast) initialState
     finalState.Output.ToString()
+
+/// Generate MLIR from analyzed compilation unit
+let generateFromCompilationAnalysis (analysis: CompilationUnitAnalysis) (typeCtx: TypeContext) (symbolRegistry: SymbolRegistry) : string =
+    // Get the main file's pruned AST
+    let mainFile = analysis.Unit.MainFile
+    match Map.tryFind mainFile analysis.PrunedAsts with
+    | None -> failwith (sprintf "Main file %s not found in pruned ASTs" mainFile)
+    | Some mainAst ->
+        // Generate MLIR with full context awareness
+        // The AST has already been pruned based on reachability
+        let initialState = createInitialState typeCtx symbolRegistry
+        let (_, finalState) = runBuilder (generateMLIR mainAst) initialState
+        finalState.Output.ToString()
+
+/// Generate MLIR for multiple files with cross-file awareness
+let generateMultiFileMLIR (analysis: CompilationUnitAnalysis) (typeCtx: TypeContext) (symbolRegistry: SymbolRegistry) : Map<string, string> =
+    analysis.PrunedAsts
+    |> Map.map (fun filePath ast ->
+        let initialState = createInitialState typeCtx symbolRegistry
+        
+        // Set current module context
+        let modulePath = analysis.Unit.SourceFiles.[filePath].ModulePath
+        let stateWithModule = 
+            { initialState with CurrentModule = modulePath }
+        
+        let (_, finalState) = runBuilder (generateMLIR ast) stateWithModule
+        finalState.Output.ToString())
+
+/// Helper to merge multiple MLIR modules into a single module
+let mergeMLIRModules (modules: Map<string, string>) (mainFile: string) : string =
+    let sb = System.Text.StringBuilder()
+    
+    // Add module header
+    sb.AppendLine("module @FireflyProgram {") |> ignore
+    
+    // Add main file first
+    match Map.tryFind mainFile modules with
+    | Some mainModule -> 
+        sb.AppendLine("  // Main module") |> ignore
+        sb.AppendLine(mainModule) |> ignore
+    | None -> ()
+    
+    // Add other modules
+    modules 
+    |> Map.toList
+    |> List.filter (fun (path, _) -> path <> mainFile)
+    |> List.iter (fun (path, moduleContent) ->
+        sb.AppendLine(sprintf "  // Module from %s" (Path.GetFileName(path))) |> ignore
+        sb.AppendLine(moduleContent) |> ignore)
+    
+    sb.AppendLine("}") |> ignore
+    sb.ToString()

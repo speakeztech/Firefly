@@ -9,7 +9,7 @@ open Dabbit.Bindings.PatternLibrary
 module AlloyFunctions =
     
     /// Core memory management functions
-    let memoryFunctions = [
+    let rec memoryFunctions = [
         "NativePtr.stackalloc", {
             QualifiedName = "Alloy.NativePtr.stackalloc"
             ShortName = "stackalloc"
@@ -60,7 +60,7 @@ module AlloyFunctions =
     ]
     
     /// Console I/O functions
-    let consoleFunctions = [
+    and consoleFunctions = [
         "Console.write", {
             QualifiedName = "Alloy.IO.Console.write"
             ShortName = "write"
@@ -99,7 +99,7 @@ module AlloyFunctions =
     ]
     
     /// String operations (zero-allocation)
-    let stringFunctions = [
+    and stringFunctions = [
         "String.length", {
             QualifiedName = "Alloy.String.length"
             ShortName = "length"
@@ -142,7 +142,7 @@ module AlloyFunctions =
     ]
     
     /// Buffer operations
-    let bufferFunctions = [
+    and bufferFunctions = [
         "Buffer.create", {
             QualifiedName = "Alloy.Buffer.create"
             ShortName = "create"
@@ -182,7 +182,7 @@ module AlloyFunctions =
     ]
     
     /// Math operations (zero-allocation)
-    let mathFunctions = [
+    and mathFunctions = [
         "Math.min", {
             QualifiedName = "Alloy.Math.min"
             ShortName = "min"

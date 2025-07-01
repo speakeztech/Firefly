@@ -71,15 +71,17 @@
       <!-- Transformations -->
       <Compile Include="Dabbit/Transformations/ClosureElimination.fs" />
       <Compile Include="Dabbit/Transformations/StackAllocation.fs" />
-      <Compile Include="Dabbit/Transformations/ASTTransformer.fs" />
-      
-      <!-- Pipeline Orchestration -->
-      <Compile Include="Dabbit/Pipeline/FCSPipeline.fs" />
-      <Compile Include="Dabbit/Pipeline/LoweringPipeline.fs" />
-      <Compile Include="Dabbit/Pipeline/OptimizationPipeline.fs" />
+      <Compile Include="Dabbit/Transformations/ASTTransformer.fs" /> 
       
       <!-- Integration -->
       <Compile Include="Dabbit/Integration/AlloyBindings.fs" />
+      
+      <!-- Pipeline Orchestration (Updated section) -->
+      <Compile Include="Dabbit/Pipeline/CompilationTypes.fs" />  
+      <Compile Include="Dabbit/Pipeline/FCSPipeline.fs" />
+      <Compile Include="Dabbit/Pipeline/LoweringPipeline.fs" />
+      <Compile Include="Dabbit/Pipeline/OptimizationPipeline.fs" />
+      <Compile Include="Dabbit/Pipeline/CompilationOrchestrator.fs" />
       
       <!-- ===== CLI - Top level ===== -->
       
