@@ -1,4 +1,4 @@
-module Core.FCSProcessing.AstMerger
+module Core.FCSIngestion.AstMerger
 
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.CodeAnalysis

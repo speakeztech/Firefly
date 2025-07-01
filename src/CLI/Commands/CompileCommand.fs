@@ -13,8 +13,7 @@ open Core.Utilities.IntermediateWriter
 open Core.Utilities.RemoveIntermediates
 open Core.Utilities.ReadSourceFile
 open Core.XParsec.Foundation
-open Core.FCSProcessing.AstMerger
-open Core.FCSProcessing.DependencyExtractor
+open Core.FCSIngestion.AstMerger
 open Dabbit.CodeGeneration.TypeMapping
 open Dabbit.CodeGeneration.MLIRModuleGenerator
 open Dabbit.Bindings.SymbolRegistry
@@ -80,96 +79,79 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
         
         let checker = FSharpChecker.Create(keepAssemblyContents = true)
         
-        // Use FCS's built-in script resolution
-        let! projectOptions = 
-            buildProjectOptionsWithDependencies ctx.InputPath checker
+        // Get project options with dependencies
+        let! (projectOptions, scriptDiagnostics) = 
+            checker.GetProjectOptionsFromScript(
+                fileName = ctx.InputPath,
+                source = SourceText.ofString sourceCode,
+                ?otherFlags = Some [|
+                    "--define:ZERO_ALLOCATION"
+                    "--define:FIDELITY"
+                    "--define:INTERACTIVE"
+                |],
+                ?useFsiAuxLib = Some false,
+                ?useSdkRefs = Some false,
+                ?assumeDotNetFramework = Some false
+            )
         
-        if ctx.Verbose then
-            printfn "  Discovered source files:"
-            for file in projectOptions.SourceFiles do
-                printfn "    - %s" file
+        // Get parsing options
+        let (parsingOptions, _) = 
+            checker.GetParsingOptionsFromProjectOptions projectOptions
         
-        // GetParsingOptionsFromProjectOptions returns a tuple!
-        let (parsingOptions, parsingDiagnostics) = checker.GetParsingOptionsFromProjectOptions projectOptions
-        
-        if parsingDiagnostics.Length > 0 then
-            printfn "  Parsing option diagnostics:"
-            for diag in parsingDiagnostics do
-                printfn "    %s" diag.Message
-        
-        // Parse all files to build consolidated AST
+        // Parse ALL files from the project
         let! parseResults = 
             projectOptions.SourceFiles 
             |> Array.map (fun file ->
                 async {
-                    try
-                        let sourceText = 
-                            File.ReadAllText(file) 
-                            |> SourceText.ofString
-                        let! result = 
-                            checker.ParseFile(file, sourceText, parsingOptions)
-                        return Some result
-                    with ex ->
-                        printfn "  ERROR parsing %s: %s" file ex.Message
-                        return None
+                    let! sourceText = 
+                        File.ReadAllTextAsync(file) 
+                        |> Async.AwaitTask
+                    return! checker.ParseFile(
+                        file, 
+                        SourceText.ofString sourceText, 
+                        parsingOptions)
                 })
             |> Async.Parallel
         
-        // Filter out failed parses
-        let successfulParses = 
+        // Check for parse errors
+        let parseErrors = 
             parseResults 
-            |> Array.choose id
+            |> Array.collect (fun r -> 
+                if r.ParseHadErrors then r.Diagnostics else [||])
         
-        if successfulParses.Length = 0 then
-            return CompilerFailure [SyntaxError(
-                { Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 },
-                "Failed to parse any files",
-                ["parsing"])]
+        if parseErrors.Length > 0 then
+            let errors = parseErrors |> Array.map (fun d ->
+                SyntaxError(
+                    { Line = d.StartLine; Column = d.StartColumn; File = d.FileName; Offset = 0 },
+                    d.Message,
+                    ["parsing"]))
+            return CompilerFailure (Array.toList errors)
         else
-            // Check for parse errors in successfully parsed files
-            let parseErrors = 
-                successfulParses 
-                |> Array.collect (fun r -> 
-                    if r.ParseHadErrors then r.Diagnostics else [||])
+            // MERGE THE ASTS - this is still needed!
+            let mergedAst = mergeParseResults parseResults
             
-            if parseErrors.Length > 0 then
-                let errors = parseErrors |> Array.map (fun d ->
-                    SyntaxError({ Line = d.StartLine; Column = d.StartColumn; File = d.FileName; Offset = 0 },
-                               d.Message,
-                               ["parsing"]))
-                return CompilerFailure (Array.toList errors)
-            else
-                // Merge all parsed inputs into consolidated AST
-                let consolidatedAst = mergeParseResults successfulParses
-                
-                // Write consolidated AST if keeping intermediates
-                if ctx.KeepIntermediates then
-                    let dir = 
-                        match ctx.IntermediatesDir with
-                        | Some d -> d
-                        | None -> "."
-                    let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
-                    writeFile dir baseName ".raw.fcs" (sprintf "%A" consolidatedAst)
-                
-                // Type check the main file with all dependencies available
-                let mainFileText = SourceText.ofString sourceCode
-                let mainParseResult = successfulParses.[0]  // Main file is first
-                let! checkAnswer = 
-                    checker.CheckFileInProject(
-                        mainParseResult,
-                        ctx.InputPath, 
-                        0, 
-                        mainFileText, 
-                        projectOptions)
-                        
-                match checkAnswer with
-                | FSharpCheckFileAnswer.Succeeded checkResults ->
-                    return Success (checkResults, consolidatedAst)
-                | _ ->
-                    return CompilerFailure [SyntaxError(
-                        { Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 },
-                        "Type checking failed",
-                        ["type checking"])]
+            if ctx.KeepIntermediates then
+                let dir = match ctx.IntermediatesDir with Some d -> d | None -> "."
+                let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
+                writeFile dir baseName ".merged.fcs" (sprintf "%A" mergedAst)
+            
+            // Type check with the main file
+            let! checkAnswer = 
+                checker.CheckFileInProject(
+                    parseResults.[0],  // Main file
+                    ctx.InputPath, 
+                    0, 
+                    SourceText.ofString sourceCode, 
+                    projectOptions)
+                    
+            match checkAnswer with
+            | FSharpCheckFileAnswer.Succeeded checkResults ->
+                return Success (checkResults, mergedAst)
+            | _ ->
+                return CompilerFailure [SyntaxError(
+                    { Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 },
+                    "Type checking failed",
+                    ["type checking"])]
     }
 
 /// Phase 2: Process compilation unit with transformations

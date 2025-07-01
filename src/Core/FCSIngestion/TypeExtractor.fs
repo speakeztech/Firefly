@@ -1,4 +1,4 @@
-module Core.FCSProcessing.TypeExtractor
+module Core.FCSIngestion.TypeExtractor
 
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.CodeAnalysis

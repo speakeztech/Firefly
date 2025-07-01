@@ -1,4 +1,4 @@
-module Core.FCSProcessing.DependencyResolver
+module Core.FCSIngestion.DependencyResolver
 
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.CodeAnalysis

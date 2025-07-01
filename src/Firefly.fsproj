@@ -7,7 +7,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.2.060</Version>
+    <Version>0.2.064</Version>
     <Description>F# to Native Compiler with Zero-Allocation Guarantees using XParsec</Description>
     <Authors>Speakez LLC</Authors>
     <PackageTags>fsharp;compiler;native;zero-allocation;xparsec;mlir;llvm</PackageTags>
@@ -37,10 +37,11 @@
       <Compile Include="Core/MemoryLayout/UnionOptimizer.fs" />
       
       <!-- Pure FCS Processing -->
-      <Compile Include="Core/FCSProcessing/TypeExtractor.fs" />
-      <Compile Include="Core/FCSProcessing/DependencyExtractor.fs" />
-      <Compile Include="Core/FCSProcessing/AstMerger.fs" />
-      <Compile Include="Core/FCSProcessing/DependencyResolver.fs" />
+      <Compile Include="Core/FCSIngestion/TypeExtractor.fs" />
+      <Compile Include="Core/FCSIngestion/FileLoader.fs" />
+      <Compile Include="Core/FCSIngestion/SymbolExtraction.fs" />
+      <Compile Include="Core/FCSIngestion/AstMerger.fs" />
+      <Compile Include="Core/FCSIngestion/DependencyResolver.fs" />
       
       <!-- ===== DABBIT - Orchestration and transformation ===== -->
       
@@ -96,7 +97,7 @@
 
     <!-- Command line argument parsing -->
     <PackageReference Include="Argu" Version="6.1.1" />
-
+    <PackageReference Include="FSharp.SystemTextJson" Version="*" />
     <PackageReference Include="FSharp.Compiler.Service" Version="43.9.300" />
 
     <PackageReference Include="Fantomas.Core" Version="6.2.3" />
@@ -161,6 +162,8 @@
   </PropertyGroup>
 
 </Project>
+
+
 
 
 
