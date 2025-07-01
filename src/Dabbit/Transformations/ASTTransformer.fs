@@ -54,7 +54,7 @@ module Transformers =
                 | CompilerFailure errors -> CompilerFailure errors
                 | Success results ->
                     match transformer item ctx with
-                    | Success transformed -> Success (results @ [transformed])
+                    | Success pruned -> Success (results @ [pruned])
                     | CompilerFailure errors -> CompilerFailure errors
             ) (Success [])
     
@@ -122,7 +122,7 @@ module ModuleTransformers =
                     | _ -> [])
             
             // Transform with closure elimination
-            let transformedBindings = 
+            let prunedBindings = 
                 if List.isEmpty bindings then 
                     []
                 else 
@@ -131,10 +131,10 @@ module ModuleTransformers =
             
             // Reconstruct module
             let newDecls = 
-                if List.isEmpty transformedBindings then 
+                if List.isEmpty prunedBindings then 
                     decls
                 else 
-                    [SynModuleDecl.Let(false, transformedBindings, range)]
+                    [SynModuleDecl.Let(false, prunedBindings, range)]
             
             Success (SynModuleOrNamespace(lid, isRec, kind, newDecls, xml, attrs, access, range, trivia))
 
@@ -153,9 +153,9 @@ module FileTransformers =
                     // Apply closure elimination
                     match mapList closureElimination modules' ctx with
                     | Success modules'' ->
-                        let transformed = ParsedInput.ImplFile(
+                        let pruned = ParsedInput.ImplFile(
                             ParsedImplFileInput(fileName, isScript, qname, pragmas, directives, modules'', isLast, trivia, ids))
-                        Success transformed
+                        Success pruned
                     | CompilerFailure errors -> CompilerFailure errors
                 | CompilerFailure errors -> CompilerFailure errors
             | sig_ -> Success sig_

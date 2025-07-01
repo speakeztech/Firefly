@@ -295,7 +295,7 @@ cat build/hello.mlir
 - **Fixed-size types** - All types have compile-time known sizes
 - **Static dispatch** - All function calls resolved at compile time
 - **Bounded stack** - Maximum stack usage computed and verified
-- **No hidden allocations** - Closures transformed to explicit parameters
+- **No hidden allocations** - Closures pruned to explicit parameters
 
 ### 🚧 Transformation Examples
 

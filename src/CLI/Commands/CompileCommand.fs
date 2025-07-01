@@ -109,8 +109,8 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
         // Create directory structure if keeping intermediates
         match ctx.IntermediatesDir with
         | Some dir ->
-            let rawUnitsDir = Path.Combine(dir, "fcs", "raw", "compilation_units")
-            let rawSymbolsDir = Path.Combine(dir, "fcs", "raw", "symbol_tables")
+            let rawUnitsDir = Path.Combine(dir, "fcs", "initial", "compilation_units")
+            let rawSymbolsDir = Path.Combine(dir, "fcs", "initial", "symbol_tables")
             let summaryDir = Path.Combine(dir, "fcs", "summary")
             Directory.CreateDirectory(rawUnitsDir) |> ignore
             Directory.CreateDirectory(rawSymbolsDir) |> ignore
@@ -133,10 +133,10 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
                     let! parseResult = 
                         checker.ParseFile(file, SourceText.ofString sourceText, parsingOptions)
                     
-                    // Write raw AST if keeping intermediates
+                    // Write initial AST if keeping intermediates
                     match ctx.IntermediatesDir with
                     | Some dir ->
-                        let rawUnitsDir = Path.Combine(dir, "fcs", "raw", "compilation_units")
+                        let rawUnitsDir = Path.Combine(dir, "fcs", "initial", "compilation_units")
                         let baseName = sprintf "%02d_%s" order (Path.GetFileName(file))
                         
                         // Write full AST
@@ -194,14 +194,14 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
                         
                         // Write defined symbols
                         let definedSymbols = extractDefinedSymbols checkResults file
-                        let rawUnitsDir = Path.Combine(dir, "fcs", "raw", "compilation_units")
+                        let rawUnitsDir = Path.Combine(dir, "fcs", "initial", "compilation_units")
                         writeFile rawUnitsDir baseName ".symbols.json" (JsonSerializer.Serialize(definedSymbols, jsonOptions))
                         
                         // Write cumulative symbol table
                         let cumulativeSymbols = extractCumulativeSymbols checkResults
                         cumulativeSymbolCount <- cumulativeSymbols.TotalModules + cumulativeSymbols.TotalTypes + cumulativeSymbols.TotalFunctions
                         
-                        let rawSymbolsDir = Path.Combine(dir, "fcs", "raw", "symbol_tables")
+                        let rawSymbolsDir = Path.Combine(dir, "fcs", "initial", "symbol_tables")
                         let symbolFileName = sprintf "after_%02d_%s" order (Path.GetFileNameWithoutExtension(file))
                         writeFile rawSymbolsDir symbolFileName ".json" (JsonSerializer.Serialize(cumulativeSymbols, jsonOptions))
                         
@@ -331,12 +331,12 @@ let private processAndTransform (ctx: CompilationContext) (compilationUnits: Com
             if ctx.KeepIntermediates then
                 match ctx.IntermediatesDir with
                 | Some dir ->
-                    let transformedDir = Path.Combine(dir, "fcs", "transformed", "compilation_units")
-                    Directory.CreateDirectory(transformedDir) |> ignore
+                    let prunedDir = Path.Combine(dir, "fcs", "pruned", "compilation_units")
+                    Directory.CreateDirectory(prunedDir) |> ignore
                     
                     successfulUnits |> Array.iteri (fun i (file, processed) ->
                         let baseName = sprintf "%02d_%s" i (Path.GetFileName(file))
-                        writeFile transformedDir baseName ".transformed.ast" (sprintf "%A" processed.Input)
+                        writeFile prunedDir baseName ".pruned.ast" (sprintf "%A" processed.Input)
                     )
                 | None -> ()
             

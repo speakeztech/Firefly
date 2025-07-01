@@ -400,7 +400,7 @@ module Patterns =
     let transformer (f: SynExpr -> SynExpr option) : ExprVisitor<unit, SynExpr option> =
         fun () expr ->
             match f expr with
-            | Some newExpr -> (), Skip (Some newExpr)  // Don't traverse into transformed nodes
+            | Some newExpr -> (), Skip (Some newExpr)  // Don't traverse into pruned nodes
             | None -> (), Continue None
             
     /// Dependency collector

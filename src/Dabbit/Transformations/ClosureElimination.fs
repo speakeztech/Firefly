@@ -220,7 +220,7 @@ let rec transform (state: ClosureState) expr =
 let transformModule (bindings: SynBinding list) =
     let initialState = { Counter = 0; Scope = Set.empty; Lifted = [] }
     
-    let (transformed, finalState) =
+    let (pruned, finalState) =
         bindings |> List.fold (fun (accBindings, accState) binding ->
             let (SynBinding(access, kind, isInline, isMut, attrs, xmlDoc, valData, 
                           headPat, retInfo, expr, range, debugPoint, trivia)) = binding
@@ -247,4 +247,4 @@ let transformModule (bindings: SynBinding list) =
     
     // Add lifted functions to module
     let liftedBindings = finalState.Lifted |> List.map snd |> List.rev
-    liftedBindings @ (List.rev transformed)
+    liftedBindings @ (List.rev pruned)

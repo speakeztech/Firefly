@@ -50,7 +50,7 @@ Version 43.9.300 made significant changes to their interaction:
 - `SyntaxVisitorBase<'T>.VisitSimplePats` now takes `SynPat` instead of `SynSimplePat list`
 - `implicitCtorSynPats` in type definitions changed from `SynSimplePats option` to `SynPat option`
 
-For AST manipulation tools, always prefer **SynPat** as it maintains source fidelity. Use SynSimplePats only when working with compiler-transformed representations in lambda expressions.
+For AST manipulation tools, always prefer **SynPat** as it maintains source fidelity. Use SynSimplePats only when working with compiler-pruned representations in lambda expressions.
 
 ### LongIdent is a simple list while SynLongIdent preserves formatting
 
