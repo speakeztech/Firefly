@@ -57,7 +57,7 @@ let private extractLoadDirectives (ast: ParsedInput) : string list =
         |> List.choose (function
             | ParsedHashDirective("load", args, _) ->
                 match args with
-                | [String (file, _, _)] -> Some file  // ParsedHashDirectiveArgument.String
+                | [ParsedHashDirectiveArgument.String (file, _, _)] -> Some file
                 | _ -> None
             | _ -> None)
     | _ -> []
