@@ -2,6 +2,7 @@ module Dabbit.Transformations.StackAllocation
 
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Text
+open Dabbit.CodeGeneration.TypeMapping
 
 /// Stack allocation analysis
 type AllocInfo = {
@@ -117,3 +118,73 @@ module StackSafety =
     
     and verifyBinding (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) =
         verify expr
+        
+module Application =
+    /// Apply stack allocation transformation to the entire AST
+    let applyStackAllocation (ast: ParsedInput) (typeCtx: TypeContext) (reachableSymbols: Set<string>) : ParsedInput =
+        // Helper to check if a symbol is reachable
+        let isReachable qualifiedName =
+            Set.contains qualifiedName reachableSymbols
+        
+        match ast with
+        | ParsedInput.ImplFile(ParsedImplFileInput(fileName, isScript, qualName, pragmas, hashDirectives, modules, isLastCompiled, isExe, trivia)) ->
+            // Transform all modules
+            let transformedModules = 
+                modules |> List.map (fun moduleOrNamespace ->
+                    match moduleOrNamespace with
+                    | SynModuleOrNamespace(lid, isRec, kind, decls, xml, attrs, access, range, trivia) ->
+                        // Build the module path for reachability checking
+                        let modulePath = lid |> List.map (fun id -> id.idText) |> String.concat "."
+                        
+                        // Transform declarations, considering reachability
+                        let transformedDecls = 
+                            decls |> List.map (fun decl ->
+                                match decl with
+                                | SynModuleDecl.Let(isRec, bindings, range) ->
+                                    let transformedBindings = 
+                                        bindings |> List.map (fun binding ->
+                                            match binding with
+                                            | SynBinding(access, kind, isInline, isMut, attrs, xmlDoc, 
+                                                        valData, headPat, retInfo, expr, bindingRange, sp, trivia) ->
+                                                // Extract the binding name for reachability check
+                                                let bindingName = 
+                                                    match headPat with
+                                                    | SynPat.LongIdent(longDotId, _, _, _, _, _) ->
+                                                        let ids = match longDotId with
+                                                                    | SynLongIdent(ids, _, _) -> ids
+                                                        ids |> List.map (fun id -> id.idText) |> String.concat "."
+                                                    | SynPat.Named(SynIdent(id, _), _, _, _) -> id.idText
+                                                    | _ -> ""
+                                                
+                                                let fullName = 
+                                                    if modulePath = "" then bindingName
+                                                    else sprintf "%s.%s" modulePath bindingName
+                                                
+                                                // Only transform if the symbol is reachable
+                                                if isReachable fullName then
+                                                    let transformedExpr = StackTransform.transform expr
+                                                    SynBinding(access, kind, isInline, isMut, attrs, xmlDoc,
+                                                            valData, headPat, retInfo, transformedExpr, 
+                                                            bindingRange, sp, trivia)
+                                                else
+                                                    binding)
+                                    SynModuleDecl.Let(isRec, transformedBindings, range)
+                                
+                                | SynModuleDecl.Expr(expr, range) ->
+                                    // Transform standalone expressions
+                                    SynModuleDecl.Expr(StackTransform.transform expr, range)
+                                
+                                | SynModuleDecl.NestedModule(componentInfo, isRec, nestedDecls, isCont, range, trivia) ->
+                                    // Recursively handle nested modules
+                                    StackTransform.transformModuleDecl decl
+                                
+                                | other -> other)
+                        
+                        SynModuleOrNamespace(lid, isRec, kind, transformedDecls, xml, attrs, access, range, trivia))
+            
+            ParsedInput.ImplFile(ParsedImplFileInput(fileName, isScript, qualName, pragmas, hashDirectives, 
+                                                    transformedModules, isLastCompiled, isExe, trivia))
+        
+        | ParsedInput.SigFile _ ->
+            // Signature files don't need stack allocation transformation
+            ast

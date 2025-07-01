@@ -239,3 +239,28 @@ module TypeConversion =
         match t.BitWidth with
         | Some width -> width
         | None -> 32  // Default
+
+/// Operations on TypeContext for type resolution and registration
+module TypeContextOps =
+    /// Try to resolve a type by name from the context
+    let tryResolveType (ctx: TypeContext) (typeName: string) : MLIRType option =
+        Map.tryFind typeName ctx.TypeMap
+    
+    /// Register a function's type signature in the context
+    let registerFunction (ctx: TypeContext) (functionName: string) 
+                        (paramTypes: MLIRType list) (returnType: MLIRType) : TypeContext =
+        // For functions, we store the complete function type
+        let funcType = MLIRTypes.func paramTypes returnType
+        { ctx with TypeMap = Map.add functionName funcType ctx.TypeMap }
+    
+    /// Register a type mapping in the context
+    let registerType (ctx: TypeContext) (typeName: string) (mlirType: MLIRType) : TypeContext =
+        { ctx with TypeMap = Map.add typeName mlirType ctx.TypeMap }
+    
+    /// Check if a type is already registered
+    let isTypeRegistered (ctx: TypeContext) (typeName: string) : bool =
+        Map.containsKey typeName ctx.TypeMap
+    
+    /// Get all registered type names
+    let getRegisteredTypes (ctx: TypeContext) : string list =
+        ctx.TypeMap |> Map.toList |> List.map fst

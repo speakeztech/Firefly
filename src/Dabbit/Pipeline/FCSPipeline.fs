@@ -3,14 +3,13 @@ module Dabbit.Pipeline.FCSPipeline
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Symbols
-open Core.XParsec.Foundation
 open Core.Types.TypeSystem 
 open Dabbit.CodeGeneration.TypeMapping
 open Dabbit.Bindings.SymbolRegistry
-open Dabbit.Bindings.SymbolRegistry.Registry
+open Dabbit.Bindings.PatternLibrary
 open Dabbit.Analysis.ReachabilityAnalyzer
 open Dabbit.Transformations.ClosureElimination
-open Dabbit.Transformations.StackAllocation
+open Dabbit.Transformations.StackAllocation.Application
 
 /// Convert F# type to MLIR type with full fidelity
 let rec private convertFSharpTypeToMLIR (fsharpType: FSharpType) (typeCtx: TypeContext) : MLIRType =
@@ -84,7 +83,7 @@ let extractTypeInformation (checkResults: FSharpCheckFileResults) (typeCtx: Type
     
     // Process all symbol uses to build type mappings
     checkResults.GetAllUsesOfAllSymbolsInFile()
-    |> Async.RunSynchronously
+    |> Seq.toArray
     |> Array.iter (fun symbolUse ->
         match symbolUse.Symbol with
         | :? FSharpMemberOrFunctionOrValue as memberSymbol when memberSymbol.IsModuleValueOrMember ->
@@ -113,7 +112,7 @@ let extractTypeInformation (checkResults: FSharpCheckFileResults) (typeCtx: Type
                 entity.UnionCases
                 |> Seq.map (fun case ->
                     let fieldTypes = 
-                        case.UnionCaseFields
+                        case.Fields  // Changed from UnionCaseFields to Fields
                         |> Seq.map (fun field -> convertFSharpTypeToMLIR field.FieldType updatedContext)
                         |> Seq.toList
                     let caseType = 
@@ -187,7 +186,7 @@ let extractTypedSymbols (checkResults: FSharpCheckFileResults) (ast: ParsedInput
     // Enhance symbols with type information from check results
     let symbolMap = 
         checkResults.GetAllUsesOfAllSymbolsInFile()
-        |> Async.RunSynchronously
+        |> Seq.toArray
         |> Array.choose (fun symbolUse ->
             match symbolUse.Symbol with
             | :? FSharpMemberOrFunctionOrValue as memberSymbol when memberSymbol.IsModuleValueOrMember ->
@@ -238,18 +237,3 @@ let applyTransformations (ast: ParsedInput) (typeCtx: TypeContext) (reachableSym
     let afterStack = applyStackAllocation afterClosure typeCtx reachableSymbols
     
     afterStack
-
-/// Batch process multiple compilation units for symbol extraction
-let extractSymbolsFromCompilationUnits (units: (string * ParsedInput * FSharpCheckFileResults) list) (typeCtx: TypeContext) =
-    units
-    |> List.collect (fun (_, ast, checkResults) -> 
-        extractTypedSymbols checkResults ast typeCtx)
-
-/// Create a processing context from FCS results
-let createProcessingContext (checkResults: FSharpCheckFileResults) (typeCtx: TypeContext) (symbolRegistry: SymbolRegistry) =
-    {
-        Checker = FSharpChecker.Create()
-        Options = checkResults.ProjectContext.ProjectOptions
-        TypeCtx = typeCtx
-        SymbolRegistry = symbolRegistry
-    }
