@@ -214,271 +214,224 @@ let resolveSymbol (ctx: ResolutionContext) (state: ModuleResolutionState) (name:
 /// Analyze dependencies in an expression
 let rec analyzeDependencies (ctx: ResolutionContext) (state: ModuleResolutionState) (expr: SynExpr) : Set<string> =
     match expr with
-    // Simple identifiers - need resolution through opened modules
+    // Function/method calls
+    | SynExpr.App(_, _, funcExpr, argExpr, _) ->
+        let funcDeps = analyzeDependencies ctx state funcExpr
+        let argDeps = analyzeDependencies ctx state argExpr
+        Set.union funcDeps argDeps
+    
+    // Identifier references (function names, variables, etc.)
     | SynExpr.Ident ident ->
         match resolveSymbol ctx state ident.idText with
-        | Some fullName -> Set.singleton fullName
+        | Some resolved -> Set.singleton resolved
         | None -> Set.empty
     
-    // Qualified identifiers
-    | SynExpr.LongIdent(_, SynLongIdent(ids, _, _), _, _) ->
-        let name = ids |> List.map (fun id -> id.idText) |> String.concat "."
-        match resolveSymbol ctx state name with
-        | Some fullName -> Set.singleton fullName
+    // Long identifier (qualified names like Module.function)
+    | SynExpr.LongIdent(_, longIdent, _, _) ->
+        let (SynLongIdent(ids, _, _)) = longIdent
+        let fullName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+        match resolveSymbol ctx state fullName with
+        | Some resolved -> Set.singleton resolved
         | None -> Set.empty
     
-    // Generic type application: func<T>(args)
-    | SynExpr.TypeApp(funcExpr, _, typeArgs, _, _, _, _) ->
-        // The function itself needs to be resolved
-        analyzeDependencies ctx state funcExpr
+    // Long identifier with set (e.g., Module.value <- expr)
+    | SynExpr.LongIdentSet(longIdent, expr, _) ->
+        let (SynLongIdent(ids, _, _)) = longIdent
+        let fullName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+        let identDeps = 
+            match resolveSymbol ctx state fullName with
+            | Some resolved -> Set.singleton resolved
+            | None -> Set.empty
+        let exprDeps = analyzeDependencies ctx state expr
+        Set.union identDeps exprDeps
     
-    // Property/method access: obj.Property or obj.Method
-    | SynExpr.DotGet(targetExpr, _, SynLongIdent(memberIds, _, _), _) ->
-        let targetDeps = analyzeDependencies ctx state targetExpr
-        let memberName = memberIds |> List.map (fun id -> id.idText) |> String.concat "."
-        
-        // For now, just track the target
-        // A more sophisticated version would resolve the member based on target type
-        targetDeps
-    
-    // Method call with dot notation: obj.Method(arg)
-    | SynExpr.App(_, _, SynExpr.DotGet(target, _, SynLongIdent(ids, _, _), _), arg, _) ->
-        let targetDeps = analyzeDependencies ctx state target
-        let methodName = ids |> List.map (fun id -> id.idText) |> String.concat "."
-        let argDeps = analyzeDependencies ctx state arg
-        
-        Set.unionMany [targetDeps; argDeps]
-    
-    // Regular function application: f x
-    | SynExpr.App(_, _, func, arg, _) ->
-        Set.union (analyzeDependencies ctx state func) (analyzeDependencies ctx state arg)
+    // Type applications (e.g., func<'T>)
+    | SynExpr.TypeApp(expr, _, _, _, _, _, _) ->
+        analyzeDependencies ctx state expr
     
     // Let bindings
-    | SynExpr.LetOrUse(_, _, bindings, body, _, _) ->
+    | SynExpr.LetOrUse(_, _, bindings, bodyExpr, _, _) ->
         let bindingDeps = 
             bindings 
-            |> List.map (fun (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) -> 
-                analyzeDependencies ctx state expr)
+            |> List.map (fun binding ->
+                match binding with
+                | SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _) ->
+                    analyzeDependencies ctx state expr)
             |> Set.unionMany
-        let bodyDeps = analyzeDependencies ctx state body
+        let bodyDeps = analyzeDependencies ctx state bodyExpr
         Set.union bindingDeps bodyDeps
     
     // Sequential expressions
-    | SynExpr.Sequential(_, _, e1, e2, _, _) ->
-        Set.union (analyzeDependencies ctx state e1) (analyzeDependencies ctx state e2)
+    | SynExpr.Sequential(_, _, expr1, expr2, _, _) ->
+        let deps1 = analyzeDependencies ctx state expr1
+        let deps2 = analyzeDependencies ctx state expr2
+        Set.union deps1 deps2
     
     // If-then-else
-    | SynExpr.IfThenElse(cond, thenExpr, elseOpt, _, _, _, _) ->
-        [Some cond; Some thenExpr; elseOpt]
-        |> List.choose id
-        |> List.map (analyzeDependencies ctx state)
-        |> Set.unionMany
+    | SynExpr.IfThenElse(condExpr, thenExpr, elseExprOpt, _, _, _, _) ->
+        let condDeps = analyzeDependencies ctx state condExpr
+        let thenDeps = analyzeDependencies ctx state thenExpr
+        let elseDeps = 
+            match elseExprOpt with
+            | Some elseExpr -> analyzeDependencies ctx state elseExpr
+            | None -> Set.empty
+        Set.unionMany [condDeps; thenDeps; elseDeps]
     
-    // Pattern matching
-    | SynExpr.Match(_, matchExpr, clauses, _, _) ->
-        let exprDeps = analyzeDependencies ctx state matchExpr
+    // Match expressions
+    | SynExpr.Match(_, expr, clauses, _, _) ->
+        let exprDeps = analyzeDependencies ctx state expr
         let clauseDeps = 
             clauses 
-            |> List.map (fun (SynMatchClause(_, whenOpt, result, _, _, _)) ->
-                let whenDeps = whenOpt |> Option.map (analyzeDependencies ctx state) |> Option.defaultValue Set.empty
-                Set.union whenDeps (analyzeDependencies ctx state result))
+            |> List.map (fun (SynMatchClause(_, _, expr, _, _, _)) ->
+                analyzeDependencies ctx state expr)
             |> Set.unionMany
         Set.union exprDeps clauseDeps
     
-    // Lambda expressions
-    | SynExpr.Lambda(_, _, _, body, _, _, _) ->
-        analyzeDependencies ctx state body
+    // For loops - FCS 43.9.300 signature
+    | SynExpr.For(_, _, _, ident, fromExpr, _, toExpr, doExpr, _) ->
+        let fromDeps = analyzeDependencies ctx state fromExpr
+        let toDeps = analyzeDependencies ctx state toExpr
+        let doDeps = analyzeDependencies ctx state doExpr
+        Set.unionMany [fromDeps; toDeps; doDeps]
     
-    // Tuples
+    // While loops
+    | SynExpr.While(_, condExpr, doExpr, _) ->
+        let condDeps = analyzeDependencies ctx state condExpr
+        let doDeps = analyzeDependencies ctx state doExpr
+        Set.union condDeps doDeps
+    
+    // Tuple expressions
     | SynExpr.Tuple(_, exprs, _, _) ->
-        exprs |> List.map (analyzeDependencies ctx state) |> Set.unionMany
+        exprs 
+        |> List.map (analyzeDependencies ctx state)
+        |> Set.unionMany
     
-    // Lists and arrays
+    // Array/List expressions
     | SynExpr.ArrayOrList(_, exprs, _) ->
-        exprs |> List.map (analyzeDependencies ctx state) |> Set.unionMany
+        exprs 
+        |> List.map (analyzeDependencies ctx state)
+        |> Set.unionMany
+    
+    // Array/List comprehensions
+    | SynExpr.ArrayOrListComputed(_, expr, _) ->
+        analyzeDependencies ctx state expr
     
     // Record construction
     | SynExpr.Record(_, _, fields, _) ->
         fields 
-        |> List.choose (fun (SynExprRecordField(_, _, expr, _)) -> expr)
+        |> List.choose (fun field ->
+            match field with
+            | SynExprRecordField(_, _, exprOpt, _) -> exprOpt)
         |> List.map (analyzeDependencies ctx state)
         |> Set.unionMany
     
-    // Object construction
-    | SynExpr.New(_, _, expr, _) ->
+    // New object construction
+    | SynExpr.New(_, typeExpr, expr, _) ->
         analyzeDependencies ctx state expr
     
-    // Object expressions
-    | SynExpr.ObjExpr(objType, argOptions, withKeyword, bindings, members, extraImpls, newExprRange, range) ->
-        // Process bindings
-        let bindingDeps = 
-            bindings 
-            |> List.map (fun (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) ->
+    // Object expressions - FCS 43.9.300
+    | SynExpr.ObjExpr(_, _, _, bindings, _, _, _, _) ->
+        bindings 
+        |> List.map (fun binding ->
+            match binding with
+            | SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _) ->
                 analyzeDependencies ctx state expr)
-            |> Set.unionMany
-        
-        // Process members
-        let memberDeps =
-            members
-            |> List.collect (fun member' ->
-                match member' with
-                | SynMemberDefn.Member(binding, _) ->
-                    let (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) = binding
-                    [analyzeDependencies ctx state expr]
-                | _ -> [])
-            |> Set.unionMany
-        
-        Set.union bindingDeps memberDeps
-    
-    // Try-with
-    | SynExpr.TryWith(tryExpr, clauses, _, _, _, _) ->
-        let tryDeps = analyzeDependencies ctx state tryExpr
-        let clauseDeps = 
-            clauses 
-            |> List.map (fun (SynMatchClause(_, _, result, _, _, _)) ->
-                analyzeDependencies ctx state result)
-            |> Set.unionMany
-        Set.union tryDeps clauseDeps
-    
-    // Try-finally
-    | SynExpr.TryFinally(tryExpr, finallyExpr, _, _, _, _) ->
-        Set.union (analyzeDependencies ctx state tryExpr) 
-                  (analyzeDependencies ctx state finallyExpr)
-    
-    // Parentheses
-    | SynExpr.Paren(expr, _, _, _) ->
-        analyzeDependencies ctx state expr
-    
-    // Type test
-    | SynExpr.TypeTest(expr, _, _) ->
-        analyzeDependencies ctx state expr
-    
-    // Type cast
-    | SynExpr.Downcast(expr, _, _)
-    | SynExpr.Upcast(expr, _, _) ->
-        analyzeDependencies ctx state expr
-    
-    // While loops
-    | SynExpr.While(_, whileExpr, doExpr, _) ->
-        Set.union (analyzeDependencies ctx state whileExpr) 
-                  (analyzeDependencies ctx state doExpr)
-    
-    // For loops
-    | SynExpr.For(_, _, _, _, _, _, toExpr, doExpr, _) ->
-        let toDeps = analyzeDependencies ctx state toExpr
-        let doDeps = analyzeDependencies ctx state doExpr
-        Set.union toDeps doDeps
-
-    // For-each loops
-    | SynExpr.ForEach(spFor, spIn, seqExprOnly, isFromSource, pat, enumExpr, bodyExpr, range) ->
-        Set.union (analyzeDependencies ctx state enumExpr) 
-                (analyzeDependencies ctx state bodyExpr)
-    
-    // Lazy expressions
-    | SynExpr.Lazy(expr, _) ->
-        analyzeDependencies ctx state expr
+        |> Set.unionMany
     
     // Do expressions
     | SynExpr.Do(expr, _) ->
         analyzeDependencies ctx state expr
     
-    // Assert expressions
-    | SynExpr.Assert(expr, _) ->
+    // Parentheses
+    | SynExpr.Paren(expr, _, _, _) ->
         analyzeDependencies ctx state expr
     
-    // Fixed expressions
-    | SynExpr.Fixed(expr, _) ->
+    // Typed expressions
+    | SynExpr.Typed(expr, _, _) ->
         analyzeDependencies ctx state expr
     
-    // Address-of
+    // Dot-get expressions (e.g., obj.Property)
+    | SynExpr.DotGet(expr, _, longIdent, _) ->
+        let objDeps = analyzeDependencies ctx state expr
+        // Also check if this is a method call
+        let (SynLongIdent(ids, _, _)) = longIdent
+        let methodName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+        let methodDeps = 
+            match resolveSymbol ctx state methodName with
+            | Some resolved -> Set.singleton resolved
+            | None -> Set.empty
+        Set.union objDeps methodDeps
+    
+    // Dot-indexed get (e.g., arr.[i])
+    | SynExpr.DotIndexedGet(expr, indexExpr, _, _) ->
+        let objDeps = analyzeDependencies ctx state expr
+        let indexDeps = analyzeDependencies ctx state indexExpr
+        Set.union objDeps indexDeps
+    
+    // Dot-indexed set (e.g., arr.[i] <- value)
+    | SynExpr.DotIndexedSet(objExpr, indexExpr, valueExpr, _, _, _) ->
+        let objDeps = analyzeDependencies ctx state objExpr
+        let indexDeps = analyzeDependencies ctx state indexExpr
+        let valueDeps = analyzeDependencies ctx state valueExpr
+        Set.unionMany [objDeps; indexDeps; valueDeps]
+    
+    // Lambda expressions
+    | SynExpr.Lambda(_, _, _, body, _, _, _) ->
+        analyzeDependencies ctx state body
+    
+    // Try-with expressions - FCS 43.9.300
+    | SynExpr.TryWith(tryExpr, withClauses, _, _, _, _) ->
+        let tryDeps = analyzeDependencies ctx state tryExpr
+        let withDeps = 
+            withClauses 
+            |> List.map (fun clause ->
+                match clause with
+                | SynMatchClause(_, _, expr, _, _, _) ->
+                    analyzeDependencies ctx state expr)
+            |> Set.unionMany
+        Set.union tryDeps withDeps
+    
+    // Try-finally expressions
+    | SynExpr.TryFinally(tryExpr, finallyExpr, _, _, _, _) ->
+        let tryDeps = analyzeDependencies ctx state tryExpr
+        let finallyDeps = analyzeDependencies ctx state finallyExpr
+        Set.union tryDeps finallyDeps
+    
+    // Constants and literals
+    | SynExpr.Const(_, _) ->
+        Set.empty
+    
+    // Lazy expressions
+    | SynExpr.Lazy(expr, _) ->
+        analyzeDependencies ctx state expr
+    
+    // Quote expressions
+    | SynExpr.Quote(_, _, expr, _, _) ->
+        analyzeDependencies ctx state expr
+    
+    // Downcast
+    | SynExpr.Downcast(expr, _, _) ->
+        analyzeDependencies ctx state expr
+    
+    // Upcast
+    | SynExpr.Upcast(expr, _, _) ->
+        analyzeDependencies ctx state expr
+    
+    // AddressOf
     | SynExpr.AddressOf(_, expr, _, _) ->
         analyzeDependencies ctx state expr
     
-    // Computation expressions
-    | SynExpr.ComputationExpr(_, expr, _) ->
+    // InferredDowncast
+    | SynExpr.InferredDowncast(expr, _) ->
         analyzeDependencies ctx state expr
     
-    // Yield/return
-    | SynExpr.YieldOrReturn(_, expr, _, _)
-    | SynExpr.YieldOrReturnFrom(_, expr, _, _) ->
+    // InferredUpcast
+    | SynExpr.InferredUpcast(expr, _) ->
         analyzeDependencies ctx state expr
     
-    // Let/use bang (computation expressions)
-    | SynExpr.LetOrUseBang(_, _, _, _, rhsExpr, andBangs, bodyExpr, _, _) ->
-        let rhsDeps = analyzeDependencies ctx state rhsExpr
-        let andBangDeps = 
-            andBangs 
-            |> List.map (fun (SynExprAndBang(_, _, _, _, expr, _, _)) -> 
-                analyzeDependencies ctx state expr)
-            |> Set.unionMany
-        let bodyDeps = analyzeDependencies ctx state bodyExpr
-        Set.unionMany [rhsDeps; andBangDeps; bodyDeps]
-    
-    // Match bang
-    | SynExpr.MatchBang(_, expr, clauses, _, _) ->
-        let exprDeps = analyzeDependencies ctx state expr
-        let clauseDeps = 
-            clauses 
-            |> List.map (fun (SynMatchClause(_, _, result, _, _, _)) -> 
-                analyzeDependencies ctx state result)
-            |> Set.unionMany
-        Set.union exprDeps clauseDeps
-    
-    // Do bang
-    | SynExpr.DoBang(expr, _, _) ->
-        analyzeDependencies ctx state expr
-    
-    // Set expressions
-    | SynExpr.Set(targetExpr, rhsExpr, _) ->
-        Set.union (analyzeDependencies ctx state targetExpr) 
-                  (analyzeDependencies ctx state rhsExpr)
-    
-    // Dot-indexed get/set
-    | SynExpr.DotIndexedGet(objectExpr, indexArgs, _, _) ->
-        Set.union (analyzeDependencies ctx state objectExpr) 
-                  (analyzeDependencies ctx state indexArgs)
-    
-    | SynExpr.DotIndexedSet(objectExpr, indexArgs, valueExpr, _, _, _) ->
-        Set.unionMany [
-            analyzeDependencies ctx state objectExpr
-            analyzeDependencies ctx state indexArgs
-            analyzeDependencies ctx state valueExpr
-        ]
-    
-    // Dot set
-    | SynExpr.DotSet(expr, _, rhsExpr, _) ->
-        Set.union (analyzeDependencies ctx state expr) 
-                  (analyzeDependencies ctx state rhsExpr)
-    
-    // Interpolated strings
-    | SynExpr.InterpolatedString(parts, _, _) ->
-        parts 
-        |> List.choose (function 
-            | SynInterpolatedStringPart.FillExpr(expr, _) -> Some expr
-            | _ -> None)
-        |> List.map (analyzeDependencies ctx state)
-        |> Set.unionMany
-    
-    // Constants and terminals - no dependencies
-    | SynExpr.Const _ 
-    | SynExpr.Null _ 
-    | SynExpr.ImplicitZero _
-    | SynExpr.MatchLambda _
-    | SynExpr.Quote _
-    | SynExpr.AnonRecd _
-    | SynExpr.LibraryOnlyILAssembly _
-    | SynExpr.LibraryOnlyStaticOptimization _
-    | SynExpr.LibraryOnlyUnionCaseFieldGet _
-    | SynExpr.LibraryOnlyUnionCaseFieldSet _
-    | SynExpr.ArbitraryAfterError _
-    | SynExpr.FromParseError _
-    | SynExpr.DiscardAfterMissingQualificationAfterDot _
-    | SynExpr.DebugPoint _
-    | SynExpr.Dynamic _ -> 
+    // Other cases we don't need to analyze
+    | _ ->
         Set.empty
-    
-    // Catch-all for any new patterns
-    | _ -> Set.empty
 
 /// Build complete dependency graph from parsed inputs
 let buildDependencyGraph (parsedInputs: (string * ParsedInput) list) : (ResolutionContext * Map<string, Set<string>> * Set<string>) =
