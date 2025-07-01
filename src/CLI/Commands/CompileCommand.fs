@@ -267,8 +267,9 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
 let private processAndTransform (ctx: CompilationContext) (compilationUnits: CompilationUnit list) : Async<CompilerResult<_>> =
     async {
         printfn "Phase 2: Processing and transforming AST..."
+        printfn "  Processing %d compilation units" compilationUnits.Length
         
-        // Get project options from the first compilation unit (they're all the same)
+        // Get project options from the first compilation unit
         let projectOptions = 
             match compilationUnits with
             | [] -> failwith "No compilation units"
@@ -288,32 +289,61 @@ let private processAndTransform (ctx: CompilationContext) (compilationUnits: Com
             SymbolRegistry = symbolRegistry
         }
         
-        // Process each compilation unit
+        // Process each compilation unit with detailed error tracking
         let! processedUnits = 
             compilationUnits
             |> List.map (fun unit ->
                 async {
-                    // Process this unit's AST
-                    let! processed = processCompilationUnit processingCtx unit.ParseResult.ParseTree
-                    return processed
+                    try
+                        printfn "  Processing unit: %s" (Path.GetFileName(unit.File))
+                        let! processed = 
+                            try
+                                processCompilationUnit processingCtx unit.ParseResult.ParseTree
+                            with
+                            | :? MatchFailureException as ex ->
+                                printfn "    ERROR: Match failure in %s" (Path.GetFileName(unit.File))
+                                printfn "    Match failed at: %s:%d" ex.Data0 ex.Data1
+                                printfn "    Message: %s" ex.Message
+                                reraise()
+                        printfn "    Successfully processed %s" (Path.GetFileName(unit.File))
+                        return Some (unit.File, processed)
+                    with
+                    | :? MatchFailureException as ex ->
+                        printfn "    ERROR: Match failure in %s" (Path.GetFileName(unit.File))
+                        printfn "    Stack trace: %s" ex.StackTrace
+                        printfn "    At: %s:%d" ex.Data0 ex.Data1
+                        return None
+                    | ex ->
+                        printfn "    ERROR: %s in %s" ex.Message (Path.GetFileName(unit.File))
+                        printfn "    Stack trace: %s" ex.StackTrace
+                        return None
                 })
             |> Async.Sequential
         
-        // For now, just return the last processed unit
-        // You might want to combine them differently
-        match Array.tryLast processedUnits with
-        | Some processed ->
+        let successfulUnits = processedUnits |> Array.choose id
+        
+        if successfulUnits.Length = 0 then
+            return CompilerFailure [InternalError("processAndTransform", "All units failed to process", None)]
+        else
+            printfn "  Successfully processed %d/%d units" successfulUnits.Length compilationUnits.Length
+            
+            // Write intermediate results if keeping intermediates
             if ctx.KeepIntermediates then
-                let dir = 
-                    match ctx.IntermediatesDir with
-                    | Some d -> d
-                    | None -> failwith "IntermediatesDir should be Some when KeepIntermediates is true"
-                let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
-                writeFile dir baseName ".processed.fcs" (sprintf "%A" processed.Input)
-
-            return Success (processed, symbolRegistry)
-        | None ->
-            return CompilerFailure [InternalError("processAndTransform", "No units processed", None)]
+                match ctx.IntermediatesDir with
+                | Some dir ->
+                    let transformedDir = Path.Combine(dir, "fcs", "transformed", "compilation_units")
+                    Directory.CreateDirectory(transformedDir) |> ignore
+                    
+                    successfulUnits |> Array.iteri (fun i (file, processed) ->
+                        let baseName = sprintf "%02d_%s" i (Path.GetFileName(file))
+                        writeFile transformedDir baseName ".transformed.ast" (sprintf "%A" processed.Input)
+                    )
+                | None -> ()
+            
+            // For now, return the last processed unit
+            match Array.tryLast successfulUnits with
+            | Some (_, processed) -> return Success (processed, symbolRegistry)
+            | None -> return CompilerFailure [InternalError("processAndTransform", "No units to return", None)]
     }
 
 /// Phase 3: Generate MLIR

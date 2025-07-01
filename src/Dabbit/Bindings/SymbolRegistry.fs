@@ -354,6 +354,7 @@ module Registry =
                                             ))
                                 if hasEntryPoint then Some ident.idText else None
                             | _ -> None)
+                    | _ -> [] 
                     ))
             |> Set.ofList
         | _ -> Set.empty
