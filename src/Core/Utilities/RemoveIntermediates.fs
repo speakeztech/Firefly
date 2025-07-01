@@ -5,26 +5,38 @@ open System.IO
 
 module RemoveIntermediates =
 
-    /// Removes all files from the intermediates directory
-    let clearIntermediatesDirectory (intermediatesDir: string option) : unit =
-        match intermediatesDir with
-        | Some dir when Directory.Exists(dir) ->
+    /// Recursively delete all files and subdirectories
+    let rec private deleteDirectoryContents (dir: string) : unit =
+        if Directory.Exists(dir) then
             try
-                // Get all files in the directory
-                let files = Directory.GetFiles(dir)
-                
-                // Delete each file
-                files |> Array.iter (fun file ->
+                // Delete all files in this directory
+                Directory.GetFiles(dir) 
+                |> Array.iter (fun file ->
                     try
                         File.Delete(file)
                     with ex ->
                         printfn "  Warning: Could not delete %s: %s" (Path.GetFileName(file)) ex.Message
                 )
                 
-                if files.Length > 0 then
-                    printfn "  Cleared %d intermediate files from %s" files.Length dir
+                // Recursively delete all subdirectories
+                Directory.GetDirectories(dir)
+                |> Array.iter (fun subDir ->
+                    deleteDirectoryContents subDir
+                    try
+                        Directory.Delete(subDir)
+                    with ex ->
+                        printfn "  Warning: Could not delete directory %s: %s" subDir ex.Message
+                )
             with ex ->
-                printfn "  Warning: Error clearing intermediates directory: %s" ex.Message
+                printfn "  Warning: Error processing directory %s: %s" dir ex.Message
+
+    /// Removes all files and subdirectories from the intermediates directory
+    let clearIntermediatesDirectory (intermediatesDir: string option) : unit =
+        match intermediatesDir with
+        | Some dir when Directory.Exists(dir) ->
+            printfn "  Clearing intermediates directory..."
+            deleteDirectoryContents dir
+            printfn "  Intermediates directory cleared"
         | Some dir ->
             // Directory doesn't exist yet, nothing to clear
             ()
@@ -36,7 +48,7 @@ module RemoveIntermediates =
     let prepareIntermediatesDirectory (intermediatesDir: string option) : unit =
         match intermediatesDir with
         | Some dir ->
-            // Clear existing files first
+            // Clear existing contents first
             clearIntermediatesDirectory intermediatesDir
             
             // Ensure directory exists

@@ -5,6 +5,8 @@
 open System
 open System.IO
 open System.Runtime.InteropServices
+open System.Text.Json
+open System.Text.Json.Serialization
 open Argu
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Text
@@ -13,6 +15,8 @@ open Core.Utilities.IntermediateWriter
 open Core.Utilities.RemoveIntermediates
 open Core.Utilities.ReadSourceFile
 open Core.XParsec.Foundation
+open Core.FCSIngestion.FileLoader
+open Core.FCSIngestion.SymbolExtraction
 open Core.FCSIngestion.AstMerger
 open Dabbit.CodeGeneration.TypeMapping
 open Dabbit.CodeGeneration.MLIRModuleGenerator
@@ -26,6 +30,12 @@ open Dabbit.Pipeline.FCSPipeline
 open Dabbit.Pipeline.LoweringPipeline
 open Dabbit.Pipeline.OptimizationPipeline
 open CLI.Configurations.ProjectConfig
+
+let private jsonOptions =
+    let options = JsonSerializerOptions()
+    options.Converters.Add(JsonFSharpConverter())
+    options.WriteIndented <- true
+    options
 
 /// Command line arguments for the compile command
 type CompileArgs =
@@ -60,6 +70,13 @@ type CompilationContext = {
     IntermediatesDir: string option
 }
 
+type CompilationUnit = {
+    Order: int
+    File: string
+    ParseResult: FSharpParseFileResults
+    CheckResults: FSharpCheckFileResults
+}
+
 /// Helper functions
 module Helpers =
     let getDefaultTarget() =
@@ -73,50 +90,78 @@ module Helpers =
             "x86_64-unknown-unknown"
 
 /// Phase 1: Parse and check source with all dependencies
-let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async<CompilerResult<FSharpCheckFileResults * ParsedInput>> =
+let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async<CompilerResult<CompilationUnit list>> =
     async {
         printfn "Phase 1: Parsing and type checking..."
         
         let checker = FSharpChecker.Create(keepAssemblyContents = true)
         
-        // Get project options with dependencies
-        let! (projectOptions, scriptDiagnostics) = 
-            checker.GetProjectOptionsFromScript(
-                fileName = ctx.InputPath,
-                source = SourceText.ofString sourceCode,
-                ?otherFlags = Some [|
-                    "--define:ZERO_ALLOCATION"
-                    "--define:FIDELITY"
-                    "--define:INTERACTIVE"
-                |],
-                ?useFsiAuxLib = Some false,
-                ?useSdkRefs = Some false,
-                ?assumeDotNetFramework = Some false
-            )
+        // Get project options using FileLoader
+        let! (projectOptions, loadDiagnostics) = 
+            loadProjectFiles ctx.InputPath checker ctx.IntermediatesDir
+        
+        // Log diagnostics
+        if loadDiagnostics.Length > 0 then
+            printfn "  Load diagnostics:"
+            for diag in loadDiagnostics do
+                printfn "    %s" diag.Message
+        
+        // Create directory structure if keeping intermediates
+        match ctx.IntermediatesDir with
+        | Some dir ->
+            let rawUnitsDir = Path.Combine(dir, "fcs", "raw", "compilation_units")
+            let rawSymbolsDir = Path.Combine(dir, "fcs", "raw", "symbol_tables")
+            let summaryDir = Path.Combine(dir, "fcs", "summary")
+            Directory.CreateDirectory(rawUnitsDir) |> ignore
+            Directory.CreateDirectory(rawSymbolsDir) |> ignore
+            Directory.CreateDirectory(summaryDir) |> ignore
+        | None -> ()
         
         // Get parsing options
-        let (parsingOptions, _) = 
-            checker.GetParsingOptionsFromProjectOptions projectOptions
+        let (parsingOptions, _) = checker.GetParsingOptionsFromProjectOptions projectOptions
         
-        // Parse ALL files from the project
+        // Parse all files
         let! parseResults = 
-            projectOptions.SourceFiles 
-            |> Array.map (fun file ->
+            projectOptions.SourceFiles
+            |> Array.mapi (fun order file ->
                 async {
                     let! sourceText = 
-                        File.ReadAllTextAsync(file) 
-                        |> Async.AwaitTask
-                    return! checker.ParseFile(
-                        file, 
-                        SourceText.ofString sourceText, 
-                        parsingOptions)
+                        match readSourceFile file with
+                        | Success text -> async { return text }
+                        | CompilerFailure _ -> failwith $"Failed to read {file}"
+                    
+                    let! parseResult = 
+                        checker.ParseFile(file, SourceText.ofString sourceText, parsingOptions)
+                    
+                    // Write raw AST if keeping intermediates
+                    match ctx.IntermediatesDir with
+                    | Some dir ->
+                        let rawUnitsDir = Path.Combine(dir, "fcs", "raw", "compilation_units")
+                        let baseName = sprintf "%02d_%s" order (Path.GetFileName(file))
+                        
+                        // Write full AST
+                        writeFile rawUnitsDir baseName ".ast" (sprintf "%A" parseResult.ParseTree)
+                        
+                        // Write AST metadata as JSON
+                        let astMeta = {|
+                            FileName = file
+                            Order = order
+                            HasErrors = parseResult.ParseHadErrors
+                            DiagnosticsCount = parseResult.Diagnostics.Length
+                            Diagnostics = parseResult.Diagnostics |> Array.map (fun d -> 
+                                {| Message = d.Message; Line = d.StartLine; Column = d.StartColumn |})
+                        |}
+                        writeFile rawUnitsDir baseName ".ast.json" (JsonSerializer.Serialize(astMeta, jsonOptions))
+                    | None -> ()
+                    
+                    return (order, file, parseResult)
                 })
-            |> Async.Parallel
+            |> Async.Sequential
         
         // Check for parse errors
         let parseErrors = 
             parseResults 
-            |> Array.collect (fun r -> 
+            |> Array.collect (fun (_, _, r) -> 
                 if r.ParseHadErrors then r.Diagnostics else [||])
         
         if parseErrors.Length > 0 then
@@ -127,37 +172,107 @@ let private parseAndCheck (ctx: CompilationContext) (sourceCode: string) : Async
                     ["parsing"]))
             return CompilerFailure (Array.toList errors)
         else
-            // MERGE THE ASTS - this is still needed!
-            let mergedAst = mergeParseResults parseResults
+            // Type check each file in order
+            let mutable cumulativeSymbolCount = 0
+            let mutable checkResultsList = []
             
-            if ctx.KeepIntermediates then
-                let dir = match ctx.IntermediatesDir with Some d -> d | None -> "."
-                let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
-                writeFile dir baseName ".merged.fcs" (sprintf "%A" mergedAst)
-            
-            // Type check with the main file
-            let! checkAnswer = 
-                checker.CheckFileInProject(
-                    parseResults.[0],  // Main file
-                    ctx.InputPath, 
-                    0, 
-                    SourceText.ofString sourceCode, 
-                    projectOptions)
+            for (order, file, parseResult) in parseResults do
+                let! checkAnswer = 
+                    checker.CheckFileInProject(
+                        parseResult,
+                        file,
+                        0,
+                        SourceText.ofString (File.ReadAllText(file)),
+                        projectOptions)
+                
+                match checkAnswer with
+                | FSharpCheckFileAnswer.Succeeded checkResults ->
+                    // Write symbols if keeping intermediates
+                    match ctx.IntermediatesDir with
+                    | Some dir ->
+                        let baseName = sprintf "%02d_%s" order (Path.GetFileName(file))
+                        
+                        // Write defined symbols
+                        let definedSymbols = extractDefinedSymbols checkResults file
+                        let rawUnitsDir = Path.Combine(dir, "fcs", "raw", "compilation_units")
+                        writeFile rawUnitsDir baseName ".symbols.json" (JsonSerializer.Serialize(definedSymbols, jsonOptions))
+                        
+                        // Write cumulative symbol table
+                        let cumulativeSymbols = extractCumulativeSymbols checkResults
+                        cumulativeSymbolCount <- cumulativeSymbols.TotalModules + cumulativeSymbols.TotalTypes + cumulativeSymbols.TotalFunctions
+                        
+                        let rawSymbolsDir = Path.Combine(dir, "fcs", "raw", "symbol_tables")
+                        let symbolFileName = sprintf "after_%02d_%s" order (Path.GetFileNameWithoutExtension(file))
+                        writeFile rawSymbolsDir symbolFileName ".json" (JsonSerializer.Serialize(cumulativeSymbols, jsonOptions))
+                        
+                        printfn "    %s: %d symbols defined, %d total symbols available" 
+                            (Path.GetFileName(file)) 
+                            (Array.length definedSymbols.Modules + Array.length definedSymbols.Types + Array.length definedSymbols.Functions)
+                            cumulativeSymbolCount
+                    | None -> ()
                     
-            match checkAnswer with
-            | FSharpCheckFileAnswer.Succeeded checkResults ->
-                return Success (checkResults, mergedAst)
-            | _ ->
+                    checkResultsList <- checkResultsList @ [(order, file, parseResult, Some checkResults)]
+                | _ ->
+                    checkResultsList <- checkResultsList @ [(order, file, parseResult, None)]
+            
+            // Merge ASTs
+            let successfulParseResults = 
+                checkResultsList 
+                |> List.choose (fun (_, _, parseResult, checkResult) -> 
+                    match checkResult with 
+                    | Some _ -> Some parseResult 
+                    | None -> None)
+                |> Array.ofList
+                  
+            // Write final compilation state
+            match ctx.IntermediatesDir with
+            | Some dir ->
+                let summaryDir = Path.Combine(dir, "fcs", "summary")
+                
+                // Write compilation state
+                let compilationState = {|
+                    TotalFiles = projectOptions.SourceFiles.Length
+                    SuccessfulFiles = successfulParseResults.Length
+                    TotalSymbols = cumulativeSymbolCount
+                    Timestamp = DateTime.UtcNow
+                    Files = checkResultsList |> List.map (fun (order, file, _, checkResult) ->
+                        {| 
+                            Order = order
+                            FileName = file
+                            ShortName = Path.GetFileName(file : string)  // Type annotation fixes error 3
+                            Success = Option.isSome checkResult
+                        |})
+                |}
+                writeFile summaryDir "compilation_state" ".json" (JsonSerializer.Serialize(compilationState, jsonOptions))
+            | None -> ()
+            
+            let compilationUnits = 
+                checkResultsList 
+                |> List.choose (fun (order, file, parseResult, checkResult) ->
+                    match checkResult with
+                    | Some cr -> Some { Order = order; File = file; ParseResult = parseResult; CheckResults = cr }
+                    | None -> None)
+            
+            match compilationUnits with
+            | [] ->
                 return CompilerFailure [SyntaxError(
                     { Line = 0; Column = 0; File = ctx.InputPath; Offset = 0 },
-                    "Type checking failed",
+                    "No files successfully type checked",
                     ["type checking"])]
+            | units ->
+                return Success units
     }
 
 /// Phase 2: Process compilation unit with transformations
-let private processAndTransform (ctx: CompilationContext) (checkResults: FSharpCheckFileResults, ast: ParsedInput) : Async<CompilerResult<_>> =
+let private processAndTransform (ctx: CompilationContext) (compilationUnits: CompilationUnit list) : Async<CompilerResult<_>> =
     async {
         printfn "Phase 2: Processing and transforming AST..."
+        
+        // Get project options from the first compilation unit (they're all the same)
+        let projectOptions = 
+            match compilationUnits with
+            | [] -> failwith "No compilation units"
+            | firstUnit :: _ -> firstUnit.CheckResults.ProjectContext.ProjectOptions
         
         // Create processing context
         let typeCtx = TypeContextBuilder.create()
@@ -168,23 +283,37 @@ let private processAndTransform (ctx: CompilationContext) (checkResults: FSharpC
             
         let processingCtx = {
             Checker = FSharpChecker.Create()
-            Options = checkResults.ProjectContext.ProjectOptions
+            Options = projectOptions
             TypeCtx = typeCtx
             SymbolRegistry = symbolRegistry
         }
         
-        // Process the compilation unit (includes transformations and reachability)
-        let! processed = processCompilationUnit processingCtx ast
+        // Process each compilation unit
+        let! processedUnits = 
+            compilationUnits
+            |> List.map (fun unit ->
+                async {
+                    // Process this unit's AST
+                    let! processed = processCompilationUnit processingCtx unit.ParseResult.ParseTree
+                    return processed
+                })
+            |> Async.Sequential
         
-        if ctx.KeepIntermediates then
-            let dir = 
-                match ctx.IntermediatesDir with
-                | Some d -> d
-                | None -> failwith "IntermediatesDir should be Some when KeepIntermediates is true"
-            let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
-            writeFile dir baseName ".processed.fcs" (sprintf "%A" processed.Input)
+        // For now, just return the last processed unit
+        // You might want to combine them differently
+        match Array.tryLast processedUnits with
+        | Some processed ->
+            if ctx.KeepIntermediates then
+                let dir = 
+                    match ctx.IntermediatesDir with
+                    | Some d -> d
+                    | None -> failwith "IntermediatesDir should be Some when KeepIntermediates is true"
+                let baseName = Path.GetFileNameWithoutExtension(ctx.InputPath)
+                writeFile dir baseName ".processed.fcs" (sprintf "%A" processed.Input)
 
-        return Success (processed, symbolRegistry)
+            return Success (processed, symbolRegistry)
+        | None ->
+            return CompilerFailure [InternalError("processAndTransform", "No units processed", None)]
     }
 
 /// Phase 3: Generate MLIR
@@ -267,9 +396,9 @@ let private compilePipeline (ctx: CompilationContext) (sourceCode: string) : Asy
         let! parseResult = parseAndCheck ctx sourceCode
         match parseResult with
         | CompilerFailure errors -> return CompilerFailure errors
-        | Success (checkResults, ast) ->
+        | Success compilationUnits ->  // Changed from (checkResults, ast)
             // Phase 2: Process and transform
-            let! processResult = processAndTransform ctx (checkResults, ast)
+            let! processResult = processAndTransform ctx compilationUnits  // Pass the list
             match processResult with
             | CompilerFailure errors -> return CompilerFailure errors
             | Success (processed, symbolRegistry) ->
@@ -307,6 +436,9 @@ let execute (args: ParseResults<CompileArgs>) =
             Directory.CreateDirectory(dir) |> ignore
             Some dir
         else None
+    
+    // Clear intermediates directory before starting
+    prepareIntermediatesDirectory intermediatesDir
     
     let ctx = {
         InputPath = inputPath
