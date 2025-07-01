@@ -214,56 +214,67 @@ let resolveSymbol (ctx: ResolutionContext) (state: ModuleResolutionState) (name:
 /// Analyze dependencies in an expression
 let rec analyzeDependencies (ctx: ResolutionContext) (state: ModuleResolutionState) (expr: SynExpr) : Set<string> =
     match expr with
+    // Simple identifiers - need resolution through opened modules
     | SynExpr.Ident ident ->
         match resolveSymbol ctx state ident.idText with
         | Some fullName -> Set.singleton fullName
         | None -> Set.empty
     
+    // Qualified identifiers
     | SynExpr.LongIdent(_, SynLongIdent(ids, _, _), _, _) ->
         let name = ids |> List.map (fun id -> id.idText) |> String.concat "."
         match resolveSymbol ctx state name with
         | Some fullName -> Set.singleton fullName
         | None -> Set.empty
     
+    // Generic type application: func<T>(args)
+    | SynExpr.TypeApp(funcExpr, _, typeArgs, _, _, _, _) ->
+        // The function itself needs to be resolved
+        analyzeDependencies ctx state funcExpr
+    
+    // Property/method access: obj.Property or obj.Method
+    | SynExpr.DotGet(targetExpr, _, SynLongIdent(memberIds, _, _), _) ->
+        let targetDeps = analyzeDependencies ctx state targetExpr
+        let memberName = memberIds |> List.map (fun id -> id.idText) |> String.concat "."
+        
+        // For now, just track the target
+        // A more sophisticated version would resolve the member based on target type
+        targetDeps
+    
+    // Method call with dot notation: obj.Method(arg)
     | SynExpr.App(_, _, SynExpr.DotGet(target, _, SynLongIdent(ids, _, _), _), arg, _) ->
-        // Method call: target.method(arg)
         let targetDeps = analyzeDependencies ctx state target
         let methodName = ids |> List.map (fun id -> id.idText) |> String.concat "."
         let argDeps = analyzeDependencies ctx state arg
         
-        // Try to resolve method based on target type
-        let methodDeps = 
-            targetDeps 
-            |> Set.toList
-            |> List.collect (fun targetName ->
-                match Map.tryFind targetName ctx.TypeMembers with
-                | Some members when Set.contains methodName members ->
-                    [targetName + "." + methodName]
-                | _ -> [])
-            |> Set.ofList
-        
-        Set.unionMany [targetDeps; argDeps; methodDeps]
+        Set.unionMany [targetDeps; argDeps]
     
+    // Regular function application: f x
     | SynExpr.App(_, _, func, arg, _) ->
         Set.union (analyzeDependencies ctx state func) (analyzeDependencies ctx state arg)
     
+    // Let bindings
     | SynExpr.LetOrUse(_, _, bindings, body, _, _) ->
         let bindingDeps = 
             bindings 
             |> List.map (fun (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) -> 
                 analyzeDependencies ctx state expr)
             |> Set.unionMany
-        Set.union bindingDeps (analyzeDependencies ctx state body)
+        let bodyDeps = analyzeDependencies ctx state body
+        Set.union bindingDeps bodyDeps
     
+    // Sequential expressions
     | SynExpr.Sequential(_, _, e1, e2, _, _) ->
         Set.union (analyzeDependencies ctx state e1) (analyzeDependencies ctx state e2)
     
+    // If-then-else
     | SynExpr.IfThenElse(cond, thenExpr, elseOpt, _, _, _, _) ->
         [Some cond; Some thenExpr; elseOpt]
         |> List.choose id
         |> List.map (analyzeDependencies ctx state)
         |> Set.unionMany
     
+    // Pattern matching
     | SynExpr.Match(_, matchExpr, clauses, _, _) ->
         let exprDeps = analyzeDependencies ctx state matchExpr
         let clauseDeps = 
@@ -274,18 +285,199 @@ let rec analyzeDependencies (ctx: ResolutionContext) (state: ModuleResolutionSta
             |> Set.unionMany
         Set.union exprDeps clauseDeps
     
+    // Lambda expressions
     | SynExpr.Lambda(_, _, _, body, _, _, _) ->
         analyzeDependencies ctx state body
     
+    // Tuples
     | SynExpr.Tuple(_, exprs, _, _) ->
         exprs |> List.map (analyzeDependencies ctx state) |> Set.unionMany
     
+    // Lists and arrays
     | SynExpr.ArrayOrList(_, exprs, _) ->
         exprs |> List.map (analyzeDependencies ctx state) |> Set.unionMany
     
-    | SynExpr.TypeApp(expr, _, _, _, _, _, _) ->
+    // Record construction
+    | SynExpr.Record(_, _, fields, _) ->
+        fields 
+        |> List.choose (fun (SynExprRecordField(_, _, expr, _)) -> expr)
+        |> List.map (analyzeDependencies ctx state)
+        |> Set.unionMany
+    
+    // Object construction
+    | SynExpr.New(_, _, expr, _) ->
         analyzeDependencies ctx state expr
     
+    // Object expressions
+    | SynExpr.ObjExpr(objType, argOptions, withKeyword, bindings, members, extraImpls, newExprRange, range) ->
+        // Process bindings
+        let bindingDeps = 
+            bindings 
+            |> List.map (fun (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) ->
+                analyzeDependencies ctx state expr)
+            |> Set.unionMany
+        
+        // Process members
+        let memberDeps =
+            members
+            |> List.collect (fun member' ->
+                match member' with
+                | SynMemberDefn.Member(binding, _) ->
+                    let (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) = binding
+                    [analyzeDependencies ctx state expr]
+                | _ -> [])
+            |> Set.unionMany
+        
+        Set.union bindingDeps memberDeps
+    
+    // Try-with
+    | SynExpr.TryWith(tryExpr, clauses, _, _, _, _) ->
+        let tryDeps = analyzeDependencies ctx state tryExpr
+        let clauseDeps = 
+            clauses 
+            |> List.map (fun (SynMatchClause(_, _, result, _, _, _)) ->
+                analyzeDependencies ctx state result)
+            |> Set.unionMany
+        Set.union tryDeps clauseDeps
+    
+    // Try-finally
+    | SynExpr.TryFinally(tryExpr, finallyExpr, _, _, _, _) ->
+        Set.union (analyzeDependencies ctx state tryExpr) 
+                  (analyzeDependencies ctx state finallyExpr)
+    
+    // Parentheses
+    | SynExpr.Paren(expr, _, _, _) ->
+        analyzeDependencies ctx state expr
+    
+    // Type test
+    | SynExpr.TypeTest(expr, _, _) ->
+        analyzeDependencies ctx state expr
+    
+    // Type cast
+    | SynExpr.Downcast(expr, _, _)
+    | SynExpr.Upcast(expr, _, _) ->
+        analyzeDependencies ctx state expr
+    
+    // While loops
+    | SynExpr.While(_, whileExpr, doExpr, _) ->
+        Set.union (analyzeDependencies ctx state whileExpr) 
+                  (analyzeDependencies ctx state doExpr)
+    
+    // For loops
+    | SynExpr.For(_, _, _, _, _, _, toExpr, doExpr, _) ->
+        let toDeps = analyzeDependencies ctx state toExpr
+        let doDeps = analyzeDependencies ctx state doExpr
+        Set.union toDeps doDeps
+
+    // For-each loops
+    | SynExpr.ForEach(spFor, spIn, seqExprOnly, isFromSource, pat, enumExpr, bodyExpr, range) ->
+        Set.union (analyzeDependencies ctx state enumExpr) 
+                (analyzeDependencies ctx state bodyExpr)
+    
+    // Lazy expressions
+    | SynExpr.Lazy(expr, _) ->
+        analyzeDependencies ctx state expr
+    
+    // Do expressions
+    | SynExpr.Do(expr, _) ->
+        analyzeDependencies ctx state expr
+    
+    // Assert expressions
+    | SynExpr.Assert(expr, _) ->
+        analyzeDependencies ctx state expr
+    
+    // Fixed expressions
+    | SynExpr.Fixed(expr, _) ->
+        analyzeDependencies ctx state expr
+    
+    // Address-of
+    | SynExpr.AddressOf(_, expr, _, _) ->
+        analyzeDependencies ctx state expr
+    
+    // Computation expressions
+    | SynExpr.ComputationExpr(_, expr, _) ->
+        analyzeDependencies ctx state expr
+    
+    // Yield/return
+    | SynExpr.YieldOrReturn(_, expr, _, _)
+    | SynExpr.YieldOrReturnFrom(_, expr, _, _) ->
+        analyzeDependencies ctx state expr
+    
+    // Let/use bang (computation expressions)
+    | SynExpr.LetOrUseBang(_, _, _, _, rhsExpr, andBangs, bodyExpr, _, _) ->
+        let rhsDeps = analyzeDependencies ctx state rhsExpr
+        let andBangDeps = 
+            andBangs 
+            |> List.map (fun (SynExprAndBang(_, _, _, _, expr, _, _)) -> 
+                analyzeDependencies ctx state expr)
+            |> Set.unionMany
+        let bodyDeps = analyzeDependencies ctx state bodyExpr
+        Set.unionMany [rhsDeps; andBangDeps; bodyDeps]
+    
+    // Match bang
+    | SynExpr.MatchBang(_, expr, clauses, _, _) ->
+        let exprDeps = analyzeDependencies ctx state expr
+        let clauseDeps = 
+            clauses 
+            |> List.map (fun (SynMatchClause(_, _, result, _, _, _)) -> 
+                analyzeDependencies ctx state result)
+            |> Set.unionMany
+        Set.union exprDeps clauseDeps
+    
+    // Do bang
+    | SynExpr.DoBang(expr, _, _) ->
+        analyzeDependencies ctx state expr
+    
+    // Set expressions
+    | SynExpr.Set(targetExpr, rhsExpr, _) ->
+        Set.union (analyzeDependencies ctx state targetExpr) 
+                  (analyzeDependencies ctx state rhsExpr)
+    
+    // Dot-indexed get/set
+    | SynExpr.DotIndexedGet(objectExpr, indexArgs, _, _) ->
+        Set.union (analyzeDependencies ctx state objectExpr) 
+                  (analyzeDependencies ctx state indexArgs)
+    
+    | SynExpr.DotIndexedSet(objectExpr, indexArgs, valueExpr, _, _, _) ->
+        Set.unionMany [
+            analyzeDependencies ctx state objectExpr
+            analyzeDependencies ctx state indexArgs
+            analyzeDependencies ctx state valueExpr
+        ]
+    
+    // Dot set
+    | SynExpr.DotSet(expr, _, rhsExpr, _) ->
+        Set.union (analyzeDependencies ctx state expr) 
+                  (analyzeDependencies ctx state rhsExpr)
+    
+    // Interpolated strings
+    | SynExpr.InterpolatedString(parts, _, _) ->
+        parts 
+        |> List.choose (function 
+            | SynInterpolatedStringPart.FillExpr(expr, _) -> Some expr
+            | _ -> None)
+        |> List.map (analyzeDependencies ctx state)
+        |> Set.unionMany
+    
+    // Constants and terminals - no dependencies
+    | SynExpr.Const _ 
+    | SynExpr.Null _ 
+    | SynExpr.ImplicitZero _
+    | SynExpr.MatchLambda _
+    | SynExpr.Quote _
+    | SynExpr.AnonRecd _
+    | SynExpr.LibraryOnlyILAssembly _
+    | SynExpr.LibraryOnlyStaticOptimization _
+    | SynExpr.LibraryOnlyUnionCaseFieldGet _
+    | SynExpr.LibraryOnlyUnionCaseFieldSet _
+    | SynExpr.ArbitraryAfterError _
+    | SynExpr.FromParseError _
+    | SynExpr.DiscardAfterMissingQualificationAfterDot _
+    | SynExpr.DebugPoint _
+    | SynExpr.Dynamic _ -> 
+        Set.empty
+    
+    // Catch-all for any new patterns
     | _ -> Set.empty
 
 /// Build complete dependency graph from parsed inputs

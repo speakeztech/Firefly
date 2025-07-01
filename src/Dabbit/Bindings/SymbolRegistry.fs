@@ -339,22 +339,27 @@ module Registry =
         match input with
         | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
             modules 
-            |> List.collect (fun (SynModuleOrNamespace(_, _, _, decls, _, _, _, _, _)) ->
+            |> List.collect (fun (SynModuleOrNamespace(moduleIds, _, _, decls, _, _, _, _, _)) ->
+                let modulePath = moduleIds |> List.map (fun id -> id.idText) |> String.concat "."
+                
                 decls |> List.collect (function
                     | SynModuleDecl.Let(_, bindings, _) ->
-                        bindings |> List.choose (function
-                            | SynBinding(_, _, _, _, attrs, _, _, SynPat.Named(SynIdent(ident, _), _, _, _), _, _, _, _, _) ->
-                                let hasEntryPoint = 
-                                    attrs |> List.exists (fun attr ->
-                                        attr.Attributes |> List.exists (fun attr ->
-                                            match attr.TypeName with
-                                            | SynLongIdent(longId, _, _) ->
-                                                let name = longId |> List.map (fun id -> id.idText) |> String.concat "."
-                                                name = "EntryPoint" || name = "System.EntryPoint" || name = "EntryPointAttribute"
-                                            ))
-                                if hasEntryPoint then Some ident.idText else None
-                            | _ -> None)
-                    | _ -> [] 
-                    ))
+                        bindings |> List.choose (fun (SynBinding(_, _, _, _, attrs, _, _, pat, _, _, _, _, _)) ->
+                            let hasEntryPoint = 
+                                attrs |> List.exists (fun attrList ->
+                                    attrList.Attributes |> List.exists (fun attr ->
+                                        match attr.TypeName with
+                                        | SynLongIdent(ids, _, _) ->
+                                            let name = ids |> List.last |> fun id -> id.idText
+                                            name = "EntryPoint" || name = "EntryPointAttribute"
+                                    ))
+                            
+                            if hasEntryPoint then
+                                match pat with
+                                | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+                                    Some (sprintf "%s.%s" modulePath ident.idText)
+                                | _ -> None
+                            else None)
+                    | _ -> []))
             |> Set.ofList
         | _ -> Set.empty
