@@ -193,12 +193,6 @@ let private toResolvedSymbol (extracted: Core.FCSIngestion.SymbolExtraction.Extr
             RequiresExternal = false
         }
 
-/// Extract symbols from a parsed AST for registration
-let extractSymbolsFromParsedInput (ast: ParsedInput) : ResolvedSymbol list =
-    // Use unified extraction
-    Core.FCSIngestion.SymbolExtraction.extractSymbolsFromParsedInput ast
-    |> List.map toResolvedSymbol
-
 /// Extract symbols with type information from check results
 let extractTypedSymbols (checkResults: FSharpCheckFileResults) (ast: ParsedInput) (typeCtx: TypeContext) : ResolvedSymbol list =
     // Start with unified extraction

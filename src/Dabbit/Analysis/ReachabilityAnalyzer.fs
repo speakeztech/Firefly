@@ -736,18 +736,107 @@ let rec analyzeDependencies (ctx: ResolutionContext) (state: ModuleResolutionSta
     | _ ->
         Set.empty, scopeMgr
 
+type private SymbolDefinition = {
+    FilePath: string
+    ModulePath: string list
+    OpenedModules: string list list
+    Binding: SynBinding option
+    TypeDef: SynTypeDefn option
+    MemberDef: SynMemberDefn option
+}
 
-/// Build complete dependency graph from parsed inputs with scope awareness
+
+
+/// Build complete dependency graph from parsed inputs with recursive analysis
 let buildDependencyGraph (parsedInputs: (string * ParsedInput) list) : ResolutionContext * Map<string, Set<string>> * Set<string> =
     let ctx = buildResolutionContext parsedInputs
     let mutable dependencies = Map.empty
     let mutable entryPoints = Set.empty
+    let mutable analyzing = Set.empty  // Track what we're currently analyzing (for cycle detection)
+    let mutable analyzed = Set.empty   // Track what we've finished analyzing
     
     // Initialize diagnostics
     ReachabilityDiagnostics.initializeDiagnostics()
     let diagnostics = ReachabilityDiagnostics.getDiagnostics()
     
-    // Process each input file
+    // First pass: Build a map of all symbols to their definitions
+    let mutable symbolDefinitions : Map<string, SymbolDefinition> = Map.empty
+    
+    // Recursive function to collect symbols from declarations
+    let rec collectFromDecl (modulePath: string list) (parentOpenedModules: string list list) (filePath: string) (decl: SynModuleDecl) =
+        match decl with
+        | SynModuleDecl.Let(_, bindings, _) ->
+            for binding in bindings do
+                match binding with
+                | SynBinding(_, _, _, _, attrs, _, _, pat, _, _, _, _, _) as synBinding ->
+                    match extractSymbolFromPattern modulePath pat with
+                    | Some symbol ->
+                        let symbolDef = {
+                            FilePath = filePath
+                            ModulePath = modulePath
+                            OpenedModules = parentOpenedModules  // Use the accumulated opens
+                            Binding = Some synBinding
+                            TypeDef = None
+                            MemberDef = None
+                        }
+                        symbolDefinitions <- Map.add symbol.QualifiedName symbolDef symbolDefinitions
+                        
+                        let isEntryPoint = attrs |> List.exists (fun attrList ->
+                            attrList.Attributes |> List.exists (fun attr ->
+                                match attr.TypeName with
+                                | SynLongIdent(ids, _, _) ->
+                                    ids |> List.exists (fun id -> id.idText = "EntryPoint")))
+                        if isEntryPoint then
+                            entryPoints <- Set.add symbol.QualifiedName entryPoints
+                    | None -> ()
+        
+        | SynModuleDecl.NestedModule(SynComponentInfo(_, _, _, longId, _, _, _, _), _, nestedDecls, _, _, _) ->
+            let nestedModuleName = longId.Head.idText
+            let nestedPath = modulePath @ [nestedModuleName]
+            let nestedLocalOpens = extractOpenedModules nestedDecls
+            // IMPORTANT: Combine parent opens with nested opens
+            let combinedOpens = parentOpenedModules @ nestedLocalOpens
+            
+            // Recursively process with combined opens
+            for nestedDecl in nestedDecls do
+                collectFromDecl nestedPath combinedOpens filePath nestedDecl
+        
+        | SynModuleDecl.Types(types, _) ->
+            // Similar fix for types - use parentOpenedModules
+            for typeDef in types do
+                match typeDef with
+                | SynTypeDefn(SynComponentInfo(_, _, _, longId, _, _, _, _), _, memberDefns, _, _, _) as td ->
+                    let typeName = (modulePath @ [longId.Head.idText]) |> String.concat "."
+                    let typeDefRecord = {
+                        FilePath = filePath
+                        ModulePath = modulePath
+                        OpenedModules = parentOpenedModules  // Use parent opens
+                        Binding = None
+                        TypeDef = Some td
+                        MemberDef = None
+                    }
+                    symbolDefinitions <- Map.add typeName typeDefRecord symbolDefinitions
+                    
+                    for memberDefn in memberDefns do
+                        match memberDefn with
+                        | SynMemberDefn.Member(SynBinding(_, _, _, _, _, _, _, pat, _, _, _, _, _), _) as md ->
+                            match extractMemberName pat with
+                            | Some memberName ->
+                                let memberQualifiedName = typeName + "." + memberName
+                                let memberDef = {
+                                    FilePath = filePath
+                                    ModulePath = modulePath
+                                    OpenedModules = parentOpenedModules  // Use parent opens
+                                    Binding = None
+                                    TypeDef = None
+                                    MemberDef = Some md
+                                }
+                                symbolDefinitions <- Map.add memberQualifiedName memberDef symbolDefinitions
+                            | None -> ()
+                        | _ -> ()
+        | _ -> ()
+    
+    // Collect all symbol definitions
     for (filePath, input) in parsedInputs do
         match input with
         | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
@@ -755,142 +844,128 @@ let buildDependencyGraph (parsedInputs: (string * ParsedInput) list) : Resolutio
                 let modulePath = longId |> List.map (fun id -> id.idText)
                 let openedModules = extractOpenedModules decls
                 
-                // Debug: print module and opens
-                printfn "[DEBUG] Processing module: %s" (String.concat "." modulePath)
-                printfn "[DEBUG] Opened modules: %A" openedModules
-                
-                let state = {
-                    CurrentModule = modulePath
-                    OpenedModules = openedModules
-                }
-                
-                // Create scope manager for this module
-                let scopeMgr = create modulePath openedModules
-                
-                // Set current module in diagnostics
-                diagnostics.SetCurrentModule(modulePath)
-                
-                // Process declarations
+                // Process each declaration recursively
                 for decl in decls do
-                    match decl with
-                    | SynModuleDecl.Let(_, bindings, _) ->
-                        let mutable currentScopeMgr = scopeMgr
-                        for (SynBinding(_, _, _, _, attrs, _, valData, pat, returnInfo, expr, _, _, _)) in bindings do
-                            // Extract bindings from this pattern and add to scope
-                            let patternBindings = extractPatternBindings pat
-                            currentScopeMgr <- addBindings patternBindings currentScopeMgr
-                            
-                            // Use unified extraction to get the symbol
-                            let extractedSymbols = 
-                                match pat with
-                                | SynPat.Named(SynIdent(ident, _), _, _, _) ->
-                                    let symbol : ExtractedSymbol = {
-                                        QualifiedName = SymbolNames.qualify modulePath ident.idText
-                                        ShortName = ident.idText
-                                        ModulePath = modulePath
-                                        Kind = Value 
-                                    }
-                                    [symbol]
-                                | SynPat.LongIdent(longIdent, _, _, _, _, _) ->
-                                    let (SynLongIdent(ids, _, _)) = longIdent
-                                    let fullName = ids |> List.map (fun id -> id.idText) |> String.concat "."
-                                    let shortName = match List.tryLast ids with 
-                                                    | Some id -> id.idText 
-                                                    | None -> fullName
-                                    let symbol : ExtractedSymbol = {
-                                        QualifiedName = SymbolNames.qualify modulePath fullName
-                                        ShortName = shortName
-                                        ModulePath = modulePath
-                                        Kind = Value
-                                    }
-                                    [symbol]
-                                | _ -> []
-                            
-                            for extractedSymbol in extractedSymbols do
-                                let symbolName = extractedSymbol.QualifiedName  // Convert to string
-                                
-                                // Check if entry point
-                                let isEntryPoint = attrs |> List.exists (fun attrList ->
-                                    attrList.Attributes |> List.exists (fun attr ->
-                                        match attr.TypeName with
-                                        | SynLongIdent(ids, _, _) ->
-                                            ids |> List.exists (fun id -> id.idText = "EntryPoint")))
-                                
-                                if isEntryPoint then
-                                    entryPoints <- Set.add symbolName entryPoints
-                                
-                                // Extract type dependencies from the binding signature
-                                let typeDeps = 
-                                    let mutable deps = Set.empty
-                                    
-                                    // Extract from return type if present
-                                    match returnInfo with
-                                    | Some (SynBindingReturnInfo(returnType, _, _, _)) ->
-                                        let extractedTypes = extractTypeReferences returnType
-                                        printfn "[DEBUG] Return type deps for %s: %A" symbolName extractedTypes
-                                        deps <- Set.union deps extractedTypes
-                                    | None -> ()
-                                    
-                                    // Extract from pattern (for typed patterns like (x: int))
-                                    let rec extractPatternTypes (p: SynPat) =
-                                        match p with
-                                        | SynPat.Typed(_, synType, _) ->
-                                            let extractedTypes = extractTypeReferences synType
-                                            printfn "[DEBUG] Pattern type deps: %A" extractedTypes
-                                            extractedTypes
-                                        | SynPat.Paren(innerPat, _) ->
-                                            extractPatternTypes innerPat
-                                        | SynPat.Tuple(_, pats, _, _) ->
-                                            pats |> List.map extractPatternTypes |> Set.unionMany
-                                        | _ -> Set.empty
-                                    
-                                    deps <- Set.union deps (extractPatternTypes pat)
-                                    printfn "[DEBUG] Total type deps for %s: %A" symbolName deps
-                                    deps
-                                
-                                // Analyze expression dependencies with scope awareness
-                                let exprDeps, _ = analyzeDependencies ctx state currentScopeMgr expr
-                                
-                                // Combine type and expression dependencies
-                                let allDeps = Set.union exprDeps typeDeps
-                                dependencies <- Map.add symbolName allDeps dependencies
-                                
-                                // Log reachability marking for entry points
-                                if isEntryPoint then
-                                    diagnostics.LogReachabilityMark(symbolName, "EntryPoint", "Marked as entry point")
-                    
-                    | SynModuleDecl.Types(types, _) ->
-                        for (SynTypeDefn(SynComponentInfo(_, _, _, longId, _, _, _, _), _, memberDefns, _, _, _)) in types do
-                            let typeName = (modulePath @ [longId.Head.idText]) |> String.concat "."
-                            dependencies <- Map.add typeName Set.empty dependencies
-                            
-                            // Process member definitions
-                            for memberDefn in memberDefns do
-                                match memberDefn with
-                                | SynMemberDefn.Member(SynBinding(_, _, _, _, _, _, _, pat, _, expr, _, _, _), _) ->
-                                    match extractMemberName pat with
-                                    | Some memberName ->
-                                        let memberQualifiedName = typeName + "." + memberName
-                                        let deps, _ = analyzeDependencies ctx state scopeMgr expr
-                                        dependencies <- Map.add memberQualifiedName deps dependencies
-                                    | None -> ()
-                                | _ -> ()
-                    
-                    | SynModuleDecl.NestedModule(SynComponentInfo(_, _, _, longId, _, _, _, _), _, nestedDecls, _, _, _) ->
-                        let nestedModuleName = longId.Head.idText
-                        let nestedPath = modulePath @ [nestedModuleName]
-                        let nestedQualifiedName = SymbolNames.qualify modulePath nestedModuleName
-                        dependencies <- Map.add nestedQualifiedName Set.empty dependencies
-                    
-                    | SynModuleDecl.Open(target, _) ->
-                        // Already handled in extractOpenedModules
-                        ()
-                    
-                    | _ -> ()
+                    collectFromDecl modulePath openedModules filePath decl
         | _ -> ()
     
+    printfn "[DEBUG] Collected %d symbol definitions" (Map.count symbolDefinitions)
+    
+    // Recursive function to analyze a symbol
+    let rec analyzeSymbol (symbolName: string) : Set<string> =
+        if Set.contains symbolName analyzing then
+            // Circular dependency detected
+            printfn "[DEBUG] Circular dependency detected for %s" symbolName
+            Set.empty
+        elif Map.containsKey symbolName dependencies then
+            // Already analyzed
+            Map.find symbolName dependencies
+        else
+            analyzing <- Set.add symbolName analyzing
+            
+            // Find the symbol definition
+            match Map.tryFind symbolName symbolDefinitions with
+            | None ->
+                // External symbol (built-in or from unanalyzed module)
+                printfn "[DEBUG] Symbol %s not found in definitions (external)" symbolName
+                dependencies <- Map.add symbolName Set.empty dependencies
+                Set.empty
+                
+            | Some def ->
+                printfn "[DEBUG] Analyzing symbol %s" symbolName
+                
+                // Create analysis context
+                let state = {
+                    CurrentModule = def.ModulePath
+                    OpenedModules = def.OpenedModules
+                }
+                let scopeMgr = create def.ModulePath def.OpenedModules
+                diagnostics.SetCurrentModule(def.ModulePath)
+                
+                // Analyze based on definition type
+                let directDeps = 
+                    match def.Binding with
+                    | Some (SynBinding(_, _, _, _, _, _, _, pat, returnInfo, expr, _, _, _)) ->
+                        // Extract type dependencies
+                        let typeDeps = 
+                            let mutable deps = Set.empty
+                            match returnInfo with
+                            | Some (SynBindingReturnInfo(returnType, _, _, _)) ->
+                                deps <- Set.union deps (extractTypeReferences returnType)
+                            | None -> ()
+                            
+                            let rec extractPatternTypes (p: SynPat) =
+                                match p with
+                                | SynPat.Typed(_, synType, _) ->
+                                    extractTypeReferences synType
+                                | SynPat.Paren(innerPat, _) ->
+                                    extractPatternTypes innerPat
+                                | SynPat.Tuple(_, pats, _, _) ->
+                                    pats |> List.map extractPatternTypes |> Set.unionMany
+                                | _ -> Set.empty
+                            
+                            deps <- Set.union deps (extractPatternTypes pat)
+                            deps
+                        
+                        // Analyze expression dependencies
+                        let exprDeps, _ = analyzeDependencies ctx state scopeMgr expr
+                        Set.union typeDeps exprDeps
+                        
+                    | None ->
+                        match def.MemberDef with
+                        | Some (SynMemberDefn.Member(SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _), _)) ->
+                            let deps, _ = analyzeDependencies ctx state scopeMgr expr
+                            deps
+                        | _ -> Set.empty
+                
+                printfn "[DEBUG] Direct dependencies of %s: %A" symbolName directDeps
+                
+                // Recursively analyze each dependency
+                let allDeps = 
+                    directDeps 
+                    |> Set.toList
+                    |> List.map (fun dep ->
+                        let depDeps = analyzeSymbol dep
+                        Set.add dep depDeps  // Include the dependency itself
+                    )
+                    |> Set.unionMany
+                
+                // Store the complete dependencies
+                dependencies <- Map.add symbolName allDeps dependencies
+                analyzing <- Set.remove symbolName analyzing
+                analyzed <- Set.add symbolName analyzed
+                
+                allDeps
+    
+    // Analyze all symbols starting with entry points
+    printfn "[DEBUG] Starting analysis with %d entry points" (Set.count entryPoints)
+    for entryPoint in entryPoints do
+        analyzeSymbol entryPoint |> ignore
+    
+    // Also analyze any symbols that were referenced but not yet analyzed
+    let mutable additionalSymbols = 
+        dependencies 
+        |> Map.toSeq 
+        |> Seq.collect (fun (_, deps) -> deps)
+        |> Set.ofSeq
+        |> Set.filter (fun sym -> not (Map.containsKey sym dependencies))
+    
+    while not (Set.isEmpty additionalSymbols) do
+        printfn "[DEBUG] Analyzing %d additional referenced symbols" (Set.count additionalSymbols)
+        for symbol in additionalSymbols do
+            analyzeSymbol symbol |> ignore
+        
+        // Check for any new symbols that were discovered
+        additionalSymbols <- 
+            dependencies 
+            |> Map.toSeq 
+            |> Seq.collect (fun (_, deps) -> deps)
+            |> Set.ofSeq
+            |> Set.filter (fun sym -> not (Map.containsKey sym dependencies))
+    
+    printfn "[DEBUG] Dependency analysis complete: %d symbols analyzed" (Map.count dependencies)
+    
     ctx, dependencies, entryPoints
-
 /// Compute transitive closure of dependencies
 let computeTransitiveClosure (dependencies: Map<string, Set<string>>) (seeds: Set<string>) : Set<string> =
     let rec closure (visited: Set<string>) (toVisit: string list) =
