@@ -3,6 +3,7 @@ module Core.FCSIngestion.SymbolExtraction
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Symbols
+open Core.Types.TypeSystem
 
 /// Basic symbol information extracted from AST
 type ExtractedSymbol = {
@@ -120,20 +121,61 @@ let rec extractSymbolsFromDecl (modulePath: string list) (decl: SynModuleDecl) :
         
     | _ -> []
 
+/// Extract all symbols from a signature module declaration
+let rec extractSymbolsFromSigDecl (modulePath: string list) (decl: SynModuleSigDecl) : string list =
+    match decl with
+    | SynModuleSigDecl.Val(valSig, _) ->
+        let (SynValSig(_, ident, _, _, _, _, _, _, _, _, _, _)) = valSig
+        match ident with
+        | SynIdent(id, _) -> [(modulePath @ [id.idText]) |> String.concat "."]
+    
+    | SynModuleSigDecl.Types(types, _) ->
+        types |> List.collect (fun typeSig ->
+            let (SynTypeDefnSig(compInfo, _, memberSigs, _, _)) = typeSig
+            let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = compInfo
+            let typeName = (modulePath @ [longId.Head.idText]) |> String.concat "."
+            
+            let memberNames = 
+                memberSigs |> List.choose (fun memberSig ->
+                    match memberSig with
+                    | SynMemberSig.Member(valSig, _, _, _) ->  // 4 arguments
+                        let (SynValSig(_, ident, _, _, _, _, _, _, _, _, _, _)) = valSig
+                        match ident with
+                        | SynIdent(id, _) -> Some (typeName + "." + id.idText)
+                    | _ -> None)
+            
+            typeName :: memberNames)
+    
+    | SynModuleSigDecl.NestedModule(compInfo, _, nestedDecls, _, _) ->
+        let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = compInfo
+        let nestedPath = modulePath @ (longId |> List.map (fun id -> id.idText))
+        nestedDecls |> List.collect (extractSymbolsFromSigDecl nestedPath)
+    
+    | _ -> []
+
 /// Extract all symbols from a parsed input file
-let extractSymbolsFromParsedInput (ast: ParsedInput) : ExtractedSymbol list =
+let extractSymbolsFromParsedInput (ast: ParsedInput) : ExtractedSymbol list =  // Changed return type
     match ast with
     | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
-        modules 
-        |> List.collect (fun (SynModuleOrNamespace(longId, _, _, decls, _, _, _, _, _)) ->
-            let modulePath = longId |> List.map (fun id -> id.idText)
-            decls |> List.collect (extractSymbolsFromDecl modulePath))
+        modules |> List.collect (fun (SynModuleOrNamespace(moduleIds, _, _, decls, _, _, _, _, _)) ->
+            let modulePath = moduleIds |> List.map (fun id -> id.idText)
+            
+            decls |> List.collect (extractSymbolsFromDecl modulePath)
+        )
     | ParsedInput.SigFile(ParsedSigFileInput(_, _, _, _, modules, _, _)) ->
-        modules
-        |> List.collect (fun (SynModuleOrNamespaceSig(longId, _, _, decls, _, _, _, _, _)) ->
+        modules |> List.collect (fun (SynModuleOrNamespaceSig(longId, _, _, decls, _, _, _, _, _)) ->
             let modulePath = longId |> List.map (fun id -> id.idText)
-            // TODO: Extract from signature declarations
-            [])
+            
+            decls |> List.collect (extractSymbolsFromSigDecl modulePath)
+            |> List.map (fun qualifiedName ->
+                let parts = qualifiedName.Split('.')
+                {
+                    QualifiedName = qualifiedName
+                    ShortName = Array.last parts
+                    ModulePath = Array.take (parts.Length - 1) parts |> Array.toList
+                    Kind = Value 
+                })
+        )
 
 /// Extract module path from parsed input
 let extractModulePath (input: ParsedInput) : string list =

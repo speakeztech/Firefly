@@ -6,8 +6,7 @@ open FSharp.Compiler.Syntax
 open FSharp.Compiler.CodeAnalysis
 open Core.XParsec.Foundation
 open Core.Utilities.IntermediateWriter
-open Core.FCSIngestion.FileLoader
-open Core.FCSIngestion.AstMerger
+open Core.FCSIngestion.SymbolExtraction
 open Dabbit.Pipeline.CompilationTypes
 open Dabbit.CodeGeneration.TypeMapping
 open Dabbit.Bindings.SymbolRegistry
@@ -245,7 +244,7 @@ let private buildCompilationUnitFromIngestion (ingestionState: FCSIngestionState
             filesWithSymbols 
             |> List.map (fun (path, _, symbols) -> (path, symbols))
         
-        let symbolToFile = Core.FCSIngestion.SymbolExtraction.buildSymbolToFileMap filesAndSymbols
+        let symbolToFile = buildSymbolToFileMap filesAndSymbols
         
         // Build file dependencies
         let fileDependencies = 

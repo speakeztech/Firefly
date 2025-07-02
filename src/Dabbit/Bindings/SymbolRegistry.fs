@@ -8,18 +8,6 @@ open Core.Types.TypeSystem
 open Core.Types.MLIRContext
 open Dabbit.Bindings.PatternLibrary
 
-/// Symbol with type safety and MLIR generation info
-type ResolvedSymbol = {
-    QualifiedName: string
-    ShortName: string
-    ParameterTypes: MLIRType list
-    ReturnType: MLIRType
-    Operation: MLIROperationPattern
-    Namespace: string
-    SourceLibrary: string
-    RequiresExternal: bool
-}
-
 /// Symbol resolution state
 type SymbolResolutionState = {
     SymbolsByQualified: Map<string, ResolvedSymbol>

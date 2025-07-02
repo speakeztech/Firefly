@@ -4,12 +4,7 @@ open FSharp.Compiler.Syntax
 open Core.Types.Dialects
 open Core.Types.TypeSystem  // Use Core types since TypeMapping comes after this file
 
-type MLIROperationPattern =
-    | DialectOp of dialect: MLIRDialect * op: string * attrs: Map<string, string>
-    | ExternalCall of func: string * lib: string option
-    | Composite of MLIROperationPattern list
-    | Transform of name: string * parameters: string list
-    | DirectCall of func: string 
+
 
 /// Pattern matcher for FCS syntax expressions
 type ExprMatcher = SynExpr -> bool

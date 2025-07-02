@@ -113,20 +113,36 @@ let extractOpenedModules (decls: SynModuleDecl list) : string list list =
             | _ -> None
         | _ -> None)
 
-/// Extract module path from parsed input
-let extractModulePath (input: ParsedInput) : string list =
-    match input with
-    | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
-        match modules with
-        | SynModuleOrNamespace(longId, _, _, _, _, _, _, _, _) :: _ ->
-            longId |> List.map (fun id -> id.idText)
-        | [] -> []
-    | _ -> []
-
 /// Extract simple pattern list from SynSimplePats
 let extractSimplePatterns (pats: SynSimplePats) : SynSimplePat list =
     match pats with
     | SynSimplePats.SimplePats(patterns, _, _) -> patterns  // Handle the main case
+
+/// Extract type names from a SynType
+let rec extractTypeReferences (synType: SynType) : Set<string> =
+    match synType with
+    | SynType.LongIdent(SynLongIdent(ids, _, _)) ->
+        let typeName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+        Set.singleton typeName
+    | SynType.App(typeName, _, typeArgs, _, _, _, _) ->
+        let baseType = extractTypeReferences typeName
+        let argTypes = typeArgs |> List.collect (extractTypeReferences >> Set.toList) |> Set.ofList
+        Set.union baseType argTypes
+    | SynType.Tuple(_, segments, _) ->
+        segments 
+        |> List.choose (fun segment ->
+            match segment with
+            | SynTupleTypeSegment.Type t -> Some (extractTypeReferences t)
+            | SynTupleTypeSegment.Star _ -> None
+            | SynTupleTypeSegment.Slash _ -> None)
+        |> Set.unionMany
+    | SynType.Array(rank, elementType, _) ->
+        extractTypeReferences elementType
+    | SynType.Fun(argType, returnType, _, _) ->
+        Set.union (extractTypeReferences argType) (extractTypeReferences returnType)
+    | SynType.Var(_, _) -> Set.empty  // Type variables
+    | SynType.Anon _ -> Set.empty
+    | _ -> Set.empty
 
 /// Build resolution context from parsed inputs - CORRECTED VERSION
 let private buildResolutionContext (parsedInputs: (string * ParsedInput) list) : ResolutionContext =
@@ -473,7 +489,13 @@ let rec analyzeDependencies (ctx: ResolutionContext) (state: ModuleResolutionSta
             match typeExpr with
             | SynType.LongIdent(SynLongIdent(ids, _, _)) ->
                 let typeName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+                printfn "[DEBUG] New expression references type: %s" typeName
                 Set.singleton typeName
+            | SynType.App(typeName, _, _, _, _, _, _) ->
+                // Handle generic type applications like StackBuffer<'T>
+                let baseTypeDeps = extractTypeReferences typeName
+                printfn "[DEBUG] New expression references generic type: %A" baseTypeDeps
+                baseTypeDeps
             | _ -> Set.empty
         let argDeps, scopeMgr' = analyzeDependencies ctx state scopeMgr argExpr
         Set.union typeDeps argDeps, scopeMgr'
@@ -714,6 +736,7 @@ let rec analyzeDependencies (ctx: ResolutionContext) (state: ModuleResolutionSta
     | _ ->
         Set.empty, scopeMgr
 
+
 /// Build complete dependency graph from parsed inputs with scope awareness
 let buildDependencyGraph (parsedInputs: (string * ParsedInput) list) : ResolutionContext * Map<string, Set<string>> * Set<string> =
     let ctx = buildResolutionContext parsedInputs
@@ -733,7 +756,7 @@ let buildDependencyGraph (parsedInputs: (string * ParsedInput) list) : Resolutio
                 let openedModules = extractOpenedModules decls
                 
                 // Debug: print module and opens
-                printfn "[DEBUG] Processing module: %A" modulePath
+                printfn "[DEBUG] Processing module: %s" (String.concat "." modulePath)
                 printfn "[DEBUG] Opened modules: %A" openedModules
                 
                 let state = {
@@ -742,7 +765,7 @@ let buildDependencyGraph (parsedInputs: (string * ParsedInput) list) : Resolutio
                 }
                 
                 // Create scope manager for this module
-                let scopeMgr = ScopeManager.create modulePath openedModules
+                let scopeMgr = create modulePath openedModules
                 
                 // Set current module in diagnostics
                 diagnostics.SetCurrentModule(modulePath)
@@ -752,26 +775,35 @@ let buildDependencyGraph (parsedInputs: (string * ParsedInput) list) : Resolutio
                     match decl with
                     | SynModuleDecl.Let(_, bindings, _) ->
                         let mutable currentScopeMgr = scopeMgr
-                        for (SynBinding(_, _, _, _, attrs, _, _, pat, _, expr, _, _, _)) in bindings do
+                        for (SynBinding(_, _, _, _, attrs, _, valData, pat, returnInfo, expr, _, _, _)) in bindings do
                             // Extract bindings from this pattern and add to scope
-                            let patternBindings = ScopeManager.extractPatternBindings pat
-                            currentScopeMgr <- ScopeManager.addBindings patternBindings currentScopeMgr
+                            let patternBindings = extractPatternBindings pat
+                            currentScopeMgr <- addBindings patternBindings currentScopeMgr
                             
                             // Use unified extraction to get the symbol
                             let extractedSymbols = 
                                 match pat with
                                 | SynPat.Named(SynIdent(ident, _), _, _, _) ->
-                                    [{ QualifiedName = SymbolNames.qualify modulePath ident.idText
-                                       ShortName = ident.idText
-                                       ModulePath = modulePath
-                                       Kind = Value }]
+                                    let symbol : ExtractedSymbol = {
+                                        QualifiedName = SymbolNames.qualify modulePath ident.idText
+                                        ShortName = ident.idText
+                                        ModulePath = modulePath
+                                        Kind = Value 
+                                    }
+                                    [symbol]
                                 | SynPat.LongIdent(longIdent, _, _, _, _, _) ->
                                     let (SynLongIdent(ids, _, _)) = longIdent
                                     let fullName = ids |> List.map (fun id -> id.idText) |> String.concat "."
-                                    [{ QualifiedName = SymbolNames.qualify modulePath fullName
-                                       ShortName = match List.tryLast ids with Some id -> id.idText | None -> fullName
-                                       ModulePath = modulePath
-                                       Kind = Value }]
+                                    let shortName = match List.tryLast ids with 
+                                                    | Some id -> id.idText 
+                                                    | None -> fullName
+                                    let symbol : ExtractedSymbol = {
+                                        QualifiedName = SymbolNames.qualify modulePath fullName
+                                        ShortName = shortName
+                                        ModulePath = modulePath
+                                        Kind = Value
+                                    }
+                                    [symbol]
                                 | _ -> []
                             
                             for extractedSymbol in extractedSymbols do
@@ -787,9 +819,41 @@ let buildDependencyGraph (parsedInputs: (string * ParsedInput) list) : Resolutio
                                 if isEntryPoint then
                                     entryPoints <- Set.add symbolName entryPoints
                                 
-                                // Analyze dependencies with scope awareness
-                                let deps, _ = analyzeDependencies ctx state currentScopeMgr expr
-                                dependencies <- Map.add symbolName deps dependencies
+                                // Extract type dependencies from the binding signature
+                                let typeDeps = 
+                                    let mutable deps = Set.empty
+                                    
+                                    // Extract from return type if present
+                                    match returnInfo with
+                                    | Some (SynBindingReturnInfo(returnType, _, _, _)) ->
+                                        let extractedTypes = extractTypeReferences returnType
+                                        printfn "[DEBUG] Return type deps for %s: %A" symbolName extractedTypes
+                                        deps <- Set.union deps extractedTypes
+                                    | None -> ()
+                                    
+                                    // Extract from pattern (for typed patterns like (x: int))
+                                    let rec extractPatternTypes (p: SynPat) =
+                                        match p with
+                                        | SynPat.Typed(_, synType, _) ->
+                                            let extractedTypes = extractTypeReferences synType
+                                            printfn "[DEBUG] Pattern type deps: %A" extractedTypes
+                                            extractedTypes
+                                        | SynPat.Paren(innerPat, _) ->
+                                            extractPatternTypes innerPat
+                                        | SynPat.Tuple(_, pats, _, _) ->
+                                            pats |> List.map extractPatternTypes |> Set.unionMany
+                                        | _ -> Set.empty
+                                    
+                                    deps <- Set.union deps (extractPatternTypes pat)
+                                    printfn "[DEBUG] Total type deps for %s: %A" symbolName deps
+                                    deps
+                                
+                                // Analyze expression dependencies with scope awareness
+                                let exprDeps, _ = analyzeDependencies ctx state currentScopeMgr expr
+                                
+                                // Combine type and expression dependencies
+                                let allDeps = Set.union exprDeps typeDeps
+                                dependencies <- Map.add symbolName allDeps dependencies
                                 
                                 // Log reachability marking for entry points
                                 if isEntryPoint then

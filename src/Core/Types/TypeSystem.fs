@@ -176,6 +176,24 @@ module MLIRTypes =
 
     /// Polymorphic "any" type for generic operations
     let any = opaque "any"
+type MLIROperationPattern =
+    | DialectOp of dialect: MLIRDialect * op: string * attrs: Map<string, string>
+    | ExternalCall of func: string * lib: string option
+    | Composite of MLIROperationPattern list
+    | Transform of name: string * parameters: string list
+    | DirectCall of func: string 
+
+/// Symbol with type safety and MLIR generation info
+type ResolvedSymbol = {
+    QualifiedName: string
+    ShortName: string
+    ParameterTypes: MLIRType list
+    ReturnType: MLIRType
+    Operation: MLIROperationPattern
+    Namespace: string
+    SourceLibrary: string
+    RequiresExternal: bool
+}
 
 // Helper function to check if a type is the polymorphic any type
 let isAnyType (t: MLIRType) =
