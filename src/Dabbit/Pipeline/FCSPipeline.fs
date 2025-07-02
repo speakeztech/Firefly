@@ -159,24 +159,49 @@ let extractTypeInformation (checkResults: FSharpCheckFileResults) (typeCtx: Type
     updatedContext
 
 /// Extract symbols from a parsed AST for registration
-let extractSymbolsFromParsedInput (input: ParsedInput) : ResolvedSymbol list =
-    match input with
+let extractSymbolsFromParsedInput (ast: ParsedInput) : ResolvedSymbol list =
+    match ast with
     | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
-        modules 
-        |> List.collect (fun (SynModuleOrNamespace(moduleIds, _, _, decls, _, _, _, _, _)) ->
-            let modulePath = moduleIds |> List.map (fun id -> id.idText)
-            decls |> List.collect (extractSymbolsFromDecl modulePath))
-        |> List.map (fun symbolInfo ->
-            {
-                QualifiedName = symbolInfo.FullName
-                ShortName = symbolInfo.UnqualifiedName
-                ParameterTypes = [] // Will be populated from type information
-                ReturnType = MLIRTypes.void_ // Will be populated from type information
-                Operation = DirectCall symbolInfo.FullName
-                Namespace = symbolInfo.ModulePath |> String.concat "."
-                SourceLibrary = "user"
-                RequiresExternal = false
-            })
+        modules |> List.collect (fun (SynModuleOrNamespace(moduleIds, _, _, decls, _, _, _, _, _)) ->
+            let modulePath = moduleIds |> List.map (fun id -> id.idText) |> String.concat "."
+            
+            decls |> List.collect (function
+                | SynModuleDecl.Let(_, bindings, _) ->
+                    bindings |> List.choose (fun (SynBinding(_, _, _, _, _, _, _, pat, _, _, _, _, _)) ->
+                        match pat with
+                        | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+                            let name = ident.idText
+                            let qualifiedName = 
+                                if modulePath = "" then name
+                                else sprintf "%s.%s" modulePath name
+                            
+                            // Try to find a pattern in our library
+                            match findByName qualifiedName with
+                            | Some pattern ->
+                                Some {
+                                    QualifiedName = qualifiedName
+                                    ShortName = name
+                                    ParameterTypes = fst pattern.TypeSig
+                                    ReturnType = snd pattern.TypeSig
+                                    Operation = pattern.OpPattern
+                                    Namespace = if modulePath = "" then "Global" else modulePath
+                                    SourceLibrary = "user"
+                                    RequiresExternal = false
+                                }
+                            | None ->
+                                // Create a default symbol
+                                Some {
+                                    QualifiedName = qualifiedName
+                                    ShortName = name
+                                    ParameterTypes = []
+                                    ReturnType = MLIRTypes.i32
+                                    Operation = DirectCall qualifiedName
+                                    Namespace = if modulePath = "" then "Global" else modulePath
+                                    SourceLibrary = "user"
+                                    RequiresExternal = false
+                                }
+                        | _ -> None)
+                | _ -> []))
     | _ -> []
 
 /// Extract symbols with type information from check results

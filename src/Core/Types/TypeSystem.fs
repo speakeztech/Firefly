@@ -135,6 +135,8 @@ module MLIRTypes =
             Category = Struct
             Fields = Some (fieldTypes |> List.mapi (fun i t -> sprintf "field%d" i, t))
     }
+
+    
     
     /// String type (alias for memref of i8)
     let string_ = memref i8
@@ -172,6 +174,17 @@ module MLIRTypes =
         Fields = Some [(name, void_)]  // Store type name as single field
     }
 
+    /// Polymorphic "any" type for generic operations
+    let any = opaque "any"
+
+// Helper function to check if a type is the polymorphic any type
+let isAnyType (t: MLIRType) =
+    match t.Category with
+    | Opaque -> 
+        match t.Fields with
+        | Some [("any", _)] -> true
+        | _ -> false
+    | _ -> false
 
 /// Helper function to get type from MLIRValue
 let parseTypeFromMLIRValue (value: MLIRValue): MLIRType =

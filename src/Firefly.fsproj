@@ -7,7 +7,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.2.082</Version>
+    <Version>0.2.086</Version>
     <Description>F# to Native Compiler with Zero-Allocation Guarantees using XParsec</Description>
     <Authors>Speakez LLC</Authors>
     <PackageTags>fsharp;compiler;native;zero-allocation;xparsec;mlir;llvm</PackageTags>
@@ -52,6 +52,8 @@
       
       <!-- Analysis (Uses Core/AST/Traversal) -->
       <Compile Include="Dabbit/Analysis/DependencyGraphBuilder.fs" />
+      <Compile Include="Dabbit/Analysis/ScopeManager.fs" />
+      <Compile Include="Dabbit/Analysis/ReachabilityDiagnostics.fs" />
       <Compile Include="Dabbit/Analysis/ReachabilityAnalyzer.fs" />
       <Compile Include="Dabbit/Analysis/AstPruner.fs" />
       <Compile Include="Dabbit/Analysis/CompilationUnit.fs" />
@@ -165,6 +167,10 @@
   </PropertyGroup>
 
 </Project>
+
+
+
+
 
 
 

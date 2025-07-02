@@ -79,7 +79,6 @@ let private extractFileSymbols (modulePath: string list) (ast: ParsedInput) : Se
         modules 
         |> List.collect (fun (SynModuleOrNamespace(_, _, _, decls, _, _, _, _, _)) ->
             decls |> List.collect (extractSymbolsFromDecl modulePath))
-        |> List.map (fun symbol -> symbol.FullName)
         |> Set.ofList
     | _ -> Set.empty
 

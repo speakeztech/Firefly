@@ -178,15 +178,125 @@ let coreFSharpPatterns = [
       Matcher = Matchers.applicationOf ["char"] }
 ]
 
+// Additional F# core operators and functions
+let fsharpCoreOperators = [
+    // Pipe operators
+    { Name = "op_PipeRight"
+      QualifiedName = "Microsoft.FSharp.Core.Operators.op_PipeRight"
+      OpPattern = Transform("identity", [])  // Pipe is just function application
+      TypeSig = ([MLIRTypes.any; MLIRTypes.func [MLIRTypes.any] MLIRTypes.any], MLIRTypes.any)
+      Matcher = Matchers.applicationOf ["|>"; "op_PipeRight"] }
+    
+    { Name = "op_PipeLeft"
+      QualifiedName = "Microsoft.FSharp.Core.Operators.op_PipeLeft"
+      OpPattern = Transform("reverse_apply", [])
+      TypeSig = ([MLIRTypes.func [MLIRTypes.any] MLIRTypes.any; MLIRTypes.any], MLIRTypes.any)
+      Matcher = Matchers.applicationOf ["<|"; "op_PipeLeft"] }
+    
+    // Comparison operators
+    { Name = "op_Equality"
+      QualifiedName = "Microsoft.FSharp.Core.Operators.op_Equality"
+      OpPattern = DialectOp(Arith, "cmpi", Map["predicate", "eq"])
+      TypeSig = ([MLIRTypes.i32; MLIRTypes.i32], MLIRTypes.i1)
+      Matcher = Matchers.applicationOf ["="; "op_Equality"] }
+    
+    { Name = "op_Inequality"
+      QualifiedName = "Microsoft.FSharp.Core.Operators.op_Inequality"
+      OpPattern = DialectOp(Arith, "cmpi", Map["predicate", "ne"])
+      TypeSig = ([MLIRTypes.i32; MLIRTypes.i32], MLIRTypes.i1)
+      Matcher = Matchers.applicationOf ["<>"; "op_Inequality"] }
+    
+    { Name = "op_LessThan"
+      QualifiedName = "Microsoft.FSharp.Core.Operators.op_LessThan"
+      OpPattern = DialectOp(Arith, "cmpi", Map["predicate", "slt"])
+      TypeSig = ([MLIRTypes.i32; MLIRTypes.i32], MLIRTypes.i1)
+      Matcher = Matchers.applicationOf ["<"; "op_LessThan"] }
+    
+    { Name = "op_GreaterThan"
+      QualifiedName = "Microsoft.FSharp.Core.Operators.op_GreaterThan"
+      OpPattern = DialectOp(Arith, "cmpi", Map["predicate", "sgt"])
+      TypeSig = ([MLIRTypes.i32; MLIRTypes.i32], MLIRTypes.i1)
+      Matcher = Matchers.applicationOf [">"; "op_GreaterThan"] }
+    
+    // Arithmetic operators
+    { Name = "op_Addition"
+      QualifiedName = "Microsoft.FSharp.Core.Operators.op_Addition"
+      OpPattern = DialectOp(Arith, "addi", Map.empty)
+      TypeSig = ([MLIRTypes.i32; MLIRTypes.i32], MLIRTypes.i32)
+      Matcher = Matchers.applicationOf ["+"; "op_Addition"] }
+    
+    { Name = "op_Subtraction"
+      QualifiedName = "Microsoft.FSharp.Core.Operators.op_Subtraction"
+      OpPattern = DialectOp(Arith, "subi", Map.empty)
+      TypeSig = ([MLIRTypes.i32; MLIRTypes.i32], MLIRTypes.i32)
+      Matcher = Matchers.applicationOf ["-"; "op_Subtraction"] }
+    
+    { Name = "op_Multiply"
+      QualifiedName = "Microsoft.FSharp.Core.Operators.op_Multiply"
+      OpPattern = DialectOp(Arith, "muli", Map.empty)
+      TypeSig = ([MLIRTypes.i32; MLIRTypes.i32], MLIRTypes.i32)
+      Matcher = Matchers.applicationOf ["*"; "op_Multiply"] }
+    
+    { Name = "op_Division"
+      QualifiedName = "Microsoft.FSharp.Core.Operators.op_Division"
+      OpPattern = DialectOp(Arith, "divsi", Map.empty)
+      TypeSig = ([MLIRTypes.i32; MLIRTypes.i32], MLIRTypes.i32)
+      Matcher = Matchers.applicationOf ["/"; "op_Division"] }
+]
+
+// Additional F# core functions
+let fsharpCoreFunctions = [
+    // Printf family
+    { Name = "printf"
+      QualifiedName = "Microsoft.FSharp.Core.ExtraTopLevelOperators.printf"
+      OpPattern = ExternalCall("printf", Some "libc")
+      TypeSig = ([MLIRTypes.memref MLIRTypes.i8], MLIRTypes.void_)
+      Matcher = Matchers.applicationOf ["printf"] }
+    
+    { Name = "printfn"
+      QualifiedName = "Microsoft.FSharp.Core.ExtraTopLevelOperators.printfn"
+      OpPattern = Transform("printf_newline", ["format_string"])
+      TypeSig = ([MLIRTypes.memref MLIRTypes.i8], MLIRTypes.void_)
+      Matcher = Matchers.applicationOf ["printfn"] }
+    
+    // List operations
+    { Name = "List.map"
+      QualifiedName = "Microsoft.FSharp.Collections.ListModule.map"
+      OpPattern = Transform("list_map", ["mapper_function"])
+      TypeSig = ([MLIRTypes.func [MLIRTypes.any] MLIRTypes.any; MLIRTypes.memref MLIRTypes.any], 
+                 MLIRTypes.memref MLIRTypes.any)
+      Matcher = Matchers.applicationOf ["List.map"; "map"] }
+    
+    { Name = "List.filter"
+      QualifiedName = "Microsoft.FSharp.Collections.ListModule.filter"
+      OpPattern = Transform("list_filter", ["predicate_function"])
+      TypeSig = ([MLIRTypes.func [MLIRTypes.any] MLIRTypes.i1; MLIRTypes.memref MLIRTypes.any], 
+                 MLIRTypes.memref MLIRTypes.any)
+      Matcher = Matchers.applicationOf ["List.filter"; "filter"] }
+    
+    // Option operations
+    { Name = "Some"
+      QualifiedName = "Microsoft.FSharp.Core.Option.Some"
+      OpPattern = Transform("option_some", ["value"])
+      TypeSig = ([MLIRTypes.any], MLIRTypes.opaque "option")
+      Matcher = Matchers.applicationOf ["Some"] }
+    
+    { Name = "None"
+      QualifiedName = "Microsoft.FSharp.Core.Option.None"
+      OpPattern = Transform("option_none", [])
+      TypeSig = ([], MLIRTypes.opaque "option")
+      Matcher = Matchers.applicationOf ["None"] }
+]
+
 // Combine all patterns
-let allPatterns = alloyPatterns @ coreFSharpPatterns
+let allPatterns = alloyPatterns @ coreFSharpPatterns @ fsharpCoreOperators @ fsharpCoreFunctions
 
 /// Find pattern by qualified name
 let findByName qualifiedName =
-    alloyPatterns |> List.tryFind (fun p -> 
+    allPatterns |> List.tryFind (fun p -> 
         p.QualifiedName = qualifiedName || 
         qualifiedName.EndsWith(p.QualifiedName))
 
 /// Find pattern by expression
 let findByExpression expr =
-    alloyPatterns |> List.tryFind (fun p -> p.Matcher expr)
+    allPatterns |> List.tryFind (fun p -> p.Matcher expr)

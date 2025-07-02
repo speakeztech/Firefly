@@ -107,7 +107,6 @@ let private pruneModule (reachable: Set<string>) (modul: SynModuleOrNamespace) :
 
 /// Prune entire ParsedInput based on reachability analysis
 let prune (reachable: Set<string>) (input: ParsedInput) : ParsedInput =
-    printfn "Pruning AST with %d reachable symbols" (Set.count reachable)
     
     match input with
     | ParsedInput.ImplFile(implFile) ->
@@ -129,8 +128,6 @@ let prune (reachable: Set<string>) (input: ParsedInput) : ParsedInput =
         let prunedDeclCount = 
             prunedModules |> List.sumBy (fun (SynModuleOrNamespace(_, _, _, decls, _, _, _, _, _)) -> 
                 List.length decls)
-        
-        printfn "Pruned %d declarations to %d declarations" originalDeclCount prunedDeclCount
         
         ParsedInput.ImplFile(
             ParsedImplFileInput(fileName, isScript, qualName, pragmas, directives, prunedModules, isLast, trivia, ids))
