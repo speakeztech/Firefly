@@ -138,6 +138,49 @@ let alloyPatterns = [
       Matcher = Matchers.applicationOf [">>"] }
 ]
 
+/// Core F# functions that need patterns
+let coreFSharpPatterns = [
+    // String formatting
+    { Name = "sprintf"
+      QualifiedName = "Microsoft.FSharp.Core.Printf.sprintf"
+      OpPattern = Transform("sprintf_format", ["varargs"])
+      TypeSig = ([MLIRTypes.memref MLIRTypes.i8], MLIRTypes.memref MLIRTypes.i8)
+      Matcher = Matchers.applicationOf ["sprintf"] }
+    
+    // Array operations
+    { Name = "Array.zeroCreate"
+      QualifiedName = "Microsoft.FSharp.Collections.Array.zeroCreate"
+      OpPattern = Transform("array_alloc_zero", ["size_param"])
+      TypeSig = ([MLIRTypes.i32], MLIRTypes.memref MLIRTypes.i8)
+      Matcher = Matchers.applicationOf ["Array.zeroCreate"; "zeroCreate"] }
+    
+    { Name = "Array.create"
+      QualifiedName = "Microsoft.FSharp.Collections.Array.create"
+      OpPattern = Transform("array_alloc_init", ["size_param"; "init_value"])
+      TypeSig = ([MLIRTypes.i32; MLIRTypes.i32], MLIRTypes.memref MLIRTypes.i32)
+      Matcher = Matchers.applicationOf ["Array.create"; "create"] }
+    
+    // Constructors
+    { Name = "string_ctor"
+      QualifiedName = "System.String..ctor"
+      OpPattern = Transform("string_from_chars", ["char_array"])
+      TypeSig = ([MLIRTypes.memref MLIRTypes.i8], MLIRTypes.memref MLIRTypes.i8)
+      Matcher = function
+        | SynExpr.New(_, SynType.LongIdent(SynLongIdent([ident], _, _)), _, _) 
+            when ident.idText = "string" -> true
+        | _ -> false }
+    
+    // Core functions
+    { Name = "char"
+      QualifiedName = "Microsoft.FSharp.Core.Operators.char"
+      OpPattern = Transform("byte_to_char", ["cast"])
+      TypeSig = ([MLIRTypes.i8], MLIRTypes.i8)
+      Matcher = Matchers.applicationOf ["char"] }
+]
+
+// Combine all patterns
+let allPatterns = alloyPatterns @ coreFSharpPatterns
+
 /// Find pattern by qualified name
 let findByName qualifiedName =
     alloyPatterns |> List.tryFind (fun p -> 

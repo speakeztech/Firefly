@@ -217,6 +217,31 @@ module AlloyFunctions =
         }
     ]
 
+    /// F# core intrinsic functions
+    and intrinsicFunctions = [
+        "sprintf", {
+            QualifiedName = "Microsoft.FSharp.Core.Printf.sprintf"
+            ShortName = "sprintf"
+            ParameterTypes = [MLIRTypes.memref MLIRTypes.i8] // Simplified
+            ReturnType = MLIRTypes.memref MLIRTypes.i8
+            Operation = Transform("sprintf_varargs", ["format_string"])
+            Namespace = "FSharp.Core"
+            SourceLibrary = "fsharp.core"
+            RequiresExternal = false
+        }
+        
+        "Array.zeroCreate", {
+            QualifiedName = "Microsoft.FSharp.Collections.Array.zeroCreate"
+            ShortName = "zeroCreate"
+            ParameterTypes = [MLIRTypes.i32]
+            ReturnType = MLIRTypes.memref MLIRTypes.i8
+            Operation = Transform("array_zero_alloc", ["element_count"])
+            Namespace = "FSharp.Collections"
+            SourceLibrary = "fsharp.core"
+            RequiresExternal = false
+        }
+    ]
+
 /// Register all Alloy functions with the symbol registry
 let registerAlloySymbols (registry: SymbolRegistry) : SymbolRegistry =
     let allFunctions = 

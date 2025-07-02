@@ -98,8 +98,41 @@ module SymbolResolution =
         match Map.tryFind symbolName state.SymbolsByShort with
         | Some symbol -> Success symbol
         | None ->
-            // Next try resolving as a qualified name
-            if symbolName.Contains(".") then
+            // Check for member access patterns (buffer.AsSpan, etc.)
+            if symbolName.Contains(".") && symbolName.Split('.').Length = 2 then
+                let parts = symbolName.Split('.')
+                let typeName = parts.[0]
+                let memberName = parts.[1]
+                
+                // Special case for buffer.AsSpan, buffer.Length etc
+                match memberName with
+                | "AsSpan" -> 
+                    Success {
+                        QualifiedName = symbolName
+                        ShortName = memberName
+                        ParameterTypes = [MLIRTypes.i32; MLIRTypes.i32]
+                        ReturnType = MLIRTypes.memref MLIRTypes.i8
+                        Operation = Transform("buffer_as_span", ["offset"; "length"])
+                        Namespace = "Buffer.Members"
+                        SourceLibrary = "intrinsic"
+                        RequiresExternal = false
+                    }
+                | "Length" ->
+                    Success {
+                        QualifiedName = symbolName
+                        ShortName = memberName
+                        ParameterTypes = []
+                        ReturnType = MLIRTypes.i32
+                        Operation = Transform("buffer_length", [])
+                        Namespace = "Buffer.Members"
+                        SourceLibrary = "intrinsic"
+                        RequiresExternal = false
+                    }
+                | _ -> 
+                    // Try as qualified name
+                    resolveQualified symbolName state
+            elif symbolName.Contains(".") then
+                // Other dotted names - try as qualified
                 resolveQualified symbolName state
             else
                 // Try all active namespaces
@@ -125,8 +158,8 @@ module SymbolResolution =
                             Success symbol
                         | None -> 
                             CompilerFailure [ConversionError("symbol_resolution", symbolName, "active_namespaces", 
-                                                 sprintf "Could not find symbol in active namespaces: %s" 
-                                                     (String.concat ", " state.ActiveNamespaces))]
+                                                sprintf "Could not find symbol in active namespaces: %s" 
+                                                    (String.concat ", " state.ActiveNamespaces))]
                     | ns :: rest ->
                         match resolveFromNamespace symbolName ns state with
                         | Success symbol -> Success symbol
