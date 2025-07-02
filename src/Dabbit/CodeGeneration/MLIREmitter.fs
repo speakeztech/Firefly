@@ -134,7 +134,7 @@ let emitAlloca (bufferSSA: string) (size: int) : MLIRBuilder<unit> =
     }
 
 /// Resolve symbol using registry (placeholder implementation)
-let resolveSymbol (name: string) : MLIRBuilder<ResolvedSymbol> =
+let private resolveSymbol (name: string) : MLIRBuilder<ResolvedSymbol> =
     mlir {
         let! state = getState
         // TODO: Implement actual symbol resolution when SymbolRegistry module is complete

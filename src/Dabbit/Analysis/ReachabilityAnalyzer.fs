@@ -99,6 +99,46 @@ let private coreBuiltIns = Map.ofList [
     ("uint16", "Microsoft.FSharp.Core.Operators.uint16")
     ("char", "Microsoft.FSharp.Core.Operators.char")
     ("string", "Microsoft.FSharp.Core.Operators.string")
+    // F# Operators (these are what get compiled from infix operators)
+    ("op_Addition", "Microsoft.FSharp.Core.Operators.op_Addition")
+    ("op_Subtraction", "Microsoft.FSharp.Core.Operators.op_Subtraction")
+    ("op_Multiply", "Microsoft.FSharp.Core.Operators.op_Multiply")
+    ("op_Division", "Microsoft.FSharp.Core.Operators.op_Division")
+    ("op_Modulus", "Microsoft.FSharp.Core.Operators.op_Modulus")
+    ("op_UnaryNegation", "Microsoft.FSharp.Core.Operators.op_UnaryNegation")
+    ("op_Equality", "Microsoft.FSharp.Core.Operators.op_Equality")
+    ("op_Inequality", "Microsoft.FSharp.Core.Operators.op_Inequality")
+    ("op_LessThan", "Microsoft.FSharp.Core.Operators.op_LessThan")
+    ("op_LessThanOrEqual", "Microsoft.FSharp.Core.Operators.op_LessThanOrEqual")
+    ("op_GreaterThan", "Microsoft.FSharp.Core.Operators.op_GreaterThan")
+    ("op_GreaterThanOrEqual", "Microsoft.FSharp.Core.Operators.op_GreaterThanOrEqual")
+    // Result type constructors
+    ("Ok", "Microsoft.FSharp.Core.Result.Ok")
+    ("Error", "Microsoft.FSharp.Core.Result.Error")
+    // Common types
+    ("int", "Microsoft.FSharp.Core.int")
+    ("string", "Microsoft.FSharp.Core.string")
+    ("Result", "Microsoft.FSharp.Core.Result")
+]
+
+// Add module functions as a separate map
+let private moduleBuiltIns = Map.ofList [
+    ("Array", Map.ofList [
+        ("zeroCreate", "Microsoft.FSharp.Collections.Array.zeroCreate")
+        ("length", "Microsoft.FSharp.Collections.Array.length")
+        ("map", "Microsoft.FSharp.Collections.Array.map")
+        ("filter", "Microsoft.FSharp.Collections.Array.filter")
+    ])
+    ("List", Map.ofList [
+        ("map", "Microsoft.FSharp.Collections.List.map")
+        ("filter", "Microsoft.FSharp.Collections.List.filter")
+        ("fold", "Microsoft.FSharp.Collections.List.fold")
+    ])
+    ("NativePtr", Map.ofList [
+        ("readLine", "Microsoft.FSharp.NativeInterop.NativePtr.readLine")
+        ("get", "Microsoft.FSharp.NativeInterop.NativePtr.get")
+        ("set", "Microsoft.FSharp.NativeInterop.NativePtr.set")
+    ])
 ]
 
 /// Extract opened modules from module declarations
@@ -239,106 +279,55 @@ let private buildResolutionContext (parsedInputs: (string * ParsedInput) list) :
 
 /// Try to resolve a symbol name
 let resolveSymbol (ctx: ResolutionContext) (state: ModuleResolutionState) (name: string) : string option =
-    // Check if it's a built-in F# function first
+    // Helper to check if a module contains a symbol
+    let checkModule modulePath symbolName =
+        match Map.tryFind (String.concat "." modulePath) ctx.SymbolsByFullName with
+        | Some symbols when Set.contains symbolName symbols ->
+            Some (SymbolNames.qualify modulePath symbolName)
+        | _ -> None
+    
+    // Helper to check module and its sub-modules
+    let checkModuleAndSubModules modulePath symbolName =
+        match checkModule modulePath symbolName with
+        | Some qualified -> Some qualified
+        | None ->
+            // Check sub-modules of this module
+            let modulePrefix = String.concat "." modulePath
+            ctx.SymbolsByFullName
+            |> Map.tryPick (fun modName symbols ->
+                if modName.StartsWith(modulePrefix + ".") && Set.contains symbolName symbols then
+                    Some (sprintf "%s.%s" modName symbolName)
+                else None
+            )
+    
+    // 1. Check if it's a built-in F# function/operator first
     match Map.tryFind name coreBuiltIns with
     | Some qualifiedName -> Some qualifiedName
     | None ->
-        // Handle "this" member access specially
-        if name.StartsWith("this.") then
-            let memberName = name.Substring(5)
-            // Return the member access pattern as-is for now
-            Some name
-        // First check if it's a fully qualified name already
-        elif name.Contains(".") then
+        // 2. Handle qualified names (e.g., Array.zeroCreate, NativePtr.readLine)
+        if name.Contains(".") then
             let parts = name.Split('.')
-            if parts.Length = 2 then
-                // Could be Type.member or Module.function
-                let typeName = parts.[0]
-                let memberName = parts.[1]
-                
-                // Check if it's a type member
-                match Map.tryFind typeName ctx.TypeMembers with
-                | Some members when Set.contains memberName members ->
-                    Some name
-                | _ ->
-                    // Try with opened modules for the type
-                    state.OpenedModules
-                    |> List.tryPick (fun openModule ->
-                        let qualifiedType = (openModule @ [typeName]) |> String.concat "."
-                        match Map.tryFind qualifiedType ctx.TypeMembers with
-                        | Some members when Set.contains memberName members ->
-                            Some (qualifiedType + "." + memberName)
-                        | _ -> None)
-            else
-                // Multi-part name, check if it exists as-is
-                ctx.SymbolsByFullName 
-                |> Map.exists (fun _ symbols -> Set.contains name symbols)
-                |> function true -> Some name | false -> None
+            match parts with
+            | [| moduleName; funcName |] ->
+                // Check if it's a known module function
+                match Map.tryFind moduleName moduleBuiltIns with
+                | Some moduleFuncs ->
+                    match Map.tryFind funcName moduleFuncs with
+                    | Some qualified -> Some qualified
+                    | None -> None
+                | None ->
+                    // Try to resolve as a regular qualified name
+                    checkModule [moduleName] funcName
+            | _ -> None
         else
-            // Simple name - try current module first, then opened modules
-            let searchPaths = state.CurrentModule :: state.OpenedModules
-            
-            // First, try direct resolution in each search path
-            let directResult = 
-                searchPaths
-                |> List.tryPick (fun modulePath ->
-                    let modulePathStr = 
-                        if List.isEmpty modulePath then "" 
-                        else String.concat "." modulePath
-                    
-                    // Debug log
-                    printfn "[DEBUG] Checking module '%s' for symbol '%s'" modulePathStr name
-                    
-                    // Check if this module has the symbol
-                    match Map.tryFind modulePathStr ctx.SymbolsByFullName with
-                    | Some symbols -> 
-                        printfn "[DEBUG] Module '%s' has symbols: %A" modulePathStr symbols
-                        if Set.contains name symbols then
-                            // Found! Return the fully qualified name
-                            let qualified = 
-                                if modulePathStr = "" then 
-                                    name
-                                else 
-                                    modulePathStr + "." + name
-                            printfn "[DEBUG] Resolved '%s' to '%s'" name qualified
-                            Some qualified
-                        else
-                            None
-                    | None -> 
-                        printfn "[DEBUG] Module '%s' not found in context" modulePathStr
-                        None
-                )
-            
-            match directResult with
-            | Some result -> Some result
+            // 3. Check current module
+            match checkModule state.CurrentModule name with
+            | Some qualified -> Some qualified
             | None ->
-                // If not found directly, check sub-modules of opened modules
-                searchPaths
-                |> List.tryPick (fun modulePath ->
-                    let modulePathStr = 
-                        if List.isEmpty modulePath then ""
-                        else String.concat "." modulePath
-                    
-                    printfn "[DEBUG] Checking sub-modules of '%s' for symbol '%s'" modulePathStr name
-                    
-                    // Look for the symbol in any sub-module of this module
-                    ctx.SymbolsByFullName
-                    |> Map.tryPick (fun modName symbols ->
-                        // Check if this module is a sub-module of our search path
-                        let isSubModule = 
-                            if modulePathStr = "" then
-                                modName <> ""  // All non-empty modules are sub-modules of root
-                            else
-                                modName.StartsWith(modulePathStr + ".") || modName = modulePathStr
-                        
-                        if isSubModule && Set.contains name symbols then
-                            // Found in a sub-module! Return fully qualified name
-                            let qualified = modName + "." + name
-                            printfn "[DEBUG] Found '%s' in sub-module '%s', resolved to '%s'" name modName qualified
-                            Some qualified
-                        else
-                            None
-                    )
+                // 4. Check opened modules and their sub-modules
+                state.OpenedModules
+                |> List.tryPick (fun openedModule ->
+                    checkModuleAndSubModules openedModule name
                 )
 
 let resolveSymbolWithLogging ctx state name =
@@ -460,28 +449,27 @@ let rec analyzeDependencies (ctx: ResolutionContext) (state: ModuleResolutionSta
         Set.union deps1 deps2, scopeMgr2
     
     | SynExpr.DotGet(expr, _, longIdent, _) ->
-        // Handle expr.Member patterns
         let exprDeps, scopeMgr' = analyzeDependencies ctx state scopeMgr expr
-        let memberName = 
-            match longIdent with
-            | SynLongIdent(ids, _, _) -> 
-                ids |> List.map (fun id -> id.idText) |> String.concat "."
+        let memberName = SymbolNames.fromLongIdent longIdent
         
-        // Check if this is a member access on 'this' or a known type
         match expr with
+        | SynExpr.Ident ident when ScopeManager.isLocalBinding ident.idText scopeMgr ->
+            Set.add (sprintf "%s.%s" ident.idText memberName) exprDeps, scopeMgr'
+        
         | SynExpr.Ident ident when ident.idText = "this" ->
-            // Member access on 'this' - still try to resolve it
-            let fullName = "this." + memberName
+            let fullName = sprintf "%s.%s" (String.concat "." state.CurrentModule) memberName
             match resolveSymbolWithLogging ctx state fullName with
             | Some resolved -> Set.singleton resolved, scopeMgr'
             | None -> exprDeps, scopeMgr'
+        
+        | SynExpr.Ident ident ->
+            let qualified = sprintf "%s.%s" ident.idText memberName
+            match resolveSymbolWithLogging ctx state qualified with
+            | Some resolved -> Set.singleton resolved, scopeMgr'
+            | None -> Set.add qualified exprDeps, scopeMgr'
+        
         | _ ->
-            // Only add member name as dependency if it's a standalone member function
-            // (not a member access on an object)
-            if memberName.Contains(".") then
-                Set.add memberName exprDeps, scopeMgr'
-            else
-                exprDeps, scopeMgr'
+            Set.add memberName exprDeps, scopeMgr'
 
     | SynExpr.New(_, typeExpr, argExpr, _) ->
         // Handle constructor calls
