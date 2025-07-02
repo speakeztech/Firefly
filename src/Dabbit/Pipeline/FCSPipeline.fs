@@ -158,55 +158,53 @@ let extractTypeInformation (checkResults: FSharpCheckFileResults) (typeCtx: Type
     
     updatedContext
 
+/// Convert extracted symbol to resolved symbol with type information
+let private toResolvedSymbol (extracted: Core.FCSIngestion.SymbolExtraction.ExtractedSymbol) : ResolvedSymbol =
+    // Try to find a pattern in our library
+    match findByName extracted.QualifiedName with
+    | Some pattern ->
+        {
+            QualifiedName = extracted.QualifiedName
+            ShortName = extracted.ShortName
+            ParameterTypes = fst pattern.TypeSig
+            ReturnType = snd pattern.TypeSig
+            Operation = pattern.OpPattern
+            Namespace = 
+                if List.isEmpty extracted.ModulePath then "Global" 
+                else String.concat "." extracted.ModulePath
+            SourceLibrary = "alloy"
+            RequiresExternal = 
+                match pattern.OpPattern with
+                | ExternalCall(_, Some _) -> true
+                | _ -> false
+        }
+    | None ->
+        // Create a default symbol
+        {
+            QualifiedName = extracted.QualifiedName
+            ShortName = extracted.ShortName
+            ParameterTypes = []
+            ReturnType = MLIRTypes.i32  // Default type
+            Operation = DirectCall extracted.QualifiedName
+            Namespace = 
+                if List.isEmpty extracted.ModulePath then "Global" 
+                else String.concat "." extracted.ModulePath
+            SourceLibrary = "user"
+            RequiresExternal = false
+        }
+
 /// Extract symbols from a parsed AST for registration
 let extractSymbolsFromParsedInput (ast: ParsedInput) : ResolvedSymbol list =
-    match ast with
-    | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
-        modules |> List.collect (fun (SynModuleOrNamespace(moduleIds, _, _, decls, _, _, _, _, _)) ->
-            let modulePath = moduleIds |> List.map (fun id -> id.idText) |> String.concat "."
-            
-            decls |> List.collect (function
-                | SynModuleDecl.Let(_, bindings, _) ->
-                    bindings |> List.choose (fun (SynBinding(_, _, _, _, _, _, _, pat, _, _, _, _, _)) ->
-                        match pat with
-                        | SynPat.Named(SynIdent(ident, _), _, _, _) ->
-                            let name = ident.idText
-                            let qualifiedName = 
-                                if modulePath = "" then name
-                                else sprintf "%s.%s" modulePath name
-                            
-                            // Try to find a pattern in our library
-                            match findByName qualifiedName with
-                            | Some pattern ->
-                                Some {
-                                    QualifiedName = qualifiedName
-                                    ShortName = name
-                                    ParameterTypes = fst pattern.TypeSig
-                                    ReturnType = snd pattern.TypeSig
-                                    Operation = pattern.OpPattern
-                                    Namespace = if modulePath = "" then "Global" else modulePath
-                                    SourceLibrary = "user"
-                                    RequiresExternal = false
-                                }
-                            | None ->
-                                // Create a default symbol
-                                Some {
-                                    QualifiedName = qualifiedName
-                                    ShortName = name
-                                    ParameterTypes = []
-                                    ReturnType = MLIRTypes.i32
-                                    Operation = DirectCall qualifiedName
-                                    Namespace = if modulePath = "" then "Global" else modulePath
-                                    SourceLibrary = "user"
-                                    RequiresExternal = false
-                                }
-                        | _ -> None)
-                | _ -> []))
-    | _ -> []
+    // Use unified extraction
+    Core.FCSIngestion.SymbolExtraction.extractSymbolsFromParsedInput ast
+    |> List.map toResolvedSymbol
 
 /// Extract symbols with type information from check results
 let extractTypedSymbols (checkResults: FSharpCheckFileResults) (ast: ParsedInput) (typeCtx: TypeContext) : ResolvedSymbol list =
-    let baseSymbols = extractSymbolsFromParsedInput ast
+    // Start with unified extraction
+    let baseSymbols = 
+        Core.FCSIngestion.SymbolExtraction.extractSymbolsFromParsedInput ast
+        |> List.map toResolvedSymbol
     
     // Enhance symbols with type information from check results
     let symbolMap = 

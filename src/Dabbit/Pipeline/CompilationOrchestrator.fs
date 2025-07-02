@@ -212,67 +212,52 @@ let private performFCSIngestion
             return Success finalState
     }
 
-/// Build compilation unit from FCS ingestion results
+/// Build compilation unit from FCS ingestion results using unified extraction
 let private buildCompilationUnitFromIngestion (ingestionState: FCSIngestionState) (mainFile: string) (progress: ProgressCallback) =
     async {
         progress ReachabilityAnalysis "Building compilation unit from ingested files"
         
-        // First, let's merge all ASTs to extract file dependencies
-        let allAsts = ingestionState.ParsedFiles |> List.map (fun (_, path, ast) -> (path, ast))
-        let mergedCollection = mergeCompilationUnit allAsts mainFile
-        
-        let sourceFiles = 
+        // Use unified symbol extraction for all files
+        let filesWithSymbols = 
             ingestionState.CheckedFiles
             |> List.map (fun (filePath, ast, _) ->
-                let symbols = extractSymbolsFromParsedInput ast
+                let symbols = Core.FCSIngestion.SymbolExtraction.extractSymbolsFromParsedInput ast
+                (filePath, ast, symbols))
+        
+        // Build source files with extracted symbols
+        let sourceFiles = 
+            filesWithSymbols
+            |> List.map (fun (filePath, ast, symbols) ->
                 let symbolSet = symbols |> List.map (fun s -> s.QualifiedName) |> Set.ofList
-                
-                let modulePath = 
-                    match ast with
-                    | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
-                        match modules with
-                        | SynModuleOrNamespace(moduleIds, _, _, _, _, _, _, _, _) :: _ ->
-                            moduleIds |> List.map (fun id -> id.idText)
-                        | [] -> []
-                    | ParsedInput.SigFile(ParsedSigFileInput(_, _, _, _, modules, _, _)) ->
-                        match modules with
-                        | SynModuleOrNamespaceSig(moduleIds, _, _, _, _, _, _, _, _) :: _ ->
-                            moduleIds |> List.map (fun id -> id.idText)
-                        | [] -> []
-                
-                let loadedFiles = []  // FileLoader already resolved dependencies during project loading
                 
                 let sourceFile = {
                     Path = filePath
                     Ast = ast
-                    LoadedFiles = loadedFiles
-                    ModulePath = modulePath
+                    LoadedFiles = [] // Already resolved during project loading
+                    ModulePath = Core.FCSIngestion.SymbolExtraction.extractModulePath ast
                     DefinedSymbols = symbolSet
                 }
-                
                 (filePath, sourceFile))
             |> Map.ofList
         
-        // Build the global symbol-to-file mapping
-        // This is crucial for reachability analysis to know where each symbol lives
-        let symbolToFile = 
-            ingestionState.CheckedFiles
-            |> List.collect (fun (filePath, ast, _) ->
-                let symbols = extractSymbolsFromParsedInput ast
-                symbols |> List.map (fun symbol -> (symbol.QualifiedName, filePath)))
-            |> Map.ofList
+        // Build the global symbol-to-file mapping using the unified function
+        let filesAndSymbols = 
+            filesWithSymbols 
+            |> List.map (fun (path, _, symbols) -> (path, symbols))
         
-        // Build file dependencies from the loaded files we already extracted
+        let symbolToFile = Core.FCSIngestion.SymbolExtraction.buildSymbolToFileMap filesAndSymbols
+        
+        // Build file dependencies
         let fileDependencies = 
             sourceFiles
             |> Map.map (fun _ sourceFile -> 
                 sourceFile.LoadedFiles |> Set.ofList)
         
-        // Log some debugging information about what we found
+        // Log debugging information
         progress ReachabilityAnalysis (sprintf "Built compilation unit with %d files and %d total symbols" 
             (Map.count sourceFiles) (Map.count symbolToFile))
         
-        // Create the compilation unit using the existing type structure
+        // Create the compilation unit
         let compilationUnit = {
             MainFile = mainFile
             SourceFiles = sourceFiles

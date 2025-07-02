@@ -4,6 +4,7 @@ open System.IO
 open FSharp.Compiler.Syntax
 open Core.XParsec.Foundation
 open Core.Utilities.IntermediateWriter
+open Core.FCSIngestion.SymbolExtraction 
 open ReachabilityAnalyzer
 open DependencyGraphBuilder
 open AstPruner
@@ -72,15 +73,10 @@ let private extractModulePath (ast: ParsedInput) : string list =
         | [] -> []
     | _ -> []
 
-/// Extract all symbols defined in a file
-let private extractFileSymbols (modulePath: string list) (ast: ParsedInput) : Set<string> =
-    match ast with
-    | ParsedInput.ImplFile(ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) ->
-        modules 
-        |> List.collect (fun (SynModuleOrNamespace(_, _, _, decls, _, _, _, _, _)) ->
-            decls |> List.collect (extractSymbolsFromDecl modulePath))
-        |> Set.ofList
-    | _ -> Set.empty
+let private extractFileSymbols (ast: ParsedInput) : Set<string> =
+    extractSymbolsFromParsedInput ast
+    |> List.map (fun s -> s.QualifiedName)
+    |> Set.ofList
 
 /// Recursively gather all files in the compilation unit
 let rec private gatherSourceFiles (parser: FileParser) (basePath: string) (filePath: string) (gathered: Map<string, SourceFile>) : Async<CompilerResult<Map<string, SourceFile>>> = async {
@@ -105,7 +101,7 @@ let rec private gatherSourceFiles (parser: FileParser) (basePath: string) (fileP
                     else Path.Combine(Path.GetDirectoryName(absolutePath), f))
             
             let modulePath = extractModulePath ast
-            let symbols = extractFileSymbols modulePath ast
+            let symbols = extractFileSymbols ast  // Fixed: only pass the AST
             
             let sourceFile = {
                 Path = absolutePath
@@ -137,7 +133,7 @@ let buildCompilationUnit (parser: FileParser) (mainFile: string) (mainAst: Parse
     let mainPath = Path.GetFullPath(mainFile)
     let mainLoads = extractLoadDirectives mainAst
     let mainModulePath = extractModulePath mainAst
-    let mainSymbols = extractFileSymbols mainModulePath mainAst
+    let mainSymbols = extractFileSymbols mainAst
     
     let mainSourceFile = {
         Path = mainPath
@@ -194,11 +190,20 @@ let analyzeCompilationUnit (unit: CompilationUnit) : CompilationUnitAnalysis =
     let perFileReachable =
         unit.SourceFiles
         |> Map.map (fun filePath sourceFile ->
-            reachabilityResult.Reachable
-            |> Set.filter (fun symbol ->
-                match Map.tryFind symbol unit.SymbolToFile with
-                | Some file -> file = filePath
-                | None -> false))
+            // For each file, check which of its defined symbols are reachable
+            sourceFile.DefinedSymbols
+            |> Set.filter (fun definedSymbol ->
+                // Check if this symbol (in any qualified form) is reachable
+                reachabilityResult.Reachable
+                |> Set.exists (fun reachableSymbol ->
+                    // Match if the reachable symbol ends with our defined symbol
+                    reachableSymbol = definedSymbol || 
+                    reachableSymbol.EndsWith("." + definedSymbol) ||
+                    // Also check if defined symbol is already fully qualified
+                    (definedSymbol.Contains(".") && 
+                    reachableSymbol.EndsWith(definedSymbol.Substring(definedSymbol.LastIndexOf('.'))))
+                )
+            ))
     
     // Prune each file with its reachable set
     let prunedAsts =
@@ -284,7 +289,7 @@ let buildCompilationUnitFromParsed (parsedUnits: (string * ParsedInput) list) : 
         // Extract information from main file
         let mainLoads = extractLoadDirectives mainAst
         let mainModulePath = extractModulePath mainAst
-        let mainSymbols = extractFileSymbols mainModulePath mainAst
+        let mainSymbols = extractFileSymbols  mainAst
         
         let mainSourceFile = {
             Path = mainPath
@@ -302,7 +307,7 @@ let buildCompilationUnitFromParsed (parsedUnits: (string * ParsedInput) list) : 
             |> List.map (fun (path, ast) ->
                 let loads = extractLoadDirectives ast
                 let modulePath = extractModulePath ast
-                let symbols = extractFileSymbols modulePath ast
+                let symbols = extractFileSymbols  ast
                 
                 let sourceFile = {
                     Path = path
