@@ -146,31 +146,41 @@ let compile
                     // Write initial AST immediately after FCS processing
                     match intermediatesDir with
                     | Some dir ->
-                        let projectName = Path.GetFileNameWithoutExtension inputPath
-                        let initialAstPath = Path.Combine(dir, sprintf "%s.initial.ast" projectName)
-
-                        let initialAstContent = 
-                            let assemblyContents = processedProject.CheckResults.AssemblyContents
-                            let sb = System.Text.StringBuilder()
-                            
-                            sb.AppendLine("=== TYPED AST CONTENT ===") |> ignore
-                            sb.AppendLine(sprintf "Files: %d" assemblyContents.ImplementationFiles.Length) |> ignore
-                            sb.AppendLine() |> ignore
-                            
-                            for implFile in assemblyContents.ImplementationFiles do
-                                sb.AppendLine(sprintf "FILE: %s" implFile.FileName) |> ignore
-                                sb.AppendLine(sprintf "Qualified Name: %s" implFile.QualifiedName) |> ignore
-                                sb.AppendLine(sprintf "Declarations: %d" implFile.Declarations.Length) |> ignore
-                                
-                                for i, decl in implFile.Declarations |> List.indexed do
-                                    sb.AppendLine(sprintf "  [%d] Declaration: %A" i decl) |> ignore
-                                
-                                sb.AppendLine() |> ignore
-                            
-                            sb.ToString()
-                        writeIntermediateFile initialAstPath initialAstContent
+                        let fcsDir = Path.Combine(dir, "fcs")
+                        Directory.CreateDirectory(fcsDir) |> ignore
                         
-                        printfn "✅ Initial typed AST written: %s" initialAstPath
+                        let assemblyContents = processedProject.CheckResults.AssemblyContents
+                        
+                        // Sort files for consistent numbering (libraries first, then main program)
+                        let sortedFiles = 
+                            assemblyContents.ImplementationFiles
+                            |> List.sortBy (fun implFile -> 
+                                let fileName = Path.GetFileNameWithoutExtension(implFile.FileName)
+                                // Libraries first (Alloy), then main program files
+                                if implFile.FileName.Contains "Alloy" then
+                                    0, fileName // Libraries get priority 0
+                                else 
+                                    1, fileName // Main program files get priority 1
+                            )
+                        
+                        // Write each file separately with numeric prefix
+                        sortedFiles
+                        |> List.iteri (fun index implFile ->
+                            let fileName = Path.GetFileNameWithoutExtension(implFile.FileName)
+                            let outputFileName = sprintf "%02d_%s.initial.ast" (index + 1) fileName
+                            let outputPath = Path.Combine(fcsDir, outputFileName)
+                            
+                            // Write just the raw declarations - completely clean
+                            let astContent = 
+                                implFile.Declarations
+                                |> List.map (sprintf "%A")
+                                |> String.concat "\n\n"
+                            
+                            writeIntermediateFile outputPath astContent
+                            printfn "  ✅ %s" outputFileName
+                        )
+                        
+                        printfn "✅ Individual AST files written to: %s" fcsDir
                     | None -> ()
                     
                     // Phase 3: Collect and analyze symbols
