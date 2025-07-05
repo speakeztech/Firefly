@@ -1,225 +1,269 @@
 module Dabbit.Analysis.ReachabilityAnalyzer
 
 open System
-open Core.XParsec.Foundation
-open Core.FCSIngestion.SymbolCollector
+open System.IO
+open System.Collections.Generic
 
-/// Reachability analysis result
-type ReachabilityResult = {
-    Reachable: Set<string>
-    Dependencies: Map<string, Set<string>>
-    EntryPoints: Set<string>
-    Statistics: ReachabilityStatistics
-    ReachableSymbols: CollectedSymbol[]
-    ProblematicSymbols: ProblematicSymbolReport
+/// Represents a symbol reference in the AST
+type SymbolReference = {
+    FullName: string
+    SourceModule: string
+    NodeType: string // "Call", "Value", "NewUnionCase", etc.
 }
 
-and ReachabilityStatistics = {
-    TotalSymbols: int
-    ReachableSymbols: int
-    EliminatedSymbols: int
-    DependencyEdges: int
-}
-
-and ProblematicSymbolReport = {
-    /// should trigger errors
-    AssemblyReferences: CollectedSymbol[]
-    AllocatingSymbols: CollectedSymbol[]
-    BCLSymbols: CollectedSymbol[]
-    UnknownSymbols: CollectedSymbol[]
-}
-
-/// Detect problematic Assembly references that should cause compilation errors
-let private detectAssemblyReferences (symbols: CollectedSymbol[]) : CollectedSymbol[] =
-    symbols
-    |> Array.filter (fun sym ->
-        sym.FullName.Contains("Assembly") ||
-        sym.DisplayName.Contains("Assembly") ||
-        (sym.DeclaringEntity |> Option.exists (fun entity -> entity.Contains("Assembly"))))
-
-/// Convert SymbolDependency array to Map for reachability computation
-let private buildDependencyMap (dependencies: SymbolDependency[]) : Map<string, Set<string>> =
-    dependencies
-    |> Array.groupBy (fun dep -> dep.FromSymbol)
-    |> Array.map (fun (fromSymbol, deps) ->
-        let targets = deps |> Array.map (fun d -> d.ToSymbol) |> Set.ofArray
-        (fromSymbol, targets))
-    |> Map.ofArray
-
-/// Compute transitive closure for reachability analysis
-let private computeTransitiveClosure (dependencies: Map<string, Set<string>>) (entryPoints: Set<string>) : Set<string> =
-    let rec loop (reachable: Set<string>) (worklist: Set<string>) =
-        if Set.isEmpty worklist then
-            reachable
-        else
-            let current = Set.minElement worklist
-            let remaining = Set.remove current worklist
-            
-            match Map.tryFind current dependencies with
-            | Some deps ->
-                let newDeps = Set.difference deps reachable
-                loop (Set.union reachable newDeps) (Set.union remaining newDeps)
-            | None ->
-                loop reachable remaining
+/// AST node visitor for extracting symbol references
+type ASTVisitor() =
+    let references = ResizeArray<SymbolReference>()
     
-    loop entryPoints entryPoints
-
-/// MAIN ANALYSIS FUNCTION - works with SymbolCollectionResult
-let analyze (symbolCollection: SymbolCollectionResult) : CompilerResult<ReachabilityResult> =
-    try
-        // Check for Assembly references first - these should be compilation errors
-        let assemblyReferences = detectAssemblyReferences (symbolCollection.AllSymbols |> Map.toArray |> Array.map snd)
+    /// Extract symbol references from AST content
+    member this.VisitASTContent(content: string, sourceModule: string) =
+        // Parse different types of references from the AST text
+        this.ExtractCallReferences(content, sourceModule)
+        this.ExtractValueReferences(content, sourceModule)
+        this.ExtractTypeReferences(content, sourceModule)
         
-        if assemblyReferences.Length > 0 then
-            let assemblyErrors = 
-                assemblyReferences
-                |> Array.map (fun sym ->
-                    ConversionError(
-                        "reachability", 
-                        sym.FullName, 
-                        "Fidelity framework", 
-                        sprintf "Assembly reference detected: %s. Fidelity is source-code based and does not use .NET assemblies." sym.FullName))
-                |> Array.toList
-            CompilerFailure assemblyErrors
-        else
-            // Build dependency map from collected dependencies
-            let dependencyMap = buildDependencyMap symbolCollection.Dependencies
+    /// Extract Call expressions like "Call (None, val functionName, ...)"
+    member private this.ExtractCallReferences(content: string, sourceModule: string) =
+        let lines = content.Split('\n')
+        for line in lines do
+            if line.Contains("Call") && line.Contains("val ") then
+                // Parse patterns like: Call (None, val writeBytes, [], [], [], ...)
+                let valStart = line.IndexOf("val ") + 4
+                if valStart > 3 then
+                    let remaining = line.Substring(valStart)
+                    let commaIndex = remaining.IndexOf(',')
+                    if commaIndex > 0 then
+                        let functionName = remaining.Substring(0, commaIndex).Trim()
+                        references.Add({
+                            FullName = functionName
+                            SourceModule = sourceModule
+                            NodeType = "Call"
+                        })
+    
+    /// Extract Value references like "Value val functionName"
+    member private this.ExtractValueReferences(content: string, sourceModule: string) =
+        let lines = content.Split('\n')
+        for line in lines do
+            if line.Contains("Value val ") then
+                let valStart = line.IndexOf("Value val ") + 10
+                if valStart > 9 then
+                    let remaining = line.Substring(valStart)
+                    let endChars = [|';'; ')'; ']'; ','; ' '|]
+                    let endIndex = remaining.IndexOfAny(endChars)
+                    if endIndex > 0 then
+                        let valueName = remaining.Substring(0, endIndex).Trim()
+                        references.Add({
+                            FullName = valueName
+                            SourceModule = sourceModule
+                            NodeType = "Value"
+                        })
+    
+    /// Extract type references like "NewUnionCase", "NewObject", etc.
+    member private this.ExtractTypeReferences(content: string, sourceModule: string) =
+        let lines = content.Split('\n')
+        for line in lines do
+            // Extract NewUnionCase references
+            if line.Contains("NewUnionCase") then
+                // Parse: NewUnionCase (type SomeType, Constructor, [...])
+                // TODO: Implement type extraction
+                ()
             
-            // Extract entry points as set of full names
-            let entryPointNames = 
-                symbolCollection.EntryPoints 
-                |> Array.map (fun ep -> ep.FullName) 
-                |> Set.ofArray
+            // Extract NewObject references  
+            if line.Contains("NewObject") then
+                // Parse: NewObject (member .ctor, [type], [...])
+                // TODO: Implement constructor extraction
+                ()
+    
+    member this.GetReferences() = references.ToArray()
+    member this.Clear() = references.Clear()
+
+/// Module dependency tracker
+type ModuleDependencyTracker() =
+    let dependencies = Dictionary<string, HashSet<string>>()
+    
+    member this.AddDependency(fromModule: string, toSymbol: string) =
+        if not (dependencies.ContainsKey(fromModule)) then
+            dependencies.[fromModule] <- HashSet<string>()
+        dependencies.[fromModule].Add(toSymbol) |> ignore
+    
+    member this.GetDependencies(moduleName: string) =
+        match dependencies.TryGetValue(moduleName) with
+        | true, deps -> deps |> Set.ofSeq
+        | false, _ -> Set.empty
+    
+    member this.AllDependencies = 
+        dependencies 
+        |> Seq.map (fun kvp -> kvp.Key, kvp.Value |> Set.ofSeq)
+        |> Map.ofSeq
+
+/// Main reachability analyzer for AST files
+type ASTReachabilityAnalyzer(astFiles: (string * string) list) =
+    let visitor = ASTVisitor()
+    let depTracker = ModuleDependencyTracker()
+    let allSymbols = Dictionary<string, string>() // symbol -> defining module
+    
+    /// Parse all AST files and build symbol tables
+    member this.BuildSymbolTables() =
+        for (moduleName, astContent) in astFiles do
+            // Extract all defined symbols in this module
+            this.ExtractDefinedSymbols(moduleName, astContent)
             
-            // If no entry points found, look for main-like functions
-            let actualEntryPoints = 
-                if Set.isEmpty entryPointNames then
-                    symbolCollection.AllSymbols
-                    |> Map.filter (fun name _ -> 
-                        name.EndsWith(".main") || name.EndsWith(".Main") || name = "main")
-                    |> Map.toSeq
-                    |> Seq.map fst
-                    |> Set.ofSeq
-                else entryPointNames
+            // Extract all symbol references  
+            visitor.Clear()
+            visitor.VisitASTContent(astContent, moduleName)
             
-            // Compute reachable symbols
-            let reachableNames = computeTransitiveClosure dependencyMap actualEntryPoints
-            
-            // Filter to get reachable symbol objects
-            let reachableSymbols = 
-                symbolCollection.AllSymbols
-                |> Map.filter (fun name _ -> Set.contains name reachableNames)
-                |> Map.toArray
-                |> Array.map snd
-            
-            // Build problematic symbol report
-            let problematicReport = {
-                AssemblyReferences = assemblyReferences
-                AllocatingSymbols = 
-                    reachableSymbols 
-                    |> Array.filter (fun sym -> sym.IsAllocation)
-                BCLSymbols = 
-                    reachableSymbols 
-                    |> Array.filter (fun sym -> sym.Category = BCLType)
-                UnknownSymbols = 
-                    reachableSymbols 
-                    |> Array.filter (fun sym -> sym.Category = Unknown)
-            }
-            
-            // Calculate statistics
-            let stats = {
-                TotalSymbols = symbolCollection.Statistics.TotalSymbols
-                ReachableSymbols = reachableSymbols.Length
-                EliminatedSymbols = symbolCollection.Statistics.TotalSymbols - reachableSymbols.Length
-                DependencyEdges = symbolCollection.Dependencies.Length
-            }
-            
-            let result = {
-                Reachable = reachableNames
-                Dependencies = dependencyMap
-                EntryPoints = actualEntryPoints
-                Statistics = stats
-                ReachableSymbols = reachableSymbols
-                ProblematicSymbols = problematicReport
-            }
-            
-            Success result
+            // Build dependency graph
+            for reference in visitor.GetReferences() do
+                depTracker.AddDependency(moduleName, reference.FullName)
+    
+    /// Extract symbols defined in a module
+    member private this.ExtractDefinedSymbols(moduleName: string, astContent: string) =
+        let lines = astContent.Split('\n')
+        for line in lines do
+            // Look for MemberOrFunctionOrValue definitions
+            if line.Contains("MemberOrFunctionOrValue") then
+                let valStart = line.IndexOf("(val ") + 5
+                if valStart > 4 then
+                    let remaining = line.Substring(valStart)
+                    let commaIndex = remaining.IndexOf(',')
+                    if commaIndex > 0 then
+                        let symbolName = remaining.Substring(0, commaIndex).Trim()
+                        let fullName = sprintf "%s.%s" moduleName symbolName
+                        allSymbols.[symbolName] <- moduleName
+                        allSymbols.[fullName] <- moduleName
+    
+    /// Perform reachability analysis starting from entry points
+    member this.AnalyzeReachability(entryPoints: string list) =
+        this.BuildSymbolTables()
         
-    with ex ->
-        CompilerFailure [InternalError("analyze", ex.Message, Some ex.StackTrace)]
+        let reachable = HashSet<string>()
+        let worklist = Queue<string>()
+        
+        // Add entry points to worklist
+        for entry in entryPoints do
+            worklist.Enqueue(entry)
+            reachable.Add(entry) |> ignore
+        
+        // Process worklist until empty
+        while worklist.Count > 0 do
+            let current = worklist.Dequeue()
+            
+            // Find which module defines this symbol
+            match allSymbols.TryGetValue(current) with
+            | true, definingModule ->
+                // Get all dependencies of this module
+                let deps = depTracker.GetDependencies(definingModule)
+                for dep in deps do
+                    if not (reachable.Contains(dep)) then
+                        reachable.Add(dep) |> ignore
+                        worklist.Enqueue(dep)
+            | false, _ -> 
+                // Symbol not found - might be external or resolved differently
+                printfn $"Warning: Symbol not found: {current}"
+        
+        reachable |> Set.ofSeq
+    
+    /// Generate pruned AST for a specific module
+    member this.GeneratePrunedAST(moduleName: string, reachableSymbols: Set<string>) =
+        // Find the original AST for this module
+        match astFiles |> List.tryFind (fun (name, _) -> name = moduleName) with
+        | Some (_, originalAST) ->
+            // TODO: Implement actual AST pruning logic
+            // For now, just return original AST if any symbols are reachable
+            let moduleSymbols = 
+                allSymbols 
+                |> Seq.filter (fun kvp -> kvp.Value = moduleName)
+                |> Seq.map (fun kvp -> kvp.Key)
+                |> Set.ofSeq
+            
+            let hasReachableSymbols = 
+                Set.intersect moduleSymbols reachableSymbols
+                |> Set.isEmpty
+                |> not
+            
+            if hasReachableSymbols then Some originalAST else None
+        | None -> None
+    
+    /// Generate final AST with all reachable dependencies inlined
+    member this.GenerateFinalAST(mainModule: string, reachableSymbols: Set<string>) =
+        // TODO: Implement final AST generation
+        // This should include all reachable symbols from all modules
+        // in a single computation graph for MLIR conversion
+        
+        let reachableModules = 
+            reachableSymbols
+            |> Set.toSeq
+            |> Seq.choose (fun symbol -> 
+                match allSymbols.TryGetValue(symbol) with
+                | true, moduleName -> Some moduleName
+                | false, _ -> None)
+            |> Set.ofSeq
+        
+        // Combine ASTs from all reachable modules
+        let combinedAST = 
+            astFiles
+            |> List.filter (fun (moduleName, _) -> Set.contains moduleName reachableModules)
+            |> List.map snd
+            |> String.concat "\n\n"
+        
+        combinedAST
 
-/// Check if reachability analysis passes zero-allocation requirements
-let validateZeroAllocation (result: ReachabilityResult) : CompilerResult<unit> =
-    let problems = result.ProblematicSymbols
+/// Helper functions for file I/O
+module ASTFileProcessor =
     
-    // Check for allocating symbols without Alloy replacements
-    let unfixableAllocations = 
-        problems.AllocatingSymbols
-        |> Array.filter (fun sym -> sym.AlloyReplacement.IsNone)
+    /// Load AST files from directory with numeric prefixes
+    let loadASTFiles(directory: string) =
+        Directory.GetFiles(directory, "*.initial.ast")
+        |> Array.map (fun filePath ->
+            let fileName = Path.GetFileNameWithoutExtension(filePath)
+            let moduleName = fileName.Replace(".initial", "")
+            let content = File.ReadAllText(filePath)
+            (moduleName, content))
+        |> Array.toList
     
-    if unfixableAllocations.Length > 0 then
-        let errors = 
-            unfixableAllocations
-            |> Array.map (fun sym ->
-                ConversionError(
-                    "allocation-check", 
-                    sym.FullName, 
-                    "zero-allocation", 
-                    sprintf "Allocating function %s has no Alloy replacement. Zero-allocation guarantee violated." sym.DisplayName))
-            |> Array.toList
-        CompilerFailure errors
-    else
-        Success ()
+    /// Write pruned AST files
+    let writePrunedASTs(directory: string, prunedASTs: (string * string) list) =
+        for (moduleName, astContent) in prunedASTs do
+            let fileName = sprintf "%s.pruned.ast" moduleName
+            let filePath = Path.Combine(directory, fileName)
+            File.WriteAllText(filePath, astContent)
+    
+    /// Write final AST file
+    let writeFinalAST(directory: string, mainModule: string, finalAST: string) =
+        let fileName = sprintf "%s.final.ast" mainModule
+        let filePath = Path.Combine(directory, fileName)
+        File.WriteAllText(filePath, finalAST)
 
-/// Generate reachability report for diagnostics
-let generateReport (result: ReachabilityResult) : string =
-    let sb = System.Text.StringBuilder()
-    
-    sb.AppendLine("Firefly Reachability Analysis Report") |> ignore
-    sb.AppendLine("====================================") |> ignore
-    sb.AppendLine() |> ignore
-    
-    sb.AppendLine(sprintf "Total symbols: %d" result.Statistics.TotalSymbols) |> ignore
-    sb.AppendLine(sprintf "Reachable symbols: %d" result.Statistics.ReachableSymbols) |> ignore
-    sb.AppendLine(sprintf "Eliminated symbols: %d" result.Statistics.EliminatedSymbols) |> ignore
-    sb.AppendLine(sprintf "Entry points: %d" (Set.count result.EntryPoints)) |> ignore
-    sb.AppendLine() |> ignore
-    
-    sb.AppendLine("Entry Points:") |> ignore
-    result.EntryPoints |> Set.iter (fun ep -> sb.AppendLine(sprintf "  %s" ep) |> ignore)
-    sb.AppendLine() |> ignore
-    
-    let problems = result.ProblematicSymbols
-    
-    if problems.AllocatingSymbols.Length > 0 then
-        sb.AppendLine("Allocating Symbols (require Alloy replacements):") |> ignore
-        problems.AllocatingSymbols
-        |> Array.iter (fun sym ->
-            match sym.AlloyReplacement with
-            | Some replacement ->
-                sb.AppendLine(sprintf "  %s → %s" sym.DisplayName replacement) |> ignore
-            | None ->
-                sb.AppendLine(sprintf "  %s (⚠️ NO REPLACEMENT)" sym.DisplayName) |> ignore)
-        sb.AppendLine() |> ignore
-    
-    if problems.BCLSymbols.Length > 0 then
-        sb.AppendLine("BCL References (should be avoided):") |> ignore
-        problems.BCLSymbols
-        |> Array.truncate 10
-        |> Array.iter (fun sym -> sb.AppendLine(sprintf "  %s" sym.FullName) |> ignore)
-        if problems.BCLSymbols.Length > 10 then
-            sb.AppendLine(sprintf "  ... and %d more" (problems.BCLSymbols.Length - 10)) |> ignore
-        sb.AppendLine() |> ignore
-    
-    if problems.UnknownSymbols.Length > 0 then
-        sb.AppendLine("Unknown Symbols (need classification):") |> ignore
-        problems.UnknownSymbols
-        |> Array.truncate 10
-        |> Array.iter (fun sym -> sb.AppendLine(sprintf "  %s" sym.FullName) |> ignore)
-        sb.AppendLine() |> ignore
-    
-    sb.ToString()
-
-/// DEPRECATED: Old function signature for backward compatibility
-let analyzeFromParsedInputs (parsedInputs: (string * FSharp.Compiler.Syntax.ParsedInput) list) : ReachabilityResult =
-    failwith "analyzeFromParsedInputs is deprecated. Use analyze(SymbolCollectionResult) instead."
+/// Example usage
+module Example =
+    let runReachabilityAnalysis() =
+        // Load all initial AST files
+        let astFiles = ASTFileProcessor.loadASTFiles("./build/intermediates")
+        
+        // Create analyzer
+        let analyzer = ASTReachabilityAnalyzer(astFiles)
+        
+        // Analyze reachability starting from main
+        let reachableSymbols = analyzer.AnalyzeReachability(["main"; "hello"])
+        
+        printfn $"Found {Set.count reachableSymbols} reachable symbols"
+        
+        // Generate pruned ASTs for each module
+        let prunedASTs = 
+            astFiles
+            |> List.map (fun (moduleName, _) -> moduleName)
+            |> List.choose (fun moduleName ->
+                match analyzer.GeneratePrunedAST(moduleName, reachableSymbols) with
+                | Some prunedAST -> Some (moduleName, prunedAST)
+                | None -> None)
+        
+        // Generate final AST
+        let finalAST = analyzer.GenerateFinalAST("06_01_HelloWorldDirect", reachableSymbols)
+        
+        // Write output files
+        ASTFileProcessor.writePrunedASTs("./build/intermediates", prunedASTs)
+        ASTFileProcessor.writeFinalAST("./build/intermediates", "06_01_HelloWorldDirect", finalAST)
+        
+        printfn "Reachability analysis complete!"
+        printfn $"Generated {List.length prunedASTs} pruned AST files"
+        printfn "Generated final AST file"

@@ -7,60 +7,82 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.2.125</Version>
-    <Description>Firefly Minimal - FCS Ingestion and Reachability Analysis Only</Description>
+    <Version>0.3.0</Version>
+    <Description>Firefly F# Compiler - FCS Ingestion, AST Reachability Analysis, and Pruning</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 
   <ItemGroup>
-      <!-- ===== CORE INFRASTRUCTURE - Required ===== -->
+      <!-- ===== CORE INFRASTRUCTURE - Foundation ===== -->
       
-      <!-- Core Utilities -->
+      <!-- Core Utilities - Must come first -->
       <Compile Include="Core/Utilities/IntermediateWriter.fs" />
       
-      <!-- Core Type System --> 
+      <!-- Core Type System and Foundation --> 
       <Compile Include="Core/Types/Dialects.fs" />
       <Compile Include="Core/Types/TypeSystem.fs" />   
       <Compile Include="Core/XParsec/Foundation.fs" />  
       
-      <!-- ===== FCS INGESTION - Your Working Implementation ===== -->
+      <!-- ===== FCS INGESTION - Working Implementation ===== -->
       
-      <Compile Include="Core/FCSIngestion/ProjectOptionsLoader.fs" />     <!-- Your working loader -->
-      <Compile Include="Core/FCSIngestion/ProjectProcessor.fs" />         <!-- Your working processor -->
-      <Compile Include="Core/FCSIngestion/SymbolCollector.fs" />          <!-- Your working collector -->
+      <!-- Project loading and FCS integration -->
+      <Compile Include="Core/FCSIngestion/ProjectOptionsLoader.fs" />     
+      <Compile Include="Core/FCSIngestion/ProjectProcessor.fs" />         
+      <Compile Include="Core/FCSIngestion/SymbolCollector.fs" />          
       
-      <!-- ===== ANALYSIS - Updated for Typed AST ===== -->
+      <!-- ===== ANALYSIS - Enhanced AST Processing ===== -->
+    
       
-      <Compile Include="Dabbit/Analysis/ReachabilityAnalyzer.fs" />       <!-- Updated for SymbolCollectionResult -->
+      <!-- Enhanced AST analysis - NEW -->
+      <Compile Include="Dabbit/Analysis/Patterns.fs" />                <!-- AST pattern matching and parsing -->
+      <Compile Include="Dabbit/Analysis/ReachabilityAnalyzer.fs" />    <!-- Enhanced reachability with AST traversal -->
+      <Compile Include="Dabbit/Analysis/DependencyGraphBuilder.fs" />     <!-- Cross-module dependency resolution -->
       
-      <!-- ===== PIPELINE - Simplified ===== -->
+      <!-- ===== PIPELINE - Enhanced Orchestration ===== -->
       
-      <Compile Include="Dabbit/Pipeline/CompilationTypes.fs" />           <!-- Basic types -->
-      <Compile Include="Dabbit/Pipeline/CompilationOrchestrator.fs" />    <!-- Simplified orchestrator -->
+      <!-- Basic pipeline types -->
+      <Compile Include="Dabbit/Pipeline/CompilationTypes.fs" />           
       
-      <!-- ===== CLI - Minimal Test Interface ===== -->
+      <!-- AST integration - NEW -->
+      <Compile Include="Dabbit/Pipeline/ReachabilityIntegration.fs" /> <!-- Integration with compilation pipeline -->
       
-      <Compile Include="CLI/Program-Minimal.fs" />                        <!-- Simple test program -->
+      <!-- Main orchestrator (enhanced) -->
+      <Compile Include="Dabbit/Pipeline/CompilationOrchestrator.fs" />    
+      
+      <!-- ===== CLI - Enhanced Interface ===== -->
+      
+      <!-- CLI program with AST analysis support -->
+      <Compile Include="CLI/Program-Enhanced.fs" />                       <!-- Enhanced CLI with AST reachability -->
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Core F# dependencies -->
+    <!-- ===== CORE F# DEPENDENCIES ===== -->
+    
+    <!-- F# Core - Pinned version for stability -->
     <PackageReference Update="FSharp.Core" Version="[9.0.300]" />
 
-    <!-- F# Compiler Services -->
+    <!-- ===== F# COMPILER SERVICES ===== -->
+    
+    <!-- FCS for AST parsing and type checking -->
     <PackageReference Include="FSharp.Compiler.Service" Version="43.9.300" />
 
-    <!-- XParsec - For project file parsing -->
+    <!-- ===== PARSING AND TEXT PROCESSING ===== -->
+    
+    <!-- XParsec for project file parsing -->
     <PackageReference Include="XParsec" Version="0.1.0" />
     
-    <!-- Command line parsing -->
+    <!-- ===== CLI AND UTILITIES ===== -->
+    
+    <!-- Command line argument parsing -->
     <PackageReference Include="Argu" Version="6.1.1" />
+    
+    <!-- ===== FUTURE DEPENDENCIES (Commented out for minimal build) ===== -->
+    
+    <!-- MLIR.NET for code generation (when ready) -->
+    <!-- <PackageReference Include="MLIR.NET" Version="1.0.0" /> -->
+    
+    <!-- LLVM.NET for native compilation (when ready) -->
+    <!-- <PackageReference Include="LLVM.NET" Version="15.0.0" /> -->
   </ItemGroup>
 
 </Project>
-
-
-
-
-
-
