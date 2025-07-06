@@ -457,22 +457,73 @@ let private buildComputationGraph (processed: ProcessedProject) : SymbolDependen
         |> Array.groupBy (fun su -> (su.Range.FileName, su.Range.StartLine))
         |> Map.ofArray
     
-    // Find function definitions first
+    // Find function definitions first:
     let functionDefinitions = 
-        processed.SymbolUses
-        |> Array.choose (fun symbolUse ->
-            match symbolUse.Symbol with
-            | :? FSharpMemberOrFunctionOrValue as func when 
-                func.IsFunction && 
-                symbolUse.IsFromDefinition ->
-                Some {|
-                    Function = func
-                    FullName = func.FullName
-                    FileName = symbolUse.Range.FileName
-                    StartLine = symbolUse.Range.StartLine
-                    EndLine = symbolUse.Range.EndLine
-                |}
-            | _ -> None)
+        // First get basic function info from declarations
+        let declaredFunctions = 
+            processed.CheckResults.AssemblyContents.ImplementationFiles
+            |> Seq.collect (fun implFile ->
+                let rec extractFunctions (decls: FSharpImplementationFileDeclaration list) =
+                    decls |> List.collect (fun decl ->
+                        match decl with
+                        | FSharpImplementationFileDeclaration.Entity(_, subDecls) ->
+                            extractFunctions subDecls
+                        | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(value, _, body) when value.IsFunction ->
+                            [{|
+                                Function = value
+                                FullName = value.FullName
+                                FileName = implFile.FileName
+                                StartLine = body.Range.StartLine - 1
+                            |}]
+                        | _ -> [])
+                extractFunctions implFile.Declarations)
+            |> Array.ofSeq
+
+        // Then use symbol uses to find actual function boundaries
+        declaredFunctions
+        |> Array.map (fun func ->
+            // Find the last symbol use in this file that could belong to this function
+            let symbolUsesInFile = 
+                processed.SymbolUses
+                |> Array.filter (fun su -> su.Range.FileName = func.FileName)
+                |> Array.sortBy (fun su -> su.Range.StartLine)
+            
+            // Find symbol uses that start after this function's start
+            let usesAfterFunctionStart = 
+                symbolUsesInFile
+                |> Array.filter (fun su -> su.Range.StartLine > func.StartLine)
+            
+            // Find the next function's start line (if any)
+            let nextFunctionStart = 
+                declaredFunctions
+                |> Array.filter (fun f -> f.FileName = func.FileName && f.StartLine > func.StartLine)
+                |> Array.tryHead
+                |> Option.map (fun f -> f.StartLine)
+            
+            // Determine end line based on next function or last symbol use
+            let endLine = 
+                match nextFunctionStart with
+                | Some nextStart -> 
+                    // Find last symbol use before the next function
+                    usesAfterFunctionStart
+                    |> Array.filter (fun su -> su.Range.StartLine < nextStart)
+                    |> Array.tryLast
+                    |> Option.map (fun su -> su.Range.StartLine)
+                    |> Option.defaultValue (nextStart - 1)
+                | None ->
+                    // No next function, use the last symbol use in file
+                    usesAfterFunctionStart
+                    |> Array.tryLast
+                    |> Option.map (fun su -> su.Range.StartLine)
+                    |> Option.defaultValue (func.StartLine + 10) // Fallback
+            
+            {|
+                Function = func.Function
+                FullName = func.FullName
+                FileName = func.FileName
+                StartLine = func.StartLine
+                EndLine = endLine
+            |})
     
     printfn "[DIAGNOSTIC] Function definitions found: %d" functionDefinitions.Length
     functionDefinitions |> Array.iter (fun fdef ->
