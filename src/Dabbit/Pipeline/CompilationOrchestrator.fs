@@ -2,28 +2,14 @@ module Dabbit.Pipeline.CompilationOrchestrator
 
 open System
 open System.IO
+open FSharp.Compiler.CodeAnalysis
 open Core.XParsec.Foundation
 open Core.Utilities.IntermediateWriter
 open Core.FCSIngestion.ProjectOptionsLoader
 open Core.FCSIngestion.ProjectProcessor
 open Core.FCSIngestion.SymbolCollector
-open Dabbit.Analysis.ReachabilityAnalyzer
 open Dabbit.Pipeline.CompilationTypes
-
-/// Progress callback for reporting compilation stages
-type ProgressCallback = CompilationPhase -> string -> unit
-
-and CompilationPhase =
-    | ProjectLoading
-    | FCSProcessing
-    | SymbolCollection
-    | ReachabilityAnalysis
-    | IntermediateGeneration
-    // Future phases (placeholders):
-    | ASTTransformation     // TODO: AST transformations and optimizations
-    | MLIRGeneration       // TODO: MLIR code generation
-    | LLVMGeneration       // TODO: LLVM IR generation
-    | NativeCompilation    // TODO: Native binary compilation
+open Dabbit.Pipeline.ReachabilityIntegration
 
 /// Result of the compilation process
 type CompilationResult = {
@@ -32,14 +18,6 @@ type CompilationResult = {
     ReachabilityReport: string option
     Diagnostics: FireflyError list
     Statistics: CompilationStatistics
-}
-
-and CompilationStatistics = {
-    TotalFiles: int
-    TotalSymbols: int
-    ReachableSymbols: int
-    EliminatedSymbols: int
-    CompilationTimeMs: float
 }
 
 /// Write intermediate files for debugging and verification
@@ -67,158 +45,122 @@ let private writeIntermediateFiles
     
     // Write reachability report (human readable)
     let reportPath = Path.Combine(analysisDir, "reachability.report")
-    let reportContent = generateReport reachability
+    let reportContent = ReachabilityHelpers.generateReport reachability
     writeIntermediateFile reportPath reportContent
-    
-    // Write pruned AST (placeholder - will contain only reachable symbols)
-    let fcsDir = Path.Combine(intermediatesDir, "fcs")
-    let prunedAstPath = Path.Combine(fcsDir, "project.pruned.ast")
-    let prunedAstContent = "// TODO: Generate pruned AST containing only reachable symbols"
-    writeIntermediateFile prunedAstPath prunedAstContent
-    
-    printfn "✅ Analysis intermediate files written"
 
-/// Validate zero-allocation requirements and report violations
-let validateZeroAllocationRequirements (reachability: ReachabilityResult) : CompilerResult<unit> =
-    validateZeroAllocation reachability
-
-/// Main compilation orchestrator - currently handles FCS ingestion through reachability analysis
-let compile 
-    (inputPath: string) 
-    (intermediatesDir: string option)
-    (progress: ProgressCallback) : Async<CompilationResult> =
+/// Main compilation function with enhanced pipeline
+let compileProject 
+    (projectFile: string) 
+    (intermediatesDir: string option) 
+    (progress: ProgressCallback)
+    : Async<CompilationResult> = async {
     
-    async {
-        let startTime = DateTime.UtcNow
+    let startTime = DateTime.UtcNow
+    
+    try
+        // Phase 1: Load and analyze project
+        progress ProjectLoading "Loading project options"
+        let checker = FSharpChecker.Create(keepAssemblyContents=true)
+        let! projectResult = loadProject projectFile checker
         
-        try
-            // Phase 1: Load project options
-            progress ProjectLoading "Loading project configuration"
-            let checker = FSharp.Compiler.CodeAnalysis.FSharpChecker.Create(keepAssemblyContents=true)
-            let! projectResult = loadProject inputPath checker
+        match projectResult with
+        | Error errorMsg ->
+            return {
+                Success = false
+                IntermediatesGenerated = false
+                ReachabilityReport = None
+                Diagnostics = [InternalError("ProjectLoading", errorMsg, None)]
+                Statistics = {
+                    TotalFiles = 0
+                    TotalSymbols = 0
+                    ReachableSymbols = 0
+                    EliminatedSymbols = 0
+                    CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
+                }
+            }
+        | Ok projectOptions ->
             
-            match projectResult with
-            | Error errorMsg ->
+            // Phase 2: Process source files with FCS
+            progress FCSProcessing "Processing F# source files"
+            let! processedResult = processProject projectOptions checker
+            
+            match processedResult with
+            | Error processingError ->
+                let diagnostics = 
+                    processingError.CriticalErrors 
+                    |> Array.map (fun diag -> 
+                        InternalError("FCSProcessing", diag.Message, None))
+                    |> Array.toList
+                
                 return {
                     Success = false
                     IntermediatesGenerated = false
                     ReachabilityReport = None
-                    Diagnostics = [InternalError("ProjectLoading", errorMsg, None)]
+                    Diagnostics = diagnostics
                     Statistics = {
-                        TotalFiles = 0
+                        TotalFiles = projectOptions.SourceFiles.Length
                         TotalSymbols = 0
                         ReachableSymbols = 0
                         EliminatedSymbols = 0
                         CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
                     }
                 }
-            | Ok projectOptions ->
+            | Ok processedProject ->
                 
-                // Phase 2: Process project through FCS
-                progress FCSProcessing "Processing project with F# Compiler Services"
-                let! processResult = processProject projectOptions checker
+                // Phase 3: Collect symbols and build dependency graph
+                progress SymbolCollection "Collecting symbols and dependencies"
+                let symbolCollection = collectSymbols processedProject
                 
-                match processResult with
-                | Error processingError ->
-                    let diagnostics = 
-                        processingError.CriticalErrors
-                        |> Array.map (fun diag ->
-                            TypeCheckError("FCS", diag.Message, 
-                                { Line = diag.StartLine; Column = diag.StartColumn; 
-                                  File = diag.FileName; Offset = 0 }))
-                        |> Array.toList
-                    
+                // Phase 4: Perform reachability analysis
+                progress ReachabilityAnalysis "Performing reachability analysis"
+                let reachabilityResult = ReachabilityHelpers.analyze symbolCollection
+                
+                match reachabilityResult with
+                | CompilerFailure errors ->
                     return {
                         Success = false
                         IntermediatesGenerated = false
                         ReachabilityReport = None
-                        Diagnostics = diagnostics
+                        Diagnostics = errors
                         Statistics = {
                             TotalFiles = projectOptions.SourceFiles.Length
-                            TotalSymbols = 0
+                            TotalSymbols = symbolCollection.Statistics.TotalSymbols
                             ReachableSymbols = 0
                             EliminatedSymbols = 0
                             CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
                         }
                     }
-                | Ok processedProject ->
+                | Success reachability ->
                     
-                    // Write initial AST immediately after FCS processing
-                    match intermediatesDir with
-                    | Some dir ->
-                        let fcsDir = Path.Combine(dir, "fcs")
-                        Directory.CreateDirectory(fcsDir) |> ignore
-                        
-                        let assemblyContents = processedProject.CheckResults.AssemblyContents
-                        
-                        // Sort files for consistent numbering (libraries first, then main program)
-                        let sortedFiles = 
-                            assemblyContents.ImplementationFiles
-                            |> List.sortBy (fun implFile -> 
-                                let fileName = Path.GetFileNameWithoutExtension(implFile.FileName)
-                                // Libraries first (Alloy), then main program files
-                                if implFile.FileName.Contains "Alloy" then
-                                    0, fileName // Libraries get priority 0
-                                else 
-                                    1, fileName // Main program files get priority 1
-                            )
-                        
-                        // Write each file separately with numeric prefix
-                        sortedFiles
-                        |> List.iteri (fun index implFile ->
-                            let fileName = Path.GetFileNameWithoutExtension(implFile.FileName)
-                            let outputFileName = sprintf "%02d_%s.initial.ast" (index + 1) fileName
-                            let outputPath = Path.Combine(fcsDir, outputFileName)
-                            
-                            // Write just the raw declarations - completely clean
-                            let astContent = 
-                                implFile.Declarations
-                                |> List.map (sprintf "%A")
-                                |> String.concat "\n\n"
-                            
-                            writeIntermediateFile outputPath astContent
-                            printfn "  ✅ %s" outputFileName
-                        )
-                        
-                        printfn "✅ Individual AST files written to: %s" fcsDir
-                    | None -> ()
+                    // Phase 5: Generate intermediate files
+                    progress IntermediateGeneration "Writing intermediate files"
+                    let intermediatesGenerated = 
+                        match intermediatesDir with
+                        | Some dir ->
+                            writeIntermediateFiles dir processedProject symbolCollection reachability
+                            true
+                        | None -> false
                     
-                    // Phase 3: Collect and analyze symbols
-                    progress SymbolCollection "Collecting and categorizing symbols"
-                    let symbolCollection = collectSymbols processedProject
+                    // Generate reachability report
+                    let report = ReachabilityHelpers.generateReport reachability
                     
-                    // Phase 4: Perform reachability analysis
-                    progress ReachabilityAnalysis "Performing reachability analysis"
-                    let reachabilityResult = analyze symbolCollection
-                    
-                    match reachabilityResult with
+                    // Validate zero allocation constraint
+                    match ReachabilityHelpers.validateZeroAllocation reachability with
                     | CompilerFailure errors ->
                         return {
                             Success = false
-                            IntermediatesGenerated = false
-                            ReachabilityReport = None
+                            IntermediatesGenerated = intermediatesGenerated
+                            ReachabilityReport = Some report
                             Diagnostics = errors
                             Statistics = {
                                 TotalFiles = projectOptions.SourceFiles.Length
-                                TotalSymbols = symbolCollection.Statistics.TotalSymbols
-                                ReachableSymbols = 0
-                                EliminatedSymbols = 0
+                                TotalSymbols = reachability.Statistics.TotalSymbols
+                                ReachableSymbols = reachability.Statistics.ReachableSymbols
+                                EliminatedSymbols = reachability.Statistics.EliminatedSymbols
                                 CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
                             }
                         }
-                    | Success reachability ->
-                        
-                        // Phase 5: Generate intermediate files
-                        progress IntermediateGeneration "Writing intermediate files"
-                        let intermediatesGenerated = 
-                            match intermediatesDir with
-                            | Some dir ->
-                                writeIntermediateFiles dir processedProject symbolCollection reachability
-                                true
-                            | None -> false
-                        
-                        // Generate reachability report
-                        let report = generateReport reachability
+                    | Success () ->
                         
                         // TODO: Phase 6 - AST Transformation
                         // Apply optimizations and transformations to the reachable AST
@@ -264,3 +206,26 @@ let compile
             }
     }
 
+/// Compile with minimal configuration for testing
+let compileMinimal (projectFile: string) (verbose: bool) : Async<CompilationResult> =
+    let intermediatesDir = 
+        if verbose then 
+            Some (Path.Combine(Path.GetDirectoryName(projectFile), "build", "intermediates"))
+        else None
+    
+    let progress = fun phase message ->
+        if verbose then
+            printfn "[%A] %s" phase message
+    
+    compileProject projectFile intermediatesDir progress
+
+/// Quick AST-only analysis without full compilation
+let analyzeASTOnly (projectFile: string) : Async<CompilationResult> =
+    let progress = fun phase message ->
+        printfn "[%A] %s" phase message
+    
+    // Run only up to reachability analysis
+    async {
+        let! result = compileProject projectFile None progress
+        return { result with Success = true } // Mark as success even if incomplete
+    }

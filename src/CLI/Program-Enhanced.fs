@@ -1,4 +1,3 @@
-// CLI/Program-Enhanced.fs
 module CLI.ProgramEnhanced
 
 open System
@@ -6,17 +5,17 @@ open System.IO
 open Argu
 open Core.XParsec.Foundation
 open Dabbit.Pipeline.CompilationOrchestrator
-open Dabbit.Pipeline.ReachabilityIntegration
+open Dabbit.Pipeline.CompilationTypes
 
 /// Command line arguments for Firefly compiler
 type FireflyArgs =
-    | [<MainCommand; Last>] Project_File of string
-    | [<AltCommandLine("-o")>] Output of string
-    | [<AltCommandLine("-i")>] Intermediates
-    | [<AltCommandLine("-v")>] Verbose
-    | [<AltCommandLine("--ast-only")>] AST_Only
-    | [<AltCommandLine("--show-stats")>] Show_Stats
-    | [<AltCommandLine("--show-elimination")>] Show_Elimination_Stats
+    | Project_File of string
+    | Output of string
+    | Intermediates
+    | Verbose
+    | AST_Only
+    | Show_Stats
+    | Show_Elimination_Stats
 
     interface IArgParserTemplate with
         member s.Usage =
@@ -30,7 +29,7 @@ type FireflyArgs =
             | Show_Elimination_Stats -> "Show detailed elimination statistics"
 
 /// Enhanced progress reporting
-let reportProgress verbose phase message =
+let reportProgress verbose (phase: CompilationPhase) message =
     let phaseColor = 
         match phase with
         | ProjectLoading -> ConsoleColor.Cyan
@@ -99,141 +98,154 @@ let displayEliminationStats projectFile =
         printfn "No elimination report found. Run with --intermediates first."
         Console.ResetColor()
 
-/// Run AST reachability analysis only
-let runASTAnalysisOnly projectFile verbose =
-    try
-        printfn "Running AST reachability analysis for: %s" (Path.GetFileName(projectFile: string))
-        
-        let projectDir = Path.GetDirectoryName(projectFile: string)
-        let progress = reportProgress verbose
-        
-        match CompilationOrchestratorIntegration.enhanceCompilationPipeline projectDir progress with
-        | Success stats ->
-            printfn ""
-            Console.ForegroundColor <- ConsoleColor.Green
-            printfn "✓ AST Analysis Complete"
-            Console.ResetColor()
-            // Convert ReachabilityStatistics to CompilationStatistics format for display
-            let compilationStats = {
-                TotalFiles = 1  // Placeholder
-                TotalSymbols = stats.TotalSymbols
-                ReachableSymbols = stats.ReachableSymbols  
-                EliminatedSymbols = stats.EliminatedSymbols
-                CompilationTimeMs = 0.0  // Placeholder
-            }
-            displayStatistics compilationStats
-            0
-        | CompilerFailure errors ->
-            Console.ForegroundColor <- ConsoleColor.Red
-            printfn "✗ AST Analysis Failed"
-            Console.ResetColor()
-            for error in errors do
-                printfn "Error: %A" error
-            1
-    with
-    | ex ->
+/// Display diagnostics with color coding
+let displayDiagnostics diagnostics =
+    if not (List.isEmpty diagnostics) then
+        printfn ""
         Console.ForegroundColor <- ConsoleColor.Red
-        printfn "✗ Analysis failed: %s" ex.Message
+        printfn "=== COMPILATION DIAGNOSTICS ==="
         Console.ResetColor()
-        if verbose then
-            printfn "Stack trace: %s" ex.StackTrace
-        1
-
-/// Run full compilation pipeline
-let runFullCompilation projectFile outputDir generateIntermediates verbose =
-    try
-        printfn "Compiling: %s" (Path.GetFileName(projectFile: string))
         
-        // TODO: This will use the existing CompilationOrchestrator
-        // For now, just run AST analysis
-        let result = runASTAnalysisOnly projectFile verbose
-        
-        if result = 0 then
-            printfn ""
-            Console.ForegroundColor <- ConsoleColor.Green
-            printfn "✓ Compilation pipeline ready"
-            Console.ForegroundColor <- ConsoleColor.Yellow
-            printfn "Note: Full compilation (AST → MLIR → LLVM → Binary) coming in next release"
-            Console.ResetColor()
-        
-        result
-    with
-    | ex ->
-        Console.ForegroundColor <- ConsoleColor.Red
-        printfn "✗ Compilation failed: %s" ex.Message
-        Console.ResetColor()
-        if verbose then
-            printfn "Stack trace: %s" ex.StackTrace
-        1
+        for error in diagnostics do
+            match error with
+            | SyntaxError (pos, message, context) ->
+                Console.ForegroundColor <- ConsoleColor.Red
+                printfn "SYNTAX ERROR in %s (%d,%d): %s" pos.File pos.Line pos.Column message
+                if not (List.isEmpty context) then
+                    printfn "  Context: %s" (String.concat " -> " context)
+                Console.ResetColor()
+            | TypeCheckError (construct, message, location) ->
+                Console.ForegroundColor <- ConsoleColor.Yellow
+                printfn "TYPE ERROR in %s (%d,%d): %s" location.File location.Line location.Column message
+                printfn "  Construct: %s" construct
+                Console.ResetColor()
+            | ConversionError (phase, source, target, message) ->
+                Console.ForegroundColor <- ConsoleColor.Magenta
+                printfn "CONVERSION ERROR in %s: %s" phase message
+                printfn "  Converting %s to %s" source target
+                Console.ResetColor()
+            | InternalError (phase, message, stackTrace) ->
+                Console.ForegroundColor <- ConsoleColor.DarkRed
+                printfn "INTERNAL ERROR in %s: %s" phase message
+                match stackTrace with
+                | Some stack -> printfn "Stack: %s" stack
+                | None -> ()
+                Console.ResetColor()
+            | MLIRGenerationError (phase, message, functionName) ->
+                Console.ForegroundColor <- ConsoleColor.DarkMagenta
+                printfn "MLIR ERROR in %s: %s" phase message
+                match functionName with
+                | Some func -> printfn "  Function: %s" func
+                | None -> ()
+                Console.ResetColor()
 
 /// Main entry point
-[<EntryPoint>]
 let main argv =
+    let parser = ArgumentParser.Create<FireflyArgs>(programName = "firefly")
+    
     try
-        let parser = ArgumentParser.Create<FireflyArgs>(programName = "firefly")
+        let results = parser.Parse argv
         
-        if Array.isEmpty argv then
-            printfn "%s" (parser.PrintUsage())
-            printfn ""
-            Console.ForegroundColor <- ConsoleColor.Cyan
-            printfn "Firefly F# Compiler - Enhanced with AST Reachability Analysis"
-            printfn "Version 0.3.0"
+        // Get project file
+        match results.TryGetResult Project_File with
+        | None ->
+            Console.ForegroundColor <- ConsoleColor.Red
+            printfn "Error: Project file is required. Use --project-file <path>"
             Console.ResetColor()
-            printfn ""
-            printfn "Examples:"
-            printfn "  firefly myproject.fsproj                    # Compile project"
-            printfn "  firefly myproject.fsproj --intermediates    # Generate debug files"
-            printfn "  firefly myproject.fsproj --ast-only         # AST analysis only"
-            printfn "  firefly myproject.fsproj --show-elimination # Show pruning stats"
-            0
-        else
-            let results = parser.Parse argv
-            
-            let projectFile = results.GetResult Project_File
-            let outputDir = results.TryGetResult Output
-            let generateIntermediates = results.Contains Intermediates
-            let verbose = results.Contains Verbose
-            let astOnly = results.Contains AST_Only
-            let showStats = results.Contains Show_Stats
-            let showElimination = results.Contains Show_Elimination_Stats
+            printfn "%s" (parser.PrintUsage())
+            1
+        | Some projectFile ->
             
             // Validate project file exists
-            if not <| File.Exists projectFile then
+            if not (File.Exists projectFile) then
                 Console.ForegroundColor <- ConsoleColor.Red
-                printfn "✗ Project file not found: %s" projectFile
+                printfn "Error: Project file not found: %s" projectFile
                 Console.ResetColor()
                 1
             else
-                // Display what we're doing
-                if verbose then
-                    printfn "Project file: %s" projectFile
-                    printfn "Output dir: %s" (outputDir |> Option.defaultValue "default")
-                    printfn "Generate intermediates: %b" generateIntermediates
-                    printfn "AST only: %b" astOnly
-                    printfn ""
                 
-                // Handle special commands
-                if showElimination then
-                    displayEliminationStats projectFile
-                    0
-                elif astOnly then
-                    runASTAnalysisOnly projectFile verbose
-                else
-                    let result = runFullCompilation projectFile outputDir generateIntermediates verbose
+                let verbose = results.Contains Verbose
+                let generateIntermediates = results.Contains Intermediates
+                let astOnly = results.Contains AST_Only
+                let showStats = results.Contains Show_Stats
+                let showElimination = results.Contains Show_Elimination_Stats
+                
+                // Configure progress reporting
+                let progress = reportProgress verbose
+                
+                // Configure intermediate files directory
+                let intermediatesDir = 
+                    if generateIntermediates then
+                        let dir = Path.Combine(Path.GetDirectoryName(projectFile), "build", "intermediates")
+                        Directory.CreateDirectory(dir) |> ignore
+                        Some dir
+                    else None
+                
+                // Run compilation
+                try
+                    let result = 
+                        if astOnly then
+                            analyzeASTOnly projectFile
+                        else
+                            compileProject projectFile intermediatesDir progress
+                        |> Async.RunSynchronously
                     
-                    if showStats && result = 0 then
-                        // Stats already displayed in compilation, just add a separator
+                    // Display results
+                    if result.Success then
+                        Console.ForegroundColor <- ConsoleColor.Green
+                        if astOnly then
+                            printfn "AST analysis completed successfully!"
+                        else
+                            printfn "Compilation completed successfully!"
+                        Console.ResetColor()
+                    else
+                        Console.ForegroundColor <- ConsoleColor.Red
+                        printfn "Compilation failed!"
+                        Console.ResetColor()
+                    
+                    // Show diagnostics if any
+                    displayDiagnostics result.Diagnostics
+                    
+                    // Show statistics if requested
+                    if showStats then
+                        displayStatistics result.Statistics
+                    
+                    // Show elimination report if requested
+                    if showElimination then
+                        displayEliminationStats projectFile
+                    
+                    // Show reachability report if available
+                    match result.ReachabilityReport with
+                    | Some report when verbose ->
                         printfn ""
+                        Console.ForegroundColor <- ConsoleColor.Cyan
+                        printfn "=== REACHABILITY REPORT ==="
+                        Console.ResetColor()
+                        printfn "%s" report
+                    | _ -> ()
                     
-                    result
+                    if result.Success then 0 else 1
+                    
+                with ex ->
+                    Console.ForegroundColor <- ConsoleColor.Red
+                    printfn "Fatal error: %s" ex.Message
+                    if verbose then
+                        printfn "Stack trace: %s" ex.StackTrace
+                    Console.ResetColor()
+                    1
+                    
     with
     | :? ArguParseException as ex ->
         Console.ForegroundColor <- ConsoleColor.Red
-        printfn "✗ %s" ex.Message
+        printfn "%s" ex.Message
         Console.ResetColor()
         1
     | ex ->
         Console.ForegroundColor <- ConsoleColor.Red
-        printfn "✗ Unexpected error: %s" ex.Message
+        printfn "Fatal error: %s" ex.Message
         Console.ResetColor()
         1
+
+/// Entry point for the application
+[<EntryPoint>]
+let entryPoint argv = main argv
