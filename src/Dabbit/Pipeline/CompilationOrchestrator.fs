@@ -27,7 +27,7 @@ let compile (projectPath: string) (intermediatesDir: string option) (progress: P
         // Phase 1: Project Loading
         progress ProjectLoading "Loading project and creating FCS options"
         
-        let checker = FSharpChecker.Create()
+        let checker = FSharpChecker.Create(keepAssemblyContents = true)
         let projectOptions = 
             if projectPath.EndsWith(".fsproj") then
                 {
@@ -79,16 +79,17 @@ let compile (projectPath: string) (intermediatesDir: string option) (progress: P
             return failureResult errors
         else
             // Phase 3: Symbol Collection
-            progress SymbolCollection "Extracting functions and building symbol table"
+            progress SymbolCollection "Extracting typedFunctions and building symbol table"
+            // In whichever file initializes your FSharpChecker
             
-            let functions = extractFunctions checkResults
-            stats <- { stats with TotalSymbols = functions.Length }
+            let typedFunctions = extractFunctions checkResults
+            stats <- { stats with TotalSymbols = typedFunctions.Length }
             
             // Write F# AST intermediate if requested
             match intermediatesDir with
             | Some dir ->
                 let astContent = 
-                    functions 
+                    typedFunctions 
                     |> Array.map (fun f -> $"{f.FullName}: {f.Module}")
                     |> String.concat "\n"
                 let astPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(projectPath) + ".fcs")
@@ -99,14 +100,14 @@ let compile (projectPath: string) (intermediatesDir: string option) (progress: P
             // Phase 4: Dependency Analysis
             progress SymbolCollection "Building dependency graph"
             
-            let dependencies = buildDependencies functions
+            let dependencies = buildDependencies typedFunctions
             
             // Phase 5: Reachability Analysis
-            progress ReachabilityAnalysis "Computing reachable functions"
+            progress ReachabilityAnalysis "Computing reachable typedFunctions"
             
-            let reachabilityResult = analyzeReachability functions dependencies
+            let reachabilityResult = analyzeReachability typedFunctions dependencies
             let reachableFunctions = 
-                functions 
+                typedFunctions 
                 |> Array.filter (fun f -> Set.contains f.FullName reachabilityResult.ReachableFunctions)
             
             stats <- { 
@@ -152,84 +153,3 @@ let compile (projectPath: string) (intermediatesDir: string option) (progress: P
         return failureResult [error]
 }
 
-// ===================================================================
-// TypedAST Processing (Alternative Entry Point)
-// ===================================================================
-
-/// Process TypedFunction array through reachability analysis and validation
-let processTypedAST (functions: TypedFunction[]) (intermediatesDir: string option) (progress: ProgressCallback) : CompilationResult =
-    let stopwatch = Stopwatch.StartNew()
-    let mutable stats = emptyStatistics
-    let mutable intermediates = emptyIntermediates
-    
-    try
-        stats <- { stats with TotalSymbols = functions.Length }
-        
-        // Phase 1: Build Dependency Graph
-        progress SymbolCollection "Building function dependency graph"
-        let dependencies = buildDependencies functions
-        
-        // Phase 2: Reachability Analysis
-        progress ReachabilityAnalysis "Computing reachable functions"
-        let reachabilityResult = analyzeReachability functions dependencies
-        let reachableFunctions = 
-            functions 
-            |> Array.filter (fun f -> Set.contains f.FullName reachabilityResult.ReachableFunctions)
-        
-        stats <- { 
-            stats with 
-                ReachableSymbols = reachabilityResult.ReachableFunctions.Count
-                EliminatedSymbols = reachabilityResult.UnreachableFunctions.Count
-        }
-        
-        // Phase 3: Zero-Allocation Validation
-        progress IntermediateGeneration "Validating zero-allocation constraints"
-        match verifyZeroAllocation reachableFunctions with
-        | Ok () ->
-            progress IntermediateGeneration "✓ Zero-allocation verification passed"
-        | Error allocationSites ->
-            let allocationReport = getAllocationReport allocationSites
-            progress IntermediateGeneration $"⚠ Allocation violations found: {allocationSites.Length}"
-            
-            // Write allocation report if intermediate files are enabled
-            match intermediatesDir with
-            | Some dir ->
-                let reportPath = Path.Combine(dir, "allocations.txt")
-                writeFileToPath reportPath allocationReport
-            | None -> ()
-        
-        // Phase 4: Generate Intermediates
-        match intermediatesDir with
-        | Some dir ->
-            // Write reachability analysis
-            let reachabilityReport = generateReachabilityReport reachabilityResult
-            let reachabilityPath = Path.Combine(dir, "reachability.ra.fcs")
-            writeFileToPath reachabilityPath reachabilityReport
-            intermediates <- { intermediates with ReducedAST = Some reachabilityReport }
-        | None -> ()
-        
-        stopwatch.Stop()
-        stats <- { stats with CompilationTimeMs = stopwatch.Elapsed.TotalMilliseconds }
-        
-        successResult stats intermediates None
-    
-    with
-    | ex ->
-        let error = InternalError("processTypedAST", ex.Message, Some ex.StackTrace)
-        failureResult [error]
-
-// ===================================================================
-// Additional Pipeline Functions
-// ===================================================================
-
-/// Validate program through comprehensive analysis
-let validateProgram (reachableFunctions: TypedFunction[]) : CompilerResult<unit> =
-    let validationResults = 
-        reachableFunctions 
-        |> Array.map validateFunction
-        |> Array.toList
-    
-    combineResults validationResults
-    |> function
-        | Success _ -> Success ()
-        | CompilerFailure errors -> CompilerFailure errors

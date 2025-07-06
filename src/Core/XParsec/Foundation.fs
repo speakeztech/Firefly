@@ -16,6 +16,12 @@ type SourcePosition = {
     Offset: int
 }
 
+/// Classification of type references for allocation analysis
+type TypeOrigin =
+    | ProjectSource      // Defined in the current project
+    | AlloyLibrary       // From Alloy source files
+    | FSharpCore         // From FSharp.Core
+    | ExternalAssembly   // From an external assembly/mscorlib
 /// Unified error type for the entire Firefly compiler pipeline
 type FireflyError =
     | SyntaxError of position: SourcePosition * message: string * context: string list

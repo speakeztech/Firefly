@@ -13,10 +13,27 @@ type TypedFunction = {
     IsEntryPoint: bool
 }
 
+
 let extractFunctions (checkResults: FSharpCheckProjectResults) : TypedFunction[] =
+    // Get the assembly signature for proper type resolution
+    let assembly = checkResults.AssemblySignature
+    
+    // Track all types defined in this project
+    let projectDefinedTypes = 
+        assembly.Entities
+        |> Seq.collect (fun entity -> 
+            seq { 
+                yield entity.FullName
+                for nestedEntity in entity.NestedEntities do
+                    yield nestedEntity.FullName 
+            })
+        |> Set.ofSeq
+    
+    // Extract with proper source tracking
     checkResults.AssemblyContents.ImplementationFiles
     |> Seq.collect (fun implFile ->
         let moduleName = implFile.QualifiedName
+        let sourceFile = implFile.FileName
         
         let rec processDeclarations (decls: FSharpImplementationFileDeclaration list) =
             decls |> List.choose (fun decl ->

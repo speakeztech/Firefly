@@ -148,6 +148,9 @@ let loadProject (projectFile: string) (checker: FSharpChecker) =
                     yield! projData.OtherFlags
                     yield! projData.NoWarns |> List.map (sprintf "--nowarn:%s")
                     "--noframework"  // Always for Firefly
+                    "--standalone"   // Ensure standalone compilation
+                    "--define:NO_MSCORLIB" 
+                    "--define:NO_SYSTEM_REFERENCE"
                     "--define:FIREFLY"
                     "--define:ZERO_ALLOCATION"
                 ]

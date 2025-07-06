@@ -7,9 +7,15 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.3.023</Version>
+    <Version>0.3.027</Version>
     <Description>Firefly F# Compiler - AST-Based Compilation</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <NoStdLib>true</NoStdLib>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <DisableImplicitSystemValueTupleReference>true</DisableImplicitSystemValueTupleReference>
   </PropertyGroup>
 
   <ItemGroup>
@@ -48,3 +54,7 @@
   </ItemGroup>
 
 </Project>
+
+
+
+

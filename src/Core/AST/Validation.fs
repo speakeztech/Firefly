@@ -1,6 +1,6 @@
 module Core.AST.Validation
 
-open System
+open System.IO
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
 open Core.AST.Extraction
@@ -14,6 +14,70 @@ let rangeToPosition (range: range) : SourcePosition = {
     File = range.FileName
     Offset = 0
 }
+
+/// Determine where a type originates from
+let determineTypeOrigin (typeDef: FSharpEntity) (projectFiles: string[]) : TypeOrigin =
+    // Check if it's from our project or Alloy
+    let location = typeDef.DeclarationLocation
+    if location <> range.Zero then
+        let filename = location.FileName
+        // Use explicit method to resolve ambiguity
+        if Array.exists (fun file -> filename.Contains(file:string)) projectFiles then
+            ProjectSource
+        elif filename.Contains("Alloy":string) || filename.Contains("lib\\Alloy2":string) then
+            AlloyLibrary
+        else
+            ExternalAssembly
+    // Check by namespace
+    elif typeDef.FullName.StartsWith "Alloy." || typeDef.FullName.StartsWith "Fidelity." then
+        AlloyLibrary
+    elif typeDef.FullName.StartsWith "Microsoft.FSharp." then
+        FSharpCore
+    else
+        ExternalAssembly
+
+/// Enhanced allocation detection that understands type origins
+let detectAllocationsWithTypeOrigins 
+    (expr: FSharpExpr) 
+    (projectFiles: string[]) 
+    (entityCache: Map<string, TypeOrigin>) : AllocationSite list =
+    
+    let allocations = ResizeArray<AllocationSite>()
+    let mutable cache = entityCache
+    
+    let getTypeOrigin (typeDef: FSharpEntity) =
+        match Map.tryFind typeDef.FullName cache with
+        | Some origin -> origin
+        | None ->
+            let origin = determineTypeOrigin typeDef projectFiles
+            cache <- Map.add typeDef.FullName origin cache
+            origin
+    
+    // The rest of your traverse function, but using type origins for decisions
+    let rec traverse (expr: FSharpExpr) =
+        if expr.Type.HasTypeDefinition then
+            let typeDef = expr.Type.TypeDefinition
+            let typeName = typeDef.QualifiedName
+            let origin = getTypeOrigin typeDef
+            
+            // Only flag external types as allocations
+            match origin with
+            | ExternalAssembly when not (typeName = "System.IDisposable") ->
+                allocations.Add({
+                    TypeName = typeName
+                    Location = expr.Range
+                    AllocationType = ObjectConstruction
+                })
+            | _ -> 
+                // Types from project, Alloy, or FSharp.Core are not allocations
+                ()
+        
+        // Recursively process sub-expressions
+        for subExpr in expr.ImmediateSubExpressions do
+            traverse subExpr
+    
+    traverse expr
+    allocations |> List.ofSeq
 
 /// Combine multiple compiler results into a single result
 let combineResults (results: CompilerResult<'T> list) : CompilerResult<'T list> =
@@ -79,32 +143,49 @@ let private isAllocatingFunction (fullName: string) : bool =
 // Simplified Expression Analysis for Allocations
 // ===================================================================
 
-/// Detect allocation sites using simplified expression analysis
+/// Detect allocation sites using enhanced type origin tracking
 let private detectAllocationsInExpr (expr: FSharpExpr) : AllocationSite list =
     let allocations = ResizeArray<AllocationSite>()
     
     try
+        // Get project files from the same folder as the current file
+        let currentDir = Path.GetDirectoryName expr.Range.FileName
+        let projectFiles = 
+            if Directory.Exists currentDir then
+                Directory.GetFiles(currentDir, "*.fs", SearchOption.AllDirectories)
+            else
+                [||]
+        
         let rec traverse (expr: FSharpExpr) =
             // Check if this expression type might indicate allocation
             if expr.Type.HasTypeDefinition then
                 let typeDef = expr.Type.TypeDefinition
                 let typeName = typeDef.QualifiedName
                 
-                // Check for known allocating types
-                if isAllocatingFunction typeName then
-                    allocations.Add({
-                        TypeName = typeName
-                        Location = expr.Range
-                        AllocationType = HeapAllocation
-                    })
-                elif typeName.StartsWith("System.") && not (typeName.StartsWith("System.Math")) then
-                    allocations.Add({
-                        TypeName = typeName
-                        Location = expr.Range
-                        AllocationType = ObjectConstruction
-                    })
+                // Determine type origin
+                let origin = determineTypeOrigin typeDef projectFiles
+                
+                // Only flag external types as allocations
+                match origin with
+                | ExternalAssembly ->
+                    // Skip IDisposable as it's just an interface marker
+                    if typeName <> "System.IDisposable" && isAllocatingFunction typeName then
+                        allocations.Add({
+                            TypeName = typeName
+                            Location = expr.Range
+                            AllocationType = HeapAllocation
+                        })
+                    elif typeName.StartsWith "System." && not (typeName.StartsWith "System.Math") then
+                        allocations.Add({
+                            TypeName = typeName
+                            Location = expr.Range
+                            AllocationType = ObjectConstruction
+                        })
+                | _ -> 
+                    // Types from project, Alloy, or FSharp.Core are not allocations
+                    ()
             
-            // Recursively check sub-expressions using the correct API
+            // Recursively check sub-expressions
             for subExpr in expr.ImmediateSubExpressions do
                 traverse subExpr
         
