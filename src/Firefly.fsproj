@@ -8,103 +8,43 @@
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
     <Version>0.3.022</Version>
-    <Description>Firefly F# Compiler - FCS Ingestion, AST Reachability Analysis, and Pruning</Description>
+    <Description>Firefly F# Compiler - AST-Based Compilation</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 
   <ItemGroup>
-      <!-- ===== CORE INFRASTRUCTURE - Foundation ===== -->
-      
-      <!-- Core Utilities - Must come first -->
+      <!-- Core Utilities -->
       <Compile Include="Core/Utilities/IntermediateWriter.fs" />
       <Compile Include="Core/Utilities/RemoveIntermediates.fs" />
       
-      <!-- Core Type System and Foundation --> 
+      <!-- Core Types --> 
       <Compile Include="Core/Types/Dialects.fs" />
       <Compile Include="Core/Types/TypeSystem.fs" />   
       <Compile Include="Core/XParsec/Foundation.fs" />  
       
-      <!-- ===== FCS INGESTION - Working Implementation ===== -->
-      
-      <!-- Project loading and FCS integration -->
+      <!-- FCS Integration -->
       <Compile Include="Core/FCSIngestion/ProjectOptionsLoader.fs" />     
       <Compile Include="Core/FCSIngestion/ProjectProcessor.fs" />         
-      <Compile Include="Core/FCSIngestion/SymbolCollector.fs" />          
       
-      <!-- ===== ANALYSIS - Enhanced AST Processing ===== -->
-    
+      <!-- AST Processing - Single Source of Truth -->
+      <Compile Include="Core/AST/Extraction.fs" />
+      <Compile Include="Core/AST/Dependencies.fs" />
+      <Compile Include="Core/AST/Reachability.fs" />
+      <Compile Include="Core/AST/Validation.fs" />
       
-      <!-- Enhanced AST analysis - NEW -->
-      <Compile Include="Dabbit/Analysis/Patterns.fs" />                <!-- AST pattern matching and parsing -->
-      <Compile Include="Dabbit/Analysis/ReachabilityAnalyzer.fs" />    <!-- Enhanced reachability with AST traversal -->
-      <Compile Include="Dabbit/Analysis/DependencyGraphBuilder.fs" />     <!-- Cross-module dependency resolution -->
-      
-      <!-- ===== PIPELINE - Enhanced Orchestration ===== -->
-      
-      <!-- Basic pipeline types -->
+      <!-- Pipeline -->
       <Compile Include="Dabbit/Pipeline/CompilationTypes.fs" />           
-      
-      <!-- AST integration - NEW -->
-      <Compile Include="Dabbit/Pipeline/ReachabilityIntegration.fs" /> <!-- Integration with compilation pipeline -->
-      
-      <!-- Main orchestrator (enhanced) -->
       <Compile Include="Dabbit/Pipeline/CompilationOrchestrator.fs" />    
       
-      <!-- ===== CLI - Enhanced Interface ===== -->
-      
-      <!-- CLI program with AST analysis support -->
-      <Compile Include="CLI/Program-Enhanced.fs" />                       <!-- Enhanced CLI with AST reachability -->
+      <!-- CLI -->
+      <Compile Include="CLI/Program-Enhanced.fs" />                       
   </ItemGroup>
 
   <ItemGroup>
-    <!-- ===== CORE F# DEPENDENCIES ===== -->
-    
-    <!-- F# Core - Pinned version for stability -->
     <PackageReference Update="FSharp.Core" Version="[9.0.300]" />
-
-    <!-- ===== F# COMPILER SERVICES ===== -->
-    
-    <!-- FCS for AST parsing and type checking -->
     <PackageReference Include="FSharp.Compiler.Service" Version="43.9.300" />
-
-    <!-- ===== PARSING AND TEXT PROCESSING ===== -->
-    
-    <!-- XParsec for project file parsing -->
     <PackageReference Include="XParsec" Version="0.1.0" />
-    
-    <!-- ===== CLI AND UTILITIES ===== -->
-    
-    <!-- Command line argument parsing -->
     <PackageReference Include="Argu" Version="6.1.1" />
-    
-    <!-- ===== FUTURE DEPENDENCIES (Commented out for minimal build) ===== -->
-    
-    <!-- MLIR.NET for code generation (when ready) -->
-    <!-- <PackageReference Include="MLIR.NET" Version="1.0.0" /> -->
-    
-    <!-- LLVM.NET for native compilation (when ready) -->
-    <!-- <PackageReference Include="LLVM.NET" Version="15.0.0" /> -->
   </ItemGroup>
 
 </Project>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
