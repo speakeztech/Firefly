@@ -7,7 +7,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.3.013</Version>
+    <Version>0.3.016</Version>
     <Description>Firefly F# Compiler - FCS Ingestion, AST Reachability Analysis, and Pruning</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
@@ -87,6 +87,9 @@
   </ItemGroup>
 
 </Project>
+
+
+
 
 
 

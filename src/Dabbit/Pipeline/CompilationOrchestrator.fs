@@ -36,6 +36,19 @@ let private writeIntermediateFiles
     for (fileName, content) in astFiles do
         let filePath = Path.Combine(intermediatesDir, fileName)
         writeFileToPath filePath content
+
+let private validateZeroAllocation (symbolCollection: SymbolCollectionResult) (reachability: ReachabilityResult) =
+    let reachableAllocators = 
+        symbolCollection.AllocatingSymbols 
+        |> Array.filter (fun sym -> Set.contains sym.FullName reachability.ReachableSymbols)
+    
+    if reachableAllocators.Length > 0 then
+        printfn "\n[CompilationOrchestrator] ❌ COMPILATION HALTED: %d allocating functions reachable" reachableAllocators.Length
+        reachableAllocators |> Array.iter (fun sym -> printfn "  ERROR: %s" sym.FullName)
+        Error reachableAllocators
+    else
+        printfn "[CompilationOrchestrator] ✓ Zero allocations in reachable code"
+        Ok ()
     
 
 /// Main compilation function with enhanced pipeline
@@ -135,7 +148,26 @@ let compileProject
                         }
                     }
                 | Success reachability ->
-    
+
+                    match validateZeroAllocation symbolCollection reachability with
+                    | Error reachableAllocators ->
+                        return {
+                            Success = false
+                            IntermediatesGenerated = false
+                            ReachabilityReport = Some (ReachabilityHelpers.generateReport reachability)
+                            Diagnostics = reachableAllocators |> Array.map (fun sym -> 
+                                InternalError("AllocationAnalysis", sprintf "Reachable allocating function: %s" sym.FullName, None)) |> Array.toList
+                            Statistics = {
+                                TotalFiles = projectOptions.SourceFiles.Length
+                                TotalSymbols = symbolCollection.Statistics.TotalSymbols
+                                ReachableSymbols = Set.count reachability.ReachableSymbols
+                                EliminatedSymbols = symbolCollection.Statistics.TotalSymbols - Set.count reachability.ReachableSymbols
+                                CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
+                            }
+                        }
+                    | Ok () ->
+
+
                     // IMMEDIATELY emit reachability outputs while we have the data
                     progress IntermediateGeneration "Writing intermediate files"
                     let intermediatesGenerated = 
