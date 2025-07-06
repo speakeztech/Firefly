@@ -23,7 +23,6 @@ type CollectedSymbol = {
     Assembly: string
     Category: SymbolCategory
     IsAllocation: bool
-    AlloyReplacement: string option
     DeclaringEntity: string option
 }
 
@@ -64,7 +63,7 @@ and SymbolStatistics = {
     EntryPoints: int
 }
 
-/// XParsec-based symbol classification - establishing the compiler pattern
+/// Improved XParsec-based symbol classification for Firefly compiler
 module private SymbolClassificationParsers =
     open XParsec
     open XParsec.CharParsers
@@ -73,7 +72,7 @@ module private SymbolClassificationParsers =
     /// Parse specific operator symbols (actual FCS names)
     let pOperatorSymbol (symbol: string) = pstring symbol
 
-    /// Parse any arithmetic operator (using actual symbolic names)
+    /// Parse any arithmetic operator
     let pArithmeticOperator =
         choice [
             pOperatorSymbol "(+)"
@@ -81,9 +80,11 @@ module private SymbolClassificationParsers =
             pOperatorSymbol "(*)"
             pOperatorSymbol "(/)"
             pOperatorSymbol "(%)"
+            pOperatorSymbol "(~-)"
+            pOperatorSymbol "(~+)"
         ]
 
-    /// Parse any comparison operator (using actual symbolic names)
+    /// Parse comparison operators
     let pComparisonOperator =
         choice [
             pOperatorSymbol "(=)"
@@ -94,112 +95,200 @@ module private SymbolClassificationParsers =
             pOperatorSymbol "(>=)"
         ]
 
-    /// Parse any bitwise operator (using actual symbolic names)
+    /// Parse bitwise operators
     let pBitwiseOperator =
         choice [
             pOperatorSymbol "(&&&)"
             pOperatorSymbol "(|||)"
+            pOperatorSymbol "(^^^)"
             pOperatorSymbol "(~~~)"
             pOperatorSymbol "(<<<)"
             pOperatorSymbol "(>>>)"
         ]
 
-    /// Parse any boolean operator (using actual intrinsic names)
-    let pBooleanOperator =
+    /// Parse logical operators
+    let pLogicalOperator =
         choice [
             pOperatorSymbol "(&&)"
             pOperatorSymbol "(||)"
+            pOperatorSymbol "(not)"
         ]
 
     /// Parse utility operators
     let pUtilityOperator =
         choice [
             pOperatorSymbol "(|>)"
-            pOperatorSymbol "(~&&)"
+            pOperatorSymbol "(<|)"
+            pOperatorSymbol "(>>)"
+            pOperatorSymbol "(<<)"
+            pOperatorSymbol "(|)"
+            pOperatorSymbol "ignore"
+            pOperatorSymbol "id"
         ]
 
-    /// Parse any operator
-    let pAnyOperator =
+    /// Parse all safe operators
+    let pSafeOperator =
         choice [
             pArithmeticOperator
             pComparisonOperator
             pBitwiseOperator
-            pBooleanOperator
+            pLogicalOperator
             pUtilityOperator
         ]
 
-    /// Parse mathematical function names
-    let pMathFunctionName =
+    /// Parse compile-time attributes (never allocate at runtime)
+    let pCompileTimeAttribute =
         choice [
+            pstring "AbstractClassAttribute"
+            pstring "AutoOpenAttribute"
+            pstring "CompiledNameAttribute"
+            pstring "EntryPointAttribute"
+            pstring "LiteralAttribute"
+            pstring "RequireQualifiedAccessAttribute"
+            pstring "StructAttribute"
+            pstring "NoComparisonAttribute"
+            pstring "NoEqualityAttribute"
+            pstring "CustomComparisonAttribute"
+            pstring "CustomEqualityAttribute"
+            pstring "StructuralComparisonAttribute"
+            pstring "StructuralEqualityAttribute"
+            pstring "CLIMutableAttribute"
+            pstring "CompilerGeneratedAttribute"
+            pstring "DebuggerNonUserCodeAttribute"
+            pstring "GeneratedCodeAttribute"
+        ]
+
+    /// Parse basic F# types that don't allocate when used as types
+    let pBasicFSharpType =
+        choice [
+            pstring "int"
+            pstring "int32"
+            pstring "int64"
+            pstring "uint32"
+            pstring "uint64"
+            pstring "float"
+            pstring "float32"
+            pstring "double"
+            pstring "byte"
+            pstring "sbyte"
+            pstring "char"
+            pstring "bool"
+            pstring "unit"
+            pstring "nativeint"
+            pstring "unativeint"
+        ]
+
+    /// Parse safe F# Core functions (mathematical, no allocation)
+    let pSafeFSharpCoreFunction =
+        choice [
+            // Math functions
             pstring "abs"; pstring "acos"; pstring "asin"; pstring "atan"; pstring "atan2"
             pstring "cos"; pstring "sin"; pstring "tan"; pstring "exp"
             pstring "log"; pstring "log10"; pstring "sqrt"; pstring "pown"
-            pstring "sign"; pstring "max"; pstring "min"
+            pstring "sign"; pstring "max"; pstring "min"; pstring "round"
+            pstring "ceil"; pstring "floor"; pstring "truncate"
+            
+            // Type conversions (safe when not boxing)
+            pstring "byte"; pstring "char"; pstring "int"; pstring "int32"; pstring "int64"
+            pstring "uint32"; pstring "uint64"; pstring "float"; pstring "float32"
+            pstring "double"; pstring "decimal"; pstring "nativeint"; pstring "unativeint"
+            
+            // Utility functions
+            pstring "id"; pstring "ignore"; pstring "not"
         ]
 
-    /// Parse utility function names
-    let pUtilityFunctionName =
-        choice [
-            pstring "id"; pstring "ignore"; pstring "``not``"
-        ]
-
-    /// Parse type conversion function names
-    let pTypeConversionName =
-        choice [
-            pstring "byte"; pstring "char"; pstring "int"; pstring "int64"
-        ]
-
-    /// Parse language primitive names
-    let pLanguagePrimitiveName =
-        choice [
-            pstring "GenericZero"; pstring "GenericOne"
-            pstring "DecimalWithMeasure"; pstring "Float32WithMeasure"
-            pstring "FloatWithMeasure"; pstring "Int32WithMeasure"; pstring "Int64WithMeasure"
-        ]
-
-    /// Parse operators namespace with any operator
-    let pOperatorsNamespace =
+    /// Parse F# Core operators namespace (mostly safe)
+    let pFSharpCoreOperators =
         pstring "Microsoft.FSharp.Core.Operators." >>. choice [
-            pAnyOperator
-            pMathFunctionName
-            pUtilityFunctionName
-            pTypeConversionName
-            pstring "Unchecked.defaultof"
+            pSafeOperator
+            pSafeFSharpCoreFunction
+            pstring "Unchecked.defaultof"  // Safe stack allocation
+            pstring "Unchecked.unbox"      // Safe when used correctly
+            pstring "Unchecked.compare"    // Safe structural comparison
         ]
 
-    /// Parse language primitives namespace
-    let pLanguagePrimitivesNamespace =
+    /// Parse F# LanguagePrimitives (mostly safe intrinsics)
+    let pFSharpLanguagePrimitives =
         pstring "Microsoft.FSharp.Core.LanguagePrimitives." >>. choice [
-            pLanguagePrimitiveName
+            pstring "GenericZero"; pstring "GenericOne"
+            pstring "AdditionDynamic"; pstring "SubtractionDynamic"
+            pstring "MultiplyDynamic"; pstring "DivisionDynamic"
+            pstring "EqualityComparer"; pstring "GenericEquality"
+            pstring "GenericComparison"; pstring "PhysicalEquality"
             pstring "IntrinsicOperators." >>. choice [
-                pOperatorSymbol "(&&)"
-                pOperatorSymbol "(||)" 
-                pOperatorSymbol "(~&&)"
+                pOperatorSymbol "(&&)"; pOperatorSymbol "(||)"
+                pOperatorSymbol "(~&&)"; pOperatorSymbol "(~||)"
             ]
         ]
 
-    /// Parse any safe F# primitive
-    let pSafePrimitive =
+    /// Parse option/voption operations (safe when using ValueOption)
+    let pSafeOptionOperations =
         choice [
-            pOperatorsNamespace
-            pLanguagePrimitivesNamespace
+            pstring "Some"; pstring "None"  // When referring to ValueOption
+            pstring "ValueSome"; pstring "ValueNone"
+            pstring "isSome"; pstring "isNone"
+            pstring "get"  // Safe for ValueOption
         ]
 
-    /// Parse known allocating function patterns
-    let pAllocatingFunction =
+    /// Parse known allocating F# functions
+    let pAllocatingFSharpFunction =
         choice [
+            // Array creation functions
             pstring "Microsoft.FSharp.Collections.Array.zeroCreate"
             pstring "Microsoft.FSharp.Collections.Array.create"
             pstring "Microsoft.FSharp.Collections.Array.init"
+            pstring "Microsoft.FSharp.Collections.Array.copy"
+            pstring "Microsoft.FSharp.Collections.Array.append"
+            pstring "Microsoft.FSharp.Collections.Array.concat"
+            
+            // List operations (all allocate)
             pstring "Microsoft.FSharp.Collections.List.init"
             pstring "Microsoft.FSharp.Collections.List.replicate"
             pstring "Microsoft.FSharp.Collections.List.ofArray"
             pstring "Microsoft.FSharp.Collections.List.toArray"
+            pstring "Microsoft.FSharp.Collections.List.append"
+            pstring "Microsoft.FSharp.Collections.List.concat"
+            pstring "Microsoft.FSharp.Collections.List.rev"
+            pstring "Microsoft.FSharp.Collections.List.sort"
+            pstring "Microsoft.FSharp.Collections.List.map"
+            pstring "Microsoft.FSharp.Collections.List.filter"
+            
+            // Sequence operations (lazy but allocate when materialized)
             pstring "Microsoft.FSharp.Collections.Seq.toArray"
             pstring "Microsoft.FSharp.Collections.Seq.toList"
+            pstring "Microsoft.FSharp.Collections.Seq.cache"
+            pstring "Microsoft.FSharp.Collections.Seq.map"
+            pstring "Microsoft.FSharp.Collections.Seq.filter"
+            
+            // String operations
             pstring "Microsoft.FSharp.Core.ExtraTopLevelOperators.sprintf"
             pstring "Microsoft.FSharp.Core.ExtraTopLevelOperators.printfn"
+            pstring "Microsoft.FSharp.Core.Printf.sprintf"
+            pstring "Microsoft.FSharp.Core.Printf.printfn"
+            
+            // Boxing operations
+            pstring "Microsoft.FSharp.Core.Operators.box"
+            pstring "Microsoft.FSharp.Core.Operators.unbox"
+            pstring "Microsoft.FSharp.Core.Operators.ref"
+            
+            // Exception handling
+            pstring "Microsoft.FSharp.Core.Operators.raise"
+            pstring "Microsoft.FSharp.Core.Operators.failwith"
+            pstring "Microsoft.FSharp.Core.Operators.invalidArg"
+        ]
+
+    /// Parse BCL allocating functions (System namespace)
+    let pAllocatingBCLFunction =
+        choice [
             pstring "System.String.Concat"
+            pstring "System.String.Format"
+            pstring "System.String.Join"
+            pstring "System.Console.WriteLine"
+            pstring "System.Console.Write"
+            pstring "System.Text.StringBuilder"
+            pstring "System.Array.Copy"
+            pstring "System.Array.Resize"
+            pstring "System.Collections.Generic.List"
         ]
 
     /// Parse Alloy/Fidelity framework symbols
@@ -207,43 +296,74 @@ module private SymbolClassificationParsers =
         choice [
             pstring "Alloy."
             pstring "Fidelity."
-            pstring "System.ValueOption`1"
-            pstring "voption"
+            pstring "System.ValueOption`1"  // Safe alternative to Option
+            pstring "voption"               // Type alias
         ]
 
-    /// Parse native interop operations
+    /// Parse NativePtr operations (safe when used correctly)
     let pNativeInterop =
-        pstring "Microsoft.FSharp.NativeInterop."
-
-    /// Parse BCL System/Microsoft prefixes
-    let pBCLPrefix =
-        choice [
-            pstring "System."
-            pstring "Microsoft."
+        pstring "Microsoft.FSharp.NativeInterop." >>. choice [
+            pstring "NativePtr.stackalloc"
+            pstring "NativePtr.read"
+            pstring "NativePtr.write"
+            pstring "NativePtr.get"
+            pstring "NativePtr.set"
+            pstring "NativePtr.add"
+            pstring "NativePtr.ofNativeInt"
+            pstring "NativePtr.toNativeInt"
         ]
 
-    /// Test if a parser matches the beginning of input (prefix matching)
+    /// Parse all safe F# primitives
+    let pSafeFSharpPrimitive =
+        choice [
+            pFSharpCoreOperators
+            pFSharpLanguagePrimitives
+            pNativeInterop
+            pSafeOptionOperations
+            pBasicFSharpType
+        ]
+
+    /// Test if a parser matches the beginning of input
     let parsePrefix parser input =
         match parser (Reader.ofString input ()) with
         | Ok _ -> true
         | Error _ -> false
 
-    /// Classify a symbol's full name using XParsec combinators
-    let classifySymbolName (fullName: string) : SymbolCategory * bool =
-        // Try parsers in priority order - most specific first
-        if parsePrefix pSafePrimitive fullName then
-            SafePrimitive, false
-        elif parsePrefix pAllocatingFunction fullName then  
-            AllocatingFunction, true
-        elif parsePrefix pAlloyFramework fullName then
-            AlloyNative, false
-        elif parsePrefix pNativeInterop fullName then
-            SafeNativeInterop, false
-        elif parsePrefix pBCLPrefix fullName then
-            BCLType, true
-        else
-            Unknown, false
-
+    /// Enhanced symbol classification with proper precedence
+    let classifySymbolName (fullName: string) (displayName: string) : SymbolCategory * bool =
+        // Handle display name patterns first for simple cases
+        match displayName with
+        | name when parsePrefix pCompileTimeAttribute name ->
+            SafePrimitive, false  // Attributes don't exist at runtime
+        | name when parsePrefix pBasicFSharpType name ->
+            SafePrimitive, false  // Basic types don't allocate
+        | name when parsePrefix pSafeOperator name ->
+            SafePrimitive, false  // Operators are safe
+        | "list" | "seq" | "array" when not (fullName.Contains("Alloy")) ->
+            AllocatingFunction, true  // BCL collections allocate
+        | "::" | "op_ColonColon" ->
+            AllocatingFunction, true  // List cons allocates
+        | "FSharp" ->
+            SafePrimitive, false  // Namespace/assembly name, not allocating
+        | _ ->
+            // Use full name for detailed classification
+            if parsePrefix pSafeFSharpPrimitive fullName then
+                SafePrimitive, false
+            elif parsePrefix pAllocatingFSharpFunction fullName then  
+                AllocatingFunction, true
+            elif parsePrefix pAllocatingBCLFunction fullName then
+                AllocatingFunction, true
+            elif parsePrefix pAlloyFramework fullName then
+                AlloyNative, false
+            elif fullName.StartsWith("Microsoft.FSharp.Core") then
+                // Most F# Core is safe unless explicitly listed as allocating
+                SafePrimitive, false
+            elif fullName.StartsWith("System.") && not (fullName.StartsWith("System.ValueOption")) then
+                BCLType, true  // Most System types should be replaced with Alloy
+            elif fullName.StartsWith("Microsoft.") && not (fullName.StartsWith("Microsoft.FSharp")) then
+                BCLType, true  // Non-F# Microsoft types
+            else
+                Unknown, false
 /// Known allocating patterns in F# and BCL
 module private AllocationPatterns =
     let allocatingFunctions = 
@@ -271,24 +391,6 @@ module private AllocationPatterns =
             "System.String.Format"
             "System.Console.WriteLine"
         ]
-    
-    let alloyReplacements = 
-        Map.ofList [
-            // Array operations
-            ("Microsoft.FSharp.Collections.Array.zeroCreate", "Alloy.Memory.stackBuffer")
-            ("Microsoft.FSharp.Collections.Array.create", "Alloy.Memory.stackBufferWithValue")
-            ("Microsoft.FSharp.Collections.Array.length", "Alloy.Memory.bufferLength")
-            
-            // String/text operations  
-            ("Microsoft.FSharp.Core.ExtraTopLevelOperators.sprintf", "Alloy.Text.formatStackBuffer")
-            ("Microsoft.FSharp.Core.ExtraTopLevelOperators.printfn", "Alloy.Console.writeLine")
-            ("System.Console.WriteLine", "Alloy.Console.writeLine")
-            
-            // Math operations
-            ("System.Math.Sin", "Alloy.Math.sin")
-            ("System.Math.Cos", "Alloy.Math.cos")
-            ("System.Math.Sqrt", "Alloy.Math.sqrt")
-        ]
 
 /// Check if a function is an entry point
 let private isEntryPoint (func: FSharpMemberOrFunctionOrValue) =
@@ -307,9 +409,9 @@ let private isEntryPoint (func: FSharpMemberOrFunctionOrValue) =
     
     hasEntryPointAttr || isMainFunction
 
-/// Analyze a single symbol using XParsec-based classification
+/// Enhanced symbol analysis with improved classification
 let private analyzeSymbol (symbol: FSharpSymbol) : CollectedSymbol =
-    // Safely get the full name, handling voption edge case
+    // Safely get the full name, handling edge cases
     let fullName = 
         try
             symbol.FullName
@@ -327,9 +429,12 @@ let private analyzeSymbol (symbol: FSharpSymbol) : CollectedSymbol =
             | _ ->
                 sprintf "Unknown.%s" symbol.DisplayName
         | ex ->
-            printfn "[SymbolCollector] Warning: Could not get FullName for symbol '%s': %s" symbol.DisplayName ex.Message
+            // Don't spam warnings for common cases
+            if not (symbol.DisplayName = "FSharp") then
+                printfn "[SymbolCollector] Warning: Could not get FullName for symbol '%s': %s" symbol.DisplayName ex.Message
             sprintf "Unknown.%s" symbol.DisplayName
     
+    let displayName = symbol.DisplayName
     let assembly = symbol.Assembly.SimpleName
     
     let category, isAllocation = 
@@ -338,20 +443,21 @@ let private analyzeSymbol (symbol: FSharpSymbol) : CollectedSymbol =
             EntryPoint, false
         | :? FSharpMemberOrFunctionOrValue as func when assembly.StartsWith("Alloy") || assembly.StartsWith("Fidelity") ->
             AlloyNative, false
-        | :? FSharpMemberOrFunctionOrValue as func when func.DeclaringEntity.IsSome && func.DeclaringEntity.Value.Assembly.SimpleName = symbol.Assembly.SimpleName ->
+        | :? FSharpMemberOrFunctionOrValue as func when 
+            func.DeclaringEntity.IsSome && 
+            func.DeclaringEntity.Value.Assembly.SimpleName = symbol.Assembly.SimpleName ->
             UserDefined, false
         | _ ->
-            // Use XParsec-based classification for external symbols
-            SymbolClassificationParsers.classifySymbolName fullName
+            // Use enhanced classification with both names
+            SymbolClassificationParsers.classifySymbolName fullName displayName
     
     {
         Symbol = symbol
         FullName = fullName
-        DisplayName = symbol.DisplayName
+        DisplayName = displayName
         Assembly = assembly
         Category = category
         IsAllocation = isAllocation
-        AlloyReplacement = AllocationPatterns.alloyReplacements.TryFind(fullName)
         DeclaringEntity = 
             match symbol with
             | :? FSharpMemberOrFunctionOrValue as func -> 
@@ -365,46 +471,49 @@ let private analyzeSymbol (symbol: FSharpSymbol) : CollectedSymbol =
 let private buildDependencies (processed: ProcessedProject) =
     printfn "[SymbolCollector] Building dependencies from %d symbol uses..." processed.SymbolUses.Length
     
-    // Create a lookup of declarations by file and location
+    // Create a lookup of declarations by file and location using symbolUse ranges
     let declarations = 
         processed.SymbolUses
         |> Array.choose (fun symbolUse ->
             match symbolUse.Symbol with
-            | :? FSharpMemberOrFunctionOrValue as func when func.DeclarationLocation.IsSome ->
-                let declLocation = func.DeclarationLocation.Value
-                Some {|
-                    Symbol = func.FullName
-                    File = declLocation.FileName
-                    StartLine = declLocation.StartLine
-                    EndLine = declLocation.EndLine
-                |}
+            | :? FSharpMemberOrFunctionOrValue as func ->
+                // Use the symbol use range as the declaration location
+                // Filter for symbols that appear to be declarations (not references)
+                if symbolUse.IsFromDefinition then
+                    let declRange = symbolUse.Range
+                    Some {|
+                        Symbol = func.FullName
+                        File = declRange.FileName
+                        StartLine = declRange.StartLine
+                        EndLine = declRange.EndLine
+                    |}
+                else
+                    None
             | _ -> None)
     
     // For each symbol use, find the containing declaration
     let dependencies = 
         processed.SymbolUses
         |> Array.choose (fun symbolUse ->
-            match symbolUse.Range with
-            | Some useRange ->
-                let usedSymbol = symbolUse.Symbol.FullName
-                
-                // Find the declaration that contains this usage
-                let containingDeclaration = 
-                    declarations
-                    |> Array.tryFind (fun decl ->
-                        decl.File = useRange.FileName &&
-                        decl.StartLine <= useRange.StartLine &&
-                        useRange.EndLine <= decl.EndLine &&
-                        decl.Symbol <> usedSymbol) // Don't create self-dependencies
-                
-                match containingDeclaration with
-                | Some decl ->
-                    Some {
-                        FromSymbol = decl.Symbol
-                        ToSymbol = usedSymbol
-                        DependencyKind = "calls"
-                    }
-                | None -> None
+            let useRange = symbolUse.Range
+            let usedSymbol = symbolUse.Symbol.FullName
+            
+            // Find the declaration that contains this usage
+            let containingDeclaration = 
+                declarations
+                |> Array.tryFind (fun decl ->
+                    decl.File = useRange.FileName &&
+                    decl.StartLine <= useRange.StartLine &&
+                    useRange.EndLine <= decl.EndLine &&
+                    decl.Symbol <> usedSymbol) // Don't create self-dependencies
+            
+            match containingDeclaration with
+            | Some decl ->
+                Some {
+                    FromSymbol = decl.Symbol
+                    ToSymbol = usedSymbol
+                    DependencyKind = "calls"
+                }
             | None -> None)
         |> Array.distinctBy (fun dep -> (dep.FromSymbol, dep.ToSymbol))
     
@@ -419,28 +528,31 @@ let private buildDependencies (processed: ProcessedProject) =
     
     dependencies
 
-/// Report on problematic symbols
+/// Report on problematic symbols that should cause compilation errors
 let private reportProblematicSymbols (collected: SymbolCollectionResult) =
     if collected.AllocatingSymbols.Length > 0 then
-        printfn "\n[SymbolCollector] ⚠️  Allocating symbols found:"
+        printfn "\n[SymbolCollector] ❌ COMPILATION ERRORS: Allocating symbols found:"
         collected.AllocatingSymbols
         |> Array.truncate 10
         |> Array.iter (fun sym ->
-            match sym.AlloyReplacement with
-            | Some replacement ->
-                printfn "  %s → %s" sym.DisplayName replacement
-            | None ->
-                printfn "  %s (no Alloy replacement)" sym.DisplayName)
+            printfn "  ERROR: %s - heap allocation not allowed in Firefly" sym.DisplayName)
                 
         if collected.AllocatingSymbols.Length > 10 then
-            printfn "  ... and %d more" (collected.AllocatingSymbols.Length - 10)
+            printfn "  ... and %d more allocation errors" (collected.AllocatingSymbols.Length - 10)
+        
+        printfn "\n  Firefly requires zero-allocation code. Use Alloy framework alternatives."
     
     if collected.BCLReferences.Length > 0 then
-        printfn "\n[SymbolCollector] ⚠️  BCL references found:"
+        printfn "\n[SymbolCollector] ❌ COMPILATION ERRORS: Unsupported BCL references:"
         collected.BCLReferences
         |> Array.truncate 5
         |> Array.iter (fun sym ->
-            printfn "  %s from %s" sym.FullName sym.Assembly)
+            printfn "  ERROR: %s from %s - BCL not supported, use Alloy framework" sym.FullName sym.Assembly)
+        
+        if collected.BCLReferences.Length > 5 then
+            printfn "  ... and %d more BCL errors" (collected.BCLReferences.Length - 5)
+        
+        printfn "\n  Firefly compiles to native code without BCL dependencies."
 
 /// Create a dependency graph suitable for reachability analysis
 let createDependencyGraph (collected: SymbolCollectionResult) =

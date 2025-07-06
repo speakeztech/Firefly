@@ -5,7 +5,7 @@ open System.IO
 module IntermediateWriter =
     
     /// Simple file writer that takes a full path and content
-    let writeIntermediateFile (filePath: string) (content: string) : unit =
+    let writeFileToPath (filePath: string) (content: string) : unit =
         try
             // Ensure directory exists
             let directory = Path.GetDirectoryName(filePath)

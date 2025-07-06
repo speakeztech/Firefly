@@ -266,32 +266,7 @@ type PipelineIntegrator(projectDirectory: string) =
         
         sb.ToString()
     
-    /// Write output files
-    member this.WriteOutputFiles(result: ReachabilityResult) =
-        // Write pruned AST files
-        for KeyValue(moduleName, prunedAST) in result.PrunedASTs do
-            let fileName = sprintf "%s.pruned.ast" moduleName
-            let filePath = Path.Combine(intermediatesDir, fileName)
-            writeIntermediateFile filePath prunedAST
-        
-        // Find main module for final AST filename
-        let mainModuleName = 
-            result.PrunedASTs.Keys
-            |> Seq.tryFind (fun name -> 
-                name.Contains("HelloWorld") || name.Contains("Main") || 
-                name.ToLower().Contains("main"))
-            |> Option.defaultValue "Program"
-        
-        // Write final AST
-        let finalFileName = sprintf "%s.final.ast" mainModuleName
-        let finalFilePath = Path.Combine(intermediatesDir, finalFileName)
-        writeIntermediateFile finalFilePath result.FinalAST
-        
-        // Write report
-        let reportContent = this.GenerateReport(result)
-        let reportPath = Path.Combine(intermediatesDir, "reachability.report")
-        writeIntermediateFile reportPath reportContent
-    
+   
     /// Generate human-readable report
     member this.GenerateReport(result: ReachabilityResult) =
         let sb = System.Text.StringBuilder()
@@ -320,31 +295,6 @@ type PipelineIntegrator(projectDirectory: string) =
         sb.AppendLine() |> ignore
         
         sb.ToString()
-
-/// Integration point for CompilationOrchestrator
-module CompilationOrchestratorIntegration =
-    
-    let enhanceCompilationPipeline (projectDirectory: string) (progress: CompilationPhase -> string -> unit) =
-        progress ReachabilityAnalysis "Starting reachability analysis"
-        
-        let integrator = PipelineIntegrator(projectDirectory)
-        
-        match integrator.RunReachabilityAnalysis() with
-        | Success result ->
-            progress IntermediateGeneration "Writing pruned and final AST files"
-            integrator.WriteOutputFiles(result)
-            progress IntermediateGeneration "Reachability analysis complete"
-            
-            Success {
-                TotalFiles = result.Statistics.TotalModules
-                TotalSymbols = result.Statistics.TotalSymbols
-                ReachableSymbols = result.Statistics.ReachableSymbols
-                EliminatedSymbols = result.Statistics.EliminatedSymbols
-                CompilationTimeMs = 0.0 // TODO: Add timing
-            }
-        | CompilerFailure errors ->
-            progress ReachabilityAnalysis "Reachability analysis failed"
-            CompilerFailure errors
 
 /// Helper functions for compilation orchestrator
 module ReachabilityHelpers =

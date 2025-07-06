@@ -5,6 +5,7 @@ open System.IO
 open FSharp.Compiler.CodeAnalysis
 open Core.XParsec.Foundation
 open Core.Utilities.IntermediateWriter
+open Core.Utilities.RemoveIntermediates
 open Core.FCSIngestion.ProjectOptionsLoader
 open Core.FCSIngestion.ProjectProcessor
 open Core.FCSIngestion.SymbolCollector
@@ -20,10 +21,10 @@ type CompilationResult = {
     Statistics: CompilationStatistics
 }
 
-/// Write intermediate files for debugging and verification
+/// Write intermediate files - STATELESS function that just writes what it's given
 let private writeIntermediateFiles 
     (intermediatesDir: string)
-    (processedProject: ProcessedProject)
+    (astFiles: (string * string) list)  // (filename, content) pairs
     (symbolCollection: SymbolCollectionResult) 
     (reachability: ReachabilityResult) : unit =
     
@@ -31,22 +32,11 @@ let private writeIntermediateFiles
     let analysisDir = Path.Combine(intermediatesDir, "analysis")
     Directory.CreateDirectory(analysisDir) |> ignore
     
-    // NOTE: Initial AST already written immediately after FCS processing
+    // Write AST files passed to us
+    for (fileName, content) in astFiles do
+        let filePath = Path.Combine(intermediatesDir, fileName)
+        writeFileToPath filePath content
     
-    // Write symbol collection results
-    let symbolsPath = Path.Combine(analysisDir, "symbols.analysis")
-    let symbolsContent = sprintf "%A" symbolCollection
-    writeIntermediateFile symbolsPath symbolsContent
-    
-    // Write reachability analysis
-    let reachabilityPath = Path.Combine(analysisDir, "reachability.analysis")
-    let reachabilityContent = sprintf "%A" reachability
-    writeIntermediateFile reachabilityPath reachabilityContent
-    
-    // Write reachability report (human readable)
-    let reportPath = Path.Combine(analysisDir, "reachability.report")
-    let reportContent = ReachabilityHelpers.generateReport reachability
-    writeIntermediateFile reportPath reportContent
 
 /// Main compilation function with enhanced pipeline
 let compileProject 
@@ -79,7 +69,9 @@ let compileProject
                 }
             }
         | Ok projectOptions ->
-            
+            // clear intermediates to ensure all files are from the current compilation pass
+            prepareIntermediatesDirectory intermediatesDir
+
             // Phase 2: Process source files with FCS
             progress FCSProcessing "Processing F# source files"
             let! processedResult = processProject projectOptions checker
@@ -107,6 +99,18 @@ let compileProject
                 }
             | Ok processedProject ->
                 
+                // IMMEDIATELY emit initial AST files while we have the data
+                match intermediatesDir with
+                | Some dir ->
+                    let implementationFiles = processedProject.CheckResults.AssemblyContents.ImplementationFiles
+                    for i, implFile in Array.indexed (implementationFiles |> Seq.toArray) do
+                        let sourceFileName = Path.GetFileNameWithoutExtension(projectOptions.SourceFiles.[i])
+                        let fileName = sprintf "%02d_%s.initial.ast" i sourceFileName
+                        let filePath = Path.Combine(dir, fileName)
+                        let astContent = sprintf "%A" implFile.Declarations
+                        writeFileToPath filePath astContent
+                | None -> ()
+
                 // Phase 3: Collect symbols and build dependency graph
                 progress SymbolCollection "Collecting symbols and dependencies"
                 let symbolCollection = collectSymbols processedProject
@@ -131,13 +135,37 @@ let compileProject
                         }
                     }
                 | Success reachability ->
-                    
-                    // Phase 5: Generate intermediate files
+    
+                    // IMMEDIATELY emit reachability outputs while we have the data
                     progress IntermediateGeneration "Writing intermediate files"
                     let intermediatesGenerated = 
                         match intermediatesDir with
                         | Some dir ->
-                            writeIntermediateFiles dir processedProject symbolCollection reachability
+                            // Create analysis directory
+                            let analysisDir = Path.Combine(dir, "analysis")
+                            Directory.CreateDirectory(analysisDir) |> ignore
+                            
+                            // Emit reduced AST files (with reachability applied)
+                            let implementationFiles = processedProject.CheckResults.AssemblyContents.ImplementationFiles
+                            for i, implFile in Array.indexed (implementationFiles |> Seq.toArray) do
+                                let sourceFileName = Path.GetFileNameWithoutExtension(projectOptions.SourceFiles.[i])
+                                let fileName = sprintf "%02d_%s.reduced.ast" i sourceFileName
+                                let filePath = Path.Combine(dir, fileName)
+                                let astContent = sprintf "%A" implFile.Declarations  // TODO: Apply reachability pruning
+                                writeFileToPath filePath astContent
+                            
+                            // Emit reachability analysis data
+                            let reachabilityPath = Path.Combine(analysisDir, "reachability.analysis")
+                            writeFileToPath reachabilityPath (sprintf "%A" reachability)
+                            
+                            // Emit human-readable reachability report
+                            let reportPath = Path.Combine(analysisDir, "reachability.report")
+                            writeFileToPath reportPath (ReachabilityHelpers.generateReport reachability)
+                            
+                            // Emit symbol collection data
+                            let symbolsPath = Path.Combine(analysisDir, "symbols.analysis")
+                            writeFileToPath symbolsPath (sprintf "%A" symbolCollection)
+                            
                             true
                         | None -> false
                     
@@ -185,11 +213,11 @@ let compileProject
                         return {
                             Success = true
                             IntermediatesGenerated = intermediatesGenerated
-                            ReachabilityReport = Some report
                             Diagnostics = []
                             Statistics = stats
+                            ReachabilityReport = None
                         }
-        
+
         with ex ->
             return {
                 Success = false
