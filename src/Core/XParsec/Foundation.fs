@@ -1,17 +1,14 @@
 ﻿module Core.XParsec.Foundation
 
 open System
-open System.Text  
-open XParsec
-open XParsec.CharParsers
-open XParsec.Parsers
-open Core.Types.TypeSystem
+open FSharp.Compiler.Symbols
+open FSharp.Compiler.Text
 
 // ===================================================================
-// Core Compiler Types
+// Core Position and Error Types - Single Source of Truth
 // ===================================================================
 
-/// Position information for error reporting
+/// Position information for precise error reporting
 type SourcePosition = {
     Line: int
     Column: int
@@ -19,295 +16,73 @@ type SourcePosition = {
     Offset: int
 }
 
-/// Core error types for the Firefly compiler
+/// Unified error type for the entire Firefly compiler pipeline
 type FireflyError =
     | SyntaxError of position: SourcePosition * message: string * context: string list
     | ConversionError of phase: string * source: string * target: string * message: string
     | TypeCheckError of construct: string * message: string * location: SourcePosition
     | InternalError of phase: string * message: string * details: string option
-    | MLIRGenerationError of phase: string * message: string * functionName: string option
+    | ParseError of position: SourcePosition * message: string
+    | DependencyResolutionError of symbol: string * message: string
 
-/// Result type for compiler operations - no fallbacks allowed
+/// Result type for all compiler operations - no exceptions allowed
 type CompilerResult<'T> =
     | Success of 'T
     | CompilerFailure of FireflyError list
 
 // ===================================================================
-// XParsec Re-exports - Controlled Access Point
+// AST and Function Types - Core Compiler Data Structures
 // ===================================================================
 
-// Character parsers
-let pString str = pstring str
-let pChar predicate = satisfy predicate
-let pCharLiteral ch = pchar ch  
-let pSpaces = spaces
-let pSpaces1 = spaces1
+/// Dependency classification for reachability analysis
+type DependencyType =
+    | DirectCall | AlloyLibraryCall | ConstructorCall | ExternalCall
 
-// Combinators  
-let choice parsers = choice parsers
-let pBetween open_ close content = between open_ close content
-let preturn value = preturn value
-let many parser = many parser
-let many1 parser = many1 parser
-let opt parser = opt parser
-let pSepBy parser separator = sepBy parser separator
-let pSepBy1 parser separator = sepBy1 parser separator
-
-// Operators
-let (>>=) = (>>=)
-let (>>.) = (>>.)
-let (.>>) = (.>>)
-let (|>>) = (|>>)
-let (>>%) = (>>%)
-let (<|>) = (<|>)
-
-// ===================================================================
-// MLIR Generation State
-// ===================================================================
-
-/// Compiler state for tracking translation context
-type FireflyState = {
-    CurrentFile: string
-    ImportedModules: string list
-    TypeDefinitions: Map<string, string>
-    ScopeStack: string list list
-    ErrorStack: string list
+/// Function dependency edge in the call graph
+type Dependency = {
+    From: string
+    To: string
+    CallSite: range
+    Type: DependencyType
 }
 
-/// MLIR-specific state for code generation
-type MLIRState = {
-    Output: StringBuilder
-    Indent: int
-    SSACounter: int
-    LocalVars: Map<string, string * string>  // name -> (ssa, type)
-    RequiredExternals: Set<string>
-    CurrentFunction: string option
-    GeneratedFunctions: Set<string>
-    CurrentModule: string list
-    HasErrors: bool
+/// Memory allocation site for zero-allocation verification
+type AllocationType = 
+    | HeapAllocation | ObjectConstruction | CollectionAllocation
+
+type AllocationSite = {
+    TypeName: string
+    Location: range
+    AllocationType: AllocationType
 }
 
-/// Combined state for MLIR generation
-type MLIRBuilderState = {
-    Firefly: FireflyState
-    MLIR: MLIRState
+// ===================================================================
+// Essential Utility Functions
+// ===================================================================
+
+/// Convert FCS range to SourcePosition
+let rangeToPosition (range: range) : SourcePosition = {
+    Line = range.Start.Line
+    Column = range.Start.Column
+    File = range.FileName
+    Offset = 0
 }
 
-/// MLIR combinator type - transforms MLIR state and produces results
-type MLIRCombinator<'T> = MLIRBuilderState -> CompilerResult<'T * MLIRBuilderState>
+/// Create a parser error from position and message
+let createParseError (pos: SourcePosition) (message: string) : FireflyError =
+    ParseError(pos, message)
 
-// ===================================================================
-// MLIR-Specific Parsing Utilities
-// ===================================================================
-
-/// Parse integer values
-let pInt () =
-    many1 (pChar System.Char.IsDigit) 
-    |>> (fun digits -> 
-        let digitStr = new string(digits |> Seq.toArray)
-        System.Int32.Parse(digitStr))
-
-/// Parse identifier (alphanumeric + underscore, starting with letter or underscore)
-let pIdentifier () =
-    (pChar System.Char.IsLetter <|> pChar (fun c -> c = '_')) >>= fun firstChar ->
-    many (pChar System.Char.IsLetterOrDigit <|> pChar (fun c -> c = '_')) >>= fun restChars ->
-    let identifier = new string(Array.append [|firstChar|] (restChars |> Seq.toArray))
-    preturn identifier
-
-/// Parse SSA value names (starting with %)
-let pSSAName () =
-    pCharLiteral '%' >>. pIdentifier ()
-
-/// Parse quoted string with basic escape sequences
-let pQuotedString () =
-    let pStringChar = pChar (fun c -> c <> '"' && c <> '\\')
-    pCharLiteral '"' >>. many pStringChar >>= fun chars ->
-    pCharLiteral '"' >>. preturn (new string(chars |> Seq.toArray))
-
-/// MLIR punctuation with spacing
-let pEqualsSpaced () = pSpaces >>. pCharLiteral '=' >>. pSpaces
-let pColonSpaced () = pSpaces >>. pCharLiteral ':' >>. pSpaces
-let pCommaSpaced () = pSpaces >>. pCharLiteral ',' >>. pSpaces
-
-// ===================================================================
-// MLIR Generation Combinators
-// ===================================================================
-
-/// MLIR combinators for code generation
-module MLIRCombinators =
+/// Combine multiple compiler results into a single result
+let combineResults (results: CompilerResult<'T> list) : CompilerResult<'T list> =
+    let successes = ResizeArray<'T>()
+    let failures = ResizeArray<FireflyError>()
     
-    /// Lift a value into the MLIR context
-    let lift (value: 'T): MLIRCombinator<'T> =
-        fun state -> Success(value, state)
+    for result in results do
+        match result with
+        | Success value -> successes.Add(value)
+        | CompilerFailure errors -> failures.AddRange(errors)
     
-    /// Sequential composition of MLIR combinators
-    let (>>=) (combinator: MLIRCombinator<'T>) (f: 'T -> MLIRCombinator<'U>): MLIRCombinator<'U> =
-        fun state ->
-            match combinator state with
-            | Success(value, state') -> f value state'
-            | CompilerFailure errors -> CompilerFailure errors
-    
-    /// Fail with MLIR generation error
-    let fail (phase: string) (message: string): MLIRCombinator<'T> =
-        fun state ->
-            let location = state.MLIR.CurrentFunction
-            let error = MLIRGenerationError(phase, message, location)
-            CompilerFailure [error]
-
-    /// Get next SSA value name
-    let nextSSA (prefix: string): MLIRCombinator<string> =
-        fun state ->
-            let newCounter = state.MLIR.SSACounter + 1
-            let ssaName = sprintf "%%%s%d" prefix newCounter
-            let newState = { state with MLIR = { state.MLIR with SSACounter = newCounter } }
-            Success(ssaName, newState)
-
-    /// Emit a line of MLIR code
-    let emitLine (line: string): MLIRCombinator<unit> =
-        fun state ->
-            let indentStr = String.replicate (state.MLIR.Indent * 2) " "
-            let fullLine = indentStr + line + "\n"
-            state.MLIR.Output.Append(fullLine) |> ignore
-            Success((), state)
-
-/// MLIR computation expression builder
-type MLIRBuilder() =
-    member inline _.Bind(c, f) = MLIRCombinators.(>>=) c f
-    member inline _.Return(x) = MLIRCombinators.lift x
-    member inline _.ReturnFrom(c) = c
-    member inline _.Zero() = MLIRCombinators.lift ()
-
-/// MLIR computation expression
-let mlir = MLIRBuilder()
-
-// ===================================================================
-// State Management
-// ===================================================================
-
-/// Creates initial compiler state
-let initialState (fileName: string) : FireflyState = {
-    CurrentFile = fileName
-    ImportedModules = []
-    TypeDefinitions = Map.empty
-    ScopeStack = [[]]
-    ErrorStack = []
-}
-
-/// Creates initial MLIR state
-let initialMLIRState : MLIRState = {
-    Output = StringBuilder()
-    Indent = 1
-    SSACounter = 0
-    LocalVars = Map.empty
-    RequiredExternals = Set.empty
-    CurrentFunction = None
-    GeneratedFunctions = Set.empty
-    CurrentModule = []
-    HasErrors = false
-}
-
-/// Creates combined initial state
-let initialMLIRBuilderState (fileName: string) : MLIRBuilderState = {
-    Firefly = initialState fileName
-    MLIR = initialMLIRState
-}
-
-/// Runs an MLIR combinator and extracts the result
-let runMLIRCombinator (combinator: MLIRCombinator<'T>) (initialState: MLIRBuilderState): CompilerResult<'T * string> =
-    match combinator initialState with
-    | Success(result, finalState) -> 
-        if finalState.MLIR.HasErrors then
-            CompilerFailure [InternalError("MLIR Generation", "Compilation completed with errors", None)]
-        else
-            Success(result, finalState.MLIR.Output.ToString())
-    | CompilerFailure errors -> CompilerFailure errors
-
-// ===================================================================
-// Utility Functions
-// ===================================================================
-
-let isNullOrEmpty (str: string) = String.IsNullOrEmpty(str)
-let isNullOrWhiteSpace (str: string) = String.IsNullOrWhiteSpace(str)
-let indent (level: int) : string = String.replicate (level * 2) " "
-
-// ===================================================================
-// TYPED MLIR GENERATION PRIMITIVES - Using TypeSystem Types
-// ===================================================================
-
-/// Create typed MLIR value
-let mlirValue (ssa: string) (typ: MLIRType) (isConst: bool) : MLIRValue = {
-    SSA = ssa
-    Type = mlirTypeToString typ
-    IsConstant = isConst
-}
-
-/// Generate MLIR constant with type
-let mlirConstant (value: string) (typ: MLIRType) : MLIRCombinator<MLIRValue> =
-    mlir {
-        let! ssa = MLIRCombinators.nextSSA "const"
-        let formattedType = mlirTypeToString typ
-        do! MLIRCombinators.emitLine (sprintf "%s = arith.constant %s : %s" ssa value formattedType)
-        return mlirValue ssa typ true
-    }
-
-/// Generate typed binary operation
-let mlirBinaryOp (op: string) (left: MLIRValue) (right: MLIRValue) (resultType: MLIRType) : MLIRCombinator<MLIRValue> =
-    mlir {
-        let! ssa = MLIRCombinators.nextSSA "op"
-        let typeStr = mlirTypeToString resultType
-        do! MLIRCombinators.emitLine (sprintf "%s = %s %s, %s : %s" ssa op left.SSA right.SSA typeStr)
-        return mlirValue ssa resultType false
-    }
-
-/// Generate function declaration
-let mlirFuncDecl (name: string) (parameters: (string * MLIRType) list) (returnTypes: MLIRType list) : MLIRCombinator<unit> =
-    mlir {
-        let paramStr = parameters |> List.map (fun (n, t) -> sprintf "%%%s: %s" n (mlirTypeToString t)) |> String.concat ", "
-        let returnStr = 
-            match returnTypes with
-            | [] -> ""
-            | types -> " -> " + (types |> List.map mlirTypeToString |> String.concat ", ")
-        do! MLIRCombinators.emitLine (sprintf "func.func @%s(%s)%s {" name paramStr returnStr)
-    }
-
-/// Generate type alias
-let mlirTypeAlias (name: string) (typ: MLIRType) : MLIRCombinator<unit> =
-    mlir {
-        do! MLIRCombinators.emitLine (sprintf "!%s = type %s" name (mlirTypeToString typ))
-    }
-
-/// Begin a new MLIR block
-let mlirBeginBlock (label: string option) : MLIRCombinator<unit> =
-    mlir {
-        match label with
-        | Some l -> do! MLIRCombinators.emitLine (sprintf "^%s:" l)
-        | None -> return ()
-    }
-
-/// Generate return operation
-let mlirReturn (values: MLIRValue list) : MLIRCombinator<unit> =
-    mlir {
-        match values with
-        | [] -> do! MLIRCombinators.emitLine "func.return"
-        | vals -> 
-            let valueStr = vals |> List.map (fun v -> v.SSA) |> String.concat ", "
-            let typeStr = vals |> List.map (fun v -> v.Type) |> String.concat ", "
-            do! MLIRCombinators.emitLine (sprintf "func.return %s : %s" valueStr typeStr)
-    }
-
-/// Generate struct type definition
-let mlirStructType (name: string) (fields: (string * MLIRType) list) : MLIRCombinator<unit> =
-    mlir {
-        let structType = MLIRTypes.struct_ fields
-        do! mlirTypeAlias name structType
-    }
-
-/// Increase indentation for nested scope
-let indentScope (builder: MLIRCombinator<'T>) : MLIRCombinator<'T> =
-    fun state ->
-        let newState = { state with MLIR = { state.MLIR with Indent = state.MLIR.Indent + 1 } }
-        match builder newState with
-        | Success(result, finalState) ->
-            let restoredState = { finalState with MLIR = { finalState.MLIR with Indent = state.MLIR.Indent } }
-            Success(result, restoredState)
-        | failure -> failure
+    if failures.Count = 0 then
+        Success (successes |> List.ofSeq)
+    else
+        CompilerFailure (failures |> List.ofSeq)

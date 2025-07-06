@@ -7,10 +7,14 @@ open Core.XParsec.Foundation
 open Dabbit.Pipeline.CompilationOrchestrator
 open Dabbit.Pipeline.CompilationTypes
 
+// ===================================================================
+// Command Line Interface Definition
+// ===================================================================
+
 /// Command line arguments for Firefly compiler
 type FireflyArgs =
-    | Project_File of string
-    | Output of string
+    | Project_File of path: string
+    | Output of dir: string
     | Intermediates
     | Verbose
     | AST_Only
@@ -18,234 +22,207 @@ type FireflyArgs =
     | Show_Elimination_Stats
 
     interface IArgParserTemplate with
-        member s.Usage =
-            match s with
-            | Project_File _ -> "F# project file (.fsproj) to compile"
-            | Output _ -> "Output directory for compiled binary"
-            | Intermediates -> "Generate intermediate files for debugging"
-            | Verbose -> "Enable verbose logging"
-            | AST_Only -> "Run AST analysis only (no compilation)"
-            | Show_Stats -> "Show compilation statistics"
-            | Show_Elimination_Stats -> "Show detailed elimination statistics"
+        member this.Usage =
+            match this with
+            | Project_File _ -> "F# project file (.fsproj) or script (.fsx) to compile"
+            | Output _ -> "Output directory for compiled binary and intermediates"
+            | Intermediates -> "Generate intermediate files for debugging (.fcs, .ra.fcs, .mlir, .ll)"
+            | Verbose -> "Enable verbose logging with timestamps"
+            | AST_Only -> "Run AST analysis only (no MLIR/LLVM generation)"
+            | Show_Stats -> "Show detailed compilation statistics"
+            | Show_Elimination_Stats -> "Show detailed dead code elimination statistics"
 
-/// Enhanced progress reporting
-let reportProgress verbose (phase: CompilationPhase) message =
-    let phaseColor = 
-        match phase with
-        | ProjectLoading -> ConsoleColor.Cyan
-        | FCSProcessing -> ConsoleColor.Green
-        | SymbolCollection -> ConsoleColor.Yellow
-        | ReachabilityAnalysis -> ConsoleColor.Magenta
-        | IntermediateGeneration -> ConsoleColor.Blue
-        | ASTTransformation -> ConsoleColor.DarkGreen
-        | MLIRGeneration -> ConsoleColor.DarkMagenta
-        | LLVMGeneration -> ConsoleColor.DarkRed
-        | NativeCompilation -> ConsoleColor.Red
 
-    let timestamp = DateTime.UtcNow.ToString "HH:mm:ss.fff"
-    
-    Console.ForegroundColor <- ConsoleColor.Gray
-    printf "[%s] " timestamp
-    
-    Console.ForegroundColor <- phaseColor
-    printf "[%A] " phase
-    
-    Console.ForegroundColor <- ConsoleColor.White
-    printfn "%s" message
-    
-    Console.ResetColor()
+// ===================================================================
+// Progress Reporting
+// ===================================================================
 
-/// Display compilation statistics
-let displayStatistics stats =
+/// Progress reporting with colored output
+let reportProgress (verbose: bool) (phase: CompilationPhase) (message: string) : unit =
+    if verbose then
+        let timestamp = DateTime.UtcNow.ToString("HH:mm:ss.fff")
+        printfn "[%s] [%A] %s" timestamp phase message
+    else
+        printf "."
+
+// ===================================================================
+// Statistics Display
+// ===================================================================
+
+/// Display detailed elimination statistics
+let displayEliminationStats (result: CompilationResult) : unit =
+    if result.Success then
+        Console.ForegroundColor <- ConsoleColor.Yellow
+        printfn "=== DEAD CODE ELIMINATION ANALYSIS ==="
+        Console.ResetColor()
+        
+        let stats = result.Statistics
+        if stats.EliminatedSymbols > 0 then
+            printfn "🗑️  Successfully eliminated %d unused functions" stats.EliminatedSymbols
+            printfn "💾 Code size reduction: ~%.1f%%" ((float stats.EliminatedSymbols / float stats.TotalSymbols) * 100.0)
+        else
+            printfn "ℹ️  No dead code found - all functions are reachable"
+        printfn ""
+
+/// Display reachability analysis statistics
+let displayStatistics (stats: CompilationStatistics) : unit =
     printfn ""
     Console.ForegroundColor <- ConsoleColor.Green
-    printfn "=== COMPILATION STATISTICS ==="
+    printfn "=== FIREFLY COMPILATION STATISTICS ==="
     Console.ResetColor()
     
-    printfn "Files processed: %d" stats.TotalFiles
-    printfn "Total symbols: %d" stats.TotalSymbols
-    printfn "Reachable symbols: %d" stats.ReachableSymbols
-    printfn "Eliminated symbols: %d" stats.EliminatedSymbols
+    printfn "📁 Files processed: %d" stats.TotalFiles
+    printfn "🔧 Total symbols: %d" stats.TotalSymbols
+    printfn "✅ Reachable symbols: %d" stats.ReachableSymbols
+    printfn "❌ Eliminated symbols: %d" stats.EliminatedSymbols
     
-    let eliminationRate = 
-        if stats.TotalSymbols > 0 then
-            float stats.EliminatedSymbols / float stats.TotalSymbols * 100.0
-        else 0.0
+    if stats.TotalSymbols > 0 then
+        let eliminationRate = (float stats.EliminatedSymbols / float stats.TotalSymbols) * 100.0
+        printfn "📊 Elimination rate: %.1f%%" eliminationRate
     
-    Console.ForegroundColor <- ConsoleColor.Yellow
-    printfn "Elimination rate: %.1f%%" eliminationRate
+    printfn "⏱️  Compilation time: %.2f ms" stats.CompilationTimeMs
+    printfn ""
+
+/// Display errors with formatting
+let displayErrors (errors: FireflyError list) : unit =
+    Console.ForegroundColor <- ConsoleColor.Red
+    printfn "=== COMPILATION ERRORS ==="
     Console.ResetColor()
     
-    printfn "Compilation time: %.0fms" stats.CompilationTimeMs
-
-/// Display elimination statistics in detail
-let displayEliminationStats projectFile =
-    let intermediatesDir = 
-        Path.Combine(Path.GetDirectoryName(projectFile: string), "build", "intermediates")
-    
-    let reportPath = Path.Combine(intermediatesDir, "reachability.report")
-    
-    if File.Exists reportPath then
-        printfn ""
-        Console.ForegroundColor <- ConsoleColor.Cyan
-        printfn "=== DETAILED ELIMINATION REPORT ==="
-        Console.ResetColor()
+    for error in errors do
+        match error with
+        | SyntaxError(pos, message, context) ->
+            printfn "❌ Syntax Error at %s(%d,%d): %s" pos.File pos.Line pos.Column message
+            for ctx in context do
+                printfn "   Context: %s" ctx
         
-        let reportContent = File.ReadAllText reportPath
-        printfn "%s" reportContent
-    else
-        Console.ForegroundColor <- ConsoleColor.Red
-        printfn "No elimination report found. Run with --intermediates first."
-        Console.ResetColor()
-
-/// Display diagnostics with color coding
-let displayDiagnostics diagnostics =
-    if not (List.isEmpty diagnostics) then
-        printfn ""
-        Console.ForegroundColor <- ConsoleColor.Red
-        printfn "=== COMPILATION DIAGNOSTICS ==="
-        Console.ResetColor()
+        | TypeCheckError(construct, message, location) ->
+            printfn "❌ Type Error in %s at %s(%d,%d): %s" construct location.File location.Line location.Column message
         
-        for error in diagnostics do
-            match error with
-            | SyntaxError (pos, message, context) ->
-                Console.ForegroundColor <- ConsoleColor.Red
-                printfn "SYNTAX ERROR in %s (%d,%d): %s" pos.File pos.Line pos.Column message
-                if not (List.isEmpty context) then
-                    printfn "  Context: %s" (String.concat " -> " context)
-                Console.ResetColor()
-            | TypeCheckError (construct, message, location) ->
-                Console.ForegroundColor <- ConsoleColor.Yellow
-                printfn "TYPE ERROR in %s (%d,%d): %s" location.File location.Line location.Column message
-                printfn "  Construct: %s" construct
-                Console.ResetColor()
-            | ConversionError (phase, source, target, message) ->
-                Console.ForegroundColor <- ConsoleColor.Magenta
-                printfn "CONVERSION ERROR in %s: %s" phase message
-                printfn "  Converting %s to %s" source target
-                Console.ResetColor()
-            | InternalError (phase, message, stackTrace) ->
-                Console.ForegroundColor <- ConsoleColor.DarkRed
-                printfn "INTERNAL ERROR in %s: %s" phase message
-                match stackTrace with
-                | Some stack -> printfn "Stack: %s" stack
-                | None -> ()
-                Console.ResetColor()
-            | MLIRGenerationError (phase, message, functionName) ->
-                Console.ForegroundColor <- ConsoleColor.DarkMagenta
-                printfn "MLIR ERROR in %s: %s" phase message
-                match functionName with
-                | Some func -> printfn "  Function: %s" func
-                | None -> ()
-                Console.ResetColor()
+        | ConversionError(phase, source, target, message) ->
+            printfn "❌ Conversion Error in %s (%s → %s): %s" phase source target message
+        
+        | InternalError(phase, message, details) ->
+            printfn "❌ Internal Error in %s: %s" phase message
+            match details with
+            | Some detail -> printfn "   Details: %s" detail
+            | None -> ()
+        
+        | ParseError(pos, message) ->
+            printfn "❌ Parse Error at %s(%d,%d): %s" pos.File pos.Line pos.Column message
+        
+        | DependencyResolutionError(symbol, message) ->
+            printfn "❌ Dependency Error for %s: %s" symbol message
+    
+    printfn ""
 
-/// Main entry point
-let main argv =
+// ===================================================================
+// Main Entry Point
+// ===================================================================
+
+[<EntryPoint>]
+let main (args: string[]) : int =
     let parser = ArgumentParser.Create<FireflyArgs>(programName = "firefly")
     
     try
-        let results = parser.Parse argv
+        let results = parser.Parse(args)
         
-        // Get project file
-        match results.TryGetResult Project_File with
+        // Get project file - handle case where it might not be provided
+        let projectFileOpt = results.TryGetResult(Project_File)
+        match projectFileOpt with
         | None ->
             Console.ForegroundColor <- ConsoleColor.Red
-            printfn "Error: Project file is required. Use --project-file <path>"
+            printfn "❌ Error: Project file is required."
+            printfn "Usage: firefly <project-file> [options]"
             Console.ResetColor()
-            printfn "%s" (parser.PrintUsage())
             1
         | Some projectFile ->
+            let outputDir = results.GetResult(Output, defaultValue = "./output")
+            let generateIntermediates = results.Contains(Intermediates)
+            let verbose = results.Contains(Verbose)
+            let astOnly = results.Contains(AST_Only)
+            let showStats = results.Contains(Show_Stats)
+            let showEliminationStats = results.Contains(Show_Elimination_Stats)
             
-            // Validate project file exists
-            if not (File.Exists projectFile) then
+            // Validate input file
+            if not (File.Exists(projectFile)) then
                 Console.ForegroundColor <- ConsoleColor.Red
-                printfn "Error: Project file not found: %s" projectFile
+                printfn "❌ Project file not found: %s" projectFile
                 Console.ResetColor()
                 1
             else
+                // Create output directory
+                if not (Directory.Exists(outputDir)) then
+                    Directory.CreateDirectory(outputDir) |> ignore
                 
-                let verbose = results.Contains Verbose
-                let generateIntermediates = results.Contains Intermediates
-                let astOnly = results.Contains AST_Only
-                let showStats = results.Contains Show_Stats
-                let showElimination = results.Contains Show_Elimination_Stats
+                // Setup intermediate files directory
+                let intermediatesDir = 
+                    if generateIntermediates then 
+                        let dir = Path.Combine(outputDir, "intermediates")
+                        if not (Directory.Exists(dir)) then
+                            Directory.CreateDirectory(dir) |> ignore
+                        Some dir
+                    else 
+                        None
                 
-                // Configure progress reporting
+                // Create progress reporter
                 let progress = reportProgress verbose
                 
-                // Configure intermediate files directory
-                let intermediatesDir = 
-                    if generateIntermediates then
-                        let dir = Path.Combine(Path.GetDirectoryName(projectFile), "build", "intermediates")
-                        Directory.CreateDirectory(dir) |> ignore
-                        Some dir
-                    else None
+                // Display header
+                Console.ForegroundColor <- ConsoleColor.Cyan
+                printfn "🔥 Firefly F# Compiler v0.3.022"
+                Console.ResetColor()
+                printfn "📂 Input: %s" (Path.GetFileName(projectFile))
+                printfn "📁 Output: %s" outputDir
+                if generateIntermediates then
+                    printfn "🔍 Intermediates: Enabled"
+                if astOnly then
+                    printfn "🎯 Mode: AST Analysis Only"
+                printfn ""
                 
-                // Run compilation
-                try
-                    let result = 
-                        if astOnly then
-                            analyzeASTOnly projectFile
-                        else
-                            compileProject projectFile intermediatesDir progress
-                        |> Async.RunSynchronously
-                    
-                    // Display results
-                    if result.Success then
-                        Console.ForegroundColor <- ConsoleColor.Green
-                        if astOnly then
-                            printfn "AST analysis completed successfully!"
-                        else
-                            printfn "Compilation completed successfully!"
-                        Console.ResetColor()
-                    else
-                        Console.ForegroundColor <- ConsoleColor.Red
-                        printfn "Compilation failed!"
-                        Console.ResetColor()
-                    
-                    // Show diagnostics if any
-                    displayDiagnostics result.Diagnostics
-                    
-                    // Show statistics if requested
-                    if showStats then
-                        displayStatistics result.Statistics
-                    
-                    // Show elimination report if requested
-                    if showElimination then
-                        displayEliminationStats projectFile
-                    
-                    // Show reachability report if available
-                    match result.ReachabilityReport with
-                    | Some report when verbose ->
-                        printfn ""
-                        Console.ForegroundColor <- ConsoleColor.Cyan
-                        printfn "=== REACHABILITY REPORT ==="
-                        Console.ResetColor()
-                        printfn "%s" report
-                    | _ -> ()
-                    
-                    if result.Success then 0 else 1
-                    
-                with ex ->
-                    Console.ForegroundColor <- ConsoleColor.Red
-                    printfn "Fatal error: %s" ex.Message
-                    if verbose then
-                        printfn "Stack trace: %s" ex.StackTrace
+                if not verbose then
+                    printf "Progress: "
+                
+                // Run compilation pipeline
+                let compilationResult = 
+                    compile projectFile intermediatesDir progress
+                    |> Async.RunSynchronously
+                
+                if not verbose then
+                    printfn ""
+                
+                // Display results
+                match compilationResult.Success with
+                | true ->
+                    Console.ForegroundColor <- ConsoleColor.Green
+                    printfn "✅ Compilation completed successfully!"
                     Console.ResetColor()
-                    1
                     
+                    if showStats then
+                        displayStatistics compilationResult.Statistics
+                    
+                    if showEliminationStats then
+                        displayEliminationStats compilationResult
+                    
+                    if generateIntermediates then
+                        printfn "📄 Intermediate files written to: %s" (Option.get intermediatesDir)
+                    
+                    0
+                
+                | false ->
+                    Console.ForegroundColor <- ConsoleColor.Red
+                    printfn "❌ Compilation failed!"
+                    Console.ResetColor()
+                    
+                    displayErrors compilationResult.Diagnostics
+                    1
+    
     with
     | :? ArguParseException as ex ->
-        Console.ForegroundColor <- ConsoleColor.Red
         printfn "%s" ex.Message
-        Console.ResetColor()
         1
     | ex ->
         Console.ForegroundColor <- ConsoleColor.Red
-        printfn "Fatal error: %s" ex.Message
+        printfn "❌ Unexpected error: %s" ex.Message
         Console.ResetColor()
         1
-
-/// Entry point for the application
-[<EntryPoint>]
-let entryPoint argv = main argv

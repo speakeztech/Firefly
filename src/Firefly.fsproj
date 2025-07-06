@@ -7,7 +7,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.3.022</Version>
+    <Version>0.3.023</Version>
     <Description>Firefly F# Compiler - AST-Based Compilation</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
@@ -26,17 +26,17 @@
       <Compile Include="Core/FCSIngestion/ProjectOptionsLoader.fs" />     
       <Compile Include="Core/FCSIngestion/ProjectProcessor.fs" />         
       
-      <!-- AST Processing - Single Source of Truth -->
+      <!-- AST Processing - Core Dabbit Functionality -->
       <Compile Include="Core/AST/Extraction.fs" />
       <Compile Include="Core/AST/Dependencies.fs" />
       <Compile Include="Core/AST/Reachability.fs" />
       <Compile Include="Core/AST/Validation.fs" />
       
-      <!-- Pipeline -->
+      <!-- Dabbit Pipeline - TypedAST Processing -->
       <Compile Include="Dabbit/Pipeline/CompilationTypes.fs" />           
       <Compile Include="Dabbit/Pipeline/CompilationOrchestrator.fs" />    
       
-      <!-- CLI -->
+      <!-- CLI - TypedAST Processor -->
       <Compile Include="CLI/Program-Enhanced.fs" />                       
   </ItemGroup>
 

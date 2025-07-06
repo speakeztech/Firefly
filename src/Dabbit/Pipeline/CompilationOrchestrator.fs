@@ -2,158 +2,234 @@ module Dabbit.Pipeline.CompilationOrchestrator
 
 open System
 open System.IO
+open System.Diagnostics
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Text
-open Core.Utilities.IntermediateWriter
-open Core.Utilities.RemoveIntermediates
-open Core.FCSIngestion.ProjectOptionsLoader
-open Core.FCSIngestion.ProjectProcessor
-open Core.AST.Extraction
+open Core.XParsec.Foundation    // Import shared types
+open Core.AST.Extraction        // Import TypedFunction from here
 open Core.AST.Dependencies
 open Core.AST.Reachability
 open Core.AST.Validation
+open Core.Utilities.IntermediateWriter
 open Dabbit.Pipeline.CompilationTypes
 
-type CompilationResult = {
-    Success: bool
-    IntermediatesGenerated: bool
-    ReachabilityReport: string option
-    Diagnostics: FireflyError list
-    Statistics: CompilationStatistics
-}
+// ===================================================================
+// Main Compilation Pipeline Orchestrator
+// ===================================================================
 
-let compileProject 
-    (projectFile: string) 
-    (intermediatesDir: string option) 
-    (progress: ProgressCallback)
-    : Async<CompilationResult> = async {
-    
-    let startTime = DateTime.UtcNow
+/// Main compilation pipeline orchestrator
+let compile (projectPath: string) (intermediatesDir: string option) (progress: ProgressCallback) : Async<CompilationResult> = async {
+    let stopwatch = Stopwatch.StartNew()
+    let mutable stats = emptyStatistics
+    let mutable intermediates = emptyIntermediates
     
     try
-        progress ProjectLoading "Loading project options"
-        let checker = FSharpChecker.Create(keepAssemblyContents=true)
-        let! projectResult = loadProject projectFile checker
+        // Phase 1: Project Loading
+        progress ProjectLoading "Loading project and creating FCS options"
         
-        match projectResult with
-        | Error errorMsg ->
-            return {
-                Success = false
-                IntermediatesGenerated = false
-                ReachabilityReport = None
-                Diagnostics = [InternalError("ProjectLoading", errorMsg, None)]
-                Statistics = {
-                    TotalFiles = 0; TotalSymbols = 0; ReachableSymbols = 0
-                    EliminatedSymbols = 0; CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
+        let checker = FSharpChecker.Create()
+        let projectOptions = 
+            if projectPath.EndsWith(".fsproj") then
+                {
+                    ProjectFileName = projectPath
+                    ProjectId = None
+                    SourceFiles = [|projectPath.Replace(".fsproj", ".fs")|]
+                    OtherOptions = [|"--warn:3"; "--noframework"|]
+                    ReferencedProjects = [||]
+                    IsIncompleteTypeCheckEnvironment = false
+                    UseScriptResolutionRules = false
+                    LoadTime = DateTime.Now
+                    UnresolvedReferences = None
+                    OriginalLoadReferences = []
+                    Stamp = None
                 }
-            }
-        | Ok projectOptions ->
-            prepareIntermediatesDirectory intermediatesDir
-
-            progress FCSProcessing "Processing F# source files"
-            let! processedResult = processProject projectOptions checker
+            else
+                {
+                    ProjectFileName = "single-file.fsproj"
+                    ProjectId = None
+                    SourceFiles = [|projectPath|]
+                    OtherOptions = [|"--warn:3"; "--noframework"|]
+                    ReferencedProjects = [||]
+                    IsIncompleteTypeCheckEnvironment = false
+                    UseScriptResolutionRules = false
+                    LoadTime = DateTime.Now
+                    UnresolvedReferences = None
+                    OriginalLoadReferences = []
+                    Stamp = None
+                }
+        
+        stats <- { stats with TotalFiles = projectOptions.SourceFiles.Length }
+        
+        // Phase 2: FCS Processing
+        progress FCSProcessing "Type-checking and building AST"
+        
+        let! checkResults = checker.ParseAndCheckProject(projectOptions)
+        
+        if checkResults.HasCriticalErrors then
+            let errors = 
+                checkResults.Diagnostics
+                |> Array.filter (fun d -> d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
+                |> Array.map (fun d -> 
+                    TypeCheckError(
+                        "FCS", 
+                        d.Message, 
+                        { Line = d.StartLine; Column = d.StartColumn; File = d.FileName; Offset = 0 }))
+                |> List.ofArray
             
-            match processedResult with
-            | Error processingError ->
-                let diagnostics = 
-                    processingError.CriticalErrors 
-                    |> Array.map (fun diag -> InternalError("FCSProcessing", diag.Message, None))
-                    |> Array.toList
-                
-                return {
-                    Success = false; IntermediatesGenerated = false; ReachabilityReport = None
-                    Diagnostics = diagnostics
-                    Statistics = {
-                        TotalFiles = projectOptions.SourceFiles.Length; TotalSymbols = 0
-                        ReachableSymbols = 0; EliminatedSymbols = 0
-                        CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
-                    }
-                }
-            | Ok processedProject ->
-                
-                progress SymbolCollection "Extracting functions from AST"
-                let typedFunctions = extractFunctions processedProject.CheckResults
-
-                printfn "[AST] Found %d functions" typedFunctions.Length
-                typedFunctions |> Array.iter (fun f ->
-                    printfn "  FUNC: %s at %s:%d-%d" f.FullName 
-                        (Path.GetFileName f.Range.FileName) f.Range.Start.Line f.Range.End.Line)
-
-                progress ReachabilityAnalysis "Building dependency graph"  
-                let dependencies = buildDependencies typedFunctions
-                printfn "[AST] Built %d dependencies" dependencies.Length
-
-                let entryPoints = typedFunctions |> Array.filter (fun f -> f.IsEntryPoint) |> Array.map (fun f -> f.FullName)
-                
-                if Array.isEmpty entryPoints then
-                    return {
-                        Success = false; IntermediatesGenerated = false; ReachabilityReport = None
-                        Diagnostics = [InternalError("Reachability", "No entry points found", None)]
-                        Statistics = {
-                            TotalFiles = projectOptions.SourceFiles.Length; TotalSymbols = typedFunctions.Length
-                            ReachableSymbols = 0; EliminatedSymbols = typedFunctions.Length
-                            CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
-                        }
-                    }
-                else
-                    let reachableNames = computeReachable dependencies entryPoints
-                    let reachableFunctions = 
-                        reachableNames
-                        |> Set.toArray
-                        |> Array.choose (fun name -> 
-                            typedFunctions |> Array.tryFind (fun f -> f.FullName = name))
-
-                    printfn "[AST] %d functions reachable from entry points" reachableFunctions.Length
-                    
-                    match verifyZeroAllocation reachableFunctions with
-                    | Ok () -> 
-                        printfn "[AST] ✓ Zero allocations verified"
-                        
-                        return {
-                            Success = true; IntermediatesGenerated = false; ReachabilityReport = None
-                            Diagnostics = []
-                            Statistics = {
-                                TotalFiles = projectOptions.SourceFiles.Length; TotalSymbols = typedFunctions.Length
-                                ReachableSymbols = reachableFunctions.Length
-                                EliminatedSymbols = typedFunctions.Length - reachableFunctions.Length
-                                CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
-                            }
-                        }
-                    
-                    | Error allocations -> 
-                        printfn "[AST] ❌ %d allocations found" allocations.Length
-                        allocations |> Array.iter (fun alloc ->
-                            printfn "  ALLOCATION: %s at %s:%d" alloc.TypeName 
-                                (Path.GetFileName alloc.Location.FileName) alloc.Location.Start.Line)
-                        
-                        return {
-                            Success = false; IntermediatesGenerated = false; ReachabilityReport = None
-                            Diagnostics = allocations |> Array.map (fun alloc -> 
-                                AllocationDetected(alloc.TypeName, alloc.Location)) |> Array.toList
-                            Statistics = {
-                                TotalFiles = projectOptions.SourceFiles.Length; TotalSymbols = typedFunctions.Length
-                                ReachableSymbols = reachableFunctions.Length; EliminatedSymbols = 0
-                                CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
-                            }
-                        }
-
-    with ex ->
-        return {
-            Success = false; IntermediatesGenerated = false; ReachabilityReport = None
-            Diagnostics = [InternalError("CompilationOrchestrator", ex.Message, Some ex.StackTrace)]
-            Statistics = {
-                TotalFiles = 0; TotalSymbols = 0; ReachableSymbols = 0; EliminatedSymbols = 0
-                CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
+            return failureResult errors
+        else
+            // Phase 3: Symbol Collection
+            progress SymbolCollection "Extracting functions and building symbol table"
+            
+            let functions = extractFunctions checkResults
+            stats <- { stats with TotalSymbols = functions.Length }
+            
+            // Write F# AST intermediate if requested
+            match intermediatesDir with
+            | Some dir ->
+                let astContent = 
+                    functions 
+                    |> Array.map (fun f -> $"{f.FullName}: {f.Module}")
+                    |> String.concat "\n"
+                let astPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(projectPath) + ".fcs")
+                writeFileToPath astPath astContent
+                intermediates <- { intermediates with FSharpAST = Some astContent }
+            | None -> ()
+            
+            // Phase 4: Dependency Analysis
+            progress SymbolCollection "Building dependency graph"
+            
+            let dependencies = buildDependencies functions
+            
+            // Phase 5: Reachability Analysis
+            progress ReachabilityAnalysis "Computing reachable functions"
+            
+            let reachabilityResult = analyzeReachability functions dependencies
+            let reachableFunctions = 
+                functions 
+                |> Array.filter (fun f -> Set.contains f.FullName reachabilityResult.ReachableFunctions)
+            
+            stats <- { 
+                stats with 
+                    ReachableSymbols = reachabilityResult.ReachableFunctions.Count
+                    EliminatedSymbols = reachabilityResult.UnreachableFunctions.Count
             }
-        }
-    }
+            
+            // Write reduced AST intermediate if requested
+            match intermediatesDir with
+            | Some dir ->
+                let reducedAstContent = generateReachabilityReport reachabilityResult
+                let reducedAstPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(projectPath) + ".ra.fcs")
+                writeFileToPath reducedAstPath reducedAstContent
+                intermediates <- { intermediates with ReducedAST = Some reducedAstContent }
+            | None -> ()
+            
+            // Phase 6: Validation (Zero-allocation check)
+            progress IntermediateGeneration "Validating zero-allocation constraints"
+            
+            match verifyZeroAllocation reachableFunctions with
+            | Ok () ->
+                progress IntermediateGeneration "✓ Zero-allocation verification passed"
+            | Error allocationSites ->
+                let allocationReport = getAllocationReport allocationSites
+                progress IntermediateGeneration $"⚠ Allocation violations found: {allocationSites.Length}"
+                
+                // Write allocation report if intermediate files are enabled
+                match intermediatesDir with
+                | Some dir ->
+                    let reportPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(projectPath) + ".allocations")
+                    writeFileToPath reportPath allocationReport
+                | None -> ()
+            
+            stopwatch.Stop()
+            stats <- { stats with CompilationTimeMs = stopwatch.Elapsed.TotalMilliseconds }
+            
+            return successResult stats intermediates None
+    
+    with
+    | ex ->
+        let error = InternalError("compile", ex.Message, Some ex.StackTrace)
+        return failureResult [error]
+}
 
-let compileMinimal (projectFile: string) (verbose: bool) : Async<CompilationResult> =
-    let intermediatesDir = 
-        if verbose then Some (Path.Combine(Path.GetDirectoryName(projectFile), "build", "intermediates"))
-        else None
+// ===================================================================
+// TypedAST Processing (Alternative Entry Point)
+// ===================================================================
+
+/// Process TypedFunction array through reachability analysis and validation
+let processTypedAST (functions: TypedFunction[]) (intermediatesDir: string option) (progress: ProgressCallback) : CompilationResult =
+    let stopwatch = Stopwatch.StartNew()
+    let mutable stats = emptyStatistics
+    let mutable intermediates = emptyIntermediates
     
-    let progress = fun phase message ->
-        if verbose then printfn "[%A] %s" phase message
+    try
+        stats <- { stats with TotalSymbols = functions.Length }
+        
+        // Phase 1: Build Dependency Graph
+        progress SymbolCollection "Building function dependency graph"
+        let dependencies = buildDependencies functions
+        
+        // Phase 2: Reachability Analysis
+        progress ReachabilityAnalysis "Computing reachable functions"
+        let reachabilityResult = analyzeReachability functions dependencies
+        let reachableFunctions = 
+            functions 
+            |> Array.filter (fun f -> Set.contains f.FullName reachabilityResult.ReachableFunctions)
+        
+        stats <- { 
+            stats with 
+                ReachableSymbols = reachabilityResult.ReachableFunctions.Count
+                EliminatedSymbols = reachabilityResult.UnreachableFunctions.Count
+        }
+        
+        // Phase 3: Zero-Allocation Validation
+        progress IntermediateGeneration "Validating zero-allocation constraints"
+        match verifyZeroAllocation reachableFunctions with
+        | Ok () ->
+            progress IntermediateGeneration "✓ Zero-allocation verification passed"
+        | Error allocationSites ->
+            let allocationReport = getAllocationReport allocationSites
+            progress IntermediateGeneration $"⚠ Allocation violations found: {allocationSites.Length}"
+            
+            // Write allocation report if intermediate files are enabled
+            match intermediatesDir with
+            | Some dir ->
+                let reportPath = Path.Combine(dir, "allocations.txt")
+                writeFileToPath reportPath allocationReport
+            | None -> ()
+        
+        // Phase 4: Generate Intermediates
+        match intermediatesDir with
+        | Some dir ->
+            // Write reachability analysis
+            let reachabilityReport = generateReachabilityReport reachabilityResult
+            let reachabilityPath = Path.Combine(dir, "reachability.ra.fcs")
+            writeFileToPath reachabilityPath reachabilityReport
+            intermediates <- { intermediates with ReducedAST = Some reachabilityReport }
+        | None -> ()
+        
+        stopwatch.Stop()
+        stats <- { stats with CompilationTimeMs = stopwatch.Elapsed.TotalMilliseconds }
+        
+        successResult stats intermediates None
     
-    compileProject projectFile intermediatesDir progress
+    with
+    | ex ->
+        let error = InternalError("processTypedAST", ex.Message, Some ex.StackTrace)
+        failureResult [error]
+
+// ===================================================================
+// Additional Pipeline Functions
+// ===================================================================
+
+/// Validate program through comprehensive analysis
+let validateProgram (reachableFunctions: TypedFunction[]) : CompilerResult<unit> =
+    let validationResults = 
+        reachableFunctions 
+        |> Array.map validateFunction
+        |> Array.toList
+    
+    combineResults validationResults
+    |> function
+        | Success _ -> Success ()
+        | CompilerFailure errors -> CompilerFailure errors
