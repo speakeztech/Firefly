@@ -434,13 +434,16 @@ let private analyzeSymbol (symbol: FSharpSymbol) : CollectedSymbol =
             | _ -> None
     }
 
-/// Build computational dependency graph (functional calls only)
+/// Build computational dependency graph (functional calls only) - ROBUST VERSION
 let private buildComputationGraph (processed: ProcessedProject) : SymbolDependency[] =
     printfn "[SymbolCollector] Building computation graph from %d symbol uses..." processed.SymbolUses.Length
     
-    // DIAGNOSTIC: Sample symbol uses
-    printfn "[DIAGNOSTIC] Sample symbol uses:"
+    // DIAGNOSTIC: Sample symbol uses focused on user code
+    printfn "[DIAGNOSTIC] User code symbol uses:"
     processed.SymbolUses
+    |> Array.filter (fun symbolUse -> 
+        let fileName = System.IO.Path.GetFileName(symbolUse.Range.FileName)
+        fileName.Contains("HelloWorld") || fileName.Contains("01_"))
     |> Array.truncate 20
     |> Array.iteri (fun i symbolUse ->
         let symType = symbolUse.Symbol.GetType().Name
@@ -448,69 +451,115 @@ let private buildComputationGraph (processed: ProcessedProject) : SymbolDependen
         printfn "  [%02d] %s (%s) at %s:%d - IsFromUse: %b, IsFromDefinition: %b" 
             i symbolUse.Symbol.DisplayName symType fileName symbolUse.Range.StartLine symbolUse.IsFromUse symbolUse.IsFromDefinition)
     
-    // Helper to find the containing function for a symbol use
-    let getContainingFunction (symbolUse: FSharpSymbolUse) : string option =
+    // NEW APPROACH: Group symbol uses by file and line, then look for function call patterns
+    let symbolUsesByLocation = 
         processed.SymbolUses
-        |> Array.tryFind (fun containerUse ->
-            match containerUse.Symbol with
+        |> Array.groupBy (fun su -> (su.Range.FileName, su.Range.StartLine))
+        |> Map.ofArray
+    
+    // Find function definitions first
+    let functionDefinitions = 
+        processed.SymbolUses
+        |> Array.choose (fun symbolUse ->
+            match symbolUse.Symbol with
             | :? FSharpMemberOrFunctionOrValue as func when 
                 func.IsFunction && 
-                containerUse.IsFromDefinition &&
-                containerUse.Range.FileName = symbolUse.Range.FileName &&
-                containerUse.Range.StartLine <= symbolUse.Range.StartLine &&
-                symbolUse.Range.EndLine <= containerUse.Range.EndLine ->
-                true
-            | _ -> false)
-        |> Option.map (fun containerUse -> containerUse.Symbol.FullName)
+                symbolUse.IsFromDefinition ->
+                Some {|
+                    Function = func
+                    FullName = func.FullName
+                    FileName = symbolUse.Range.FileName
+                    StartLine = symbolUse.Range.StartLine
+                    EndLine = symbolUse.Range.EndLine
+                |}
+            | _ -> None)
     
-    // Extract functional dependencies
+    printfn "[DIAGNOSTIC] Function definitions found: %d" functionDefinitions.Length
+    functionDefinitions |> Array.iter (fun fdef ->
+        let fileName = System.IO.Path.GetFileName(fdef.FileName)
+        printfn "  DEF: %s at %s:%d-%d" fdef.FullName fileName fdef.StartLine fdef.EndLine)
+    
+    // SIMPLIFIED: Find function calls using symbol use patterns
     let functionalDeps = 
         processed.SymbolUses
         |> Array.choose (fun symbolUse ->
             match symbolUse.Symbol with
             | :? FSharpMemberOrFunctionOrValue as func when 
-                symbolUse.IsFromUse &&
-                not func.IsCompilerGenerated &&
-                not func.IsProperty &&
-                not func.IsEvent ->
-                // REMOVED overly restrictive filters
+                symbolUse.IsFromUse &&           // This is a usage, not a definition
+                func.IsFunction &&               // It's a function
+                not func.IsProperty &&           // Not a property
+                not func.IsEvent &&              // Not an event
+                not func.IsCompilerGenerated ->  // Not compiler generated
                 
-                match getContainingFunction symbolUse with
-                | Some caller when caller <> func.FullName ->
+                // Find which function this call occurs within using SIMPLER logic
+                let containingFunction = 
+                    functionDefinitions
+                    |> Array.tryFind (fun fdef ->
+                        fdef.FileName = symbolUse.Range.FileName &&
+                        fdef.StartLine < symbolUse.Range.StartLine &&  // Function starts before the call
+                        symbolUse.Range.StartLine < fdef.EndLine &&    // Call is before function ends
+                        fdef.FullName <> func.FullName)                // Don't create self-references
+                
+                match containingFunction with
+                | Some container ->
                     let dependencyKind = 
                         if func.IsConstructor then ConstructorCall
-                        elif func.Assembly.SimpleName.StartsWith("Alloy") || func.Assembly.SimpleName.StartsWith("Fidelity") then AlloyLibraryCall
+                        elif func.FullName.StartsWith("Alloy.") || func.FullName.StartsWith("Fidelity.") then AlloyLibraryCall
                         elif func.Assembly.SimpleName = symbolUse.Symbol.Assembly.SimpleName then IntraAssemblyCall
                         elif func.Assembly.SimpleName = "FSharp.Core" then LanguagePrimitive
                         else ExternalLibraryCall
                     
                     let dep = {
-                        FromSymbol = caller
+                        FromSymbol = container.FullName
                         ToSymbol = func.FullName
                         CallSite = sprintf "%s:%d" symbolUse.Range.FileName symbolUse.Range.StartLine
                         DependencyKind = dependencyKind
                     }
                     
-                    // DIAGNOSTIC: Log dependency creation
-                    if caller.Contains("hello") || caller.Contains("main") || func.FullName.Contains("Alloy") then
-                        printfn "[DIAGNOSTIC] Dependency: %s -> %s (%A)" caller func.FullName dependencyKind
+                    // DIAGNOSTIC: Log important dependencies
+                    if container.FullName.Contains("main") || container.FullName.Contains("hello") || 
+                       func.FullName.Contains("hello") || func.FullName.Contains("stackBuffer") || 
+                       func.FullName.Contains("Prompt") || func.FullName.Contains("WriteLine") then
+                        printfn "[DIAGNOSTIC] KEY DEPENDENCY: %s -> %s (%A)" container.FullName func.FullName dependencyKind
                     
                     Some dep
-                | containingFunc ->
-                    // DIAGNOSTIC: Log when no container found
-                    if func.FullName.Contains("Alloy") || func.FullName.Contains("hello") then
-                        printfn "[DIAGNOSTIC] No container for %s (found: %A)" func.FullName containingFunc
+                | None ->
+                    // DIAGNOSTIC: Log when we can't find a container for key functions
+                    if func.FullName.Contains("hello") || func.FullName.Contains("stackBuffer") || 
+                       func.FullName.Contains("Prompt") || func.FullName.Contains("WriteLine") then
+                        let fileName = System.IO.Path.GetFileName(symbolUse.Range.FileName)
+                        printfn "[DIAGNOSTIC] NO CONTAINER for %s at %s:%d" func.FullName fileName symbolUse.Range.StartLine
+                        
+                        // Show nearby function definitions for debugging
+                        let nearbyFunctions = 
+                            functionDefinitions
+                            |> Array.filter (fun fdef -> 
+                                fdef.FileName = symbolUse.Range.FileName &&
+                                abs (fdef.StartLine - symbolUse.Range.StartLine) < 10)
+                        
+                        printfn "[DIAGNOSTIC]   Nearby functions:"
+                        nearbyFunctions |> Array.iter (fun fdef ->
+                            printfn "[DIAGNOSTIC]     %s at lines %d-%d" fdef.FullName fdef.StartLine fdef.EndLine)
                     None
             | _ -> None)
         |> Array.distinctBy (fun dep -> (dep.FromSymbol, dep.ToSymbol))
     
     printfn "[SymbolCollector] Built computation graph with %d functional dependencies" functionalDeps.Length
     
-    // DIAGNOSTIC: Show all dependencies
-    printfn "[DIAGNOSTIC] All dependencies:"
-    functionalDeps
-    |> Array.iteri (fun i dep ->
-        printfn "  [%02d] %s -> %s (%A)" i dep.FromSymbol dep.ToSymbol dep.DependencyKind)
+    // DIAGNOSTIC: Show all dependencies with better categorization
+    printfn "[DIAGNOSTIC] Dependencies by category:"
+    
+    let userCodeDeps = functionalDeps |> Array.filter (fun dep -> 
+        dep.FromSymbol.Contains("Examples.") || dep.ToSymbol.Contains("Examples."))
+    printfn "[DIAGNOSTIC] User code dependencies (%d):" userCodeDeps.Length
+    userCodeDeps |> Array.iter (fun dep ->
+        printfn "  USER: %s -> %s (%A)" dep.FromSymbol dep.ToSymbol dep.DependencyKind)
+    
+    let alloyDeps = functionalDeps |> Array.filter (fun dep -> 
+        dep.FromSymbol.Contains("Alloy.") || dep.ToSymbol.Contains("Alloy."))
+    printfn "[DIAGNOSTIC] Alloy dependencies (%d):" alloyDeps.Length
+    alloyDeps |> Array.truncate 10 |> Array.iter (fun dep ->
+        printfn "  ALLOY: %s -> %s (%A)" dep.FromSymbol dep.ToSymbol dep.DependencyKind)
     
     functionalDeps
 
