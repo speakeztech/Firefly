@@ -15,9 +15,12 @@ Firefly is a novel F# compiler that brings the expressiveness and safety of func
 
 Firefly transforms F# from a managed runtime language into a true systems programming language with hard real-time guarantees. By orchestrating compilation through MLIR, Firefly ensures all memory is stack-allocated, all function calls are statically resolved, and all types have fixed layouts - enabling developers to write everything from embedded firmware to high-performance compute kernels while preserving F#'s elegant syntax and type safety.
 
-Central to Firefly's approach is intelligent static library handling through LLVM.NET. Rather than traditional whole-archive linking that bloats executables, Firefly examines static library archives at build time, traces symbol dependencies from your F# code, and extracts only the required object files. This selective linking means a cryptography library containing 47 object files might contribute just 2-3 objects to your final executable. Combined with link-time optimization across F# and C/C++ boundaries, Firefly delivers both the safety of functional programming and the efficiency of hand-tuned systems code.
+Central to Firefly's approach is the Program Semantic Graph (PSG) - a unified representation that combines syntactic structure with rich type information and MLIR mapping metadata. This representation enables comprehensive static analysis and allows library authors to hint at optimal MLIR translations through structured XML documentation.
+
+Combined with intelligent static library handling through LLVM.NET, Firefly delivers both the safety of functional programming and the efficiency of hand-tuned systems code.
 
 **Key Innovations:** 
+- **Program Semantic Graph (PSG)** unifying syntax, types, and MLIR metadata
 - **Zero-allocation guarantee** through compile-time memory management
 - **Type-preserving compilation** maintaining F#'s rich type system throughout the pipeline
 - **Intelligent static linking** via LLVM.NET archive analysis and selective object extraction
@@ -27,11 +30,13 @@ Central to Firefly's approach is intelligent static library handling through LLV
 ## 🏗️ Architecture
 
 ```
-F# Source Code
+F# Source Code + XML Documentation
     ↓ (F# Compiler Services parses & type-checks)
-Type-Preserved F# AST
+Type-checked AST + Symbol Information
+    ↓ (PSG construction merges syntax, types, and metadata)
+Program Semantic Graph (PSG)
     ↓ (Type-aware reachability analysis & pruning)
-Memory-Layout Analyzed F# AST
+Memory-Layout Analyzed PSG
     ↓ (Dabbit transforms to MLIR operations)
 MLIR High-Level Dialects
     ↓ (Progressive lowering through dialects)
@@ -46,56 +51,70 @@ Optimized Native Code
 
 Firefly operates as an intelligent compilation orchestrator that:
 
-1. **Parses & analyzes** - F# Compiler Services builds a fully type-checked AST
-2. **Preserves types** - Rich type information flows through the entire pipeline
-3. **Computes layouts** - Memory layouts for all types determined at compile time
-4. **Transforms progressively** - F# AST → MLIR dialects → LLVM IR
-5. **Analyzes statically** - All allocations and calls resolved at compile time
-6. **Links selectively** - LLVM.NET examines archives and extracts only needed objects
-7. **Optimizes aggressively** - LTO across F# and native library boundaries
-8. **Verifies continuously** - Zero allocations, bounded stack, no dynamic dispatch
+1. **Parses & analyzes** - F# Compiler Services builds a fully type-checked AST and symbol information
+2. **Constructs PSG** - Merges syntax tree, type information, and MLIR metadata into a unified graph
+3. **Preserves types** - Rich type information flows through the entire pipeline
+4. **Computes layouts** - Memory layouts for all types determined at compile time
+5. **Transforms progressively** - PSG → MLIR dialects → LLVM IR
+6. **Analyzes statically** - All allocations and calls resolved at compile time
+7. **Links selectively** - LLVM.NET examines archives and extracts only needed objects
+8. **Optimizes aggressively** - LTO across F# and native library boundaries
+9. **Verifies continuously** - Zero allocations, bounded stack, no dynamic dispatch
 
-## 🚀 Quick Start
-
-### Installation
-
-```bash
-# Install as global .NET tool
-dotnet tool install -g Firefly
-
-# Or build from source
-git clone https://github.com/speakez-llc/firefly.git
-cd firefly
-dotnet build
-```
-
-### Hello World (Stack-Only)
+## Hello World (Stack-Only)
 
 Create `hello.fs`:
 ```fsharp
-module Examples.HelloWorld
+module Examples.HelloWorldDirect
 
 open Alloy
+open Alloy.Console
+open Alloy.Text.UTF8
+open Alloy.Memory
 
 let hello() =
-    // All string operations use stack buffers
-    let buffer = NativePtr.stackalloc<byte> 256
-    printf "Enter your name: "
-    let length = Console.readLine buffer 256
-    printfn "Hello, %s!" (Span<byte>(buffer, length))
+    use buffer = stackBuffer<byte> 256
+    Prompt "Enter your name: "
+    
+    let name = 
+        match readInto buffer with
+        | Ok length -> spanToString (buffer.AsReadOnlySpan(0, length))
+        | Error _ -> "Unknown Person"
+    
+    let message = sprintf "Hello, %s!" name 
+    WriteLine message
 
 [<EntryPoint>]
-let main argv =
+let main argv = 
     hello()
-    0 
+    0
 ```
 
 Compile and verify zero allocations:
 ```bash
-firefly compile hello.fs --output hello --target embedded
-firefly verify hello --no-heap
+firefly compile HelloWorldDirect.fidproj --output hello
+# compiler console output
 ./hello
 ```
+
+### Library With MLIR Hints
+
+Alloy library functions use XML documentation to provide MLIR mapping hints where necessary:
+
+```fsharp
+namespace Alloy.Memory
+
+/// <summary>Allocates memory on the stack</summary>
+/// <param name="count">Number of elements to allocate</param>
+/// <returns>Pointer to allocated memory</returns>
+/// <mlir:dialect>memref</mlir:dialect>
+/// <mlir:op>alloca</mlir:op>
+/// <mlir:params>element_type={T}</mlir:params>
+let inline stackalloc<'T when 'T : unmanaged> (count: int) : nativeptr<'T> =
+    NativePtr.stackalloc<'T> count
+```
+
+The compiler extracts these hints during PSG construction, enabling optimal MLIR code generation.
 
 ### Embedded Message Parser Example
 
@@ -129,63 +148,9 @@ let parseMessage (buffer: ReadOnlySpan<byte>) =
         Ok { Type = msgType; Length = length; Checksum = checksum }
 ```
 
-## 📚 Project Structure
-
-```
-firefly/
-└── src/
-    ├── CLI/
-    │   ├── Program.fs
-    │   ├── Commands/
-    │   │   ├── CompileCommand.fs
-    │   │   ├── VerifyCommand.fs
-    │   │   └── DoctorCommand.fs
-    │   ├── Configurations/
-    │   │   └── ProjectConfig.fs
-    │   └── Diagnostics/
-    │       ├── EnvironmentInfo.fs
-    │       └── ToolchainVerification.fs
-    │
-    ├── Core/
-    │   ├── Utilities/
-    │   │   └── IntermediateWriter.fs
-    │   ├── XParsec/
-    │   │   └── Foundation.fs
-    │   ├── FCSProcessing/      
-    │   │   ├── TypeExtractor.fs
-    │   │   ├── DependencyResolver.fs
-    │   │   └── ASTTransformer.fs
-    │   ├── MemoryLayout/         
-    │   │   ├── LayoutAnalyzer.fs
-    │   │   └── UnionOptimizer.fs
-    │   ├── MLIRGeneration/
-    │   │   ├── Dialect.fs
-    │   │   ├── MLIRContext.fs
-    │   │   ├── TypeMapping.fs   
-    │   │   └── DirectGenerator.fs 
-    │   └── Conversion/
-    │       ├── LoweringPipeline.fs
-    │       └── OptimizationPipeline.fs
-    │
-    └── Dabbit/                  
-        ├── Transformations/     
-        │   ├── ClosureElimination.fs
-        │   └── StackAllocation.fs
-        ├── Analysis/       
-        │   ├── ReachabilityAnalyzer.fs
-        │   ├── DependencyGraph.fs
-        │   └── DeadCodeElimination.fs
-        ├── Bindings/
-        │   ├── SymbolRegistry.fs
-        │   ├── BindingMetadata.fs
-        │   └── PatternLibrary.fs 
-        └── Integration/
-            └── AlloyBindings.fs  
-```
-
 ## 🎛️ Configuration
 
-Firefly projects use TOML for fine-grained compilation control:
+Firefly projects use a ".fidproj" project file format with TOML for fine-grained compilation control:
 
 ```toml
 [package]
@@ -209,8 +174,10 @@ require_static_memory = true
 eliminate_closures = true
 
 [profiles.development]
-# Keep MLIR for inspection
+# Keep intermediates for inspection
 keep_intermediates = true
+# Generate VSCode debug info
+generate_psg_explorer = true
 # Minimal optimization for faster builds
 optimize = false
 
@@ -234,11 +201,11 @@ The Firefly compilation process leverages multiple tools in concert:
 firefly build --release --target thumbv7em-none-eabihf
 
 # What happens internally:
-# 1. F# Compiler Services → Type-checked AST
-# 2. FCS Processing → Type-preserved AST with dependency resolution  
+# 1. F# Compiler Services → Type-checked AST + Symbol Information
+# 2. PSG Construction → Unified program representation
 # 3. Memory Layout Analysis → Compute precise memory layouts
 # 4. Reachability Analysis → Eliminate unreachable code
-# 5. XParsec patterns → MLIR generation
+# 5. MLIR Generation → Translate PSG to MLIR operations
 # 6. MLIR passes → Progressive lowering
 # 7. LLVM.NET → Archive analysis & selective linking
 # 8. LLVM → Optimized native code
@@ -246,7 +213,7 @@ firefly build --release --target thumbv7em-none-eabihf
 
 ### Static Linking Intelligence
 
-When Firefly encounters a static library dependency, LLVM.NET provides deep introspection:
+When Firefly encounters a static library dependency, LLVM.NET will provide deep introspection:
 
 ```
 Analyzing libcrypto.a:
@@ -257,35 +224,6 @@ Analyzing libcrypto.a:
   Linking 3 of 47 objects (8KB vs 892KB)
   Applying LTO across F#/C boundaries...
   Final contribution: 4KB after optimization
-```
-
-### Verification Commands
-
-```bash
-# Verify zero-allocation guarantee
-firefly verify myapp --no-heap --max-stack 8192
-
-# Analyze symbol dependencies
-firefly analyze --show-symbol-deps
-
-# Profile-guided optimization
-firefly build --pgo-data trace.pgo
-```
-
-### Diagnostic Intermediate Files
-
-```bash
-# View the type-preserved F# AST
-cat build/hello.fcs.preserved
-
-# Examine memory layouts
-cat build/hello.layouts
-
-# View reachability analysis
-cat build/hello.fcs.ra
-
-# Inspect generated MLIR
-cat build/hello.mlir
 ```
 
 ## 🎯 Memory & Execution Guarantees
@@ -326,6 +264,7 @@ let createAdder x =
 ### Phase 1: Foundation (Current)
 - ✅ Basic F# to MLIR pipeline
 - ✅ Stack-only transformations  
+- 🚧 Program Semantic Graph construction
 - 🚧 Type-preserving compilation
 - 🚧 Memory layout analysis
 - 🚧 Static library selective linking
@@ -342,12 +281,13 @@ let createAdder x =
 - 📋 Computation expression transforms
 - 📋 Cross-compilation profiles
 - 📋 GPU kernel generation
-- 📋 VSCode integration with dual views
+- 📋 VSCode integration with PSG explorer
 
 ## 🤝 Contributing
 
-We welcome contributions! Areas of particular interest:
+We will welcome contributions after a solid baseline is established. Areas of particular interest:
 
+- **Program Semantic Graph**: Techniques for merging syntax and semantic information
 - **Type-Preserving Transformations**: Techniques for maintaining F#'s rich type system
 - **Memory Layout Algorithms**: Advanced layout strategies for complex types
 - **Zero-Allocation Patterns**: Novel stack-based algorithms for F# constructs
