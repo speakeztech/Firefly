@@ -67,32 +67,51 @@ type ReachabilityResult = {
 }
 
 /// Perform complete reachability analysis
-let analyzeReachability (functions: TypedFunction[]) (dependencies: Dependency[]) : ReachabilityResult =
-    // Identify entry points
+let analyzeReachability (functions: TypedFunction[]) (dependencies: Dependency[]) (entryPointRequired: bool) =
+    // Find potential entry points
     let entryPoints = 
         functions
         |> Array.filter (fun f -> f.IsEntryPoint)
         |> Array.map (fun f -> f.FullName)
     
-    // If no explicit entry points, treat all public functions as entry points
-    let effectiveEntryPoints = 
-        if Array.isEmpty entryPoints then
-            functions
-            |> Array.filter (fun f -> not (f.FullName.Contains("+"))) // Filter out nested functions
-            |> Array.map (fun f -> f.FullName)
+    if Array.isEmpty entryPoints then
+        if entryPointRequired then
+            // Error for executable projects that need an entry point
+            printfn "ERROR: No entry point found in the program."
+            printfn "Add [<EntryPoint>] attribute to your main function or create a 'main' function."
+            
+            // Return empty reachability result
+            { TotalFunctions = functions.Length
+              ReachableFunctions = Set.empty
+              UnreachableFunctions = functions |> Array.map (fun f -> f.FullName) |> Set.ofArray
+              CallGraph = Map.empty
+              EntryPoints = [||] }
         else
-            entryPoints
-    
-    let (callGraph, reachable, unreachable) = 
-        computeReachabilityAnalysis dependencies functions effectiveEntryPoints
-    
-    {
-        TotalFunctions = functions.Length
-        ReachableFunctions = reachable
-        UnreachableFunctions = unreachable
-        CallGraph = callGraph
-        EntryPoints = effectiveEntryPoints
-    }
+            // For library projects, consider all exported functions as entry points
+            let libraryExports = 
+                functions 
+                |> Array.filter (fun f -> f.Symbol.Accessibility.IsPublic)
+                |> Array.map (fun f -> f.FullName)
+            
+            // Compute reachability from these exports
+            let callGraph, reachable, unreachable = 
+                computeReachabilityAnalysis dependencies functions libraryExports
+                
+            { TotalFunctions = functions.Length
+              ReachableFunctions = reachable
+              UnreachableFunctions = unreachable
+              CallGraph = callGraph
+              EntryPoints = libraryExports }
+    else
+        // Standard case - compute reachability from detected entry points
+        let callGraph, reachable, unreachable = 
+            computeReachabilityAnalysis dependencies functions entryPoints
+            
+        { TotalFunctions = functions.Length
+          ReachableFunctions = reachable
+          UnreachableFunctions = unreachable
+          CallGraph = callGraph
+          EntryPoints = entryPoints }
 
 // ===================================================================
 // Utility Functions for Analysis

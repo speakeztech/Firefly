@@ -113,7 +113,7 @@ module ProjectFileParser =
         }
 
 /// Load a project file and create FCS options
-let loadProject (projectFile: string) (checker: FSharpChecker) =
+let parseProjectOptions (projectFile: string) (checker: FSharpChecker) =
     async {
         printfn "[ProjectLoader] Loading project: %s" projectFile
         

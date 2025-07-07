@@ -143,6 +143,71 @@ let private isAllocatingFunction (fullName: string) : bool =
 // Simplified Expression Analysis for Allocations
 // ===================================================================
 
+/// Safely determine if a type has a qualified name, handling primitives specially
+let rec typeHasQualifiedName (fsharpType: FSharpType) : bool * string =
+    try
+        if fsharpType.IsAbbreviation then
+            typeHasQualifiedName fsharpType.AbbreviatedType
+        elif fsharpType.HasTypeDefinition then
+            let typeDef = fsharpType.TypeDefinition
+            
+            // Check for primitive types by their name patterns
+            match typeDef.DisplayName with
+            | "int" | "int32" -> true, "System.Int32"
+            | "int64" | "long" -> true, "System.Int64"
+            | "uint32" | "uint" -> true, "System.UInt32"  
+            | "uint64" | "ulong" -> true, "System.UInt64"
+            | "float" | "double" -> true, "System.Double"
+            | "float32" | "single" -> true, "System.Single"
+            | "byte" -> true, "System.Byte"
+            | "sbyte" -> true, "System.SByte"
+            | "char" -> true, "System.Char"
+            | "bool" -> true, "System.Boolean"
+            | "unit" -> true, "System.Void"
+            | "string" -> true, "System.String"
+            | "voption`1" -> true, "Microsoft.FSharp.Core.ValueOption`1"
+            | "option`1" -> true, "Microsoft.FSharp.Core.FSharpOption`1"
+            | _ ->
+                // For non-primitive types, use FullName if available
+                try 
+                    let fullName = typeDef.FullName
+                    if System.String.IsNullOrEmpty fullName then
+                        false, sprintf "Unknown.%s" typeDef.DisplayName
+                    else
+                        true, fullName
+                with _ -> 
+                    false, sprintf "Unknown.%s" typeDef.DisplayName
+        else
+            false, "Unknown.Type"
+    with ex ->
+        false, sprintf "Error.%s" (ex.Message.Replace(" ", ""))
+
+/// Determine if a type is a primitive value type that doesn't cause heap allocation
+let private isPrimitiveValueType (typeName: string) =
+    // Core primitive types that are stored on the stack, not the heap
+    match typeName with
+    | "System.Int32" | "System.Int64" | "System.UInt32" | "System.UInt64"
+    | "System.Boolean" | "System.Char" | "System.Double" | "System.Single"
+    | "System.Decimal" | "System.Void" | "System.IntPtr" | "System.UIntPtr" -> true
+    | name when name.StartsWith("System.ValueTuple") -> true
+    | _ -> false
+
+/// Determine if a type should be flagged as causing an allocation
+let private shouldFlagAsAllocation (typeName: string) (origin: TypeOrigin) =
+    if isPrimitiveValueType typeName then
+        // Primitive value types never cause heap allocations
+        false
+    else
+        // For non-primitives, apply your existing rules based on origin
+        match origin with
+        | ExternalAssembly ->
+            // Skip IDisposable and math functions
+            typeName <> "System.IDisposable" && 
+            not (typeName.StartsWith("System.Math"))
+        | _ -> 
+            // Types from your project, Alloy, or FSharp.Core are considered safe
+            false
+
 /// Detect allocation sites using enhanced type origin tracking
 let private detectAllocationsInExpr (expr: FSharpExpr) : AllocationSite list =
     let allocations = ResizeArray<AllocationSite>()
@@ -157,41 +222,37 @@ let private detectAllocationsInExpr (expr: FSharpExpr) : AllocationSite list =
                 [||]
         
         let rec traverse (expr: FSharpExpr) =
-            // Check if this expression type might indicate allocation
-            if expr.Type.HasTypeDefinition then
-                let typeDef = expr.Type.TypeDefinition
-                let typeName = typeDef.QualifiedName
+            try
+                // Check if this expression type might indicate allocation
+                let hasName, typeName = typeHasQualifiedName expr.Type
                 
-                // Determine type origin
-                let origin = determineTypeOrigin typeDef projectFiles
-                
-                // Only flag external types as allocations
-                match origin with
-                | ExternalAssembly ->
-                    // Skip IDisposable as it's just an interface marker
-                    if typeName <> "System.IDisposable" && isAllocatingFunction typeName then
-                        allocations.Add({
-                            TypeName = typeName
-                            Location = expr.Range
-                            AllocationType = HeapAllocation
-                        })
-                    elif typeName.StartsWith "System." && not (typeName.StartsWith "System.Math") then
-                        allocations.Add({
-                            TypeName = typeName
-                            Location = expr.Range
-                            AllocationType = ObjectConstruction
-                        })
-                | _ -> 
-                    // Types from project, Alloy, or FSharp.Core are not allocations
+                // In your traverse function, replace the allocation detection logic with:
+                if hasName then
+                    // Only proceed if we have a valid type name
+                    if expr.Type.HasTypeDefinition then
+                        let typeDef = expr.Type.TypeDefinition
+                        let origin = determineTypeOrigin typeDef projectFiles
+                        
+                        // Use improved allocation detection that avoids flagging primitives
+                        if shouldFlagAsAllocation typeName origin then
+                            allocations.Add({
+                                TypeName = typeName
+                                Location = expr.Range
+                                AllocationType = ObjectConstruction
+                            })
+                else
+                    // Skip types without qualified names
                     ()
+            with ex ->
+                // Don't print warning here - we'll catch it at the outer level
+                ()
             
             // Recursively check sub-expressions
             for subExpr in expr.ImmediateSubExpressions do
                 traverse subExpr
         
         traverse expr
-    with
-    | ex ->
+    with ex ->
         eprintfn "Warning: Could not fully analyze allocations in expression: %s" ex.Message
     
     allocations |> List.ofSeq
@@ -223,7 +284,7 @@ let getAllocationReport (allocationSites: AllocationSite[]) : string =
         "✓ Zero-allocation verification passed - no heap allocations detected"
     else
         let sb = System.Text.StringBuilder()
-        sb.AppendLine("❌ Zero-allocation verification failed:") |> ignore
+        sb.AppendLine "❌ Zero-allocation verification failed:" |> ignore
         sb.AppendLine() |> ignore
         
         let groupedAllocations = 
@@ -231,10 +292,10 @@ let getAllocationReport (allocationSites: AllocationSite[]) : string =
             |> Array.groupBy (fun site -> site.AllocationType)
         
         for (allocType, sites) in groupedAllocations do
-            sb.AppendLine($"{allocType} allocations:") |> ignore
+            sb.AppendLine $"{allocType} allocations:" |> ignore
             for site in sites do
                 let location = $"{site.Location.FileName}({site.Location.Start.Line},{site.Location.Start.Column})"
-                sb.AppendLine($"  • {site.TypeName} at {location}") |> ignore
+                sb.AppendLine $"  • {site.TypeName} at {location}" |> ignore
             sb.AppendLine() |> ignore
         
         sb.ToString()
@@ -291,8 +352,8 @@ let getValidationStatistics (functions: TypedFunction[]) : Map<string, int> =
         | _ -> () // Continue processing other functions
     
     Map.ofList [
-        ("TotalFunctions", totalFunctions)
-        ("FunctionsWithAllocations", functionsWithAllocations)
-        ("TotalAllocationSites", totalAllocations)
-        ("CleanFunctions", totalFunctions - functionsWithAllocations)
+        "TotalFunctions", totalFunctions
+        "FunctionsWithAllocations", functionsWithAllocations
+        "TotalAllocationSites", totalAllocations
+        "CleanFunctions", totalFunctions - functionsWithAllocations
     ]

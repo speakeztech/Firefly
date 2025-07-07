@@ -2,7 +2,6 @@ module Core.FCSIngestion.ProjectProcessor
 
 open System
 open FSharp.Compiler.CodeAnalysis
-open FSharp.Compiler.Symbols
 
 /// Result of processing a project through FCS
 type ProcessedProject = {
@@ -23,15 +22,15 @@ type ProcessingError = {
 }
 
 /// Process a project using FCS ParseAndCheckProject
-let processProject (projectOptions: FSharpProjectOptions) (checker: FSharpChecker) =
+let processProject (projectPath: string) (projectOptions: FSharpProjectOptions) (checker: FSharpChecker) =
     async {
+       
+        // Process the project
         let startTime = DateTime.UtcNow
         
-        printfn "[ProjectProcessor] Starting ParseAndCheckProject..."
-        printfn "[ProjectProcessor] Project: %s" projectOptions.ProjectFileName
-        printfn "[ProjectProcessor] Files: %d" projectOptions.SourceFiles.Length
+        printfn "[ProjectProcessor] Processing project: %s" projectPath
+        printfn "[ProjectProcessor] Source files: %d" projectOptions.SourceFiles.Length
         
-        // The one call that does everything!
         let! projectResults = checker.ParseAndCheckProject(projectOptions)
         
         let processingTime = DateTime.UtcNow - startTime
