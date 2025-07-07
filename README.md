@@ -63,7 +63,6 @@ Firefly operates as an intelligent compilation orchestrator that:
 
 ## Hello World (Stack-Only)
 
-Create `hello.fs`:
 ```fsharp
 module Examples.HelloWorldDirect
 

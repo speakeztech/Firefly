@@ -28,6 +28,13 @@
       <Compile Include="Core/Types/TypeSystem.fs" />   
       <Compile Include="Core/XParsec/Foundation.fs" />  
       
+      <!-- Program Semantic Graph - Core PSG Functionality -->
+      <Compile Include="Core/PSG/Types.fs" />
+      <Compile Include="Core/PSG/XmlDocParser.fs" />
+      <Compile Include="Core/PSG/Builder.fs" />
+      <Compile Include="Core/PSG/IntermediateWriter.fs" />
+      <Compile Include="Core/PSG/Pipeline.fs" />
+      
       <!-- FCS Integration -->
       <Compile Include="Core/FCSIngestion/ProjectOptionsLoader.fs" />     
       <Compile Include="Core/FCSIngestion/ProjectProcessor.fs" />         
@@ -51,19 +58,7 @@
     <PackageReference Include="FSharp.Compiler.Service" Version="43.9.300" />
     <PackageReference Include="XParsec" Version="0.1.0" />
     <PackageReference Include="Argu" Version="6.1.1" />
+    <PackageReference Include="FSharp.SystemTextJson" Version="1.2.42" />
   </ItemGroup>
 
 </Project>
-
-
-
-
-
-
-
-
-
-
-
-
-
