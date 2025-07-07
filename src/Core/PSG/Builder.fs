@@ -369,7 +369,7 @@ let buildPSG
                 { psg with SourceASTs = Map.add parseResult.FileName parsedInput psg.SourceASTs })
         
         // Process each parsed input
-        let finalPsg = 
+        let psgWithProcessedModules = 
             (psgWithInputs, parseResults)
             ||> Array.fold (fun psg parseResult ->
                 let parsedInput = parseResult.ParseTree
@@ -382,121 +382,8 @@ let buildPSG
                         let updatedPsg, _ = processModuleOrNamespace modOrNs None symbolUses sourceFiles currentPsg
                         updatedPsg)
                 | ParsedInput.SigFile _ -> 
-                    // Handle signature files if needed
+                    // Signature files don't contribute to the runtime PSG
                     psg)
-        
-        // STEP 1: Collect all potential entry points
-        let potentialEntryPoints = 
-            checkResults.AssemblyContents.ImplementationFiles
-            |> Seq.collect (fun implFile ->
-                implFile.Declarations
-                |> Seq.collect (fun decl ->
-                    match decl with
-                    | FSharpImplementationFileDeclaration.Entity (entity, subDecls) -> 
-                        // Look inside entities (modules, namespaces)
-                        subDecls |> Seq.collect (function
-                            | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(mfv, _, _) ->
-                                let hasEntryPointAttr = 
-                                    mfv.Attributes 
-                                    |> Seq.exists (fun attr -> 
-                                        attr.AttributeType.BasicQualifiedName = "EntryPointAttribute" ||
-                                        attr.AttributeType.BasicQualifiedName = "System.EntryPointAttribute")
-                                
-                                let isMainFunction = 
-                                    mfv.LogicalName = "main" && 
-                                    mfv.FullType.IsFunctionType
-                                
-                                if hasEntryPointAttr || isMainFunction then
-                                    // Store the full path for lookup
-                                    let fullPath = sprintf "%s.%s.%s" 
-                                                        implFile.QualifiedName 
-                                                        entity.DisplayName 
-                                                        mfv.DisplayName
-                                    
-                                    printfn "Found entry point: %s in %s (attr: %b, main: %b)" 
-                                        mfv.DisplayName fullPath hasEntryPointAttr isMainFunction
-                                    
-                                    [(fullPath, mfv)]
-                                else []
-                            | _ -> [])
-                    | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(mfv, _, _) ->
-                        // Top-level functions (rare but possible)
-                        let hasEntryPointAttr = 
-                            mfv.Attributes 
-                            |> Seq.exists (fun attr -> 
-                                attr.AttributeType.BasicQualifiedName = "EntryPointAttribute" ||
-                                attr.AttributeType.BasicQualifiedName = "System.EntryPointAttribute")
-                        
-                        let isMainFunction = 
-                            mfv.LogicalName = "main" && 
-                            mfv.FullType.IsFunctionType
-                        
-                        if hasEntryPointAttr || isMainFunction then
-                            let fullPath = sprintf "%s.%s" 
-                                                implFile.QualifiedName 
-                                                mfv.DisplayName
-                            
-                            printfn "Found entry point: %s in %s (attr: %b, main: %b)" 
-                                mfv.DisplayName fullPath hasEntryPointAttr isMainFunction
-                            
-                            [(fullPath, mfv)]
-                        else []
-                    | _ -> []
-                )
-            )
-            |> Seq.toList
-        
-        // STEP 2: Map entry points to nodes
-        let entryPointNodes = 
-            potentialEntryPoints
-            |> List.choose (fun (path, symbol) ->
-                // Try to find a node corresponding to this symbol
-                let symbolKey = symbol.FullName
-                printfn "Looking for symbol key: %s" symbolKey
-                
-                // Try to find in SymbolToNodes map
-                match Map.tryFind symbolKey finalPsg.SymbolToNodes with
-                | Some nodeIds when not (Set.isEmpty nodeIds) -> 
-                    let nodeId = Set.minElement nodeIds
-                    printfn "Found node for entry point: %s -> %s" symbolKey nodeId.Value
-                    Some nodeId
-                | _ -> 
-                    // Try by display name as fallback
-                    let displayKey = symbol.DisplayName
-                    match Map.tryFind displayKey finalPsg.SymbolToNodes with
-                    | Some nodeIds when not (Set.isEmpty nodeIds) -> 
-                        let nodeId = Set.minElement nodeIds
-                        printfn "Found node by display name: %s -> %s" displayKey nodeId.Value
-                        Some nodeId
-                    | _ ->
-                        // Last resort - scan through for a matching pattern
-                        let matchingNodes =
-                            finalPsg.ValueNodes
-                            |> Map.toSeq
-                            |> Seq.choose (fun (nodeId, node) ->
-                                match node.Symbol with
-                                | Some sym when sym.DisplayName = symbol.DisplayName -> Some nodeId
-                                | _ -> None)
-                            |> Seq.tryHead
-                        
-                        match matchingNodes with
-                        | Some nodeId -> 
-                            printfn "Found node by scan: %s" nodeId.Value
-                            Some nodeId
-                        | None -> 
-                            printfn "WARNING: Failed to map entry point to node: %s" path
-                            printfn "Symbols in map: %d, Nodes: %d" 
-                                (Map.count finalPsg.SymbolTable) 
-                                (Map.count finalPsg.ValueNodes)
-                            None
-            )
-
-        // Print summary of entry point detection
-        printfn "DEBUG: Found %d entry points out of %d functions" 
-            entryPointNodes.Length potentialEntryPoints.Length
-        
-        // STEP 3: Update PSG with entry points
-        let psgWithEntryPoints = { finalPsg with EntryPoints = entryPointNodes }
         
         // Collect Alloy references for zero-allocation analysis
         let alloyRefs = 
@@ -513,14 +400,120 @@ let buildPSG
                 | _ -> None)
             |> Set.ofSeq
         
-        // Final PSG with Alloy references
-        let completePsg = { psgWithEntryPoints with AlloyReferences = alloyRefs }
+        let psgWithAlloyRefs = { psgWithProcessedModules with AlloyReferences = alloyRefs }
         
-        Success completePsg
+        // ===== ENTRY POINT DETECTION (SEPARATE PASS) =====
+        // Now that the PSG is built with all nodes and symbol mappings,
+        // we can properly find entry points using both AST and symbol information
+        
+        // Helper function to check if a symbol is an entry point
+        let isEntryPointSymbol (symbol: FSharpSymbol) =
+            match symbol with
+            | :? FSharpMemberOrFunctionOrValue as mfv ->
+                // Check for EntryPoint attribute using multiple matching strategies
+                let hasEntryPointAttr = 
+                    mfv.Attributes 
+                    |> Seq.exists (fun attr -> 
+                        // Check all possible ways the attribute might be represented
+                        attr.AttributeType.DisplayName = "EntryPoint" ||
+                        attr.AttributeType.DisplayName = "EntryPointAttribute" ||
+                        attr.AttributeType.BasicQualifiedName = "EntryPointAttribute" ||
+                        attr.AttributeType.BasicQualifiedName = "System.EntryPointAttribute")
+                
+                // Check if it's a main function with the right signature
+                let isMainFunction = 
+                    mfv.LogicalName = "main" && 
+                    mfv.FullType.IsFunctionType
+                
+                // Log potential entry points for diagnostics
+                if hasEntryPointAttr || isMainFunction then
+                    printfn "Found potential entry point: %s (attribute: %b, main function: %b)" 
+                        mfv.LogicalName hasEntryPointAttr isMainFunction
+                
+                hasEntryPointAttr || isMainFunction
+            | _ -> false
+        
+        // Find all entry point symbols in the FCS API
+        let entryPointSymbols =
+            checkResults.AssemblyContents.ImplementationFiles
+            |> Seq.collect (fun implFile ->
+                implFile.Declarations
+                |> Seq.collect (fun decl ->
+                    match decl with
+                    | FSharpImplementationFileDeclaration.Entity(entity, subDecls) ->
+                        // Look in module/namespace declarations
+                        subDecls 
+                        |> Seq.choose (function
+                            | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(mfv, _, _) 
+                                when isEntryPointSymbol mfv -> 
+                                Some(mfv)
+                            | _ -> None)
+                    | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(mfv, _, _) 
+                        when isEntryPointSymbol mfv ->
+                        // Top-level function (rare but possible)
+                        Seq.singleton mfv
+                    | _ -> Seq.empty
+                )
+            )
+            |> Seq.toList
+        
+        // Map entry point symbols to PSG nodes
+        let entryPointNodes =
+            entryPointSymbols
+            |> List.choose (fun symbol ->
+                // Try different strategies to map the symbol to a node
+                
+                // Strategy 1: Direct symbol lookup
+                let symbolKey = symbol.FullName
+                match Map.tryFind symbolKey psgWithAlloyRefs.SymbolToNodes with
+                | Some nodeIds when not (Set.isEmpty nodeIds) -> 
+                    let nodeId = Set.minElement nodeIds
+                    printfn "Found node for entry point by full name: %s -> %s" symbolKey nodeId.Value
+                    Some nodeId
+                | _ ->
+                    // Strategy 2: Display name lookup
+                    let displayKey = symbol.DisplayName
+                    match Map.tryFind displayKey psgWithAlloyRefs.SymbolToNodes with
+                    | Some nodeIds when not (Set.isEmpty nodeIds) -> 
+                        let nodeId = Set.minElement nodeIds
+                        printfn "Found node for entry point by display name: %s -> %s" displayKey nodeId.Value
+                        Some nodeId
+                    | _ ->
+                            // Strategy 3: Search through all value nodes
+                            let matchingNodes =
+                                psgWithAlloyRefs.ValueNodes
+                                |> Map.toSeq
+                                |> Seq.choose (fun (nodeId, node) ->
+                                    match node.Symbol with
+                                    | Some sym when 
+                                        sym.DisplayName = symbol.DisplayName || 
+                                        (sym :? FSharpMemberOrFunctionOrValue && 
+                                            (sym :?> FSharpMemberOrFunctionOrValue).LogicalName = "main") -> 
+                                        Some nodeId
+                                    | _ -> None)
+                                |> Seq.tryHead
+                            
+                            match matchingNodes with
+                            | Some nodeId -> 
+                                printfn "Found node for entry point by scan: %s" nodeId.Value
+                                Some nodeId
+                            | None -> 
+                                printfn "WARNING: Failed to map entry point to node: %s" symbol.DisplayName
+                                None
+            )
+        
+        // Print summary of entry point detection
+        printfn "DEBUG: Found %d entry points out of %d potential entry point symbols" 
+            entryPointNodes.Length entryPointSymbols.Length
+        
+        // Create final PSG with entry points
+        let finalPsg = { psgWithAlloyRefs with EntryPoints = entryPointNodes }
+        
+        Success finalPsg
     with ex ->
         Failure [{
             Severity = DiagnosticSeverity.Error
-            Code = "FCS001"  // FCS-specific error code
+            Code = "PSG001"
             Message = sprintf "Failed to build PSG: %s" ex.Message
             Location = None
             RelatedLocations = []
