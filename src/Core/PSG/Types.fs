@@ -237,7 +237,7 @@ type DiagnosticMessage = {
     RelatedLocations: (range * string) list
 }
 
-/// Result of a compilation phase
-type CompilationResult<'T> =
+/// Result type specific to F# Compiler Services operations
+type FcsResult<'T> =
     | Success of 'T
     | Failure of DiagnosticMessage list

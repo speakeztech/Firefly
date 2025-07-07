@@ -1,6 +1,5 @@
 module Core.PSG.Pipeline
 
-open System
 open System.IO
 open FSharp.Compiler.CodeAnalysis
 open Core.PSG.Types
@@ -31,17 +30,27 @@ let createPSG
     (checker: FSharpChecker) 
     (projectOptions: FSharpProjectOptions)
     (options: PSGOptions)
-    (progress: ProgressReporter) : Async<CompilationResult<ProgramSemanticGraph>> =
+    (progress: ProgressReporter) : Async<FcsResult<ProgramSemanticGraph>> =
     
     async {
         try
             // Parse all project files
             progress "Parsing source files..."
+            // Modify this line in Pipeline.fs:
             let! parseResults = 
+                // Get parsing options from project options
+                let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions projectOptions
+                
                 projectOptions.SourceFiles
-                |> Array.map (fun file -> checker.ParseFile(file, projectOptions.SourceTextOpt.[file], projectOptions))
+                |> Array.map (fun file -> 
+                    // Read file content and create source text
+                    let content = System.IO.File.ReadAllText(file)
+                    let sourceText = FSharp.Compiler.Text.SourceText.ofString content
+                    
+                    // Use the correct overload with the right parameters
+                    checker.ParseFile(file, sourceText, parsingOptions))
                 |> Async.Parallel
-            
+
             // Type check the project
             progress "Type checking project..."
             let! checkResults = checker.ParseAndCheckProject(projectOptions)
@@ -53,7 +62,7 @@ let createPSG
                     |> Seq.filter (fun diag -> diag.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error)
                     |> Seq.map (fun diag ->
                         {
-                            Severity = DiagnosticSeverity.Error
+                            Severity = Error
                             Code = "FCS" + diag.ErrorNumber.ToString()
                             Message = diag.Message
                             Location = Some diag.Range
@@ -107,7 +116,7 @@ let createPSG
     }
 
 /// Validate a PSG for correctness
-let validatePSG (psg: ProgramSemanticGraph) : CompilationResult<ProgramSemanticGraph> =
+let validatePSG (psg: ProgramSemanticGraph) : FcsResult<ProgramSemanticGraph> =
     let diagnostics = ResizeArray<DiagnosticMessage>()
     
     // Check for orphaned nodes

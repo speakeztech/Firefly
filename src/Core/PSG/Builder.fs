@@ -143,9 +143,12 @@ let rec processModuleOrNamespace
     // Create enriched node for module
     let moduleNode = processNode modOrNs "module" modOrNs.Range parentId symbolUses sourceFiles
     
-    // Process module declarations - Access 'decls' instead of 'Declarations'
+    // Extract declarations through pattern matching
+    let (SynModuleOrNamespace(_, _, _, declarations, _, _, _, _, _)) = modOrNs
+    
+    // Process module declarations
     let psgWithDecls, childIds = 
-        ((psg, []), modOrNs.Decls) // Use 'Decls' instead of 'Declarations'
+        ((psg, []), declarations)
         ||> List.fold (fun (currentPsg, ids) decl ->
             let updatedPsg, childId = processDeclaration decl (Some moduleNode.Id) symbolUses sourceFiles currentPsg
             (updatedPsg, childId :: ids))
@@ -177,7 +180,7 @@ and processDeclaration
     (psg: ProgramSemanticGraph) : ProgramSemanticGraph * NodeId =
     
     match decl with
-    | SynModuleDecl.Let(_, bindings, range, _) -> // Add trivia parameter
+    | SynModuleDecl.Let(_, bindings, range) -> // Add trivia parameter
         // Process each binding
         let psgWithBindings, childIds = 
             ((psg, []), bindings)
@@ -189,7 +192,7 @@ and processDeclaration
         let letNodeId = NodeId.FromSyntaxNode("let_decl", range)
         psgWithBindings, letNodeId
         
-    | SynModuleDecl.Types(typeDefs, range, _) -> // Add trivia parameter
+    | SynModuleDecl.Types(typeDefs, range) -> // Add trivia parameter
         // Process each type definition
         let psgWithTypes, childIds = 
             ((psg, []), typeDefs)
@@ -202,7 +205,7 @@ and processDeclaration
         | id :: _ -> psgWithTypes, id
         | [] -> psgWithTypes, NodeId.FromSyntaxNode("empty_types", Range.Zero)
         
-    | SynModuleDecl.NestedModule(componentInfo, isRec, decls, range, _, _) -> // Add trivia parameter
+    | SynModuleDecl.NestedModule(componentInfo, isRec, decls, _, range, _) -> // Add trivia parameter
         // Create node for nested module
         let moduleNodeId = NodeId.FromSyntaxNode("nested_module", range)
         
@@ -228,49 +231,35 @@ and processBinding
     (sourceFiles: Map<string, string>)
     (psg: ProgramSemanticGraph) : ProgramSemanticGraph * EnrichedNode<SynBinding> =
     
-    // Use RangeOfBindingWithRhs instead of RangeOfBindingAndRhs
+    // Use RangeOfBindingWithRhs to get the binding range
     let bindingRange = binding.RangeOfBindingWithRhs 
     
     // Create enriched node for binding
     let bindingNode = processNode binding "binding" bindingRange parentId symbolUses sourceFiles
     
-    // Use RangeExpr to get the expression
-    match binding.RangeExpr with
-    | Some expr ->
-        // Process the expression in the binding
-        let psgWithExpr, exprNode = processExpression expr (Some bindingNode.Id) symbolUses sourceFiles psg
-        
-        // Update binding node with expression as child
-        let updatedBindingNode = { bindingNode with Children = [exprNode.Id] }
-        
-        // Add to PSG
-        let updatedPsg = { psgWithExpr with ValueNodes = Map.add updatedBindingNode.Id updatedBindingNode psgWithExpr.ValueNodes }
-        
-        // Add symbol mapping if available
-        let finalPsg =
-            match bindingNode.Symbol with
-            | Some symbol -> 
-                updatedPsg 
-                |> addSymbol symbol
-                |> addRangeSymbolMapping bindingNode.SourceLocation.Range symbol
-                |> addSymbolNodeMapping symbol bindingNode.Id
-            | None -> updatedPsg
-        
-        finalPsg, updatedBindingNode
-    | None ->
-        // No expression available
-        let updatedPsg = { psg with ValueNodes = Map.add bindingNode.Id bindingNode psg.ValueNodes }
-        
-        let finalPsg =
-            match bindingNode.Symbol with
-            | Some symbol -> 
-                updatedPsg 
-                |> addSymbol symbol
-                |> addRangeSymbolMapping bindingNode.SourceLocation.Range symbol
-                |> addSymbolNodeMapping symbol bindingNode.Id
-            | None -> updatedPsg
-        
-        finalPsg, bindingNode
+    // Extract the expression directly from the binding through pattern matching
+    let (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) = binding
+    
+    // Process the expression
+    let psgWithExpr, exprNode = processExpression expr (Some bindingNode.Id) symbolUses sourceFiles psg
+    
+    // Update binding node with expression as child
+    let updatedBindingNode = { bindingNode with Children = [exprNode.Id] }
+    
+    // Add to PSG
+    let updatedPsg = { psgWithExpr with ValueNodes = Map.add updatedBindingNode.Id updatedBindingNode psgWithExpr.ValueNodes }
+    
+    // Add symbol mapping if available
+    let finalPsg =
+        match bindingNode.Symbol with
+        | Some symbol -> 
+            updatedPsg 
+            |> addSymbol symbol
+            |> addRangeSymbolMapping bindingNode.SourceLocation.Range symbol
+            |> addSymbolNodeMapping symbol bindingNode.Id
+        | None -> updatedPsg
+    
+    finalPsg, updatedBindingNode
 
 /// Process an expression
 and processExpression 
@@ -360,79 +349,178 @@ and processTypeDefinition
 let buildPSG 
     (parseResults: FSharpParseFileResults[]) 
     (checkResults: FSharpCheckProjectResults)
-    (sourceFiles: Map<string, string>) : CompilationResult<ProgramSemanticGraph> =
+    (sourceFiles: Map<string, string>) : FcsResult<ProgramSemanticGraph> =
     
     try
         // Get all symbol uses
         let symbolUses = checkResults.GetAllUsesOfAllSymbols()
         
-        // Build initial empty PSG
-        let initialPsg = createEmptyPSG()
+        // Create empty PSG
+        let psg = createEmptyPSG()
         
         // Add source files to PSG
-        let psgWithSources = { initialPsg with SourceFiles = sourceFiles }
+        let psgWithSources = { psg with SourceFiles = sourceFiles }
         
         // Add parsed inputs to PSG
         let psgWithInputs = 
             (psgWithSources, parseResults)
             ||> Array.fold (fun psg parseResult ->
-                match parseResult.ParseTree with
-                | Some parsedInput ->
-                    { psg with SourceASTs = Map.add parseResult.FileName parsedInput psg.SourceASTs }
-                | None -> psg)
+                let parsedInput = parseResult.ParseTree
+                { psg with SourceASTs = Map.add parseResult.FileName parsedInput psg.SourceASTs })
         
         // Process each parsed input
         let finalPsg = 
             (psgWithInputs, parseResults)
             ||> Array.fold (fun psg parseResult ->
-                match parseResult.ParseTree with
-                | Some parsedInput ->
-                    match parsedInput with
-                    | ParsedInput.ImplFile implFile ->
-                        // Process each module or namespace
-                        (psg, implFile.Modules) // Use Modules instead of Modules
-                        ||> List.fold (fun currentPsg modOrNs ->
-                            let updatedPsg, _ = processModuleOrNamespace modOrNs None symbolUses sourceFiles currentPsg
-                            updatedPsg)
-                    | _ -> psg
-                | None -> psg)
+                let parsedInput = parseResult.ParseTree
+                match parsedInput with
+                | ParsedInput.ImplFile implFile ->
+                    let (ParsedImplFileInput(_, _, _, _, _, modules, _, _, _)) = implFile
+                    // Process each module or namespace
+                    (psg, modules)
+                    ||> List.fold (fun currentPsg modOrNs ->
+                        let updatedPsg, _ = processModuleOrNamespace modOrNs None symbolUses sourceFiles currentPsg
+                        updatedPsg)
+                | ParsedInput.SigFile _ -> 
+                    // Handle signature files if needed
+                    psg)
         
-        // Identify entry points - Update to match FCS 43.9.300 structure
-        let entryPoints = 
+        // STEP 1: Collect all potential entry points
+        let potentialEntryPoints = 
             checkResults.AssemblyContents.ImplementationFiles
             |> Seq.collect (fun implFile ->
                 implFile.Declarations
                 |> Seq.collect (fun decl ->
                     match decl with
-                    | FSharpImplementationFileDeclaration.Entity (_, subDecls) -> 
-                        subDecls |> Seq.toList
+                    | FSharpImplementationFileDeclaration.Entity (entity, subDecls) -> 
+                        // Look inside entities (modules, namespaces)
+                        subDecls |> Seq.collect (function
+                            | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(mfv, _, _) ->
+                                let hasEntryPointAttr = 
+                                    mfv.Attributes 
+                                    |> Seq.exists (fun attr -> 
+                                        attr.AttributeType.BasicQualifiedName = "EntryPointAttribute" ||
+                                        attr.AttributeType.BasicQualifiedName = "System.EntryPointAttribute")
+                                
+                                let isMainFunction = 
+                                    mfv.LogicalName = "main" && 
+                                    mfv.FullType.IsFunctionType
+                                
+                                if hasEntryPointAttr || isMainFunction then
+                                    // Store the full path for lookup
+                                    let fullPath = sprintf "%s.%s.%s" 
+                                                        implFile.QualifiedName 
+                                                        entity.DisplayName 
+                                                        mfv.DisplayName
+                                    
+                                    printfn "Found entry point: %s in %s (attr: %b, main: %b)" 
+                                        mfv.DisplayName fullPath hasEntryPointAttr isMainFunction
+                                    
+                                    [(fullPath, mfv)]
+                                else []
+                            | _ -> [])
                     | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(mfv, _, _) ->
+                        // Top-level functions (rare but possible)
                         let hasEntryPointAttr = 
                             mfv.Attributes 
                             |> Seq.exists (fun attr -> 
                                 attr.AttributeType.BasicQualifiedName = "EntryPointAttribute" ||
                                 attr.AttributeType.BasicQualifiedName = "System.EntryPointAttribute")
-                        if hasEntryPointAttr then [mfv] else []
+                        
+                        let isMainFunction = 
+                            mfv.LogicalName = "main" && 
+                            mfv.FullType.IsFunctionType
+                        
+                        if hasEntryPointAttr || isMainFunction then
+                            let fullPath = sprintf "%s.%s" 
+                                                implFile.QualifiedName 
+                                                mfv.DisplayName
+                            
+                            printfn "Found entry point: %s in %s (attr: %b, main: %b)" 
+                                mfv.DisplayName fullPath hasEntryPointAttr isMainFunction
+                            
+                            [(fullPath, mfv)]
+                        else []
                     | _ -> []
                 )
             )
-            |> Seq.choose (fun symbol ->
-                match Map.tryFind (sprintf "%s_%d" (symbol.ToString()) (symbol.GetHashCode())) finalPsg.SymbolToNodes with
-                | Some nodeIds -> 
-                    nodeIds 
-                    |> Seq.tryHead
-                | None -> None
-            )
             |> Seq.toList
         
-        // Add entry points to PSG
-        let psgWithEntryPoints = { finalPsg with EntryPoints = entryPoints }
+        // STEP 2: Map entry points to nodes
+        let entryPointNodes = 
+            potentialEntryPoints
+            |> List.choose (fun (path, symbol) ->
+                // Try to find a node corresponding to this symbol
+                let symbolKey = symbol.FullName
+                printfn "Looking for symbol key: %s" symbolKey
+                
+                // Try to find in SymbolToNodes map
+                match Map.tryFind symbolKey finalPsg.SymbolToNodes with
+                | Some nodeIds when not (Set.isEmpty nodeIds) -> 
+                    let nodeId = Set.minElement nodeIds
+                    printfn "Found node for entry point: %s -> %s" symbolKey nodeId.Value
+                    Some nodeId
+                | _ -> 
+                    // Try by display name as fallback
+                    let displayKey = symbol.DisplayName
+                    match Map.tryFind displayKey finalPsg.SymbolToNodes with
+                    | Some nodeIds when not (Set.isEmpty nodeIds) -> 
+                        let nodeId = Set.minElement nodeIds
+                        printfn "Found node by display name: %s -> %s" displayKey nodeId.Value
+                        Some nodeId
+                    | _ ->
+                        // Last resort - scan through for a matching pattern
+                        let matchingNodes =
+                            finalPsg.ValueNodes
+                            |> Map.toSeq
+                            |> Seq.choose (fun (nodeId, node) ->
+                                match node.Symbol with
+                                | Some sym when sym.DisplayName = symbol.DisplayName -> Some nodeId
+                                | _ -> None)
+                            |> Seq.tryHead
+                        
+                        match matchingNodes with
+                        | Some nodeId -> 
+                            printfn "Found node by scan: %s" nodeId.Value
+                            Some nodeId
+                        | None -> 
+                            printfn "WARNING: Failed to map entry point to node: %s" path
+                            printfn "Symbols in map: %d, Nodes: %d" 
+                                (Map.count finalPsg.SymbolTable) 
+                                (Map.count finalPsg.ValueNodes)
+                            None
+            )
+
+        // Print summary of entry point detection
+        printfn "DEBUG: Found %d entry points out of %d functions" 
+            entryPointNodes.Length potentialEntryPoints.Length
         
-        Success psgWithEntryPoints
+        // STEP 3: Update PSG with entry points
+        let psgWithEntryPoints = { finalPsg with EntryPoints = entryPointNodes }
+        
+        // Collect Alloy references for zero-allocation analysis
+        let alloyRefs = 
+            symbolUses
+            |> Seq.choose (fun symbolUse ->
+                let symbol = symbolUse.Symbol
+                match symbol with
+                | :? FSharpEntity as entity when entity.FullName.StartsWith("Alloy.") ->
+                    Some entity.FullName
+                | :? FSharpMemberOrFunctionOrValue as mfv when 
+                    mfv.FullName.StartsWith("Alloy.") || 
+                    (mfv.DeclaringEntity.IsSome && mfv.DeclaringEntity.Value.FullName.StartsWith("Alloy.")) ->
+                    Some mfv.FullName
+                | _ -> None)
+            |> Set.ofSeq
+        
+        // Final PSG with Alloy references
+        let completePsg = { psgWithEntryPoints with AlloyReferences = alloyRefs }
+        
+        Success completePsg
     with ex ->
         Failure [{
             Severity = DiagnosticSeverity.Error
-            Code = "PSG001"
+            Code = "FCS001"  // FCS-specific error code
             Message = sprintf "Failed to build PSG: %s" ex.Message
             Location = None
             RelatedLocations = []

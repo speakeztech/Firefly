@@ -7,7 +7,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.3.036</Version>
+    <Version>0.3.040</Version>
     <Description>Firefly F# Compiler - AST-Based Compilation</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
@@ -62,3 +62,6 @@
   </ItemGroup>
 
 </Project>
+
+
+

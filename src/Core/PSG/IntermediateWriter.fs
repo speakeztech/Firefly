@@ -173,9 +173,8 @@ let writePSG (fileName: string) (psg: ProgramSemanticGraph) =
                     // Extract qualified path through pattern matching
                     let moduleName = 
                         match node.Syntax with
-                        | SynModuleOrNamespace(longId, _, _, _, _, _, _, _) ->
+                        | SynModuleOrNamespace(longId, isRec, kind, decls, xmlDoc, attrs, access, range, trivia) ->
                             longId |> List.map (fun id -> id.idText) |> String.concat "."
-                        | _ -> "unknown"
                     
                     {|
                         Id = nodeId.Value
@@ -193,7 +192,7 @@ let writePSG (fileName: string) (psg: ProgramSemanticGraph) =
                     // Extract type name through pattern matching
                     let typeName = 
                         match node.Syntax with
-                        | SynTypeDefn(typeInfo, _, _, _) ->
+                        | SynTypeDefn(typeInfo, implType, members, None, range, trivia) ->
                             match typeInfo with
                             | SynComponentInfo(_, _, _, id, _, _, _, _) ->
                                 id |> List.map (fun i -> i.idText) |> String.concat "."
@@ -214,13 +213,12 @@ let writePSG (fileName: string) (psg: ProgramSemanticGraph) =
                     // Extract name from binding through pattern matching
                     let bindingName =
                         match node.Syntax with
-                        | SynBinding(_, _, _, _, _, pat, _, _, _) ->
+                        | SynBinding(_, _, _, _, _, _, _,  pat, _, _, _, _, _) ->
                             match pat with
                             | SynPat.Named(SynIdent(ident, _), _, _, _) -> ident.idText
-                            | SynPat.LongIdent(LongIdentWithDots(ids, _), _, _, _, _, _) ->
+                            | SynPat.LongIdent(SynLongIdent(ids, _, _), _, _, _, _, _) ->
                                 ids |> List.map (fun id -> id.idText) |> String.concat "."
-                            | _ -> "anonymous"
-                        | _ -> "anonymous"
+                            | _ -> "anonymous" // Handle other pattern cases
                     
                     {|
                         Id = nodeId.Value
