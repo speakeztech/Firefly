@@ -1,32 +1,39 @@
 module Dabbit.Pipeline.CompilationTypes
 
 open System
-open Core.XParsec.Foundation
 
 // ===================================================================
-// TypedAST Processing Pipeline Types
+// Compilation Pipeline Types
 // ===================================================================
 
-/// Processing phases for TypedAST analysis
+/// Phases of the compilation pipeline
 type CompilationPhase =
-    | ProjectLoading
-    | FCSProcessing
-    | SymbolCollection
+    | Initialization
+    | Parsing
+    | TypeChecking
+    | SymbolExtraction
     | ReachabilityAnalysis
-    | IntermediateGeneration
     | ASTTransformation
     | MLIRGeneration
     | LLVMGeneration
-    | NativeCompilation
+    | IntermediateGeneration
+    | Finalization
 
-/// Progress callback for pipeline orchestration
-type ProgressCallback = CompilationPhase -> string -> unit
+/// Error severity levels
+type ErrorSeverity =
+    | Error
+    | Warning
+    | Info
 
-// ===================================================================
-// Analysis Statistics
-// ===================================================================
+/// Compiler error with context
+type CompilerError = {
+    Phase: string
+    Message: string
+    Location: string option
+    Severity: ErrorSeverity
+}
 
-/// Statistics collected during TypedAST processing
+/// Compilation statistics
 type CompilationStatistics = {
     TotalFiles: int
     TotalSymbols: int
@@ -36,56 +43,37 @@ type CompilationStatistics = {
 }
 
 /// Empty statistics for initialization
-let emptyStatistics = {
-    TotalFiles = 0
-    TotalSymbols = 0
-    ReachableSymbols = 0
-    EliminatedSymbols = 0
-    CompilationTimeMs = 0.0
+module CompilationStatistics =
+    let empty = {
+        TotalFiles = 0
+        TotalSymbols = 0
+        ReachableSymbols = 0
+        EliminatedSymbols = 0
+        CompilationTimeMs = 0.0
+    }
+
+/// Configuration for the compilation pipeline
+type CompilationConfig = {
+    EnableClosureElimination: bool
+    EnableStackAllocation: bool
+    EnableReachabilityAnalysis: bool
+    PreserveIntermediateASTs: bool
+    VerboseOutput: bool
 }
+
+/// Progress callback for reporting compilation status
+type ProgressCallback = CompilationPhase -> string -> unit
 
 // ===================================================================
-// Intermediate Outputs
+// Project Loading Types (for FCS integration)
 // ===================================================================
 
-/// Intermediate analysis outputs
-type IntermediateOutputs = {
-    /// F# AST serialized to text
-    FSharpAST: string option
-    /// Reduced AST after reachability analysis
-    ReducedAST: string option
-}
+/// Project loading phase (subset of compilation phases)
+type ProjectLoadingPhase =
+    | ProjectLoading
+    | FCSProcessing
+    | SymbolCollection
+    | IntermediateGeneration
 
-/// Empty intermediate outputs
-let emptyIntermediates = {
-    FSharpAST = None
-    ReducedAST = None
-}
-
-// ===================================================================
-// Processing Results
-// ===================================================================
-
-/// Result of TypedAST processing
-type CompilationResult = {
-    Success: bool
-    Statistics: CompilationStatistics
-    Diagnostics: FireflyError list
-    Intermediates: IntermediateOutputs
-}
-
-/// Create a successful processing result
-let successResult stats intermediates _ = {
-    Success = true
-    Statistics = stats
-    Diagnostics = []
-    Intermediates = intermediates
-}
-
-/// Create a failed processing result
-let failureResult errors = {
-    Success = false
-    Statistics = emptyStatistics
-    Diagnostics = errors
-    Intermediates = emptyIntermediates
-}
+// Note: Removed projectPhaseToCompilationPhase as it was causing type issues
+// The phases are handled differently in the orchestrator

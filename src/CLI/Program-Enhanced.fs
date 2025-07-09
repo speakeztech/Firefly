@@ -83,36 +83,31 @@ let displayStatistics (stats: CompilationStatistics) : unit =
     printfn "⏱️  Compilation time: %.2f ms" stats.CompilationTimeMs
     printfn ""
 
-/// Display errors with formatting
-let displayErrors (errors: FireflyError list) : unit =
+/// Display compiler errors with formatting
+let displayErrors (errors: CompilerError list) : unit =
     Console.ForegroundColor <- ConsoleColor.Red
     printfn "=== COMPILATION ERRORS ==="
     Console.ResetColor()
     
-    for error in errors do
-        match error with
-        | SyntaxError(pos, message, context) ->
-            printfn "❌ Syntax Error at %s(%d,%d): %s" pos.File pos.Line pos.Column message
-            for ctx in context do
-                printfn "   Context: %s" ctx
+    let errorsByPhase = errors |> List.groupBy (fun e -> e.Phase)
+    
+    for (phase, phaseErrors) in errorsByPhase do
+        printfn ""
+        printfn "Phase: %s" phase
+        printfn "%s" (String.replicate (phase.Length + 7) "-")
         
-        | TypeCheckError(construct, message, location) ->
-            printfn "❌ Type Error in %s at %s(%d,%d): %s" construct location.File location.Line location.Column message
-        
-        | ConversionError(phase, source, target, message) ->
-            printfn "❌ Conversion Error in %s (%s → %s): %s" phase source target message
-        
-        | InternalError(phase, message, details) ->
-            printfn "❌ Internal Error in %s: %s" phase message
-            match details with
-            | Some detail -> printfn "   Details: %s" detail
-            | None -> ()
-        
-        | ParseError(pos, message) ->
-            printfn "❌ Parse Error at %s(%d,%d): %s" pos.File pos.Line pos.Column message
-        
-        | DependencyResolutionError(symbol, message) ->
-            printfn "❌ Dependency Error for %s: %s" symbol message
+        for error in phaseErrors do
+            let severityIcon = 
+                match error.Severity with
+                | ErrorSeverity.Error -> "❌"
+                | ErrorSeverity.Warning -> "⚠️ "
+                | ErrorSeverity.Info -> "ℹ️ "
+            
+            match error.Location with
+            | Some loc ->
+                printfn "%s %s: %s" severityIcon loc error.Message
+            | None ->
+                printfn "%s %s" severityIcon error.Message
     
     printfn ""
 
@@ -133,6 +128,8 @@ let main (args: string[]) : int =
         | None ->
             Console.ForegroundColor <- ConsoleColor.Red
             printfn "❌ Error: Project file is required."
+            Console.ResetColor()
+            printfn ""
             printfn "Usage: firefly <project-file> [options]"
             Console.ResetColor()
             1
@@ -170,7 +167,7 @@ let main (args: string[]) : int =
                 
                 // Display header
                 Console.ForegroundColor <- ConsoleColor.Cyan
-                printfn "🔥 Firefly F# Compiler v0.3.022"
+                printfn "🔥 Firefly F# Compiler v0.4.000"
                 Console.ResetColor()
                 printfn "📂 Input: %s" (Path.GetFileName(projectFile))
                 printfn "📁 Output: %s" outputDir

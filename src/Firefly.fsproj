@@ -7,13 +7,12 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.4.000</Version>
+    <Version>0.4.004</Version>
     <Description>Firefly F# Compiler - Deep FCS Integration</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 
   <PropertyGroup>
-    <NoStdLib>true</NoStdLib>
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
     <DisableImplicitSystemValueTupleReference>true</DisableImplicitSystemValueTupleReference>
   </PropertyGroup>
@@ -69,3 +68,6 @@
   </ItemGroup>
 
 </Project>
+
+
+
