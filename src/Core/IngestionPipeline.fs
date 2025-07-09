@@ -4,10 +4,7 @@ open System
 open System.IO
 open System.Text.Json
 open System.Text.Json.Serialization
-open FSharp.Compiler.Syntax
-open FSharp.Compiler.Text
-open FSharp.Compiler.CodeAnalysis  // Required for FSharpParseFileResults
-open FSharp.Compiler.Symbols
+open FSharp.Compiler.CodeAnalysis
 open Core.FCS.ProjectContext
 open Core.FCS.SymbolAnalysis
 open Core.Analysis.CouplingCohesion
@@ -24,11 +21,6 @@ let private createJsonOptions() =
 
 /// Global JSON options for the pipeline
 let private jsonOptions = createJsonOptions()
-
-/// Extract the string value from QualifiedNameOfFile
-let private extractQualifiedName (qualName: QualifiedNameOfFile) =
-    match qualName with
-    | QualifiedNameOfFile ident -> ident.idText
 
 /// Pipeline configuration
 type PipelineConfig = {
@@ -76,123 +68,31 @@ let defaultConfig = {
     IntermediatesDir = None
 }
 
-/// Convert range to JSON-friendly format
-let private rangeToJson (range: range) =
-    {| 
-        fileName = range.FileName
-        start = {| line = range.Start.Line; column = range.Start.Column |}
-        ``end`` = {| line = range.End.Line; column = range.End.Column |}
-    |}
-
-/// Convert range to string for output
-let private rangeToString (range: range) =
-    sprintf "[%d:%d-%d:%d]" range.Start.Line range.Start.Column range.End.Line range.End.Column
-
-/// Write the raw FCS AST using F#'s native representation (symbolic AST)
-let private writeRawFCSOutput (parseResults: FSharpParseFileResults[]) (intermediatesDir: string) =
+/// Write the symbolic AST using F#'s native representation 
+let private writeSymbolicAst (parseResults: FSharpParseFileResults[]) (intermediatesDir: string) =
     parseResults |> Array.iter (fun pr ->
         let baseName = Path.GetFileNameWithoutExtension(pr.FileName)
-        let astPath = Path.Combine(intermediatesDir, $"{baseName}.fcs.ast")
+        let astPath = Path.Combine(intermediatesDir, $"{baseName}.sym.ast")
         File.WriteAllText(astPath, sprintf "%A" pr.ParseTree)
         printfn "  Wrote %s (%d bytes)" (Path.GetFileName astPath) (FileInfo(astPath).Length)
     )
 
 /// Write typed AST from check results
-let private writeTypedAST (checkResults: FSharpCheckProjectResults) (intermediatesDir: string) =
+let private writeTypedAst (checkResults: FSharpCheckProjectResults) (intermediatesDir: string) =
     // Get all implementation files from the project
     checkResults.AssemblyContents.ImplementationFiles
     |> List.iter (fun implFile ->
         let baseName = Path.GetFileNameWithoutExtension(implFile.FileName)
-        let typedPath = Path.Combine(intermediatesDir, $"{baseName}.typed.ast")
+        let typedPath = Path.Combine(intermediatesDir, $"{baseName}.typ.ast")
         
-        // Write the typed AST representation
+        // Write the complete typed AST representation with all details
+        use writer = new StreamWriter(typedPath)
+        // Format with same depth and detail as symbolic AST
         let content = sprintf "%A" implFile
-        File.WriteAllText(typedPath, content)
+        writer.Write(content)
+        
         printfn "  Wrote %s (%d bytes)" (Path.GetFileName typedPath) (FileInfo(typedPath).Length)
     )
-
-/// Write symbol uses with type information
-let private writeSymbolUses (symbolUses: FSharpSymbolUse[]) (intermediatesDir: string) =
-    // Group symbol uses by file
-    let symbolsByFile = 
-        symbolUses 
-        |> Array.groupBy (fun symbolUse -> symbolUse.FileName)
-    
-    symbolsByFile
-    |> Array.iter (fun (fileName, uses) ->
-        let baseName = Path.GetFileNameWithoutExtension(fileName)
-        let symbolPath = Path.Combine(intermediatesDir, $"{baseName}.symbols")
-        
-        let content = 
-            uses
-            |> Array.map (fun symbolUse ->
-                let typeInfo = 
-                    match symbolUse.Symbol with
-                    | :? FSharpMemberOrFunctionOrValue as mfv -> 
-                        try mfv.FullType.Format(symbolUse.DisplayContext) with _ -> "<type unavailable>"
-                    | :? FSharpEntity as entity ->
-                        entity.DisplayName
-                    | _ -> "<no type info>"
-                
-                sprintf "Symbol: %s\n  Location: %s\n  Type: %s\n  IsFromDefinition: %b\n  IsFromAttribute: %b\n  IsFromComputationExpression: %b\n  IsFromDispatchSlotImplementation: %b\n  IsFromPattern: %b\n  IsFromType: %b\n"
-                    symbolUse.Symbol.DisplayName
-                    (symbolUse.Range.ToString())
-                    typeInfo
-                    symbolUse.IsFromDefinition
-                    symbolUse.IsFromAttribute
-                    symbolUse.IsFromComputationExpression
-                    symbolUse.IsFromDispatchSlotImplementation
-                    symbolUse.IsFromPattern
-                    symbolUse.IsFromType
-            )
-            |> String.concat "\n"
-            
-        File.WriteAllText(symbolPath, content)
-        printfn "  Wrote %s (%d bytes)" (Path.GetFileName symbolPath) (FileInfo(symbolPath).Length)
-    )
-
-/// Write module summary in S-expression format
-let private writeModuleSummary (parseResults: FSharpParseFileResults[]) (intermediatesDir: string) =
-    parseResults |> Array.iter (fun pr ->
-        match pr.ParseTree with
-        | ParsedInput.ImplFile(ParsedImplFileInput(fileName, _, qualName, _, _, modules, _, _, _)) ->
-            let baseName = Path.GetFileNameWithoutExtension(pr.FileName)
-            let summaryPath = Path.Combine(intermediatesDir, $"{baseName}.summary.sexp")
-            
-            use writer = new StreamWriter(summaryPath)
-            writer.WriteLine(sprintf ";; Module Summary: %s" fileName)
-            writer.WriteLine(sprintf ";; Qualified Name: %s" (extractQualifiedName qualName))
-            writer.WriteLine()
-            
-            modules |> List.iter (fun m ->
-                match m with
-                | SynModuleOrNamespace(longId, isRec, kind, decls, _, attrs, _, range, _) ->
-                    let moduleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
-                    writer.WriteLine(sprintf "(module %s" moduleName)
-                    writer.WriteLine(sprintf "  :kind %A" kind)
-                    writer.WriteLine(sprintf "  :range %s" (rangeToString range))
-                    writer.WriteLine(sprintf "  :declarations %d" decls.Length)
-                    
-                    // Summary statistics
-                    let letCount = decls |> List.filter (function SynModuleDecl.Let _ -> true | _ -> false) |> List.length
-                    let openCount = decls |> List.filter (function SynModuleDecl.Open _ -> true | _ -> false) |> List.length
-                    let typeCount = decls |> List.filter (function SynModuleDecl.Types _ -> true | _ -> false) |> List.length
-                    let nestedModuleCount = decls |> List.filter (function SynModuleDecl.NestedModule _ -> true | _ -> false) |> List.length
-                    
-                    writer.WriteLine(sprintf "  :let-bindings %d" letCount)
-                    writer.WriteLine(sprintf "  :open-declarations %d" openCount)
-                    writer.WriteLine(sprintf "  :type-definitions %d" typeCount)
-                    writer.WriteLine(sprintf "  :nested-modules %d" nestedModuleCount)
-                    writer.WriteLine(")")
-            )
-            
-            printfn "  Wrote %s (%d bytes)" (Path.GetFileName summaryPath) (FileInfo(summaryPath).Length)
-            
-        | ParsedInput.SigFile(_) -> 
-            ()
-    )
-
-// Removed writeStructuredJSON - we agreed to discard the simplified JSON representation
 
 /// Run the ingestion pipeline
 let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineResult> = async {
@@ -212,24 +112,17 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
         printfn "[Pipeline] Analyzing project with FCS..."
         let! projectResults = getProjectResults ctx
         
-        // Write parsed AST immediately with full details
+        // Write intermediate files if enabled
         if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-            // 1. Raw FCS output - exactly what FCS parsed (symbolic AST)
-            writeRawFCSOutput projectResults.ParseResults config.IntermediatesDir.Value
+            // Write symbolic AST
+            printfn "[IntermediateGeneration] Writing symbolic AST..."
+            writeSymbolicAst projectResults.ParseResults config.IntermediatesDir.Value
             
-            // 2. Module summary in S-expression format
-            writeModuleSummary projectResults.ParseResults config.IntermediatesDir.Value
-            
-            // 3. Typed AST from check results
-            printfn "[IntermediateGeneration] Writing type-checked AST..."
-            writeTypedAST projectResults.CheckResults config.IntermediatesDir.Value
-            
-            // 4. Symbol uses with type information
-            printfn "[IntermediateGeneration] Writing symbol uses..."
-            writeSymbolUses projectResults.SymbolUses config.IntermediatesDir.Value
+            // Write typed AST
+            printfn "[IntermediateGeneration] Writing typed AST..."
+            writeTypedAst projectResults.CheckResults config.IntermediatesDir.Value
         
-        // Write type-checked results summary
-        if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+            // Write type-checked results summary
             let typeCheckData = {|
                 Files = projectResults.CompilationOrder
                 SymbolCount = projectResults.SymbolUses.Length
