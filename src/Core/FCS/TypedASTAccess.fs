@@ -72,7 +72,7 @@ let extractTypeReferences (expr: FSharpExpr) =
 /// Simplified representation of a function
 type Function = {
     Symbol: FSharpMemberOrFunctionOrValue
-    Parameters: FSharpMemberOrFunctionOrValue list list
+    Parameters: FSharpParameter list list  
     Body: FSharpExpr
     ReturnType: FSharpType
 }
@@ -83,19 +83,28 @@ let extractFunctions (implFiles: FSharpImplementationFileContents list) =
     |> List.collect (fun implFile ->
         let decls = extractDeclarations implFile
         
-        let rec collectFunctions decl =
+        let rec collectFunctions (decl: TypedDeclaration) =
             match decl.Symbol with
-            | Some (:? FSharpMemberOrFunctionOrValue as mfv) when mfv.IsFunction ->
-                match decl.Expression with
-                | Some expr ->
-                    [{
-                        Symbol = mfv
-                        Parameters = mfv.CurriedParameterGroups |> List.ofSeq |> List.map List.ofSeq
-                        Body = expr
-                        ReturnType = mfv.ReturnParameter.Type
-                    }]
-                | None -> []
-            | _ ->
+            | Some symbol ->
+                match symbol with
+                | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsFunction ->
+                    match decl.Expression with
+                    | Some expr ->
+                        [{
+                            Symbol = mfv
+                            Parameters = 
+                                mfv.CurriedParameterGroups 
+                                |> Seq.map (fun group -> group |> List.ofSeq) 
+                                |> List.ofSeq  
+                            Body = expr
+                            ReturnType = mfv.ReturnParameter.Type
+                        }]
+                    | None -> []
+                | _ ->
+                    // Not a function, but check nested declarations
+                    decl.NestedDeclarations |> List.collect collectFunctions
+            | None ->
+                // No symbol (e.g., init action), check nested declarations
                 decl.NestedDeclarations |> List.collect collectFunctions
         
         decls |> List.collect collectFunctions

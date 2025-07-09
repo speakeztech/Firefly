@@ -1,15 +1,17 @@
 module Core.Analysis.Reachability
 
 open FSharp.Compiler.Symbols
+open FSharp.Compiler.CodeAnalysis  // For FSharpSymbolUse
 open Core.FCS.SymbolAnalysis
-open Core.Analysis.CouplingCohesion  // This imports CodeComponent type
+open Core.FCS.Helpers              // For getDeclaringEntity
+open Core.Analysis.CouplingCohesion // For CodeComponent type
 
 /// Reachability analysis result
 type ReachabilityResult = {
     EntryPoints: FSharpSymbol list
-    ReachableSymbols: Set<FSharpSymbol>
-    UnreachableSymbols: Set<FSharpSymbol>
-    CallGraph: Map<FSharpSymbol, FSharpSymbol list>
+    ReachableSymbols: Set<string>        // Changed to Set<string>
+    UnreachableSymbols: Set<string>      // Changed to Set<string>
+    CallGraph: Map<string, string list>  // Changed to use strings
 }
 
 /// Generate dead code elimination opportunities
@@ -25,12 +27,25 @@ and EliminationReason =
     | DeadBranch
     | UnusedType
 
+/// Helper to get symbol identifier for comparison
+let private getSymbolId (symbol: FSharpSymbol) = symbol.FullName
+
+/// Helper function to estimate symbol size (simplified)
+let private estimateSymbolSize (symbol: FSharpSymbol) =
+    match symbol with
+    | :? FSharpMemberOrFunctionOrValue as mfv ->
+        if mfv.IsFunction then 100 else 50  // Rough estimate
+    | :? FSharpEntity as entity ->
+        if entity.IsFSharpModule then 200
+        elif entity.IsFSharpRecord then 150
+        else 100
+    | _ -> 50
 
 /// Find entry points in the project
 let findEntryPoints (symbolUses: FSharpSymbolUse[]) =
     symbolUses
-    |> Array.filter (fun symbolUse -> symbolUse.IsFromDefinition)
-    |> Array.choose (fun symbolUse ->
+    |> Array.filter (fun (symbolUse: FSharpSymbolUse) -> symbolUse.IsFromDefinition)
+    |> Array.choose (fun (symbolUse: FSharpSymbolUse) ->
         match symbolUse.Symbol with
         | :? FSharpMemberOrFunctionOrValue as mfv ->
             // Check for [<EntryPoint>] attribute
@@ -57,32 +72,33 @@ let findEntryPoints (symbolUses: FSharpSymbolUse[]) =
 let buildCallGraph (relationships: SymbolRelation[]) =
     relationships
     |> Array.filter (fun r -> r.RelationType = RelationType.Calls)
-    |> Array.groupBy (fun r -> r.From)
-    |> Array.map (fun (caller, calls) ->
-        caller, calls |> Array.map (fun r -> r.To) |> Array.distinct |> List.ofArray
+    |> Array.groupBy (fun r -> getSymbolId r.From)
+    |> Array.map (fun (callerId, calls) ->
+        callerId, calls |> Array.map (fun r -> getSymbolId r.To) |> Array.distinct |> List.ofArray
     )
     |> Map.ofArray
 
 /// Compute reachable symbols from entry points
-let computeReachable (entryPoints: FSharpSymbol list) (callGraph: Map<FSharpSymbol, FSharpSymbol list>) =
-    let rec traverse (visited: Set<FSharpSymbol>) (current: FSharpSymbol) =
-        if Set.contains current visited then visited
+let computeReachable (entryPoints: FSharpSymbol list) (callGraph: Map<string, string list>) =
+    let rec traverse (visited: Set<string>) (currentId: string) =
+        if Set.contains currentId visited then visited
         else
-            let newVisited = Set.add current visited
-            match Map.tryFind current callGraph with
-            | Some callees ->
-                callees |> List.fold traverse newVisited
+            let newVisited = Set.add currentId visited
+            match Map.tryFind currentId callGraph with
+            | Some calleeIds ->
+                calleeIds |> List.fold traverse newVisited
             | None -> newVisited
     
-    entryPoints |> List.fold traverse Set.empty
+    let entryPointIds = entryPoints |> List.map getSymbolId
+    entryPointIds |> List.fold traverse Set.empty
 
 /// Perform complete reachability analysis
 let analyzeReachability (symbolUses: FSharpSymbolUse[]) (relationships: SymbolRelation[]) =
     // Find all defined symbols
-    let allSymbols = 
+    let allSymbolIds = 
         symbolUses
-        |> Array.filter (fun useSymbol -> useSymbol.IsFromDefinition)
-        |> Array.map (fun useSymbol -> useSymbol.Symbol)
+        |> Array.filter (fun (useSymbol: FSharpSymbolUse) -> useSymbol.IsFromDefinition)
+        |> Array.map (fun (useSymbol: FSharpSymbolUse) -> getSymbolId useSymbol.Symbol)
         |> Set.ofArray
     
     // Find entry points
@@ -92,15 +108,15 @@ let analyzeReachability (symbolUses: FSharpSymbolUse[]) (relationships: SymbolRe
     let callGraph = buildCallGraph relationships
     
     // Compute reachable symbols
-    let reachable = computeReachable entryPoints callGraph
+    let reachableIds = computeReachable entryPoints callGraph
     
     // Find unreachable symbols
-    let unreachable = Set.difference allSymbols reachable
+    let unreachableIds = Set.difference allSymbolIds reachableIds
     
     {
         EntryPoints = entryPoints
-        ReachableSymbols = reachable
-        UnreachableSymbols = unreachable
+        ReachableSymbols = reachableIds
+        UnreachableSymbols = unreachableIds
         CallGraph = callGraph
     }
 
@@ -118,7 +134,7 @@ and ComponentReachability = {
 }
 
 /// Analyze reachability with component awareness
-let analyzeComponentReachability (simpleRResult: ReachabilityResult) (codeComponents: CodeComponent list) =
+let analyzeComponentReachability (basicResult: ReachabilityResult) (codeComponents: CodeComponent list) =
     let componentReachability = 
         codeComponents
         |> List.map (fun codeComp ->
@@ -127,10 +143,10 @@ let analyzeComponentReachability (simpleRResult: ReachabilityResult) (codeCompon
                 |> List.filter (fun compUnit ->
                     match compUnit with
                     | Module compEntity ->
-                        Set.contains (compEntity :> FSharpSymbol) simpleRResult.ReachableSymbols
+                        Set.contains (getSymbolId (compEntity :> FSharpSymbol)) basicResult.ReachableSymbols
                     | FunctionGroup functions ->
                         functions |> List.exists (fun f -> 
-                            Set.contains (f :> FSharpSymbol) simpleRResult.ReachableSymbols
+                            Set.contains (getSymbolId (f :> FSharpSymbol)) basicResult.ReachableSymbols
                         )
                     | _ -> false
                 )
@@ -148,23 +164,32 @@ let analyzeComponentReachability (simpleRResult: ReachabilityResult) (codeCompon
         |> Map.ofList
     
     {
-        BasicResult = simpleRResult
+        BasicResult = basicResult
         ComponentReachability = componentReachability
     }
 
-
-
-let identifyEliminationOpportunities (result: ReachabilityResult) (codeComponents: CodeComponent list) =
+/// Identify elimination opportunities
+let identifyEliminationOpportunities (result: ReachabilityResult) (codeComponents: CodeComponent list) (symbolUses: FSharpSymbolUse[]) =
+    // Create a map from symbol ID to symbol for lookup
+    let symbolMap = 
+        symbolUses
+        |> Array.filter (fun su -> su.IsFromDefinition)
+        |> Array.map (fun su -> getSymbolId su.Symbol, su.Symbol)
+        |> Map.ofArray
+    
     // Direct unreachable symbols
     let unreachableOpportunities = 
         result.UnreachableSymbols
         |> Set.toList
-        |> List.map (fun symbol ->
-            {
-                Symbol = symbol
-                Reason = Unreachable
-                EstimatedSaving = estimateSymbolSize symbol
-            }
+        |> List.choose (fun symbolId ->
+            Map.tryFind symbolId symbolMap
+            |> Option.map (fun symbol ->
+                {
+                    Symbol = symbol
+                    Reason = Unreachable
+                    EstimatedSaving = estimateSymbolSize symbol
+                }
+            )
         )
     
     // Unused components
@@ -174,10 +199,10 @@ let identifyEliminationOpportunities (result: ReachabilityResult) (codeComponent
             codeComp.Units |> List.forall (fun unit ->
                 match unit with
                 | Module entity -> 
-                    Set.contains (entity :> FSharpSymbol) result.UnreachableSymbols
+                    Set.contains (getSymbolId (entity :> FSharpSymbol)) result.UnreachableSymbols
                 | FunctionGroup functions ->
                     functions |> List.forall (fun f ->
-                        Set.contains (f :> FSharpSymbol) result.UnreachableSymbols
+                        Set.contains (getSymbolId (f :> FSharpSymbol)) result.UnreachableSymbols
                     )
                 | _ -> false
             )
@@ -205,33 +230,14 @@ let identifyEliminationOpportunities (result: ReachabilityResult) (codeComponent
     
     unreachableOpportunities @ unusedComponentOpportunities
 
-// Helper function to estimate symbol size (simplified)
-and private estimateSymbolSize (symbol: FSharpSymbol) =
-    match symbol with
-    | :? FSharpMemberOrFunctionOrValue as mfv ->
-        if mfv.IsFunction then 100 else 50  // Rough estimate
-    | :? FSharpEntity as entity ->
-        if entity.IsFSharpModule then 200
-        elif entity.IsFSharpRecord then 150
-        else 100
-    | _ -> 50
-
-// Helper function to estimate symbol size (simplified)
-and estimateSymbolSize (symbol: FSharpSymbol) =
-    match symbol with
-    | :? FSharpMemberOrFunctionOrValue as mfv ->
-        if mfv.IsFunction then 100 else 50  // Rough estimate
-    | :? FSharpEntity as entity ->
-        if entity.IsFSharpModule then 200
-        elif entity.IsFSharpRecord then 150
-        else 100
-    | _ -> 50
-
 /// Generate reachability report
 let generateReport (result: EnhancedReachability) (opportunities: EliminationOpportunity list) =
     let basic = result.BasicResult
     let totalSymbols = Set.count basic.ReachableSymbols + Set.count basic.UnreachableSymbols
-    let eliminationRate = float (Set.count basic.UnreachableSymbols) / float totalSymbols * 100.0
+    let eliminationRate = 
+        if totalSymbols > 0 then
+            float (Set.count basic.UnreachableSymbols) / float totalSymbols * 100.0
+        else 0.0
     let totalSavings = opportunities |> List.sumBy (fun o -> o.EstimatedSaving)
     
     {|

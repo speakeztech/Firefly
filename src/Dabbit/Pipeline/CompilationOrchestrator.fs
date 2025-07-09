@@ -2,187 +2,263 @@ module Dabbit.Pipeline.CompilationOrchestrator
 
 open System
 open System.IO
-open System.Diagnostics
 open FSharp.Compiler.CodeAnalysis
-open FSharp.Compiler.Text
 open Core.XParsec.Foundation
-open Core.AST.Extraction  
-open Core.AST.Dependencies
-open Core.AST.Reachability
-open Core.AST.Validation
-open Core.FCSIngestion.ProjectOptionsLoader
-open Core.FCSIngestion.ProjectProcessor
 open Core.Utilities.IntermediateWriter
+open Core.IngestionPipeline
+open Core.FCS.ProjectContext
+open Core.Analysis.Reachability
+open Core.Analysis.MemoryLayout
 open Dabbit.Pipeline.CompilationTypes
 
-// ===================================================================
-// Raw AST Output Function
-// ===================================================================
+// Import necessary modules for MLIR generation (these would need to be implemented)
+// open Dabbit.MLIRGeneration
 
-/// Write raw AST files for each source file in the project
-let writeRawAsts (checkResults: FSharpCheckProjectResults) (intermediatesDir: string) =
+/// Progress callback for reporting compilation phases
+type ProgressCallback = CompilationPhase -> string -> unit
 
-    Directory.CreateDirectory intermediatesDir |> ignore
-    
-    printfn "Writing raw AST files for %d source files" 
-        checkResults.AssemblyContents.ImplementationFiles.Length
-    
-    // Process and write each implementation file's AST
-    checkResults.AssemblyContents.ImplementationFiles
-    |> List.iteri (fun index implFile ->
-        let fileName = Path.GetFileName implFile.FileName 
-        let baseName = sprintf "%02d_%s" index (Path.GetFileNameWithoutExtension fileName )
-        let astFilePath = Path.Combine(intermediatesDir, baseName + ".initial.ast")
-        
-        // Create a more detailed header with file information
-        let header = sprintf "// Raw AST for %s\n// Module: %s\n// File: %s\n\n" 
-                        fileName implFile.QualifiedName implFile.FileName
-        
-        // Format the declarations in a readable way
-        let astText = 
-            header +
-            (implFile.Declarations
-            |> List.map (fun decl -> sprintf "%A" decl)
-            |> String.concat "\n\n")
-        
-        // Write the AST to file
-        File.WriteAllText(astFilePath, astText)
-        
-        printfn "  Wrote raw AST: %s (%d bytes)" baseName (astText.Length)
-    )
+/// Convert pipeline config to ingestion pipeline config
+let private toPipelineConfig (config: PipelineConfiguration) (templateName: string option) = 
+    {
+        CacheStrategy = Balanced
+        TemplateName = templateName
+        CustomTemplateDir = None
+        EnableCouplingAnalysis = config.EnableReachabilityAnalysis
+        EnableMemoryOptimization = config.EnableStackAllocation
+        OutputIntermediates = config.PreserveIntermediateASTs
+        IntermediatesDir = None
+    }
 
-// ===================================================================
-// Main Compilation Pipeline Orchestrator
-// ===================================================================
-
-/// Main compilation pipeline orchestrator
-let compile (projectPath: string) (intermediatesDir: string option) (progress: ProgressCallback) = async {
-    let stopwatch = Stopwatch.StartNew()
-    let mutable stats = emptyStatistics
-    let mutable intermediates = emptyIntermediates
-    
-    try
-        // Phase 1: Project Loading and Processing
-        progress ProjectLoading "Loading and processing project with FCS"
+/// Compile a single F# file (simplified entry point)
+let compile (inputPath: string) (intermediatesDir: string option) (progress: ProgressCallback) : Async<CompilationResult> = 
+    async {
+        let startTime = DateTime.UtcNow
         
-        // Create checker instance
-        let checker = FSharpChecker.Create(keepAssemblyContents = true)
+        progress ProjectLoading $"Loading {Path.GetFileName(inputPath)}"
         
-        // Parse project options
-        let! projectOptionsResult = parseProjectOptions projectPath checker
+        // Create a simple project options for single file
+        let projectDir = Path.GetDirectoryName(inputPath)
+        let sourceFiles = [| inputPath |]
+        let projectOptions = buildProjectOptions inputPath sourceFiles
         
-        // Process based on project options result
-        match projectOptionsResult with
-        | Error errorMsg ->
-            // Early return for project loading errors
-            return failureResult [InternalError("ProjectLoading", errorMsg, None)]
+        // Create pipeline config
+        let config = {
+            CacheStrategy = Balanced
+            TemplateName = None
+            CustomTemplateDir = None
+            EnableCouplingAnalysis = true
+            EnableMemoryOptimization = false
+            OutputIntermediates = intermediatesDir.IsSome
+            IntermediatesDir = intermediatesDir
+        }
+        
+        // Run the ingestion pipeline
+        progress FCSProcessing "Running FCS analysis..."
+        let! pipelineResult = runPipeline inputPath config
+        
+        if not pipelineResult.Success then
+            let errors = 
+                pipelineResult.Diagnostics 
+                |> List.filter (fun d -> d.Severity = Error)
+                |> List.map (fun d -> SyntaxError({ Line = 0; Column = 0; File = inputPath; Offset = 0 }, d.Message, []))
             
-        | Ok projectOptions ->
-            // Process the project with valid options
-            let! processResult = processProject projectPath projectOptions checker
-            
-            // Handle processing result
-            match processResult with
-            | Error processingError -> 
-                // Convert ProcessingError to our error format
-                let errors = 
-                    processingError.CriticalErrors
-                    |> Array.map (fun err -> 
-                        TypeCheckError(
-                            "FCS", 
-                            err.Message, 
-                            { Line = err.StartLine; Column = err.StartColumn; File = err.FileName; Offset = 0 }))
-                    |> List.ofArray
-                
-                // Return the failure result at the proper level
-                return failureResult errors
-                
-            | Ok processedProject ->
-                // We now have a fully processed project with CheckResults and SymbolUses
-                
-                // Log basic project information
-                let sourceFiles = projectOptions.SourceFiles
-                sourceFiles |> Array.iteri (fun i file ->
-                    printfn "  [%d] %s" i file)
-                
-                stats <- { stats with TotalFiles = sourceFiles.Length }
-                
-                // Write raw AST files if requested
-                match intermediatesDir with
-                | Some dir ->
-                    writeRawAsts processedProject.CheckResults dir
-                | None -> ()
-                
-                // Phase 2: Symbol Collection
-                progress SymbolCollection "Extracting typedFunctions and building symbol table"
-                
-                let typedFunctions = extractFunctions processedProject.CheckResults
-                debugEntryPoints typedFunctions
-                stats <- { stats with TotalSymbols = typedFunctions.Length }
-                
-                // Write F# AST intermediate if requested
-                match intermediatesDir with
-                | Some dir ->
-                    let astContent = 
-                        typedFunctions 
-                        |> Array.map (fun f -> $"{f.FullName}: {f.Module}")
-                        |> String.concat "\n"
-                    let astPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(projectPath) + ".fcs")
-                    writeFileToPath astPath astContent
-                    intermediates <- { intermediates with FSharpAST = Some astContent }
-                | None -> ()
-                
-                // Phase 3: Dependency Analysis
-                progress SymbolCollection "Building dependency graph"
-                
-                let dependencies = buildDependencies typedFunctions
-                
-                // Phase 4: Reachability Analysis
-                progress ReachabilityAnalysis "Computing reachable typedFunctions"
-                
-                let reachabilityResult = analyzeReachability typedFunctions dependencies true
-                let reachableFunctions = 
-                    typedFunctions 
-                    |> Array.filter (fun f -> Set.contains f.FullName reachabilityResult.ReachableFunctions)
-                
-                stats <- { 
-                    stats with 
-                        ReachableSymbols = reachabilityResult.ReachableFunctions.Count
-                        EliminatedSymbols = reachabilityResult.UnreachableFunctions.Count
+            return {
+                Success = false
+                Statistics = {
+                    TotalFiles = 1
+                    TotalSymbols = 0
+                    ReachableSymbols = 0
+                    EliminatedSymbols = 0
+                    CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
                 }
+                MLIROutput = None
+                LLVMOutput = None
+                Diagnostics = errors
+            }
+        else
+            // Extract statistics from pipeline result
+            let stats = 
+                match pipelineResult.ReachabilityAnalysis with
+                | Some ra ->
+                    let basic = ra.BasicResult
+                    let totalReachable = basic.ReachableSymbols.Count
+                    let totalUnreachable = basic.UnreachableSymbols.Count
+                    {
+                        TotalFiles = 
+                            match pipelineResult.ProjectResults with
+                            | Some pr -> pr.CompilationOrder.Length
+                            | None -> 1
+                        TotalSymbols = totalReachable + totalUnreachable
+                        ReachableSymbols = totalReachable
+                        EliminatedSymbols = totalUnreachable
+                        CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
+                    }
+                | None ->
+                    {
+                        TotalFiles = 1
+                        TotalSymbols = 0
+                        ReachableSymbols = 0
+                        EliminatedSymbols = 0
+                        CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
+                    }
+            
+            // Write reachability report if intermediates enabled
+            match intermediatesDir, pipelineResult.ReachabilityAnalysis with
+            | Some dir, Some ra ->
+                progress IntermediateGeneration "Writing reachability report..."
+                let report = generateReport ra []
+                let reportJson = System.Text.Json.JsonSerializer.Serialize(report)
+                File.WriteAllText(Path.Combine(dir, "reachability.json"), reportJson)
+            | _ -> ()
+            
+            // TODO: Generate MLIR from the analysis results
+            progress MLIRGeneration "Generating MLIR..."
+            let mlirOutput = None // This would call into Dabbit MLIR generation
+            
+            // TODO: Generate LLVM if MLIR succeeded
+            progress LLVMGeneration "Generating LLVM IR..."
+            let llvmOutput = None // This would call MLIR->LLVM lowering
+            
+            return {
+                Success = true
+                Statistics = stats
+                MLIROutput = mlirOutput
+                LLVMOutput = llvmOutput
+                Diagnostics = []
+            }
+    }
+
+/// Compile an F# project
+let compileProject 
+    (projectPath: string) 
+    (outputPath: string)
+    (projectOptions: FSharpProjectOptions) 
+    (config: PipelineConfiguration)
+    (intermediatesDir: string option)
+    (progress: ProgressCallback) : Async<CompilationResult> =
+    
+    async {
+        let startTime = DateTime.UtcNow
+        
+        progress ProjectLoading $"Loading project {Path.GetFileName(projectPath)}"
+        
+        // Create ingestion pipeline config
+        let pipelineConfig = toPipelineConfig config None
+        
+        // Run the ingestion pipeline
+        progress FCSProcessing "Running FCS analysis..."
+        let! pipelineResult = runPipeline projectPath pipelineConfig
+        
+        if not pipelineResult.Success then
+            let errors = 
+                pipelineResult.Diagnostics 
+                |> List.filter (fun d -> d.Severity = Error)
+                |> List.map (fun d -> 
+                    SyntaxError(
+                        { Line = 0; Column = 0; File = d.Location |> Option.defaultValue projectPath; Offset = 0 }, 
+                        d.Message, 
+                        []
+                    )
+                )
+            
+            return {
+                Success = false
+                Statistics = {
+                    TotalFiles = 0
+                    TotalSymbols = 0
+                    ReachableSymbols = 0
+                    EliminatedSymbols = 0
+                    CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
+                }
+                MLIROutput = None
+                LLVMOutput = None
+                Diagnostics = errors
+            }
+        else
+            // Extract statistics
+            let stats = 
+                match pipelineResult.ReachabilityAnalysis with
+                | Some ra ->
+                    let basic = ra.BasicResult
+                    let totalReachable = basic.ReachableSymbols.Count
+                    let totalUnreachable = basic.UnreachableSymbols.Count
+                    {
+                        TotalFiles = 
+                            match pipelineResult.ProjectResults with
+                            | Some pr -> pr.CompilationOrder.Length
+                            | None -> 0
+                        TotalSymbols = totalReachable + totalUnreachable
+                        ReachableSymbols = totalReachable
+                        EliminatedSymbols = totalUnreachable
+                        CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
+                    }
+                | None ->
+                    {
+                        TotalFiles = 0
+                        TotalSymbols = 0
+                        ReachableSymbols = 0
+                        EliminatedSymbols = 0
+                        CompilationTimeMs = (DateTime.UtcNow - startTime).TotalMilliseconds
+                    }
+            
+            // Write analysis results if intermediates enabled
+            if config.PreserveIntermediateASTs && intermediatesDir.IsSome then
+                progress IntermediateGeneration "Writing analysis results..."
+                let dir = intermediatesDir.Value
                 
-                // Write reduced AST intermediate if requested
-                match intermediatesDir with
-                | Some dir ->
-                    let reducedAstContent = generateReachabilityReport reachabilityResult
-                    let reducedAstPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(projectPath) + ".ra.fcs")
-                    writeFileToPath reducedAstPath reducedAstContent
-                    intermediates <- { intermediates with ReducedAST = Some reducedAstContent }
+                // Write coupling analysis
+                match pipelineResult.CouplingAnalysis with
+                | Some ca ->
+                    let couplingJson = System.Text.Json.JsonSerializer.Serialize(ca.Report)
+                    File.WriteAllText(Path.Combine(dir, "coupling.json"), couplingJson)
                 | None -> ()
                 
-                // Phase 5: Validation (Zero-allocation check)
-                progress IntermediateGeneration "Validating zero-allocation constraints"
+                // Write reachability report
+                match pipelineResult.ReachabilityAnalysis with
+                | Some ra ->
+                    let report = generateReport ra []
+                    let reportJson = System.Text.Json.JsonSerializer.Serialize(report)
+                    File.WriteAllText(Path.Combine(dir, "reachability.json"), reportJson)
+                | None -> ()
                 
-                match verifyZeroAllocation reachableFunctions with
-                | Ok () ->
-                    progress IntermediateGeneration "✓ Zero-allocation verification passed"
-                | Error allocationSites ->
-                    let allocationReport = getAllocationReport allocationSites
-                    progress IntermediateGeneration $"⚠ Allocation violations found: {allocationSites.Length}"
-                    
-                    // Write allocation report if intermediate files are enabled
-                    match intermediatesDir with
-                    | Some dir ->
-                        let reportPath = Path.Combine(dir, Path.GetFileNameWithoutExtension(projectPath) + ".allocations")
-                        writeFileToPath reportPath allocationReport
-                    | None -> ()
-                
-                stopwatch.Stop()
-                stats <- { stats with CompilationTimeMs = stopwatch.Elapsed.TotalMilliseconds }
-                
-                return successResult stats intermediates None
-    
-    with ex ->
-        let error = InternalError("compile", ex.Message, Some ex.StackTrace)
-        return failureResult [error]
-}
+                // Write memory layout
+                match pipelineResult.MemoryLayout with
+                | Some layout ->
+                    let layoutReport = generateLayoutReport layout []
+                    let layoutJson = System.Text.Json.JsonSerializer.Serialize(layoutReport)
+                    File.WriteAllText(Path.Combine(dir, "memory_layout.json"), layoutJson)
+                | None -> ()
+            
+            // TODO: Generate MLIR from the analysis results
+            progress MLIRGeneration "Generating MLIR..."
+            let mlirOutput = None // This would integrate with existing Dabbit MLIR generation
+            
+            // TODO: Generate LLVM if MLIR succeeded
+            progress LLVMGeneration "Generating LLVM IR..."
+            let llvmOutput = None // This would call MLIR->LLVM lowering
+            
+            return {
+                Success = true
+                Statistics = stats
+                MLIROutput = mlirOutput
+                LLVMOutput = llvmOutput
+                Diagnostics = []
+            }
+    }
+
+/// Run allocation verification on generated code
+let verifyZeroAllocation (mlirCode: string) : Result<unit, string> =
+    // This is a placeholder - would need real implementation
+    if mlirCode.Contains("alloc") && not (mlirCode.Contains("alloca")) then
+        Error "Heap allocation detected"
+    else
+        Ok ()
+
+/// Generate allocation report
+let getAllocationReport (projectResults: PipelineResult) : string =
+    match projectResults.MemoryLayout with
+    | Some layout ->
+        let report = generateLayoutReport layout []
+        System.Text.Json.JsonSerializer.Serialize(report, System.Text.Json.JsonSerializerOptions(WriteIndented = true))
+    | None -> 
+        "No memory layout analysis available"

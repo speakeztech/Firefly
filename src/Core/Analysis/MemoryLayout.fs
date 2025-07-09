@@ -3,6 +3,7 @@ module Core.Analysis.MemoryLayout
 open FSharp.Compiler.Symbols
 open Core.Analysis.CouplingCohesion
 open Core.Templates.TemplateTypes
+open Core.FCS.Helpers  // For getDeclaringEntity
 
 /// Memory region assignment
 type MemoryRegion = {
@@ -24,7 +25,7 @@ and MemoryAttribute =
 /// Memory layout strategy derived from analysis
 type LayoutStrategy = {
     Regions: MemoryRegion list
-    Allocations: Map<FSharpSymbol, AllocationInfo>
+    Allocations: Map<string, AllocationInfo>  // Changed from Map<FSharpSymbol, AllocationInfo>
     CrossRegionLinks: CrossRegionLink list
 }
 
@@ -44,7 +45,10 @@ and CrossRegionLink = {
 and LinkType =
     | ZeroCopy      // Shared memory
     | Copy          // Explicit copy needed
-    | DMA           // DMA transfer
+    | DMATransfer   // DMA transfer (renamed to avoid confusion)
+
+/// Helper to get symbol identifier
+let private getSymbolId (symbol: FSharpSymbol) = symbol.FullName
 
 /// Apply platform template to layout hints
 let applyPlatformConstraints (hints: MemoryLayoutHint list) (template: PlatformTemplate) =
@@ -55,13 +59,14 @@ let applyPlatformConstraints (hints: MemoryLayoutHint list) (template: PlatformT
             BaseAddress = r.BaseAddress
             Size = r.Size
             Attributes = 
-                r.Attributes |> List.map (function
-                    | "fast" -> Fast
-                    | "secure" -> Secure
-                    | "shared" -> Shared
-                    | "persistent" -> Persistent
-                    | "dma" -> DMA
-                    | _ -> Stack
+                r.Attributes |> List.choose (function
+                    | "fast" -> Some Fast
+                    | "secure" -> Some Secure
+                    | "shared" -> Some Shared
+                    | "persistent" -> Some Persistent
+                    | "dma" -> Some DMA
+                    | "stack" -> Some Stack
+                    | _ -> None
                 )
             AssignedUnits = []
         })
@@ -123,6 +128,13 @@ let applyPlatformConstraints (hints: MemoryLayoutHint list) (template: PlatformT
             { fastRegion with AssignedUnits = hot }
     )
 
+/// Type to hold symbol and allocation info temporarily
+type private SymbolAllocation = {
+    SymbolId: string
+    Symbol: FSharpSymbol
+    Allocation: AllocationInfo
+}
+
 /// Calculate memory layout from components and platform
 let calculateMemoryLayout 
     (codeComponents: CodeComponent list) 
@@ -136,7 +148,7 @@ let calculateMemoryLayout
     let regions = applyPlatformConstraints hints template
     
     // Build allocation map
-    let allocations = 
+    let symbolAllocations = 
         regions
         |> List.collect (fun region ->
             region.AssignedUnits
@@ -144,6 +156,7 @@ let calculateMemoryLayout
                 match unit with
                 | Module entity ->
                     [{
+                        SymbolId = getSymbolId (entity :> FSharpSymbol)
                         Symbol = entity :> FSharpSymbol
                         Allocation = {
                             Region = region.Name
@@ -155,6 +168,7 @@ let calculateMemoryLayout
                 | FunctionGroup functions ->
                     functions |> List.map (fun f ->
                         {
+                            SymbolId = getSymbolId (f :> FSharpSymbol)
                             Symbol = f :> FSharpSymbol
                             Allocation = {
                                 Region = region.Name
@@ -166,8 +180,11 @@ let calculateMemoryLayout
                     )
                 | _ -> []
             )
-            |> List.map (fun { Symbol = s; Allocation = a } -> s, a)
         )
+    
+    let allocations = 
+        symbolAllocations
+        |> List.map (fun sa -> sa.SymbolId, sa.Allocation)
         |> Map.ofList
     
     // Identify cross-region links
@@ -191,7 +208,7 @@ let calculateMemoryLayout
                     To = tr.Name
                     LinkType = 
                         if coupling.Strength > 0.8 then ZeroCopy
-                        elif fr.Attributes |> List.contains DMA then DMA
+                        elif fr.Attributes |> List.contains DMA then DMATransfer
                         else Copy
                 }
             | _ -> None
@@ -206,9 +223,9 @@ let calculateMemoryLayout
 
 /// Memory safety validation
 type MemorySafetyViolation = {
-    Symbol: FSharpSymbol
-    ViolationType: ViolationType
     Description: string
+    ViolationType: ViolationType
+    Region: string option
 }
 
 and ViolationType =
@@ -225,15 +242,15 @@ let validateMemorySafety (layout: LayoutStrategy) (template: PlatformTemplate) =
     for region in layout.Regions do
         let totalSize = 
             layout.Allocations
-            |> Map.toSeq
-            |> Seq.filter (fun (_, alloc) -> alloc.Region = region.Name)
-            |> Seq.sumBy (fun (_, alloc) -> alloc.Size)
+            |> Map.toList
+            |> List.filter (fun (_, alloc) -> alloc.Region = region.Name)
+            |> List.sumBy (fun (_, alloc) -> alloc.Size)
         
         if totalSize > region.Size then
             violations.Add {
-                Symbol = FSharpSymbol()  // Region-level violation
-                ViolationType = CapacityViolation
                 Description = $"Region {region.Name} exceeds capacity: {totalSize}/{region.Size} bytes"
+                ViolationType = CapacityViolation
+                Region = Some region.Name
             }
     
     // Check cross-region access safety
@@ -246,9 +263,9 @@ let validateMemorySafety (layout: LayoutStrategy) (template: PlatformTemplate) =
            not (toRegion.Attributes |> List.contains Secure) &&
            link.LinkType = ZeroCopy then
             violations.Add {
-                Symbol = FSharpSymbol()  // Link-level violation
-                ViolationType = RegionViolation
                 Description = $"Zero-copy link from secure region {link.From} to non-secure {link.To}"
+                ViolationType = RegionViolation
+                Region = Some link.From
             }
     
     List.ofSeq violations
@@ -261,9 +278,9 @@ let generateLayoutReport (layout: LayoutStrategy) (violations: MemorySafetyViola
             |> List.map (fun r ->
                 let used = 
                     layout.Allocations
-                    |> Map.toSeq
-                    |> Seq.filter (fun (_, alloc) -> alloc.Region = r.Name)
-                    |> Seq.sumBy (fun (_, alloc) -> alloc.Size)
+                    |> Map.toList
+                    |> List.filter (fun (_, alloc) -> alloc.Region = r.Name)
+                    |> List.sumBy (fun (_, alloc) -> alloc.Size)
                 
                 {|
                     Name = r.Name
@@ -285,67 +302,19 @@ let generateLayoutReport (layout: LayoutStrategy) (violations: MemorySafetyViola
                 |}
             )
         
-        SafetyViolations = 
+        Violations = 
             violations
             |> List.map (fun v ->
                 {|
                     Type = string v.ViolationType
                     Description = v.Description
+                    Region = v.Region |> Option.defaultValue "N/A"
                 |}
             )
         
-        Statistics = {|
-            TotalRegions = layout.Regions.Length
-            TotalAllocations = layout.Allocations.Count
-            CrossRegionLinks = layout.CrossRegionLinks.Length
-            SafetyViolations = violations.Length
-        |}
+        TotalAllocations = layout.Allocations.Count
+        TotalSize = 
+            layout.Allocations
+            |> Map.toList
+            |> List.sumBy (fun (_, alloc) -> alloc.Size)
     |}
-
-/// Memory layout optimization suggestions
-type OptimizationSuggestion = {
-    Description: string
-    Impact: OptimizationImpact
-    Implementation: string
-}
-
-and OptimizationImpact =
-    | Performance of percent: float
-    | Memory of saved: int
-    | Safety of resolved: int
-
-/// Generate optimization suggestions
-let generateOptimizations (layout: LayoutStrategy) (codeComponents: CodeComponent list) =
-    let suggestions = ResizeArray<OptimizationSuggestion>()
-    
-    // Check for split components
-    for codeComp in codeComponents do
-        let regions = 
-            codeComp.Units
-            |> List.choose (fun unit ->
-                layout.Regions 
-                |> List.tryFind (fun r -> r.AssignedUnits |> List.contains unit)
-                |> Option.map (fun r -> r.Name)
-            )
-            |> List.distinct
-        
-        if regions.Length > 1 then
-            suggestions.Add {
-                Description = $"Component {codeComp.Id} is split across {regions.Length} regions"
-                Impact = Performance 15.0
-                Implementation = "Consolidate component into single region for better cache locality"
-            }
-    
-    // Check for unnecessary cross-region links
-    let unnecessaryLinks = 
-        layout.CrossRegionLinks
-        |> List.filter (fun link -> link.LinkType = Copy)
-    
-    if unnecessaryLinks.Length > 0 then
-        suggestions.Add {
-            Description = $"{unnecessaryLinks.Length} cross-region copies could be eliminated"
-            Impact = Performance 25.0
-            Implementation = "Reorganize units to minimize cross-region dependencies"
-        }
-    
-    List.ofSeq suggestions

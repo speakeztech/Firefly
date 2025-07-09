@@ -7,7 +7,7 @@ let getDeclaringEntity (symbol: FSharpSymbol) : FSharpEntity option =
     match symbol with
     | :? FSharpMemberOrFunctionOrValue as mfv -> mfv.DeclaringEntity
     | :? FSharpField as field -> field.DeclaringEntity
-    | :? FSharpUnionCase as unionCase -> unionCase.DeclaringEntity
+    | :? FSharpUnionCase as unionCase -> Some unionCase.DeclaringEntity
     | :? FSharpEntity as entity -> entity.DeclaringEntity
     | :? FSharpGenericParameter -> None
     | :? FSharpActivePatternCase -> None
@@ -30,22 +30,40 @@ let symbolBelongsTo (moduleOrNamespace: FSharpEntity) (symbol: FSharpSymbol) : b
 
 /// Get all members of an entity
 let getEntityMembers (entity: FSharpEntity) : FSharpSymbol list =
-    let members = entity.MembersFunctionsAndValues |> List.map (fun m -> m :> FSharpSymbol)
-    let fields = entity.FSharpFields |> List.map (fun f -> f :> FSharpSymbol)
+    let members = entity.MembersFunctionsAndValues |> Seq.toList |> List.map (fun m -> m :> FSharpSymbol)
+    let fields = entity.FSharpFields |> Seq.toList |> List.map (fun f -> f :> FSharpSymbol)
     let unionCases = 
         if entity.IsFSharpUnion then 
-            entity.UnionCases |> List.map (fun uc -> uc :> FSharpSymbol)
+            entity.UnionCases |> Seq.toList |> List.map (fun uc -> uc :> FSharpSymbol)
         else []
-    let nested = entity.NestedEntities |> List.map (fun e -> e :> FSharpSymbol)
+    let nested = entity.NestedEntities |> Seq.toList |> List.map (fun e -> e :> FSharpSymbol)
     
     members @ fields @ unionCases @ nested
 
 /// Get the accessibility of a symbol
 let getAccessibility (symbol: FSharpSymbol) : string =
-    if symbol.IsPublic then "public"
-    elif symbol.IsPrivate then "private"
-    elif symbol.IsInternal then "internal"
-    else "unknown"
+    match symbol with
+    | :? FSharpEntity as entity ->
+        if entity.Accessibility.IsPublic then "public"
+        elif entity.Accessibility.IsPrivate then "private"
+        elif entity.Accessibility.IsInternal then "internal"
+        else "unknown"
+    | :? FSharpMemberOrFunctionOrValue as mfv ->
+        if mfv.Accessibility.IsPublic then "public"
+        elif mfv.Accessibility.IsPrivate then "private"
+        elif mfv.Accessibility.IsInternal then "internal"
+        else "unknown"
+    | :? FSharpField as field ->
+        if field.Accessibility.IsPublic then "public"
+        elif field.Accessibility.IsPrivate then "private"
+        elif field.Accessibility.IsInternal then "internal"
+        else "unknown"
+    | :? FSharpUnionCase as unionCase ->
+        if unionCase.Accessibility.IsPublic then "public"
+        elif unionCase.Accessibility.IsPrivate then "private"
+        elif unionCase.Accessibility.IsInternal then "internal"
+        else "unknown"
+    | _ -> "unknown"
 
 /// Check if symbol is a function
 let isFunction (symbol: FSharpSymbol) : bool =
@@ -103,9 +121,9 @@ let getSymbolKind (symbol: FSharpSymbol) : string =
 /// Get attributes for a symbol
 let getAttributes (symbol: FSharpSymbol) : FSharpAttribute list =
     match symbol with
-    | :? FSharpEntity as entity -> entity.Attributes |> List.ofSeq
-    | :? FSharpMemberOrFunctionOrValue as mfv -> mfv.Attributes |> List.ofSeq
-    | :? FSharpField as field -> field.PropertyAttributes |> List.ofSeq
+    | :? FSharpEntity as entity -> entity.Attributes |> Seq.toList
+    | :? FSharpMemberOrFunctionOrValue as mfv -> mfv.Attributes |> Seq.toList
+    | :? FSharpField as field -> field.PropertyAttributes |> Seq.toList
     | _ -> []
 
 /// Check if symbol has a specific attribute

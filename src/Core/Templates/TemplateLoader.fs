@@ -23,7 +23,7 @@ module TomlParser =
         | Array of TomlValue list
         | Table of Map<string, TomlValue>
     
-    let private parseValue (value: string) : TomlValue =
+    let rec private parseValue (value: string) : TomlValue =
         let trimmed = value.Trim()
         
         // String

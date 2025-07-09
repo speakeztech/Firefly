@@ -105,10 +105,16 @@ let runPipeline (projectPath: string) (config: PipelineConfig) = async {
                         |> List.filter (fun c -> c.Strength > 0.0)
                     
                     let report = generateAnalysisReport components units
+                    // Extract only the fields we need from the report
+                    let simplifiedReport = {|
+                        TotalUnits = report.TotalUnits
+                        ComponentCount = report.ComponentCount
+                        AverageCohesion = report.AverageCohesion
+                    |}
                     Some {
                         Components = components
                         Couplings = couplings
-                        Report = report
+                        Report = simplifiedReport
                     }
                 else None
             
@@ -120,14 +126,26 @@ let runPipeline (projectPath: string) (config: PipelineConfig) = async {
                 | Some ca -> analyzeComponentReachability basicReachability ca.Components
                 | None -> { BasicResult = basicReachability; ComponentReachability = Map.empty }
             
-            // Step 6: Memory Layout Optimization (if enabled)
+            // Step 6: Get elimination opportunities (needed for report)
+            let eliminationOpportunities = 
+                match couplingAnalysis with
+                | Some ca -> identifyEliminationOpportunities basicReachability ca.Components projectResults.SymbolUses
+                | None -> identifyEliminationOpportunities basicReachability [] projectResults.SymbolUses
+            
+            // Step 7: Memory Layout Optimization (if enabled)
             let memoryLayout = 
                 if config.EnableMemoryOptimization then
                     match config.TemplateName, couplingAnalysis with
                     | Some templateName, Some ca ->
                         printfn "[Pipeline] Optimizing memory layout for platform: %s" templateName
                         let registry = initializeRegistry config.CustomTemplateDir
-                        match selectTemplate { Platform = Some templateName; MinMemory = None; RequiredCapabilities = []; Profile = None } registry with
+                        let selector = { 
+                            Platform = Some templateName
+                            MinMemory = None
+                            RequiredCapabilities = []
+                            Profile = None 
+                        }
+                        match selectTemplate selector registry with
                         | Some template ->
                             let layout = calculateMemoryLayout ca.Components ca.Couplings template
                             let violations = validateMemorySafety layout template
@@ -150,7 +168,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) = async {
                     | _ -> None
                 else None
             
-            // Step 7: Output intermediates (if enabled)
+            // Step 8: Output intermediates (if enabled)
             if config.OutputIntermediates then
                 match config.IntermediatesDir with
                 | Some dir ->
@@ -165,7 +183,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) = async {
                     | None -> ()
                     
                     // Write reachability analysis
-                    let reachReport = generateReport enhancedReachability []
+                    let reachReport = generateReport enhancedReachability eliminationOpportunities
                     let reachJson = System.Text.Json.JsonSerializer.Serialize(reachReport)
                     File.WriteAllText(Path.Combine(dir, "reachability.json"), reachJson)
                     
@@ -229,9 +247,14 @@ let generateSummary (result: PipelineResult) =
     match result.ReachabilityAnalysis with
     | Some ra ->
         let basic = ra.BasicResult
-        let total = Set.count basic.ReachableSymbols + Set.count basic.UnreachableSymbols
-        let rate = float (Set.count basic.UnreachableSymbols) / float total * 100.0
-        summary.AppendLine($"Dead Code: {rate:F1}%") |> ignore
+        let totalReachable = basic.ReachableSymbols.Count
+        let totalUnreachable = basic.UnreachableSymbols.Count
+        let total = totalReachable + totalUnreachable
+        let rate = 
+            if total > 0 then
+                float totalUnreachable / float total * 100.0
+            else 0.0
+        summary.AppendLine($"Dead Code: {rate:F1}%%") |> ignore
     | None -> ()
     
     // Memory layout

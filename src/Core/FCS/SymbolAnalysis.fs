@@ -2,6 +2,8 @@ module Core.FCS.SymbolAnalysis
 
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
+open FSharp.Compiler.CodeAnalysis  // Add this for FSharpSymbolUse
+open Core.FCS.Helpers  // Import our helper functions
 
 /// Symbol relationship extracted from FCS
 type SymbolRelation = {
@@ -23,19 +25,20 @@ let extractRelationships (symbolUses: FSharpSymbolUse[]) =
     // Group by file and position for efficient processing
     let usesByPosition = 
         symbolUses
-        |> Array.groupBy (fun symbolUse -> symbolUse.Range.FileName, symbolUse.Range.StartLine)
+        |> Array.groupBy (fun (symbolUse: FSharpSymbolUse) -> 
+            symbolUse.Range.FileName, symbolUse.Range.Start.Line)  // Use Start.Line not StartLine
         |> Map.ofArray
     
     // Find containing symbol for each use
     let findContainingSymbol (symbolUse: FSharpSymbolUse) =
-        let key = (symbolUse.Range.FileName, symbolUse.Range.StartLine)
+        let key = (symbolUse.Range.FileName, symbolUse.Range.Start.Line)
         match Map.tryFind key usesByPosition with
         | Some uses ->
             uses 
-            |> Array.tryFind (fun u -> 
+            |> Array.tryFind (fun (u: FSharpSymbolUse) -> 
                 u.IsFromDefinition && 
-                u.Range.StartLine <= symbolUse.Range.StartLine &&
-                u.Range.EndLine >= symbolUse.Range.EndLine &&
+                u.Range.Start.Line <= symbolUse.Range.Start.Line &&
+                u.Range.End.Line >= symbolUse.Range.End.Line &&
                 u <> symbolUse
             )
             |> Option.map (fun u -> u.Symbol)
@@ -43,7 +46,7 @@ let extractRelationships (symbolUses: FSharpSymbolUse[]) =
     
     // Build relationships
     symbolUses
-    |> Array.choose (fun symbolUse ->
+    |> Array.choose (fun (symbolUse: FSharpSymbolUse) ->
         if symbolUse.IsFromUse then
             match findContainingSymbol symbolUse with
             | Some containerSymbol ->
@@ -66,37 +69,39 @@ let extractRelationships (symbolUses: FSharpSymbolUse[]) =
 /// Get all symbols defined in a specific file
 let getFileSymbols (fileName: string) (symbolUses: FSharpSymbolUse[]) =
     symbolUses
-    |> Array.filter (fun symbolUse -> 
+    |> Array.filter (fun (symbolUse: FSharpSymbolUse) -> 
         symbolUse.IsFromDefinition && 
         symbolUse.Range.FileName.EndsWith(fileName)
     )
-    |> Array.map (fun symbolUse -> symbolUse.Symbol)
+    |> Array.map (fun (symbolUse: FSharpSymbolUse) -> symbolUse.Symbol)
     |> Array.distinct
 
 /// Find all references to a symbol
 let findReferences (symbol: FSharpSymbol) (symbolUses: FSharpSymbolUse[]) =
     symbolUses
-    |> Array.filter (fun symbolUse -> 
+    |> Array.filter (fun (symbolUse: FSharpSymbolUse) -> 
         symbolUse.Symbol = symbol && symbolUse.IsFromUse
     )
 
 /// Find symbol definition
 let findDefinition (symbol: FSharpSymbol) (symbolUses: FSharpSymbolUse[]) =
     symbolUses
-    |> Array.tryFind (fun symbolUse -> 
+    |> Array.tryFind (fun (symbolUse: FSharpSymbolUse) -> 
         symbolUse.Symbol = symbol && symbolUse.IsFromDefinition
     )
 
 /// Group symbols by containing module/namespace
 let groupByContainer (symbolUses: FSharpSymbolUse[]) =
     symbolUses
-    |> Array.filter (fun symbolUse -> symbolUse.IsFromDefinition)
-    |> Array.groupBy (fun symbolUse ->
-        match symbolUse.Symbol with
+    |> Array.filter (fun (symbolUse: FSharpSymbolUse) -> symbolUse.IsFromDefinition)
+    |> Array.groupBy (fun (symbolUse: FSharpSymbolUse) ->
+        let symbol = symbolUse.Symbol
+        match symbol with
         | :? FSharpEntity as entity when entity.IsFSharpModule || entity.IsNamespace ->
             entity.FullName
-        | symbol ->
-            match symbol.DeclaringEntity with
+        | _ ->
+            // Use helper function to get declaring entity
+            match getDeclaringEntity symbol with
             | Some entity -> entity.FullName
             | None -> "<global>"
     )
@@ -122,8 +127,8 @@ let calculateMetrics (symbol: FSharpSymbol) (relationships: SymbolRelation[]) =
     
     let depth =
         let rec countDepth (s: FSharpSymbol) acc =
-            match s.DeclaringEntity with
-            | Some entity -> countDepth entity (acc + 1)
+            match getDeclaringEntity s with  // Use helper function
+            | Some entity -> countDepth (entity :> FSharpSymbol) (acc + 1)
             | None -> acc
         countDepth symbol 0
     

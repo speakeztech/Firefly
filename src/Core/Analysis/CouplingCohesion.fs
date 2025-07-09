@@ -1,7 +1,9 @@
 module Core.Analysis.CouplingCohesion
 
 open FSharp.Compiler.Symbols
-open Core.FCS.SymbolAnalysis  // This gives us access to SymbolRelation, RelationType, etc.
+open FSharp.Compiler.CodeAnalysis  // For FSharpSymbolUse
+open Core.FCS.SymbolAnalysis       // For SymbolRelation, RelationType, etc.
+open Core.FCS.Helpers              // For getDeclaringEntity
 
 /// Semantic unit representing a cohesive component
 type SemanticUnit = 
@@ -42,43 +44,49 @@ and ComponentBoundary = {
 
 and BoundaryDirection = Inbound | Outbound | Bidirectional
 
+/// Helper to get symbol identifiers for comparison
+let private getSymbolId (symbol: FSharpSymbol) = symbol.FullName
+
 /// Calculate cohesion for a semantic unit
 let calculateCohesion (unit: SemanticUnit) (relationships: SymbolRelation[]) =
-    let unitSymbols = 
+    // Get symbol identifiers for the unit
+    let unitSymbolIds = 
         match unit with
         | Module entity -> 
             relationships 
             |> Array.filter (fun r -> 
-                match r.From.DeclaringEntity with
+                match getDeclaringEntity r.From with
                 | Some e -> e = entity
                 | None -> false
             )
-            |> Array.map (fun r -> r.From)
+            |> Array.map (fun r -> getSymbolId r.From)
             |> Set.ofArray
         
         | FunctionGroup functions ->
-            functions |> List.map (fun f -> f :> FSharpSymbol) |> Set.ofList
+            functions |> List.map (fun f -> getSymbolId (f :> FSharpSymbol)) |> Set.ofList
         
         | TypeCluster types ->
-            types |> List.map (fun t -> t :> FSharpSymbol) |> Set.ofList
+            types |> List.map (fun t -> getSymbolId (t :> FSharpSymbol)) |> Set.ofList
         
         | Namespace ns ->
             relationships
             |> Array.filter (fun r -> r.From.FullName.StartsWith(ns))
-            |> Array.map (fun r -> r.From)
+            |> Array.map (fun r -> getSymbolId r.From)
             |> Set.ofArray
     
     let internalRelations = 
         relationships 
         |> Array.filter (fun r -> 
-            Set.contains r.From unitSymbols && Set.contains r.To unitSymbols
+            Set.contains (getSymbolId r.From) unitSymbolIds && 
+            Set.contains (getSymbolId r.To) unitSymbolIds
         )
         |> Array.length
     
     let externalRelations = 
         relationships 
         |> Array.filter (fun r -> 
-            Set.contains r.From unitSymbols && not (Set.contains r.To unitSymbols)
+            Set.contains (getSymbolId r.From) unitSymbolIds && 
+            not (Set.contains (getSymbolId r.To) unitSymbolIds)
         )
         |> Array.length
     
@@ -94,29 +102,30 @@ let calculateCohesion (unit: SemanticUnit) (relationships: SymbolRelation[]) =
 
 /// Calculate coupling between two semantic units
 let calculateCoupling (from: SemanticUnit) (to': SemanticUnit) (relationships: SymbolRelation[]) =
-    let fromSymbols = 
+    let fromSymbolIds = 
         match from with
-        | Module e -> Set.singleton (e :> FSharpSymbol)
-        | FunctionGroup fs -> fs |> List.map (fun f -> f :> FSharpSymbol) |> Set.ofList
-        | TypeCluster ts -> ts |> List.map (fun t -> t :> FSharpSymbol) |> Set.ofList
-        | Namespace _ -> Set.empty  // Simplified
+        | Module e -> Set.singleton (getSymbolId (e :> FSharpSymbol))
+        | FunctionGroup fs -> fs |> List.map (fun f -> getSymbolId (f :> FSharpSymbol)) |> Set.ofList
+        | TypeCluster ts -> ts |> List.map (fun t -> getSymbolId (t :> FSharpSymbol)) |> Set.ofList
+        | Namespace ns -> Set.singleton ns
     
-    let toSymbols = 
+    let toSymbolIds = 
         match to' with
-        | Module e -> Set.singleton (e :> FSharpSymbol)
-        | FunctionGroup fs -> fs |> List.map (fun f -> f :> FSharpSymbol) |> Set.ofList
-        | TypeCluster ts -> ts |> List.map (fun t -> t :> FSharpSymbol) |> Set.ofList
-        | Namespace _ -> Set.empty  // Simplified
+        | Module e -> Set.singleton (getSymbolId (e :> FSharpSymbol))
+        | FunctionGroup fs -> fs |> List.map (fun f -> getSymbolId (f :> FSharpSymbol)) |> Set.ofList
+        | TypeCluster ts -> ts |> List.map (fun t -> getSymbolId (t :> FSharpSymbol)) |> Set.ofList
+        | Namespace ns -> Set.singleton ns
     
     let dependencies = 
         relationships
         |> Array.filter (fun r -> 
-            Set.contains r.From fromSymbols && Set.contains r.To toSymbols
+            Set.contains (getSymbolId r.From) fromSymbolIds && 
+            Set.contains (getSymbolId r.To) toSymbolIds
         )
         |> Array.toList
     
     let strength = 
-        let fromSize = Set.count fromSymbols
+        let fromSize = Set.count fromSymbolIds
         let depCount = dependencies.Length
         if fromSize > 0 then float depCount / float fromSize else 0.0
     
@@ -134,7 +143,7 @@ let identifySemanticUnits (symbolUses: FSharpSymbolUse[]) (relationships: Symbol
         symbolUses
         |> Array.filter (fun useSymbol -> useSymbol.IsFromDefinition)
         |> Array.groupBy (fun useSymbol ->
-            match useSymbol.Symbol.DeclaringEntity with
+            match getDeclaringEntity useSymbol.Symbol with
             | Some entity when entity.IsFSharpModule -> Some entity
             | _ -> None
         )
@@ -156,10 +165,20 @@ let identifySemanticUnits (symbolUses: FSharpSymbolUse[]) (relationships: Symbol
         
         // Simple clustering: functions in same module that call each other
         functions
-        |> Array.groupBy (fun f -> f.DeclaringEntity)
+        |> Array.groupBy (fun f -> getDeclaringEntity (f :> FSharpSymbol))
         |> Array.map (fun (_, funcs) -> FunctionGroup (List.ofArray funcs))
     
     Array.append moduleGroups functionClusters |> List.ofArray
+
+/// Helper to create unique unit identifier
+let private getUnitId (unit: SemanticUnit) =
+    match unit with
+    | Module e -> "Module:" + e.FullName
+    | Namespace ns -> "Namespace:" + ns
+    | FunctionGroup fs -> 
+        "FunctionGroup:" + (fs |> List.map (fun f -> f.FullName) |> String.concat ",")
+    | TypeCluster ts -> 
+        "TypeCluster:" + (ts |> List.map (fun t -> t.FullName) |> String.concat ",")
 
 /// Detect components through cohesion threshold
 let detectComponents (units: SemanticUnit list) (relationships: SymbolRelation[]) (threshold: float) =
@@ -171,22 +190,24 @@ let detectComponents (units: SemanticUnit list) (relationships: SymbolRelation[]
     
     // Group highly cohesive units that have coupling
     let codeComponents = ResizeArray<CodeComponent>()
-    let processed = System.Collections.Generic.HashSet<SemanticUnit>()
+    let processed = System.Collections.Generic.HashSet<string>()
     
     for (unit, cohesion) in cohesions do
-        if not (processed.Contains unit) then
+        let unitId = getUnitId unit
+        if not (processed.Contains unitId) then
             // Find all units coupled to this one
             let cluster = ResizeArray<SemanticUnit>()
             cluster.Add unit
-            processed.Add unit |> ignore
+            processed.Add unitId |> ignore
             
             // Add coupled units above threshold
             for (otherUnit, otherCohesion) in cohesions do
-                if not (processed.Contains otherUnit) then
+                let otherUnitId = getUnitId otherUnit
+                if not (processed.Contains otherUnitId) then
                     let coupling = calculateCoupling unit otherUnit relationships
                     if coupling.Strength > 0.3 then  // Coupling threshold
                         cluster.Add otherUnit
-                        processed.Add otherUnit |> ignore
+                        processed.Add otherUnitId |> ignore
             
             if cluster.Count > 0 then
                 let avgCohesion = 
@@ -194,7 +215,7 @@ let detectComponents (units: SemanticUnit list) (relationships: SymbolRelation[]
                     |> Seq.map (fun u -> 
                         let (_, cohesion) = 
                             cohesions 
-                            |> List.find (fun (unit', _) -> unit' = u)
+                            |> List.find (fun (unit', _) -> getUnitId unit' = getUnitId u)
                         cohesion.Score
                     )
                     |> Seq.average
@@ -228,7 +249,7 @@ let generateMemoryLayoutHints (codeComponents: CodeComponent list) (couplings: C
     |> List.map (fun codeComp ->
         if codeComp.Cohesion > 0.8 then
             // Very high cohesion: keep everything contiguous
-            Contiguous codeComp.Units
+            [Contiguous codeComp.Units]
         elif codeComp.Cohesion < 0.3 then
             // Low cohesion: isolate units
             codeComp.Units |> List.map Isolated
@@ -237,11 +258,12 @@ let generateMemoryLayoutHints (codeComponents: CodeComponent list) (couplings: C
             let relevantCouplings = 
                 couplings 
                 |> List.filter (fun c -> 
-                    List.exists (fun u -> u = c.From) codeComp.Units
+                    let fromId = getUnitId c.From
+                    List.exists (fun u -> getUnitId u = fromId) codeComp.Units
                 )
             
             if relevantCouplings.Length = 0 then
-                Contiguous codeComp.Units
+                [Contiguous codeComp.Units]
             else
                 // Determine access pattern from coupling types
                 let pattern = 
@@ -250,7 +272,7 @@ let generateMemoryLayoutHints (codeComponents: CodeComponent list) (couplings: C
                     else
                         Sequential
                 
-                SharedRegion(codeComp.Units, pattern)
+                [SharedRegion(codeComp.Units, pattern)]
     )
     |> List.concat
 
