@@ -7,8 +7,8 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.3.042</Version>
-    <Description>Firefly F# Compiler - AST-Based Compilation</Description>
+    <Version>0.4.000</Version>
+    <Description>Firefly F# Compiler - Deep FCS Integration</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 
@@ -19,37 +19,44 @@
   </PropertyGroup>
 
   <ItemGroup>
-      <!-- Core Utilities -->
+      <!-- Core Utilities (kept from existing) -->
       <Compile Include="Core/Utilities/IntermediateWriter.fs" />
       <Compile Include="Core/Utilities/RemoveIntermediates.fs" />
       
-      <!-- Core Types --> 
+      <!-- Core Types (kept from existing) --> 
       <Compile Include="Core/Types/Dialects.fs" />
-      <Compile Include="Core/Types/TypeSystem.fs" />   
+      <Compile Include="Core/Types/MLIRTypes.fs" />   
+      
+      <!-- Parser Foundation (kept from existing) -->
       <Compile Include="Core/XParsec/Foundation.fs" />  
       
-      <!-- Program Semantic Graph - Core PSG Functionality -->
-      <Compile Include="Core/PSG/Types.fs" />
-      <Compile Include="Core/PSG/XmlDocParser.fs" />
-      <Compile Include="Core/PSG/Builder.fs" />
-      <Compile Include="Core/PSG/IntermediateWriter.fs" />
-      <Compile Include="Core/PSG/Pipeline.fs" />
+      <!-- Deep FCS Integration (new) -->
+      <Compile Include="Core/FCS/Helpers.fs" />
+      <Compile Include="Core/FCS/ProjectContext.fs" />
+      <Compile Include="Core/FCS/SymbolAnalysis.fs" />
+      <Compile Include="Core/FCS/TypedASTAccess.fs" />
       
-      <!-- FCS Integration -->
-      <Compile Include="Core/FCSIngestion/ProjectOptionsLoader.fs" />     
-      <Compile Include="Core/FCSIngestion/ProjectProcessor.fs" />         
+      <!-- Metadata Processing (new) -->
+      <Compile Include="Core/Meta/Parser.fs" />
+      <Compile Include="Core/Meta/AlloyHints.fs" />
       
-      <!-- AST Processing - Core Dabbit Functionality -->
-      <Compile Include="Core/AST/Extraction.fs" />
-      <Compile Include="Core/AST/Dependencies.fs" />
-      <Compile Include="Core/AST/Reachability.fs" />
-      <Compile Include="Core/AST/Validation.fs" />
+      <!-- Platform Templates (new) -->
+      <Compile Include="Core/Templates/TemplateTypes.fs" />
+      <Compile Include="Core/Templates/TemplateLoader.fs" />
       
-      <!-- Dabbit Pipeline - TypedAST Processing -->
+      <!-- Analysis Engine (new) -->
+      <Compile Include="Core/Analysis/CouplingCohesion.fs" />
+      <Compile Include="Core/Analysis/Reachability.fs" />
+      <Compile Include="Core/Analysis/MemoryLayout.fs" />
+      
+      <!-- FCS Ingestion Pipeline (new) -->
+      <Compile Include="Core/IngestionPipeline.fs" />
+      
+      <!-- Dabbit Pipeline - MLIR Generation (existing) -->
       <Compile Include="Dabbit/Pipeline/CompilationTypes.fs" />           
       <Compile Include="Dabbit/Pipeline/CompilationOrchestrator.fs" />    
       
-      <!-- CLI - TypedAST Processor -->
+      <!-- CLI - Firefly Entry Point (existing) -->
       <Compile Include="CLI/Program-Enhanced.fs" />                       
   </ItemGroup>
 
@@ -62,8 +69,3 @@
   </ItemGroup>
 
 </Project>
-
-
-
-
-

@@ -1,4 +1,4 @@
-module Core.Types.TypeSystem
+module Core.Types.MLIRTypes
 
 open Dialects
 
