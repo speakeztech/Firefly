@@ -9,7 +9,6 @@ open FSharp.Compiler.CodeAnalysis
 open Core.PSG.Types
 open Core.PSG.Correlation
 open Core.PSG.SymbolAnalysis
-open Core.FCS.ProjectContext
 
 /// Build context for PSG construction
 type BuildContext = {
@@ -79,6 +78,10 @@ let rec processModuleDecl
             processModuleDecl decl (Some moduleNode.Id) fileName context g
         ) graph'
         
+    | SynModuleDecl.Open(_, range) ->
+        let openNode = createNode "OpenDeclaration" range fileName None parentId
+        { graph with Nodes = Map.add openNode.Id.Value openNode graph.Nodes }
+        
     | _ -> graph
 
 /// Process a binding
@@ -124,7 +127,13 @@ and processExpression
         | SynExpr.LetOrUse _ -> "LetOrUse"
         | SynExpr.Match _ -> "Match"
         | SynExpr.Ident _ -> "Identifier"
+        | SynExpr.LongIdent _ -> "LongIdentifier"
         | SynExpr.Const _ -> "Constant"
+        | SynExpr.Sequential _ -> "Sequential"
+        | SynExpr.IfThenElse _ -> "IfThenElse"
+        | SynExpr.TypeApp _ -> "TypeApplication"
+        | SynExpr.Paren _ -> "Parenthesized"
+        | SynExpr.Tuple _ -> "Tuple"
         | _ -> "Expression"
     
     let exprNode = createNode exprKind expr.Range fileName symbol parentId
@@ -145,18 +154,88 @@ and processExpression
             |> List.fold (fun g b -> processBinding b (Some exprNode.Id) fileName context g) graph'
         processExpression bodyExpr (Some exprNode.Id) fileName context graph''
         
+    | SynExpr.Match(_, matchExpr, clauses, _, _) ->
+        let graph'' = processExpression matchExpr (Some exprNode.Id) fileName context graph'
+        clauses
+        |> List.fold (fun g clause ->
+            let (SynMatchClause(pat, whenExpr, resultExpr, _, _, _)) = clause
+            let g' = processPattern pat (Some exprNode.Id) fileName context g
+            let g'' = 
+                match whenExpr with
+                | Some e -> processExpression e (Some exprNode.Id) fileName context g'
+                | None -> g'
+            processExpression resultExpr (Some exprNode.Id) fileName context g''
+        ) graph''
+        
+    | SynExpr.Sequential(_, _, expr1, expr2, _, _) ->
+        let g' = processExpression expr1 (Some exprNode.Id) fileName context graph'
+        processExpression expr2 (Some exprNode.Id) fileName context g'
+        
+    | SynExpr.IfThenElse(ifExpr, thenExpr, elseExpr, _, _, _, _) ->
+        let g' = processExpression ifExpr (Some exprNode.Id) fileName context graph'
+        let g'' = processExpression thenExpr (Some exprNode.Id) fileName context g'
+        match elseExpr with
+        | Some expr -> processExpression expr (Some exprNode.Id) fileName context g''
+        | None -> g''
+        
+    | SynExpr.TypeApp(expr, _, _, _, _, _, _) ->
+        processExpression expr (Some exprNode.Id) fileName context graph'
+        
+    | SynExpr.Paren(expr, _, _, _) ->
+        processExpression expr (Some exprNode.Id) fileName context graph'
+        
+    | SynExpr.Tuple(_, exprs, _, _) ->
+        exprs 
+        |> List.fold (fun g e -> processExpression e (Some exprNode.Id) fileName context g) graph'
+        
     | SynExpr.Ident ident ->
-        // Create reference edge if we can resolve the symbol
-        match symbol with
-        | Some sym ->
+        // Try to find the definition of this identifier in the symbol table
+        let identName = ident.idText
+        match Map.tryFind identName graph'.SymbolTable with
+        | Some targetSymbol ->
             let edge = {
                 Source = exprNode.Id
-                Target = NodeId.FromSymbol(sym)
+                Target = NodeId.FromSymbol(targetSymbol)
                 Kind = EdgeKind.References
             }
             { graph' with Edges = edge :: graph'.Edges }
         | None -> graph'
         
+    | SynExpr.LongIdent(_, lid, _, _) ->
+        // Handle qualified identifiers
+        let fullName = lid.LongIdent |> List.map (fun id -> id.idText) |> String.concat "."
+        match Map.tryFind fullName graph'.SymbolTable with
+        | Some targetSymbol ->
+            let edge = {
+                Source = exprNode.Id
+                Target = NodeId.FromSymbol(targetSymbol)
+                Kind = EdgeKind.References
+            }
+            { graph' with Edges = edge :: graph'.Edges }
+        | None -> graph'
+        
+    | _ -> graph'
+
+/// Process a pattern
+and processPattern 
+    (pat: SynPat) 
+    (parentId: NodeId option) 
+    (fileName: string) 
+    (context: BuildContext) 
+    (graph: ProgramSemanticGraph) =
+    
+    let symbol = tryCorrelateSymbol pat.Range fileName context.CorrelationContext
+    let patNode = createNode "Pattern" pat.Range fileName symbol parentId
+    let graph' = { graph with Nodes = Map.add patNode.Id.Value patNode graph.Nodes }
+    
+    // Add symbol to symbol table if it's a binding pattern
+    match pat with
+    | SynPat.Named(synIdent, _, _, _) ->
+        let (SynIdent(ident, _)) = synIdent
+        match symbol with
+        | Some sym ->
+            { graph' with SymbolTable = Map.add ident.idText sym graph'.SymbolTable }
+        | None -> graph'
     | _ -> graph'
 
 /// Process a type definition
@@ -210,26 +289,47 @@ let buildFromImplementationFile
     }
     
     // Process all modules
-    modules 
-    |> List.fold (fun graph moduleOrNs ->
-        let (SynModuleOrNamespace(_, _, _, decls, _, _, _, range, _)) = moduleOrNs
-        let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
-        let moduleNode = createNode "Module" range fileName symbol None
-        let graph' = { graph with Nodes = Map.add moduleNode.Id.Value moduleNode graph.Nodes }
+    let finalGraph = 
+        modules 
+        |> List.fold (fun graph moduleOrNs ->
+            let (SynModuleOrNamespace(_, _, _, decls, _, _, _, range, _)) = moduleOrNs
+            let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
+            let moduleNode = createNode "Module" range fileName symbol None
+            let graph' = { graph with Nodes = Map.add moduleNode.Id.Value moduleNode graph.Nodes }
+            
+            // Add module symbol to symbol table if available
+            let graph'' = 
+                match symbol with
+                | Some sym -> 
+                    { graph' with SymbolTable = Map.add sym.DisplayName sym graph'.SymbolTable }
+                | None -> graph'
+            
+            decls 
+            |> List.fold (fun g decl -> 
+                processModuleDecl decl (Some moduleNode.Id) fileName context g
+            ) graph''
+        ) initialGraph
         
-        decls 
-        |> List.fold (fun g decl -> 
-            processModuleDecl decl (Some moduleNode.Id) fileName context g
-        ) graph'
-    ) initialGraph
+    printfn "[PSG Debug] Built graph for %s: %d nodes" 
+        (System.IO.Path.GetFileName fileName) finalGraph.Nodes.Count
+        
+    finalGraph
 
 /// Build complete PSG from project results
 let buildProgramSemanticGraph 
     (checkResults: FSharpCheckProjectResults) 
     (parseResults: FSharpParseFileResults[]) =
     
+    // Debug: Check what FCS is providing
+    printfn "[PSG Debug] CheckResults has errors: %b" checkResults.HasCriticalErrors
+    printfn "[PSG Debug] AssemblyContents files: %d" checkResults.AssemblyContents.ImplementationFiles.Length
+    
     // Create correlation context
     let correlationContext = createContext checkResults
+    
+    printfn "[PSG Debug] Symbol uses found: %d across %d files" 
+        correlationContext.SymbolUses.Length
+        correlationContext.FileIndex.Count
     
     // Load source files
     let sourceFiles = 
@@ -261,6 +361,8 @@ let buildProgramSemanticGraph
             | _ -> None
         )
     
+    printfn "[PSG Debug] Built %d file graphs" graphs.Length
+    
     // Merge all graphs
     let mergedGraph = 
         graphs 
@@ -282,13 +384,58 @@ let buildProgramSemanticGraph
             CompilationOrder = []
         }
     
+    // Build comprehensive symbol table from all symbol uses
+    let fullSymbolTable =
+        correlationContext.SymbolUses
+        |> Array.filter (fun su -> su.IsFromDefinition)
+        |> Array.fold (fun table su ->
+            let key = su.Symbol.DisplayName
+            Map.add key su.Symbol table
+        ) mergedGraph.SymbolTable
+    
+    printfn "[PSG Debug] Symbol table size: %d (was %d)" fullSymbolTable.Count mergedGraph.SymbolTable.Count
+    
     // Find entry points
     let entryPoints = 
         getEntryPointSymbols correlationContext.SymbolUses
         |> Array.map NodeId.FromSymbol
         |> Array.toList
     
-    Success { mergedGraph with EntryPoints = entryPoints }
+    // Create proper reference edges based on symbol uses
+    let referenceEdges =
+        correlationContext.SymbolUses
+        |> Array.filter (fun su -> su.IsFromUse)
+        |> Array.choose (fun useSym ->
+            // Find the definition of this symbol
+            let defOpt = 
+                correlationContext.SymbolUses
+                |> Array.tryFind (fun def -> 
+                    def.IsFromDefinition && 
+                    def.Symbol = useSym.Symbol
+                )
+            
+            match defOpt with
+            | Some def when useSym.Range <> def.Range ->
+                // Create edge from use location to definition
+                Some {
+                    Source = NodeId.FromRange(useSym.Range.FileName, useSym.Range)
+                    Target = NodeId.FromSymbol(def.Symbol)
+                    Kind = EdgeKind.References
+                }
+            | _ -> None
+        )
+        |> Array.toList
+    
+    printfn "[PSG Debug] Created %d reference edges" referenceEdges.Length
+    
+    let finalGraph = { 
+        mergedGraph with 
+            EntryPoints = entryPoints
+            SymbolTable = fullSymbolTable
+            Edges = referenceEdges @ mergedGraph.Edges
+    }
+    
+    Success finalGraph
 
 /// Validate PSG structure
 let validateGraph (graph: ProgramSemanticGraph) =
