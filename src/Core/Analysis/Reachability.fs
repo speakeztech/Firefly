@@ -1,5 +1,6 @@
 module Core.Analysis.Reachability
 
+open System
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.CodeAnalysis  // For FSharpSymbolUse
 open Core.FCS.SymbolAnalysis
@@ -26,6 +27,26 @@ and EliminationReason =
     | UnusedComponent of componentId: string
     | DeadBranch
     | UnusedType
+
+type LibraryCategory =
+    | UserCode
+    | AlloyLibrary  
+    | FSharpCore
+    | Other of libraryName: string
+
+/// Enhanced reachability result with library boundary information
+type LibraryAwareReachability = {
+    BasicResult: ReachabilityResult
+    LibraryCategories: Map<string, LibraryCategory>
+    PruningStatistics: PruningStatistics
+}
+
+and PruningStatistics = {
+    TotalSymbols: int
+    ReachableSymbols: int
+    EliminatedSymbols: int
+    ComputationTimeMs: int64
+}
 
 /// Helper to get symbol identifier for comparison
 let private getSymbolId (symbol: FSharpSymbol) = symbol.FullName
@@ -279,4 +300,161 @@ let generateReport (result: EnhancedReachability) (opportunities: EliminationOpp
                     EstimatedSaving = $"{o.EstimatedSaving} bytes"
                 |}
             )
+    |}
+
+/// Classify symbol by library boundary
+let classifySymbol (symbol: FSharpSymbol) : LibraryCategory =
+    let fullName = getSymbolId symbol
+    match fullName with
+    | name when name.StartsWith("Alloy.") -> AlloyLibrary
+    | name when name.StartsWith("FSharp.Core.") || name.StartsWith("Microsoft.FSharp.") -> FSharpCore
+    | _ -> UserCode
+
+/// Check if symbol should be included based on library boundaries
+let shouldIncludeSymbol (symbol: FSharpSymbol) : bool =
+    match classifySymbol symbol with
+    | UserCode | AlloyLibrary -> true
+    | FSharpCore -> 
+        // Only include primitives and SRTP targets
+        match symbol with
+        | :? FSharpMemberOrFunctionOrValue as mfv ->
+            let primNames = [ "op_Addition"; "op_Subtraction"; "op_Multiply"; "op_Division"; "printf"; "printfn" ]
+            List.contains mfv.LogicalName primNames || mfv.IsCompilerGenerated
+        | _ -> false
+    | Other _ -> false
+
+/// Enhanced reachability analysis with library boundary awareness
+let analyzeReachabilityWithBoundaries (symbolUses: FSharpSymbolUse[]) : LibraryAwareReachability =
+    let startTime = DateTime.UtcNow
+    
+    // Extract relationships from ALL symbol uses
+    let relationships = extractRelationships symbolUses
+    
+    // Run existing analysis on ALL symbols to get complete reachability
+    let basicResult = analyzeReachability symbolUses relationships
+    
+    // DEBUG: Print some diagnostics to understand what's happening
+    printfn "[DEBUG] Total symbol uses: %d" symbolUses.Length
+    printfn "[DEBUG] Total relationships: %d" relationships.Length
+    printfn "[DEBUG] Call relationships: %d" (relationships |> Array.filter (fun r -> r.RelationType = RelationType.Calls) |> Array.length)
+    printfn "[DEBUG] Entry points found: %d (%s)" 
+        basicResult.EntryPoints.Length 
+        (basicResult.EntryPoints |> List.map (fun ep -> ep.DisplayName) |> String.concat ", ")
+    printfn "[DEBUG] Call graph entries: %d" (Map.count basicResult.CallGraph)
+    printfn "[DEBUG] Reachable symbols: %d" (Set.count basicResult.ReachableSymbols)
+    
+    // For now, don't filter at all - just categorize
+    let libraryCategories = 
+        symbolUses
+        |> Array.map (fun symbolUse -> getSymbolId symbolUse.Symbol, classifySymbol symbolUse.Symbol)
+        |> Map.ofArray
+    
+    let endTime = DateTime.UtcNow
+    let computationTime = (endTime - startTime).TotalMilliseconds |> int64
+    
+    let pruningStats = {
+        TotalSymbols = symbolUses.Length
+        ReachableSymbols = Set.count basicResult.ReachableSymbols
+        EliminatedSymbols = symbolUses.Length - Set.count basicResult.ReachableSymbols
+        ComputationTimeMs = computationTime
+    }
+    
+    {
+        BasicResult = basicResult
+        LibraryCategories = libraryCategories
+        PruningStatistics = pruningStats
+    }
+
+/// Generate pruned symbol list for debug output
+let generatePrunedSymbolData (result: LibraryAwareReachability) (symbolUses: FSharpSymbolUse[]) =
+    symbolUses
+    |> Array.map (fun symbolUse ->
+        let symbolId = getSymbolId symbolUse.Symbol
+        {|
+            SymbolName = symbolUse.Symbol.DisplayName
+            SymbolKind = symbolUse.Symbol.GetType().Name
+            SymbolHash = symbolUse.Symbol.GetHashCode()
+            Range = {|
+                File = symbolUse.Range.FileName
+                StartLine = symbolUse.Range.Start.Line
+                StartColumn = symbolUse.Range.Start.Column
+                EndLine = symbolUse.Range.End.Line
+                EndColumn = symbolUse.Range.End.Column
+            |}
+            IsReachable = Set.contains symbolId result.BasicResult.ReachableSymbols
+            LibraryCategory = Map.tryFind symbolId result.LibraryCategories |> Option.map (sprintf "%A")
+        |})
+    |> Array.filter (fun symbolData -> symbolData.IsReachable)
+
+/// Generate reachability comparison report
+let generateComparisonData (beforeSymbols: FSharpSymbolUse[]) (result: LibraryAwareReachability) =
+    {|
+        Summary = {|
+            OriginalSymbolCount = beforeSymbols.Length
+            ReachableSymbolCount = result.PruningStatistics.ReachableSymbols
+            EliminatedCount = result.PruningStatistics.EliminatedSymbols
+            EliminationRate = 
+                if beforeSymbols.Length > 0 then
+                    (float result.PruningStatistics.EliminatedSymbols / float beforeSymbols.Length) * 100.0
+                else 0.0
+            ComputationTimeMs = result.PruningStatistics.ComputationTimeMs
+        |}
+        EntryPoints = result.BasicResult.EntryPoints |> List.map (fun ep -> ep.DisplayName)
+        CallGraph = result.BasicResult.CallGraph
+    |}
+
+/// Generate call graph data structure for visualization
+let generateCallGraphData (result: LibraryAwareReachability) =
+    // Generate nodes for ALL reachable symbols, not just entry points
+    let nodes = 
+        result.BasicResult.ReachableSymbols 
+        |> Set.toArray 
+        |> Array.map (fun symbolId -> {|
+            Id = symbolId
+            Name = symbolId
+            IsReachable = true
+        |})
+    
+    // Generate edges only between reachable symbols
+    let edges = 
+        result.BasicResult.CallGraph 
+        |> Map.toSeq
+        |> Seq.collect (fun (from, targets) ->
+            targets |> List.map (fun target -> {|
+                Source = from
+                Target = target
+                Kind = "References"
+            |}))
+        |> Seq.toArray
+    
+    {|
+        Nodes = nodes
+        Edges = edges
+        NodeCount = nodes.Length
+        EdgeCount = edges.Length
+    |}
+
+/// Generate library boundary analysis data
+let generateLibraryBoundaryData (result: LibraryAwareReachability) =
+    result.LibraryCategories
+    |> Map.toSeq
+    |> Seq.groupBy (fun (_, category) -> category)
+    |> Seq.map (fun (category, symbols) -> {|
+        LibraryCategory = sprintf "%A" category
+        SymbolCount = Seq.length symbols
+        IncludedInAnalysis = 
+            match category with
+            | UserCode | AlloyLibrary -> true
+            | FSharpCore -> false
+            | Other _ -> false
+    |})
+    |> Seq.toArray
+
+/// Generate all debug assets for pruned PSG
+let generatePrunedPSGAssets (beforeSymbols: FSharpSymbolUse[]) (result: LibraryAwareReachability) =
+    {|
+        CorrelationData = generatePrunedSymbolData result beforeSymbols
+        ComparisonData = generateComparisonData beforeSymbols result
+        CallGraphData = generateCallGraphData result
+        LibraryBoundaryData = generateLibraryBoundaryData result
     |}

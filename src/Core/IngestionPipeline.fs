@@ -43,7 +43,7 @@ type PipelineResult = {
     ProjectResults: ProjectResults option
     ProgramSemanticGraph: ProgramSemanticGraph option
     CouplingAnalysis: CouplingAnalysisResult option
-    ReachabilityAnalysis: EnhancedReachability option
+    ReachabilityAnalysis: LibraryAwareReachability option
     MemoryLayout: LayoutStrategy option
     Diagnostics: Diagnostic list
 }
@@ -215,11 +215,35 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                     else
                         None
                 
-                // Step 6: Reachability Analysis (using PSG)
+                // Step 6: Reachability Analysis with Library Boundary Awareness
                 let reachabilityAnalysis =
-                    printfn "[Analysis] Performing reachability analysis..."
-                    // TODO: Implement reachability traversal from PSG entry points
-                    None
+                    printfn "[Analysis] Performing reachability analysis with library boundaries..."
+                    
+                    // Run enhanced reachability analysis
+                    let reachabilityResult = analyzeReachabilityWithBoundaries projectResults.SymbolUses
+                    
+                    // Log analysis results
+                    printfn "[Analysis] Reachability complete: %d/%d symbols reachable (%.1f%% eliminated)" 
+                        reachabilityResult.PruningStatistics.ReachableSymbols
+                        reachabilityResult.PruningStatistics.TotalSymbols
+                        ((float reachabilityResult.PruningStatistics.EliminatedSymbols / float reachabilityResult.PruningStatistics.TotalSymbols) * 100.0)
+                    
+                    // Generate debug assets if intermediates enabled
+                    if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                        printfn "[DebugAssets] Generating pruned PSG debug assets..."
+                        
+                        // Generate all debug data structures (logic stays here, near the analysis)
+                        let debugAssets = generatePrunedPSGAssets projectResults.SymbolUses reachabilityResult
+                        
+                        // Simple IO calls to write the prepared data
+                        writeJsonAsset config.IntermediatesDir.Value "psg.corr.pruned.json" debugAssets.CorrelationData
+                        writeJsonAsset config.IntermediatesDir.Value "reachability.analysis.json" debugAssets.ComparisonData  
+                        writeJsonAsset config.IntermediatesDir.Value "psg.callgraph.pruned.json" debugAssets.CallGraphData
+                        writeJsonAsset config.IntermediatesDir.Value "library.boundaries.json" debugAssets.LibraryBoundaryData
+                        
+                        printfn "[DebugAssets] Pruned PSG debug assets written successfully"
+                    
+                    Some reachabilityResult
                 
                 // Step 7: Memory Layout Analysis (if enabled)
                 let memoryLayout =
@@ -244,7 +268,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                     let llvmPath = Path.Combine(config.IntermediatesDir.Value, "output.ll")
                     writeFileToPath llvmPath llvmContent
                 
-                // Return success with PSG
+                // Return success with PSG and reachability analysis
                 return {
                     Success = true
                     ProjectResults = Some projectResults

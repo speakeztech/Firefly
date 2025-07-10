@@ -1,6 +1,7 @@
 namespace Core.Utilities
 
 open System.IO
+open System.Text.Json
 
 module IntermediateWriter =
     
@@ -17,3 +18,15 @@ module IntermediateWriter =
             printfn "  Wrote %s (%d bytes)" (Path.GetFileName(filePath)) content.Length
         with ex ->
             printfn "  Warning: Could not write %s: %s" filePath ex.Message
+
+    /// JSON options for consistent serialization
+    let private jsonOptions = 
+        let options = JsonSerializerOptions(WriteIndented = true)
+        options.PropertyNamingPolicy <- JsonNamingPolicy.CamelCase
+        options
+
+    /// Write data as JSON to specified filename in output directory
+    let writeJsonAsset (outputDir: string) (filename: string) (data: obj) : unit =
+        let json = JsonSerializer.Serialize(data, jsonOptions)
+        let outputPath = Path.Combine(outputDir, filename)
+        writeFileToPath outputPath json
