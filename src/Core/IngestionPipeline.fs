@@ -134,10 +134,6 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                 Diagnostics = List.ofSeq diagnostics
             }
         else
-            // Step 3: Extract symbol relationships
-            printfn "[Pipeline] Extracting symbol relationships..."
-            let relationships = extractRelationships projectResults.SymbolUses
-            
             // Step 4: Build Program Semantic Graph
             printfn "[PSG] Building Program Semantic Graph..."
             let psgResult = buildProgramSemanticGraph projectResults.CheckResults projectResults.ParseResults
@@ -220,7 +216,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                     printfn "[Analysis] Performing reachability analysis with library boundaries..."
                     
                     // Run enhanced reachability analysis
-                    let reachabilityResult = analyzeReachabilityWithBoundaries projectResults.SymbolUses
+                    let reachabilityResult = analyzeReachabilityWithBoundaries psg projectResults.SymbolUses
                     
                     // Log analysis results
                     printfn "[Analysis] Reachability complete: %d/%d symbols reachable (%.1f%% eliminated)" 

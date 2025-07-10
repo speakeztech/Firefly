@@ -188,11 +188,10 @@ and processExpression
         |> List.fold (fun g e -> processExpression e (Some exprNode.Id) fileName context g) graph'
         
     | SynExpr.Ident ident ->
-        // Try to find the definition of this identifier in the symbol table
         let identName = ident.idText
         match Map.tryFind identName graph'.SymbolTable with
         | Some targetSymbol ->
-            let edge = {
+            let edge : PSGEdge = {
                 Source = exprNode.Id
                 Target = NodeId.FromSymbol(targetSymbol)
                 Kind = SymRef
@@ -201,14 +200,13 @@ and processExpression
         | None -> graph'
         
     | SynExpr.LongIdent(_, lid, _, _) ->
-        // Handle qualified identifiers
         let fullName = lid.LongIdent |> List.map (fun id -> id.idText) |> String.concat "."
         match Map.tryFind fullName graph'.SymbolTable with
         | Some targetSymbol ->
-            let edge = {
+            let edge : PSGEdge = {
                 Source = exprNode.Id
                 Target = NodeId.FromSymbol(targetSymbol)
-                Kind = EdgeKind.References
+                Kind = SymRef
             }
             { graph' with Edges = edge :: graph'.Edges }
         | None -> graph'
@@ -227,7 +225,6 @@ and processPattern
     let patNode = createNode "Pattern" pat.Range fileName symbol parentId
     let graph' = { graph with Nodes = Map.add patNode.Id.Value patNode graph.Nodes }
     
-    // Add symbol to symbol table if it's a binding pattern
     match pat with
     | SynPat.Named(synIdent, _, _, _) ->
         let (SynIdent(ident, _)) = synIdent
@@ -251,7 +248,6 @@ and processTypeDef
     
     let graph' = { graph with Nodes = Map.add typeNode.Id.Value typeNode graph.Nodes }
     
-    // Process members
     members 
     |> List.fold (fun g member' -> 
         processMember member' (Some typeNode.Id) fileName context g
@@ -277,7 +273,6 @@ let buildFromImplementationFile
     
     let (ParsedImplFileInput(fileName, _, _, _, _, modules, _, _, _)) = implFile
     
-    // Initialize empty graph
     let initialGraph = {
         Nodes = Map.empty
         Edges = []
@@ -287,7 +282,6 @@ let buildFromImplementationFile
         CompilationOrder = []
     }
     
-    // Process all modules
     let finalGraph = 
         modules 
         |> List.fold (fun graph moduleOrNs ->
@@ -296,7 +290,6 @@ let buildFromImplementationFile
             let moduleNode = createNode "Module" range fileName symbol None
             let graph' = { graph with Nodes = Map.add moduleNode.Id.Value moduleNode graph.Nodes }
             
-            // Add module symbol to symbol table if available
             let graph'' = 
                 match symbol with
                 | Some sym -> 
@@ -310,7 +303,7 @@ let buildFromImplementationFile
         ) initialGraph
         
     printfn "[PSG Debug] Built graph for %s: %d nodes" 
-        (System.IO.Path.GetFileName fileName) finalGraph.Nodes.Count
+        (Path.GetFileName fileName) finalGraph.Nodes.Count
         
     finalGraph
 
@@ -319,18 +312,15 @@ let buildProgramSemanticGraph
     (checkResults: FSharpCheckProjectResults) 
     (parseResults: FSharpParseFileResults[]) =
     
-    // Debug: Check what FCS is providing
     printfn "[PSG Debug] CheckResults has errors: %b" checkResults.HasCriticalErrors
     printfn "[PSG Debug] AssemblyContents files: %d" checkResults.AssemblyContents.ImplementationFiles.Length
     
-    // Create correlation context
     let correlationContext = createContext checkResults
     
     printfn "[PSG Debug] Symbol uses found: %d across %d files" 
         correlationContext.SymbolUses.Length
         correlationContext.FileIndex.Count
     
-    // Load source files
     let sourceFiles = 
         parseResults
         |> Array.map (fun pr -> 
@@ -342,7 +332,6 @@ let buildProgramSemanticGraph
         )
         |> Map.ofArray
     
-    // Create build context
     let buildContext = {
         CheckResults = checkResults
         ParseResults = parseResults
@@ -350,7 +339,6 @@ let buildProgramSemanticGraph
         SourceFiles = sourceFiles
     }
     
-    // Build PSG for each file and merge
     let graphs = 
         parseResults
         |> Array.choose (fun pr ->
@@ -362,7 +350,6 @@ let buildProgramSemanticGraph
     
     printfn "[PSG Debug] Built %d file graphs" graphs.Length
     
-    // Merge all graphs
     let mergedGraph = 
         graphs 
         |> Array.fold (fun acc g ->
@@ -383,7 +370,6 @@ let buildProgramSemanticGraph
             CompilationOrder = []
         }
     
-    // Build comprehensive symbol table from all symbol uses
     let fullSymbolTable =
         correlationContext.SymbolUses
         |> Array.filter (fun su -> su.IsFromDefinition)
@@ -394,18 +380,15 @@ let buildProgramSemanticGraph
     
     printfn "[PSG Debug] Symbol table size: %d (was %d)" fullSymbolTable.Count mergedGraph.SymbolTable.Count
     
-    // Find entry points
     let entryPoints = 
         getEntryPointSymbols correlationContext.SymbolUses
         |> Array.map NodeId.FromSymbol
         |> Array.toList
     
-    // Create proper reference edges based on symbol uses
     let referenceEdges =
         correlationContext.SymbolUses
         |> Array.filter (fun su -> su.IsFromUse)
         |> Array.choose (fun useSym ->
-            // Find the definition of this symbol
             let defOpt = 
                 correlationContext.SymbolUses
                 |> Array.tryFind (fun def -> 
@@ -415,12 +398,12 @@ let buildProgramSemanticGraph
             
             match defOpt with
             | Some def when useSym.Range <> def.Range ->
-                // Create edge from use location to definition
-                Some {
+                let edge : PSGEdge = {
                     Source = NodeId.FromRange(useSym.Range.FileName, useSym.Range)
                     Target = NodeId.FromSymbol(def.Symbol)
-                    Kind = EdgeKind.References
+                    Kind = SymRef
                 }
+                Some edge
             | _ -> None
         )
         |> Array.toList
@@ -440,7 +423,6 @@ let buildProgramSemanticGraph
 let validateGraph (graph: ProgramSemanticGraph) =
     let errors = ResizeArray<PSGError>()
     
-    // Check all edges reference valid nodes
     graph.Edges |> List.iter (fun edge ->
         if not (Map.containsKey edge.Source.Value graph.Nodes) then
             errors.Add {
@@ -456,7 +438,6 @@ let validateGraph (graph: ProgramSemanticGraph) =
             }
     )
     
-    // Check entry points exist
     if graph.EntryPoints.IsEmpty then
         errors.Add {
             Message = "No entry points found in PSG"
