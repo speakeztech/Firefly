@@ -1,6 +1,5 @@
 module Core.PSG.Builder
 
-open System
 open System.IO
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
@@ -196,7 +195,7 @@ and processExpression
             let edge = {
                 Source = exprNode.Id
                 Target = NodeId.FromSymbol(targetSymbol)
-                Kind = EdgeKind.References
+                Kind = SymRef
             }
             { graph' with Edges = edge :: graph'.Edges }
         | None -> graph'

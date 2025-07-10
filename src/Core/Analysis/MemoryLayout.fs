@@ -3,7 +3,7 @@ module Core.Analysis.MemoryLayout
 open FSharp.Compiler.Symbols
 open Core.Analysis.CouplingCohesion
 open Core.Templates.TemplateTypes
-open Core.FCS.Helpers  // For getDeclaringEntity
+open Core.PSG.Types  // For getDeclaringEntity
 
 /// Memory region assignment
 type MemoryRegion = {

@@ -2,47 +2,9 @@ module Core.Analysis.CouplingCohesion
 
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.CodeAnalysis  // For FSharpSymbolUse
-open Core.PSG.SymbolAnalysis       // For SymbolRelation, RelationType, etc.
+open Core.PSG.Types       // For SymbolRelation, RelationType, etc.
 open Core.FCS.Helpers              // For getDeclaringEntity
 
-/// Semantic unit representing a cohesive component
-type SemanticUnit = 
-    | Module of FSharpEntity
-    | Namespace of string
-    | FunctionGroup of FSharpMemberOrFunctionOrValue list
-    | TypeCluster of FSharpEntity list
-
-/// Coupling measurement between semantic units
-type Coupling = {
-    From: SemanticUnit
-    To: SemanticUnit
-    Strength: float  // 0.0 to 1.0
-    Dependencies: SymbolRelation list
-}
-
-/// Cohesion measurement within a semantic unit
-type Cohesion = {
-    Unit: SemanticUnit
-    Score: float  // 0.0 to 1.0
-    InternalRelations: int
-    ExternalRelations: int
-}
-
-/// Component identified through coupling/cohesion analysis
-type CodeComponent = {
-    Id: string
-    Units: SemanticUnit list
-    Cohesion: float
-    AverageCoupling: float
-    Boundaries: ComponentBoundary list
-}
-
-and ComponentBoundary = {
-    Interface: FSharpSymbol list
-    Direction: BoundaryDirection
-}
-
-and BoundaryDirection = Inbound | Outbound | Bidirectional
 
 /// Helper to get symbol identifiers for comparison
 let private getSymbolId (symbol: FSharpSymbol) = symbol.FullName

@@ -16,32 +16,6 @@ let private jsonOptions =
     opts.Converters.Add(JsonFSharpConverter())
     opts
 
-/// JSON-friendly representation of a PSG node
-type NodeJson = {
-    Id: string
-    Kind: string
-    Symbol: string option
-    Range: {| StartLine: int; StartColumn: int; EndLine: int; EndColumn: int |}
-    SourceFile: string
-    ParentId: string option
-    Children: string[]
-}
-
-/// JSON-friendly representation of an edge
-type EdgeJson = {
-    Source: string
-    Target: string
-    Kind: string
-}
-
-/// JSON-friendly representation of correlation entry
-type CorrelationJson = {
-    Range: {| File: string; StartLine: int; StartColumn: int; EndLine: int; EndColumn: int |}
-    SymbolName: string
-    SymbolKind: string
-    SymbolHash: int
-}
-
 /// Convert PSG node to JSON representation
 let nodeToJson (node: PSGNode) : NodeJson =
     {
@@ -67,7 +41,7 @@ let edgeToJson (edge: PSGEdge) : EdgeJson =
         Kind = 
             match edge.Kind with
             | ChildOf -> "ChildOf"
-            | References -> "References"
+            | SymRef -> "References"
             | TypeOf -> "TypeOf"
             | CallsFunction -> "CallsFunction"
             | Instantiates -> "Instantiates"

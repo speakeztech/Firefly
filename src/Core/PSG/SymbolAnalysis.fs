@@ -1,133 +1,68 @@
 module Core.PSG.SymbolAnalysis
 
 open FSharp.Compiler.Symbols
-open FSharp.Compiler.Text
-open FSharp.Compiler.CodeAnalysis  // Add this for FSharpSymbolUse
-open Core.FCS.Helpers  // Import our helper functions
+open FSharp.Compiler.CodeAnalysis
+open Core.FCS.Helpers
+open Core.PSG.Types
 
-/// Symbol relationship extracted from FCS
-type SymbolRelation = {
-    From: FSharpSymbol
-    To: FSharpSymbol
-    RelationType: RelationType
-    Location: range
-}
-
-and RelationType =
-    | Calls           // Function call
-    | References      // Type or value reference
-    | Inherits        // Type inheritance
-    | Implements      // Interface implementation
-    | Contains        // Module/namespace containment
-
-/// Fixed relationship extraction with proper range containment
-let extractRelationships (symbolUses: FSharpSymbolUse[]) =
-    // Group definitions by file for efficient lookup
-    let definitionsByFile = 
-        symbolUses
-        |> Array.filter (fun su -> su.IsFromDefinition)
-        |> Array.groupBy (fun su -> su.Range.FileName)
-        |> Map.ofArray
+/// Extract relationships from the existing PSG instead of rebuilding from scratch
+let extractRelationships (psg: ProgramSemanticGraph) : SymbolRelation[] =
+    printfn "[RELATIONSHIP] === Using Existing PSG ==="
+    printfn "[RELATIONSHIP] PSG has %d nodes and %d edges" psg.Nodes.Count psg.Edges.Length
     
-    // Find containing symbol using proper range containment
-    let findContainingSymbol (symbolUse: FSharpSymbolUse) =
-        match Map.tryFind symbolUse.Range.FileName definitionsByFile with
-        | Some definitions ->
-            definitions
-            |> Array.filter (fun def ->
-                let useRange = symbolUse.Range
-                let defRange = def.Range
-                
-                // Proper range containment: definition must completely contain the use
-                (defRange.Start.Line < useRange.Start.Line || 
-                 (defRange.Start.Line = useRange.Start.Line && defRange.Start.Column <= useRange.Start.Column)) &&
-                (defRange.End.Line > useRange.End.Line || 
-                 (defRange.End.Line = useRange.End.Line && defRange.End.Column >= useRange.End.Column)) &&
-                def.Symbol <> symbolUse.Symbol  // Not the same symbol
-            )
-            |> Array.sortBy (fun def -> 
-                // Find the most specific (smallest) containing definition
-                let defRange = def.Range
-                (defRange.End.Line - defRange.Start.Line), 
-                (defRange.End.Column - defRange.Start.Column)
-            )
-            |> Array.tryHead
-            |> Option.map (fun def -> def.Symbol)
-        | None -> None
-    
-    // Build relationships with detailed debugging
     let relationships = 
-        symbolUses
-        |> Array.choose (fun (symbolUse: FSharpSymbolUse) ->
-            if symbolUse.IsFromUse then
-                match findContainingSymbol symbolUse with
-                | Some containerSymbol ->
+        psg.Edges
+        |> List.choose (fun edge ->
+            // Get source and target nodes from PSG using NodeId.Value as key
+            match Map.tryFind edge.Source.Value psg.Nodes, Map.tryFind edge.Target.Value psg.Nodes with
+            | Some sourceNode, Some targetNode ->
+                // Convert to SymbolRelation if both nodes have symbols
+                match sourceNode.Symbol, targetNode.Symbol with
+                | Some fromSymbol, Some toSymbol ->
                     let relationType = 
-                        match symbolUse.Symbol with
-                        | :? FSharpMemberOrFunctionOrValue -> RelationType.Calls
-                        | :? FSharpEntity -> RelationType.References
-                        | _ -> RelationType.References
+                        match edge.Kind with
+                        | CallsFunction -> Calls
+                        | SymRef -> References
+                        | ChildOf -> Contains
+                        | TypeOf -> Inherits
+                        | Instantiates -> Implements
                     
-                    // Debug critical relationships
-                    if containerSymbol.DisplayName = "main" || symbolUse.Symbol.DisplayName = "hello" then
-                        printfn "[RELATIONSHIP] %s -> %s (at %s:%d)" 
-                            containerSymbol.FullName
-                            symbolUse.Symbol.FullName
-                            (System.IO.Path.GetFileName(symbolUse.Range.FileName))
-                            symbolUse.Range.Start.Line
+                    // Debug main/hello relationships
+                    if fromSymbol.DisplayName.Contains("main") || 
+                       toSymbol.DisplayName.Contains("hello") then
+                        printfn "[RELATIONSHIP] ✅ %s -> %s (%A)" 
+                            fromSymbol.FullName toSymbol.FullName relationType
                     
                     Some {
-                        From = containerSymbol
-                        To = symbolUse.Symbol
+                        From = fromSymbol
+                        To = toSymbol
                         RelationType = relationType
-                        Location = symbolUse.Range
+                        Location = sourceNode.Range
                     }
-                | None -> 
-                    // Debug missing containers for entry point calls
-                    if symbolUse.Symbol.DisplayName = "hello" then
-                        printfn "[RELATIONSHIP] No container found for hello() call at %s:%d" 
-                            (System.IO.Path.GetFileName(symbolUse.Range.FileName))
-                            symbolUse.Range.Start.Line
-                        
-                        // Show nearby definitions for debugging
-                        let fileName = symbolUse.Range.FileName
-                        match Map.tryFind fileName definitionsByFile with
-                        | Some defs ->
-                            printfn "[RELATIONSHIP] Nearby definitions in %s:" (System.IO.Path.GetFileName(fileName))
-                            defs 
-                            |> Array.filter (fun def -> 
-                                abs(def.Range.Start.Line - symbolUse.Range.Start.Line) <= 5)
-                            |> Array.iter (fun def ->
-                                printfn "  %s at line %d-%d" 
-                                    def.Symbol.FullName 
-                                    def.Range.Start.Line 
-                                    def.Range.End.Line)
-                        | None -> ()
-                    None
-            else None
+                | _ -> None
+            | _ -> None
         )
+        |> List.toArray
     
-    // Additional debug: count relationships by type
-    let callCount = relationships |> Array.filter (fun r -> r.RelationType = RelationType.Calls) |> Array.length
-    let refCount = relationships |> Array.filter (fun r -> r.RelationType = RelationType.References) |> Array.length
+    printfn "[RELATIONSHIP] Converted %d PSG edges to %d symbol relationships" 
+        psg.Edges.Length relationships.Length
     
-    printfn "[RELATIONSHIP] Extracted %d total relationships (%d calls, %d references)" 
-        relationships.Length callCount refCount
-    
-    // Show critical entry point relationships
+    // Check for entry point relationships
     let entryPointRels = 
         relationships 
-        |> Array.filter (fun r -> r.From.DisplayName = "main")
+        |> Array.filter (fun r -> 
+            r.From.DisplayName.Contains("main") || 
+            r.From.FullName.Contains("HelloWorldDirect"))
     
     if entryPointRels.Length > 0 then
-        printfn "[RELATIONSHIP] Entry point relationships found:"
+        printfn "[RELATIONSHIP] ✅ Entry point relationships from PSG:"
         entryPointRels |> Array.iter (fun r ->
-            printfn "  main -> %s" r.To.FullName)
+            printfn "  %s -> %s" r.From.FullName r.To.FullName)
     else
-        printfn "[RELATIONSHIP] ⚠️  NO entry point relationships found! This will break reachability."
+        printfn "[RELATIONSHIP] ⚠️ No entry point relationships in PSG"
     
     relationships
-
+    
 /// Get all symbols defined in a specific file
 let getFileSymbols (fileName: string) (symbolUses: FSharpSymbolUse[]) =
     symbolUses
@@ -296,8 +231,8 @@ let buildDependencyGraph (symbolCorrelations: SymbolCorrelation[]) =
                 correlation.Uses
                 |> Array.filter (fun useSym ->
                     useSym.Range.FileName = def.Range.FileName &&
-                    useSym.Range.StartLine >= def.Range.StartLine &&
-                    useSym.Range.EndLine <= def.Range.EndLine
+                    useSym.Range.Start.Line >= def.Range.Start.Line &&
+                    useSym.Range.End.Line <= def.Range.End.Line
                 )
                 |> Array.map (fun useSym -> useSym.Symbol)
                 |> Array.distinct

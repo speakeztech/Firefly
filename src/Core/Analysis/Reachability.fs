@@ -4,7 +4,7 @@ open System
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.CodeAnalysis  // For FSharpSymbolUse
 open Core.PSG.SymbolAnalysis
-open Core.FCS.Helpers              // For getDeclaringEntity
+open Core.PSG.Types              // For getDeclaringEntity
 open Core.Analysis.CouplingCohesion // For CodeComponent type
 
 /// Reachability analysis result
@@ -89,16 +89,6 @@ let findEntryPoints (symbolUses: FSharpSymbolUse[]) =
     |> Array.distinct
     |> List.ofArray
 
-/// Build call graph from symbol relationships
-let buildCallGraph (relationships: SymbolRelation[]) =
-    relationships
-    |> Array.filter (fun r -> r.RelationType = RelationType.Calls)
-    |> Array.groupBy (fun r -> getSymbolId r.From)
-    |> Array.map (fun (callerId, calls) ->
-        callerId, calls |> Array.map (fun r -> getSymbolId r.To) |> Array.distinct |> List.ofArray
-    )
-    |> Map.ofArray
-
 /// Compute reachable symbols from entry points
 let computeReachable (entryPoints: FSharpSymbol list) (callGraph: Map<string, string list>) =
     let rec traverse (visited: Set<string>) (currentId: string) =
@@ -112,34 +102,6 @@ let computeReachable (entryPoints: FSharpSymbol list) (callGraph: Map<string, st
     
     let entryPointIds = entryPoints |> List.map getSymbolId
     entryPointIds |> List.fold traverse Set.empty
-
-/// Perform complete reachability analysis
-let analyzeReachability (symbolUses: FSharpSymbolUse[]) (relationships: SymbolRelation[]) =
-    // Find all defined symbols
-    let allSymbolIds = 
-        symbolUses
-        |> Array.filter (fun (useSymbol: FSharpSymbolUse) -> useSymbol.IsFromDefinition)
-        |> Array.map (fun (useSymbol: FSharpSymbolUse) -> getSymbolId useSymbol.Symbol)
-        |> Set.ofArray
-    
-    // Find entry points
-    let entryPoints = findEntryPoints symbolUses
-    
-    // Build call graph
-    let callGraph = buildCallGraph relationships
-    
-    // Compute reachable symbols
-    let reachableIds = computeReachable entryPoints callGraph
-    
-    // Find unreachable symbols
-    let unreachableIds = Set.difference allSymbolIds reachableIds
-    
-    {
-        EntryPoints = entryPoints
-        ReachableSymbols = reachableIds
-        UnreachableSymbols = unreachableIds
-        CallGraph = callGraph
-    }
 
 /// Enhanced reachability with coupling/cohesion awareness
 type EnhancedReachability = {
@@ -323,8 +285,46 @@ let shouldIncludeSymbol (symbol: FSharpSymbol) : bool =
         | _ -> false
     | Other _ -> false
 
-/// Enhanced reachability analysis with library boundary awareness
-let analyzeReachabilityWithBoundaries (symbolUses: FSharpSymbolUse[]) : LibraryAwareReachability =
+/// Build call graph from symbol relationships  
+let buildCallGraph (relationships: SymbolRelation[]) =
+    relationships
+    |> Array.filter (fun r -> r.RelationType = RelationType.Calls)
+    |> Array.groupBy (fun r -> getSymbolId r.From)
+    |> Array.map (fun (callerId, calls) ->
+        callerId, calls |> Array.map (fun r -> getSymbolId r.To) |> Array.distinct |> List.ofArray
+    )
+    |> Map.ofArray
+
+/// Perform complete reachability analysis
+let analyzeReachability (symbolUses: FSharpSymbolUse[]) (relationships: SymbolRelation[]) =
+    // Find all defined symbols
+    let allSymbolIds = 
+        symbolUses
+        |> Array.filter (fun (useSymbol: FSharpSymbolUse) -> useSymbol.IsFromDefinition)
+        |> Array.map (fun (useSymbol: FSharpSymbolUse) -> getSymbolId useSymbol.Symbol)
+        |> Set.ofArray
+    
+    // Find entry points
+    let entryPoints = findEntryPoints symbolUses
+    
+    // Build call graph
+    let callGraph = buildCallGraph relationships
+    
+    // Compute reachable symbols
+    let reachableIds = computeReachable entryPoints callGraph
+    
+    // Find unreachable symbols
+    let unreachableIds = Set.difference allSymbolIds reachableIds
+    
+    {
+        EntryPoints = entryPoints
+        ReachableSymbols = reachableIds
+        UnreachableSymbols = unreachableIds
+        CallGraph = callGraph
+    }
+
+/// Enhanced reachability analysis with library boundary awareness - updated to use PSG
+let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) (symbolUses: FSharpSymbolUse[]) : LibraryAwareReachability =
     let startTime = DateTime.UtcNow
     
     // Enhanced debug output to understand symbol distribution
@@ -348,8 +348,8 @@ let analyzeReachabilityWithBoundaries (symbolUses: FSharpSymbolUse[]) : LibraryA
     fileStats |> Array.iter (fun (file, count) -> 
         printfn "  %s: %d symbols" file count)
     
-    // Extract relationships from ALL symbol uses
-    let relationships = extractRelationships symbolUses
+    // Extract relationships from PSG instead of raw symbol uses
+    let relationships = extractRelationships psg
     
     // Detailed relationship analysis
     printfn "[REACHABILITY] === Relationship Analysis ==="

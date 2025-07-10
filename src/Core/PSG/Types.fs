@@ -1,6 +1,5 @@
 module Core.PSG.Types
 
-open System
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
 
@@ -20,7 +19,7 @@ type NodeId =
         SymbolNode(symbol.GetHashCode(), symbol.DisplayName)
     
     static member FromRange(file: string, range: range) =
-        RangeNode(file, range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
+        RangeNode(file, range.Start.Line, range.Start.Column, range.End.Line, range.End.Column)
 
 /// Unified PSG node containing both syntax and semantic information
 type PSGNode = {
@@ -36,7 +35,7 @@ type PSGNode = {
 /// Edge types in the PSG
 type EdgeKind =
     | ChildOf          // Syntactic parent-child
-    | References       // Symbol reference
+    | SymRef       // Symbol reference
     | TypeOf          // Type relationship
     | CallsFunction   // Function call
     | Instantiates    // Generic instantiation
@@ -46,6 +45,22 @@ type PSGEdge = {
     Source: NodeId
     Target: NodeId
     Kind: EdgeKind
+}
+
+/// Relationship types for reachability analysis
+type RelationType =
+    | Calls           // Function call
+    | References      // Type or value reference
+    | Inherits        // Type inheritance
+    | Implements      // Interface implementation
+    | Contains        // Module/namespace containment
+
+/// Symbol relationship for reachability analysis
+type SymbolRelation = {
+    From: FSharpSymbol
+    To: FSharpSymbol
+    RelationType: RelationType
+    Location: range
 }
 
 /// The complete Program Semantic Graph
@@ -85,3 +100,69 @@ and PSGErrorKind =
     | MissingSymbol
     | InvalidNode
     | BuilderError
+
+/// JSON-friendly representation of a PSG node
+type NodeJson = {
+    Id: string
+    Kind: string
+    Symbol: string option
+    Range: {| StartLine: int; StartColumn: int; EndLine: int; EndColumn: int |}
+    SourceFile: string
+    ParentId: string option
+    Children: string[]
+}
+
+/// JSON-friendly representation of an edge
+type EdgeJson = {
+    Source: string
+    Target: string
+    Kind: string
+}
+
+/// JSON-friendly representation of correlation entry
+type CorrelationJson = {
+    Range: {| File: string; StartLine: int; StartColumn: int; EndLine: int; EndColumn: int |}
+    SymbolName: string
+    SymbolKind: string
+    SymbolHash: int
+}
+
+/// Semantic unit representing a cohesive component
+type SemanticUnit = 
+    | Module of FSharpEntity
+    | Namespace of string
+    | FunctionGroup of FSharpMemberOrFunctionOrValue list
+    | TypeCluster of FSharpEntity list
+
+/// Coupling measurement between semantic units
+type Coupling = {
+    From: SemanticUnit
+    To: SemanticUnit
+    Strength: float  // 0.0 to 1.0
+    Dependencies: SymbolRelation list
+}
+
+/// Cohesion measurement within a semantic unit
+type Cohesion = {
+    Unit: SemanticUnit
+    Score: float  // 0.0 to 1.0
+    InternalRelations: int
+    ExternalRelations: int
+}
+
+/// Component identified through coupling/cohesion analysis
+type CodeComponent = {
+    Id: string
+    Units: SemanticUnit list
+    Cohesion: float
+    AverageCoupling: float
+    Boundaries: ComponentBoundary list
+}
+
+and ComponentBoundary = {
+    Interface: FSharpSymbol list
+    Direction: BoundaryDirection
+}
+
+and BoundaryDirection = Inbound | Outbound | Bidirectional
+
