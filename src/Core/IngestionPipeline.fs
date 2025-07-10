@@ -82,23 +82,6 @@ let private writeSymbolicAst (parseResults: FSharpParseFileResults[]) (intermedi
         printfn "  Wrote %s (%d bytes)" (Path.GetFileName astPath) (FileInfo(astPath).Length)
     )
 
-/// Write typed AST from check results
-let private writeTypedAst (checkResults: FSharpCheckProjectResults) (intermediatesDir: string) =
-    // Get all implementation files from the project
-    checkResults.AssemblyContents.ImplementationFiles
-    |> List.iter (fun implFile ->
-        let baseName = Path.GetFileNameWithoutExtension(implFile.FileName)
-        let typedPath = Path.Combine(intermediatesDir, $"{baseName}.typ.ast")
-        
-        // Write the complete typed AST representation with all details
-        use writer = new StreamWriter(typedPath)
-        // Format with same depth and detail as symbolic AST
-        let content = sprintf "%A" implFile
-        writer.Write(content)
-        
-        printfn "  Wrote %s (%d bytes)" (Path.GetFileName typedPath) (FileInfo(typedPath).Length)
-    )
-
 /// Run the ingestion pipeline
 let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineResult> = async {
     let diagnostics = ResizeArray<Diagnostic>()
@@ -122,10 +105,6 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
             // Write symbolic AST
             printfn "[IntermediateGeneration] Writing symbolic AST..."
             writeSymbolicAst projectResults.ParseResults config.IntermediatesDir.Value
-            
-            // Write typed AST
-            printfn "[IntermediateGeneration] Writing typed AST..."
-            writeTypedAst projectResults.CheckResults config.IntermediatesDir.Value
         
             // Write type-checked results summary
             let typeCheckData = {|
