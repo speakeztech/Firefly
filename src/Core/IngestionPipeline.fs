@@ -7,6 +7,10 @@ open System.Text.Json.Serialization
 open FSharp.Compiler.CodeAnalysis
 open Core.FCS.ProjectContext
 open Core.FCS.SymbolAnalysis
+open Core.PSG.Types
+open Core.PSG.Builder
+open Core.PSG.Correlation
+open Core.PSG.DebugOutput
 open Core.Analysis.CouplingCohesion
 open Core.Analysis.Reachability
 open Core.Analysis.MemoryLayout
@@ -37,6 +41,7 @@ type PipelineConfig = {
 type PipelineResult = {
     Success: bool
     ProjectResults: ProjectResults option
+    ProgramSemanticGraph: ProgramSemanticGraph option
     CouplingAnalysis: CouplingAnalysisResult option
     ReachabilityAnalysis: EnhancedReachability option
     MemoryLayout: LayoutStrategy option
@@ -143,6 +148,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
             return {
                 Success = false
                 ProjectResults = Some projectResults
+                ProgramSemanticGraph = None
                 CouplingAnalysis = None
                 ReachabilityAnalysis = None
                 MemoryLayout = None
@@ -153,41 +159,122 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
             printfn "[Pipeline] Extracting symbol relationships..."
             let relationships = extractRelationships projectResults.SymbolUses
             
-            // Step 4: Build PSG (placeholder for now)
-            printfn "[ASTTransformation] Building Program Semantic Graph..."
-            if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-                let psgData = {|
-                    entryPoints = []
-                    functions = 100  // Placeholder
-                    modules = 6      // Placeholder
-                    types = 50       // Placeholder
-                |}
-                let psgPath = Path.Combine(config.IntermediatesDir.Value, "semantic.psg.json")
-                writeFileToPath psgPath (JsonSerializer.Serialize(psgData, jsonOptions))
+            // Step 4: Build Program Semantic Graph
+            printfn "[PSG] Building Program Semantic Graph..."
+            let psgResult = buildProgramSemanticGraph projectResults.CheckResults projectResults.ParseResults
             
-            // Step 5: Generate MLIR (placeholder)
-            printfn "[MLIRGeneration] Generating MLIR dialects..."
-            if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-                let mlirContent = ";; MLIR generation placeholder\nmodule @main {\n  func.func @main() -> i32 {\n    %0 = arith.constant 0 : i32\n    return %0 : i32\n  }\n}"
-                let mlirPath = Path.Combine(config.IntermediatesDir.Value, "output.mlir")
-                writeFileToPath mlirPath mlirContent
-            
-            // Step 6: Generate LLVM (placeholder)
-            printfn "[LLVMGeneration] Lowering MLIR to LLVM IR..."
-            if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-                let llvmContent = "; LLVM IR placeholder\ndefine i32 @main() {\n  ret i32 0\n}"
-                let llvmPath = Path.Combine(config.IntermediatesDir.Value, "output.ll")
-                writeFileToPath llvmPath llvmContent
-            
-            // Return success
-            return {
-                Success = true
-                ProjectResults = Some projectResults
-                CouplingAnalysis = None  // TODO: Implement
-                ReachabilityAnalysis = None  // TODO: Implement
-                MemoryLayout = None  // TODO: Implement
-                Diagnostics = List.ofSeq diagnostics
-            }
+            match psgResult with
+            | PSGResult.Failure errors ->
+                errors |> List.iter (fun error ->
+                    diagnostics.Add {
+                        Severity = Error
+                        Message = error.Message
+                        Location = error.Location |> Option.map (fun r -> r.FileName)
+                    }
+                )
+                return {
+                    Success = false
+                    ProjectResults = Some projectResults
+                    ProgramSemanticGraph = None
+                    CouplingAnalysis = None
+                    ReachabilityAnalysis = None
+                    MemoryLayout = None
+                    Diagnostics = List.ofSeq diagnostics
+                }
+                
+            | PSGResult.Success psg ->
+                // Validate PSG structure
+                match validateGraph psg with
+                | PSGResult.Failure validationErrors ->
+                    validationErrors |> List.iter (fun error ->
+                        diagnostics.Add {
+                            Severity = Warning
+                            Message = sprintf "PSG validation: %s" error.Message
+                            Location = None
+                        }
+                    )
+                | _ -> ()
+                
+                // Generate PSG debug outputs if intermediates enabled
+                if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                    // Create correlation context for statistics
+                    let correlationContext = createContext projectResults.CheckResults
+                    
+                    // Collect all correlations from parsed files
+                    let correlations = 
+                        projectResults.ParseResults
+                        |> Array.collect (fun pr -> 
+                            correlateFile pr.ParseTree correlationContext
+                        )
+                    
+                    // Generate correlation statistics
+                    let stats = generateStats correlationContext correlations
+                    
+                    // Generate all debug outputs
+                    generateDebugOutputs psg correlations stats config.IntermediatesDir.Value
+                    
+                    // Also write a PSG summary
+                    let psgSummary = {|
+                        NodeCount = psg.Nodes.Count
+                        EdgeCount = psg.Edges.Length
+                        EntryPoints = psg.EntryPoints |> List.map (fun ep -> ep.Value)
+                        SymbolCount = psg.SymbolTable.Count
+                        FileCount = psg.SourceFiles.Count
+                    |}
+                    let psgSummaryPath = Path.Combine(config.IntermediatesDir.Value, "psg.summary.json")
+                    writeFileToPath psgSummaryPath (JsonSerializer.Serialize(psgSummary, jsonOptions))
+                
+                printfn "[PSG] PSG construction complete: %d nodes, %d edges, %d entry points" 
+                    psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length
+                
+                // Step 5: Coupling/Cohesion Analysis (if enabled)
+                let couplingAnalysis = 
+                    if config.EnableCouplingAnalysis then
+                        printfn "[Analysis] Performing coupling/cohesion analysis..."
+                        // TODO: Implement coupling analysis using PSG
+                        None
+                    else
+                        None
+                
+                // Step 6: Reachability Analysis (using PSG)
+                let reachabilityAnalysis =
+                    printfn "[Analysis] Performing reachability analysis..."
+                    // TODO: Implement reachability traversal from PSG entry points
+                    None
+                
+                // Step 7: Memory Layout Analysis (if enabled)
+                let memoryLayout =
+                    if config.EnableMemoryOptimization then
+                        printfn "[Analysis] Determining memory layout..."
+                        // TODO: Implement memory layout using PSG and coupling data
+                        None
+                    else
+                        None
+                
+                // Step 8: Generate MLIR (placeholder - will use PSG)
+                printfn "[MLIRGeneration] Generating MLIR dialects..."
+                if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                    let mlirContent = sprintf ";; MLIR generation from PSG with %d nodes\nmodule @main {\n  func.func @main() -> i32 {\n    %%0 = arith.constant 0 : i32\n    return %%0 : i32\n  }\n}" psg.Nodes.Count
+                    let mlirPath = Path.Combine(config.IntermediatesDir.Value, "output.mlir")
+                    writeFileToPath mlirPath mlirContent
+                
+                // Step 9: Generate LLVM (placeholder)
+                printfn "[LLVMGeneration] Lowering MLIR to LLVM IR..."
+                if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                    let llvmContent = "; LLVM IR placeholder\ndefine i32 @main() {\n  ret i32 0\n}"
+                    let llvmPath = Path.Combine(config.IntermediatesDir.Value, "output.ll")
+                    writeFileToPath llvmPath llvmContent
+                
+                // Return success with PSG
+                return {
+                    Success = true
+                    ProjectResults = Some projectResults
+                    ProgramSemanticGraph = Some psg
+                    CouplingAnalysis = couplingAnalysis
+                    ReachabilityAnalysis = reachabilityAnalysis
+                    MemoryLayout = memoryLayout
+                    Diagnostics = List.ofSeq diagnostics
+                }
             
     with ex ->
         diagnostics.Add {
@@ -198,6 +285,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
         return {
             Success = false
             ProjectResults = None
+            ProgramSemanticGraph = None
             CouplingAnalysis = None
             ReachabilityAnalysis = None
             MemoryLayout = None
