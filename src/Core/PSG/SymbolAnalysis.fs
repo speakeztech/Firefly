@@ -20,51 +20,113 @@ and RelationType =
     | Implements      // Interface implementation
     | Contains        // Module/namespace containment
 
-/// Extract all symbol relationships from project
+/// Fixed relationship extraction with proper range containment
 let extractRelationships (symbolUses: FSharpSymbolUse[]) =
-    // Group by file and position for efficient processing
-    let usesByPosition = 
+    // Group definitions by file for efficient lookup
+    let definitionsByFile = 
         symbolUses
-        |> Array.groupBy (fun (symbolUse: FSharpSymbolUse) -> 
-            symbolUse.Range.FileName, symbolUse.Range.Start.Line)  // Use Start.Line not StartLine
+        |> Array.filter (fun su -> su.IsFromDefinition)
+        |> Array.groupBy (fun su -> su.Range.FileName)
         |> Map.ofArray
     
-    // Find containing symbol for each use
+    // Find containing symbol using proper range containment
     let findContainingSymbol (symbolUse: FSharpSymbolUse) =
-        let key = (symbolUse.Range.FileName, symbolUse.Range.Start.Line)
-        match Map.tryFind key usesByPosition with
-        | Some uses ->
-            uses 
-            |> Array.tryFind (fun (u: FSharpSymbolUse) -> 
-                u.IsFromDefinition && 
-                u.Range.Start.Line <= symbolUse.Range.Start.Line &&
-                u.Range.End.Line >= symbolUse.Range.End.Line &&
-                u <> symbolUse
+        match Map.tryFind symbolUse.Range.FileName definitionsByFile with
+        | Some definitions ->
+            definitions
+            |> Array.filter (fun def ->
+                let useRange = symbolUse.Range
+                let defRange = def.Range
+                
+                // Proper range containment: definition must completely contain the use
+                (defRange.Start.Line < useRange.Start.Line || 
+                 (defRange.Start.Line = useRange.Start.Line && defRange.Start.Column <= useRange.Start.Column)) &&
+                (defRange.End.Line > useRange.End.Line || 
+                 (defRange.End.Line = useRange.End.Line && defRange.End.Column >= useRange.End.Column)) &&
+                def.Symbol <> symbolUse.Symbol  // Not the same symbol
             )
-            |> Option.map (fun u -> u.Symbol)
+            |> Array.sortBy (fun def -> 
+                // Find the most specific (smallest) containing definition
+                let defRange = def.Range
+                (defRange.End.Line - defRange.Start.Line), 
+                (defRange.End.Column - defRange.Start.Column)
+            )
+            |> Array.tryHead
+            |> Option.map (fun def -> def.Symbol)
         | None -> None
     
-    // Build relationships
-    symbolUses
-    |> Array.choose (fun (symbolUse: FSharpSymbolUse) ->
-        if symbolUse.IsFromUse then
-            match findContainingSymbol symbolUse with
-            | Some containerSymbol ->
-                let relationType = 
-                    match symbolUse.Symbol with
-                    | :? FSharpMemberOrFunctionOrValue -> RelationType.Calls
-                    | :? FSharpEntity -> RelationType.References
-                    | _ -> RelationType.References
-                
-                Some {
-                    From = containerSymbol
-                    To = symbolUse.Symbol
-                    RelationType = relationType
-                    Location = symbolUse.Range
-                }
-            | None -> None
-        else None
-    )
+    // Build relationships with detailed debugging
+    let relationships = 
+        symbolUses
+        |> Array.choose (fun (symbolUse: FSharpSymbolUse) ->
+            if symbolUse.IsFromUse then
+                match findContainingSymbol symbolUse with
+                | Some containerSymbol ->
+                    let relationType = 
+                        match symbolUse.Symbol with
+                        | :? FSharpMemberOrFunctionOrValue -> RelationType.Calls
+                        | :? FSharpEntity -> RelationType.References
+                        | _ -> RelationType.References
+                    
+                    // Debug critical relationships
+                    if containerSymbol.DisplayName = "main" || symbolUse.Symbol.DisplayName = "hello" then
+                        printfn "[RELATIONSHIP] %s -> %s (at %s:%d)" 
+                            containerSymbol.FullName
+                            symbolUse.Symbol.FullName
+                            (System.IO.Path.GetFileName(symbolUse.Range.FileName))
+                            symbolUse.Range.Start.Line
+                    
+                    Some {
+                        From = containerSymbol
+                        To = symbolUse.Symbol
+                        RelationType = relationType
+                        Location = symbolUse.Range
+                    }
+                | None -> 
+                    // Debug missing containers for entry point calls
+                    if symbolUse.Symbol.DisplayName = "hello" then
+                        printfn "[RELATIONSHIP] No container found for hello() call at %s:%d" 
+                            (System.IO.Path.GetFileName(symbolUse.Range.FileName))
+                            symbolUse.Range.Start.Line
+                        
+                        // Show nearby definitions for debugging
+                        let fileName = symbolUse.Range.FileName
+                        match Map.tryFind fileName definitionsByFile with
+                        | Some defs ->
+                            printfn "[RELATIONSHIP] Nearby definitions in %s:" (System.IO.Path.GetFileName(fileName))
+                            defs 
+                            |> Array.filter (fun def -> 
+                                abs(def.Range.Start.Line - symbolUse.Range.Start.Line) <= 5)
+                            |> Array.iter (fun def ->
+                                printfn "  %s at line %d-%d" 
+                                    def.Symbol.FullName 
+                                    def.Range.Start.Line 
+                                    def.Range.End.Line)
+                        | None -> ()
+                    None
+            else None
+        )
+    
+    // Additional debug: count relationships by type
+    let callCount = relationships |> Array.filter (fun r -> r.RelationType = RelationType.Calls) |> Array.length
+    let refCount = relationships |> Array.filter (fun r -> r.RelationType = RelationType.References) |> Array.length
+    
+    printfn "[RELATIONSHIP] Extracted %d total relationships (%d calls, %d references)" 
+        relationships.Length callCount refCount
+    
+    // Show critical entry point relationships
+    let entryPointRels = 
+        relationships 
+        |> Array.filter (fun r -> r.From.DisplayName = "main")
+    
+    if entryPointRels.Length > 0 then
+        printfn "[RELATIONSHIP] Entry point relationships found:"
+        entryPointRels |> Array.iter (fun r ->
+            printfn "  main -> %s" r.To.FullName)
+    else
+        printfn "[RELATIONSHIP] ⚠️  NO entry point relationships found! This will break reachability."
+    
+    relationships
 
 /// Get all symbols defined in a specific file
 let getFileSymbols (fileName: string) (symbolUses: FSharpSymbolUse[]) =

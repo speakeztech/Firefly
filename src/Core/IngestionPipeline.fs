@@ -6,7 +6,7 @@ open System.Text.Json
 open System.Text.Json.Serialization
 open FSharp.Compiler.CodeAnalysis
 open Core.FCS.ProjectContext
-open Core.FCS.SymbolAnalysis
+open Core.PSG.SymbolAnalysis
 open Core.PSG.Types
 open Core.PSG.Builder
 open Core.PSG.Correlation

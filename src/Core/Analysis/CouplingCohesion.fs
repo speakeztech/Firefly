@@ -2,7 +2,7 @@ module Core.Analysis.CouplingCohesion
 
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.CodeAnalysis  // For FSharpSymbolUse
-open Core.FCS.SymbolAnalysis       // For SymbolRelation, RelationType, etc.
+open Core.PSG.SymbolAnalysis       // For SymbolRelation, RelationType, etc.
 open Core.FCS.Helpers              // For getDeclaringEntity
 
 /// Semantic unit representing a cohesive component

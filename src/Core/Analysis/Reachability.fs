@@ -3,7 +3,7 @@ module Core.Analysis.Reachability
 open System
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.CodeAnalysis  // For FSharpSymbolUse
-open Core.FCS.SymbolAnalysis
+open Core.PSG.SymbolAnalysis
 open Core.FCS.Helpers              // For getDeclaringEntity
 open Core.Analysis.CouplingCohesion // For CodeComponent type
 
@@ -327,27 +327,139 @@ let shouldIncludeSymbol (symbol: FSharpSymbol) : bool =
 let analyzeReachabilityWithBoundaries (symbolUses: FSharpSymbolUse[]) : LibraryAwareReachability =
     let startTime = DateTime.UtcNow
     
+    // Enhanced debug output to understand symbol distribution
+    printfn "[REACHABILITY] === Analysis Start ==="
+    printfn "[REACHABILITY] Total symbol uses: %d" symbolUses.Length
+    
+    let definitions = symbolUses |> Array.filter (fun su -> su.IsFromDefinition)
+    let uses = symbolUses |> Array.filter (fun su -> su.IsFromUse)
+    
+    printfn "[REACHABILITY] Symbol definitions: %d" definitions.Length
+    printfn "[REACHABILITY] Symbol uses: %d" uses.Length
+    
+    // Show file distribution
+    let fileStats = 
+        symbolUses 
+        |> Array.groupBy (fun su -> System.IO.Path.GetFileName(su.Range.FileName))
+        |> Array.map (fun (fileName, symbols) -> fileName, symbols.Length)
+        |> Array.sortByDescending snd
+    
+    printfn "[REACHABILITY] File distribution:"
+    fileStats |> Array.iter (fun (file, count) -> 
+        printfn "  %s: %d symbols" file count)
+    
     // Extract relationships from ALL symbol uses
     let relationships = extractRelationships symbolUses
+    
+    // Detailed relationship analysis
+    printfn "[REACHABILITY] === Relationship Analysis ==="
+    printfn "[REACHABILITY] Total relationships extracted: %d" relationships.Length
+    
+    let relationshipsByType = 
+        relationships 
+        |> Array.groupBy (fun r -> r.RelationType)
+        |> Array.map (fun (relType, rels) -> relType, rels.Length)
+    
+    relationshipsByType |> Array.iter (fun (relType, count) ->
+        printfn "[REACHABILITY] %A relationships: %d" relType count)
+    
+    // Show sample relationships for debugging
+    let callRels = relationships |> Array.filter (fun r -> r.RelationType = RelationType.Calls)
+    let refRels = relationships |> Array.filter (fun r -> r.RelationType = RelationType.References)
+    
+    if callRels.Length > 0 then
+        printfn "[REACHABILITY] Sample CALL relationships:"
+        callRels 
+        |> Array.take (min 10 callRels.Length) 
+        |> Array.iter (fun rel ->
+            printfn "  %s -> %s (in %s)" 
+                rel.From.DisplayName 
+                rel.To.DisplayName 
+                (System.IO.Path.GetFileName(rel.Location.FileName)))
+    else
+        printfn "[REACHABILITY] ⚠️  NO CALL relationships found!"
+    
+    if refRels.Length > 0 then
+        printfn "[REACHABILITY] Sample REFERENCE relationships:"
+        refRels 
+        |> Array.take (min 5 refRels.Length) 
+        |> Array.iter (fun rel ->
+            printfn "  %s -> %s" rel.From.DisplayName rel.To.DisplayName)
     
     // Run existing analysis on ALL symbols to get complete reachability
     let basicResult = analyzeReachability symbolUses relationships
     
-    // DEBUG: Print some diagnostics to understand what's happening
-    printfn "[DEBUG] Total symbol uses: %d" symbolUses.Length
-    printfn "[DEBUG] Total relationships: %d" relationships.Length
-    printfn "[DEBUG] Call relationships: %d" (relationships |> Array.filter (fun r -> r.RelationType = RelationType.Calls) |> Array.length)
-    printfn "[DEBUG] Entry points found: %d (%s)" 
-        basicResult.EntryPoints.Length 
-        (basicResult.EntryPoints |> List.map (fun ep -> ep.DisplayName) |> String.concat ", ")
-    printfn "[DEBUG] Call graph entries: %d" (Map.count basicResult.CallGraph)
-    printfn "[DEBUG] Reachable symbols: %d" (Set.count basicResult.ReachableSymbols)
+    // Enhanced debug output for reachability results
+    printfn "[REACHABILITY] === Reachability Results ==="
+    printfn "[REACHABILITY] Entry points found: %d" basicResult.EntryPoints.Length
     
-    // For now, don't filter at all - just categorize
+    if basicResult.EntryPoints.Length > 0 then
+        basicResult.EntryPoints |> List.iter (fun ep ->
+            printfn "  Entry Point: %s (%s)" ep.DisplayName ep.FullName)
+    else
+        printfn "[REACHABILITY] ⚠️  NO ENTRY POINTS found!"
+    
+    printfn "[REACHABILITY] Call graph entries: %d" (Map.count basicResult.CallGraph)
+    printfn "[REACHABILITY] Reachable symbols: %d" (Set.count basicResult.ReachableSymbols)
+    
+    // Show call graph structure
+    if Map.count basicResult.CallGraph > 0 then
+        printfn "[REACHABILITY] Sample call graph entries:"
+        basicResult.CallGraph 
+        |> Map.toSeq 
+        |> Seq.take (min 10 (Map.count basicResult.CallGraph))
+        |> Seq.iter (fun (from, targets) ->
+            printfn "  %s calls: [%s]" from (String.concat "; " targets))
+    else
+        printfn "[REACHABILITY] ⚠️  CALL GRAPH IS EMPTY!"
+    
+    // Show sample reachable symbols
+    if Set.count basicResult.ReachableSymbols > 1 then
+        printfn "[REACHABILITY] Sample reachable symbols:"
+        basicResult.ReachableSymbols 
+        |> Set.toArray 
+        |> Array.take (min 15 (Set.count basicResult.ReachableSymbols))
+        |> Array.iter (fun symbolId -> printfn "  ✓ %s" symbolId)
+    else
+        printfn "[REACHABILITY] ⚠️  Only %d symbol(s) reachable (expected hundreds)" (Set.count basicResult.ReachableSymbols)
+    
+    // Analyze what symbols are NOT being reached
+    let allDefinedSymbolIds = 
+        definitions 
+        |> Array.map (fun def -> getSymbolId def.Symbol)
+        |> Set.ofArray
+    
+    let unreachableCount = Set.count (Set.difference allDefinedSymbolIds basicResult.ReachableSymbols)
+    printfn "[REACHABILITY] Unreachable symbols: %d" unreachableCount
+    
+    // Show some unreachable Alloy symbols for debugging
+    let unreachableAlloy = 
+        Set.difference allDefinedSymbolIds basicResult.ReachableSymbols
+        |> Set.filter (fun symbolId -> symbolId.StartsWith("Alloy."))
+        |> Set.toArray
+        |> Array.take (min 10 unreachableCount)
+    
+    if unreachableAlloy.Length > 0 then
+        printfn "[REACHABILITY] Sample unreachable Alloy symbols:"
+        unreachableAlloy |> Array.iter (fun symbolId -> printfn "  ✗ %s" symbolId)
+    
+    // Library categorization and final results
     let libraryCategories = 
         symbolUses
         |> Array.map (fun symbolUse -> getSymbolId symbolUse.Symbol, classifySymbol symbolUse.Symbol)
         |> Map.ofArray
+    
+    // Show library distribution
+    let libStats = 
+        libraryCategories 
+        |> Map.toSeq 
+        |> Seq.groupBy snd 
+        |> Seq.map (fun (category, symbols) -> category, Seq.length symbols)
+        |> Seq.toArray
+    
+    printfn "[REACHABILITY] Library category distribution:"
+    libStats |> Array.iter (fun (category, count) ->
+        printfn "  %A: %d symbols" category count)
     
     let endTime = DateTime.UtcNow
     let computationTime = (endTime - startTime).TotalMilliseconds |> int64
@@ -358,6 +470,12 @@ let analyzeReachabilityWithBoundaries (symbolUses: FSharpSymbolUse[]) : LibraryA
         EliminatedSymbols = symbolUses.Length - Set.count basicResult.ReachableSymbols
         ComputationTimeMs = computationTime
     }
+    
+    printfn "[REACHABILITY] === Summary ==="
+    printfn "[REACHABILITY] Analysis completed in %dms" computationTime
+    printfn "[REACHABILITY] Elimination rate: %.2f%%" 
+        (if symbolUses.Length > 0 then (float pruningStats.EliminatedSymbols / float symbolUses.Length) * 100.0 else 0.0)
+    printfn "[REACHABILITY] ==========================="
     
     {
         BasicResult = basicResult
