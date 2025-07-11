@@ -2,31 +2,16 @@ module Core.Analysis.Reachability
 
 open System
 open FSharp.Compiler.Symbols
-open FSharp.Compiler.CodeAnalysis  // For FSharpSymbolUse
-open Core.PSG.SymbolAnalysis
-open Core.PSG.Types              // For getDeclaringEntity
-open Core.Analysis.CouplingCohesion // For CodeComponent type
+open Core.PSG.Types
+open Core.Analysis.CouplingCohesion
 
 /// Reachability analysis result
 type ReachabilityResult = {
     EntryPoints: FSharpSymbol list
-    ReachableSymbols: Set<string>        // Changed to Set<string>
-    UnreachableSymbols: Set<string>      // Changed to Set<string>
-    CallGraph: Map<string, string list>  // Changed to use strings
+    ReachableSymbols: Set<string>
+    UnreachableSymbols: Set<string>
+    CallGraph: Map<string, string list>
 }
-
-/// Generate dead code elimination opportunities
-type EliminationOpportunity = {
-    Symbol: FSharpSymbol
-    Reason: EliminationReason
-    EstimatedSaving: int // bytes
-}
-
-and EliminationReason =
-    | Unreachable
-    | UnusedComponent of componentId: string
-    | DeadBranch
-    | UnusedType
 
 type LibraryCategory =
     | UserCode
@@ -48,433 +33,213 @@ and PruningStatistics = {
     ComputationTimeMs: int64
 }
 
-/// Helper to get symbol identifier for comparison
-let private getSymbolId (symbol: FSharpSymbol) = symbol.FullName
-
-/// Helper function to estimate symbol size (simplified)
-let private estimateSymbolSize (symbol: FSharpSymbol) =
-    match symbol with
-    | :? FSharpMemberOrFunctionOrValue as mfv ->
-        if mfv.IsFunction then 100 else 50  // Rough estimate
-    | :? FSharpEntity as entity ->
-        if entity.IsFSharpModule then 200
-        elif entity.IsFSharpRecord then 150
-        else 100
-    | _ -> 50
-
-/// Find entry points in the project
-let findEntryPoints (symbolUses: FSharpSymbolUse[]) =
-    symbolUses
-    |> Array.filter (fun (symbolUse: FSharpSymbolUse) -> symbolUse.IsFromDefinition)
-    |> Array.choose (fun (symbolUse: FSharpSymbolUse) ->
-        match symbolUse.Symbol with
-        | :? FSharpMemberOrFunctionOrValue as mfv ->
-            // Check for [<EntryPoint>] attribute
-            let hasEntryPoint = 
-                mfv.Attributes 
-                |> Seq.exists (fun attr -> 
-                    attr.AttributeType.DisplayName = "EntryPoint"
-                )
-            
-            // Check for main function
-            let isMain = 
-                mfv.DisplayName = "main" && 
-                mfv.IsModuleValueOrMember &&
-                mfv.GenericParameters.Count = 0
-            
-            if hasEntryPoint || isMain then Some (mfv :> FSharpSymbol)
-            else None
-        | _ -> None
-    )
-    |> Array.distinct
-    |> List.ofArray
-
-/// Compute reachable symbols from entry points
-let computeReachable (entryPoints: FSharpSymbol list) (callGraph: Map<string, string list>) =
-    let rec traverse (visited: Set<string>) (currentId: string) =
-        if Set.contains currentId visited then visited
-        else
-            let newVisited = Set.add currentId visited
-            match Map.tryFind currentId callGraph with
-            | Some calleeIds ->
-                calleeIds |> List.fold traverse newVisited
-            | None -> newVisited
-    
-    let entryPointIds = entryPoints |> List.map getSymbolId
-    entryPointIds |> List.fold traverse Set.empty
-
-/// Enhanced reachability with coupling/cohesion awareness
-type EnhancedReachability = {
-    BasicResult: ReachabilityResult
-    ComponentReachability: Map<string, ComponentReachability>
-}
-
-and ComponentReachability = {
-    ComponentId: string
-    ReachableUnits: int
-    TotalUnits: int
-    PartiallyReachable: bool
-}
-
-/// Analyze reachability with component awareness
-let analyzeComponentReachability (basicResult: ReachabilityResult) (codeComponents: CodeComponent list) =
-    let componentReachability = 
-        codeComponents
-        |> List.map (fun codeComp ->
-            let reachableInComponent = 
-                codeComp.Units
-                |> List.filter (fun compUnit ->
-                    match compUnit with
-                    | Module compEntity ->
-                        Set.contains (getSymbolId (compEntity :> FSharpSymbol)) basicResult.ReachableSymbols
-                    | FunctionGroup functions ->
-                        functions |> List.exists (fun f -> 
-                            Set.contains (getSymbolId (f :> FSharpSymbol)) basicResult.ReachableSymbols
-                        )
-                    | _ -> false
-                )
-                |> List.length
-            
-            let total = codeComp.Units.Length
-            
-            codeComp.Id, {
-                ComponentId = codeComp.Id
-                ReachableUnits = reachableInComponent
-                TotalUnits = total
-                PartiallyReachable = reachableInComponent > 0 && reachableInComponent < total
-            }
-        )
-        |> Map.ofList
-    
-    {
-        BasicResult = basicResult
-        ComponentReachability = componentReachability
-    }
-
-/// Identify elimination opportunities
-let identifyEliminationOpportunities (result: ReachabilityResult) (codeComponents: CodeComponent list) (symbolUses: FSharpSymbolUse[]) =
-    // Create a map from symbol ID to symbol for lookup
-    let symbolMap = 
-        symbolUses
-        |> Array.filter (fun su -> su.IsFromDefinition)
-        |> Array.map (fun su -> getSymbolId su.Symbol, su.Symbol)
-        |> Map.ofArray
-    
-    // Direct unreachable symbols
-    let unreachableOpportunities = 
-        result.UnreachableSymbols
-        |> Set.toList
-        |> List.choose (fun symbolId ->
-            Map.tryFind symbolId symbolMap
-            |> Option.map (fun symbol ->
-                {
-                    Symbol = symbol
-                    Reason = Unreachable
-                    EstimatedSaving = estimateSymbolSize symbol
-                }
-            )
-        )
-    
-    // Unused components
-    let unusedComponentOpportunities =
-        codeComponents
-        |> List.filter (fun codeComp ->
-            codeComp.Units |> List.forall (fun unit ->
-                match unit with
-                | Module entity -> 
-                    Set.contains (getSymbolId (entity :> FSharpSymbol)) result.UnreachableSymbols
-                | FunctionGroup functions ->
-                    functions |> List.forall (fun f ->
-                        Set.contains (getSymbolId (f :> FSharpSymbol)) result.UnreachableSymbols
-                    )
-                | _ -> false
-            )
-        )
-        |> List.collect (fun codeComp ->
-            codeComp.Units |> List.collect (fun unit ->
-                match unit with
-                | Module entity -> 
-                    [{
-                        Symbol = entity :> FSharpSymbol
-                        Reason = UnusedComponent codeComp.Id
-                        EstimatedSaving = estimateSymbolSize (entity :> FSharpSymbol)
-                    }]
-                | FunctionGroup functions ->
-                    functions |> List.map (fun f ->
-                        {
-                            Symbol = f :> FSharpSymbol
-                            Reason = UnusedComponent codeComp.Id
-                            EstimatedSaving = estimateSymbolSize (f :> FSharpSymbol)
-                        }
-                    )
-                | _ -> []
-            )
-        )
-    
-    unreachableOpportunities @ unusedComponentOpportunities
-
-/// Generate reachability report
-let generateReport (result: EnhancedReachability) (opportunities: EliminationOpportunity list) =
-    let basic = result.BasicResult
-    let totalSymbols = Set.count basic.ReachableSymbols + Set.count basic.UnreachableSymbols
-    let eliminationRate = 
-        if totalSymbols > 0 then
-            float (Set.count basic.UnreachableSymbols) / float totalSymbols * 100.0
-        else 0.0
-    let totalSavings = opportunities |> List.sumBy (fun o -> o.EstimatedSaving)
-    
-    {|
-        Summary = {|
-            TotalSymbols = totalSymbols
-            ReachableSymbols = Set.count basic.ReachableSymbols
-            UnreachableSymbols = Set.count basic.UnreachableSymbols
-            EliminationRate = eliminationRate
-            EstimatedSavings = $"{totalSavings / 1024} KB"
-        |}
-        
-        EntryPoints = 
-            basic.EntryPoints 
-            |> List.map (fun ep -> ep.FullName)
-        
-        ComponentAnalysis = 
-            result.ComponentReachability
-            |> Map.toList
-            |> List.map (fun (id, cr) ->
-                {|
-                    ComponentId = id
-                    ReachableUnits = cr.ReachableUnits
-                    TotalUnits = cr.TotalUnits
-                    Status = 
-                        if cr.ReachableUnits = 0 then "Unused"
-                        elif cr.PartiallyReachable then "Partially Used"
-                        else "Fully Used"
-                |}
-            )
-        
-        TopOpportunities = 
-            opportunities
-            |> List.sortByDescending (fun o -> o.EstimatedSaving)
-            |> List.truncate 10
-            |> List.map (fun o ->
-                {|
-                    Symbol = o.Symbol.FullName
-                    Reason = string o.Reason
-                    EstimatedSaving = $"{o.EstimatedSaving} bytes"
-                |}
-            )
-    |}
-
 /// Classify symbol by library boundary
 let classifySymbol (symbol: FSharpSymbol) : LibraryCategory =
-    let fullName = getSymbolId symbol
+    let fullName = symbol.FullName
     match fullName with
     | name when name.StartsWith("Alloy.") -> AlloyLibrary
     | name when name.StartsWith("FSharp.Core.") || name.StartsWith("Microsoft.FSharp.") -> FSharpCore
     | _ -> UserCode
 
-/// Check if symbol should be included based on library boundaries
-let shouldIncludeSymbol (symbol: FSharpSymbol) : bool =
-    match classifySymbol symbol with
-    | UserCode | AlloyLibrary -> true
-    | FSharpCore -> 
-        // Only include primitives and SRTP targets
-        match symbol with
-        | :? FSharpMemberOrFunctionOrValue as mfv ->
-            let primNames = [ "op_Addition"; "op_Subtraction"; "op_Multiply"; "op_Division"; "printf"; "printfn" ]
-            List.contains mfv.LogicalName primNames || mfv.IsCompilerGenerated
-        | _ -> false
-    | Other _ -> false
-
-/// Build call graph from symbol relationships  
-let buildCallGraph (relationships: SymbolRelation[]) =
-    relationships
-    |> Array.filter (fun r -> r.RelationType = RelationType.Calls)
-    |> Array.groupBy (fun r -> getSymbolId r.From)
-    |> Array.map (fun (callerId, calls) ->
-        callerId, calls |> Array.map (fun r -> getSymbolId r.To) |> Array.distinct |> List.ofArray
+/// Extract function calls by analyzing Application nodes and their References edges
+let extractFunctionCalls (psg: ProgramSemanticGraph) =
+    // Find all Application nodes (function calls)
+    let applicationNodes = 
+        psg.Nodes
+        |> Map.toSeq
+        |> Seq.filter (fun (_, node) -> node.SyntaxKind = "Application")
+        |> Seq.map fst
+        |> Set.ofSeq
+    
+    // Find References edges from Application nodes to function symbols
+    psg.Edges
+    |> List.choose (fun edge ->
+        match edge.Kind with
+        | SymRef when Set.contains edge.Source.Value applicationNodes ->
+            // This is a reference from a function call site
+            let sourceNode = Map.tryFind edge.Source.Value psg.Nodes
+            let targetNode = Map.tryFind edge.Target.Value psg.Nodes
+            
+            match sourceNode, targetNode with
+            | Some src, Some tgt ->
+                match src.Symbol, tgt.Symbol with
+                | Some srcSymbol, Some tgtSymbol ->
+                    let srcName = srcSymbol.FullName
+                    let tgtName = tgtSymbol.FullName
+                    
+                    // Include calls to library functions and user functions
+                    if (tgtName.StartsWith("Alloy.") || 
+                        tgtName.StartsWith("FSharp.Core.") ||
+                        tgtName.StartsWith("Examples.")) &&
+                       srcName <> tgtName then
+                        Some (srcName, tgtName)
+                    else None
+                | _ -> None
+            | _ -> None
+        | _ -> None
     )
-    |> Map.ofArray
 
-/// Perform complete reachability analysis
-let analyzeReachability (symbolUses: FSharpSymbolUse[]) (relationships: SymbolRelation[]) =
-    // Find all defined symbols
-    let allSymbolIds = 
-        symbolUses
-        |> Array.filter (fun (useSymbol: FSharpSymbolUse) -> useSymbol.IsFromDefinition)
-        |> Array.map (fun (useSymbol: FSharpSymbolUse) -> getSymbolId useSymbol.Symbol)
-        |> Set.ofArray
-    
-    // Find entry points
-    let entryPoints = findEntryPoints symbolUses
-    
-    // Build call graph
-    let callGraph = buildCallGraph relationships
-    
-    // Compute reachable symbols
-    let reachableIds = computeReachable entryPoints callGraph
-    
-    // Find unreachable symbols
-    let unreachableIds = Set.difference allSymbolIds reachableIds
-    
-    {
-        EntryPoints = entryPoints
-        ReachableSymbols = reachableIds
-        UnreachableSymbols = unreachableIds
-        CallGraph = callGraph
-    }
+/// Build call graph from function relationships
+let buildCallGraph (relationships: (string * string) list) =
+    relationships
+    |> List.groupBy fst
+    |> List.map (fun (caller, calls) ->
+        caller, calls |> List.map snd |> List.distinct
+    )
+    |> Map.ofList
 
-/// Enhanced reachability analysis with library boundary awareness - updated to use PSG
-let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) (symbolUses: FSharpSymbolUse[]) : LibraryAwareReachability =
+/// Extract entry points from PSG
+let extractEntryPoints (psg: ProgramSemanticGraph) =
+    psg.EntryPoints
+    |> List.choose (fun entryPointId ->
+        match entryPointId with
+        | SymbolNode(_, symbolName) ->
+            Map.tryFind symbolName psg.SymbolTable
+        | RangeNode(file, sl, sc, el, ec) ->
+            psg.Nodes
+            |> Map.toSeq
+            |> Seq.tryPick (fun (_, node) ->
+                if node.Range.Start.Line = sl && 
+                   node.Range.Start.Column = sc &&
+                   node.Range.End.Line = el &&
+                   node.Range.End.Column = ec &&
+                   node.SourceFile.EndsWith(System.IO.Path.GetFileName(file))
+                then node.Symbol
+                else None
+            )
+    )
+
+/// Compute reachable symbols using breadth-first traversal
+let computeReachableSymbols (entryPoints: FSharpSymbol list) (callGraph: Map<string, string list>) (allSymbols: Set<string>) =
+    let rec traverse (visited: Set<string>) (queue: string list) =
+        match queue with
+        | [] -> visited
+        | current :: remaining ->
+            if Set.contains current visited then
+                traverse visited remaining
+            else
+                let newVisited = Set.add current visited
+                let callees = Map.tryFind current callGraph |> Option.defaultValue []
+                let newQueue = callees @ remaining
+                traverse newVisited newQueue
+    
+    let entryPointNames = entryPoints |> List.map (fun ep -> ep.FullName)
+    let initialQueue = entryPointNames |> List.filter (fun name -> Set.contains name allSymbols)
+    
+    traverse Set.empty initialQueue
+
+/// Enhanced reachability analysis using Application nodes
+let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) : LibraryAwareReachability =
     let startTime = DateTime.UtcNow
     
-    // Enhanced debug output to understand symbol distribution
-    printfn "[REACHABILITY] === Analysis Start ==="
-    printfn "[REACHABILITY] Total symbol uses: %d" symbolUses.Length
+    printfn "[REACHABILITY] === PSG-Based Analysis Start ==="
+    printfn "[REACHABILITY] PSG nodes: %d" (Map.count psg.Nodes)
+    printfn "[REACHABILITY] PSG edges: %d" psg.Edges.Length
+    printfn "[REACHABILITY] Entry points: %d" psg.EntryPoints.Length
     
-    let definitions = symbolUses |> Array.filter (fun su -> su.IsFromDefinition)
-    let uses = symbolUses |> Array.filter (fun su -> su.IsFromUse)
-    
-    printfn "[REACHABILITY] Symbol definitions: %d" definitions.Length
-    printfn "[REACHABILITY] Symbol uses: %d" uses.Length
-    
-    // Show file distribution
-    let fileStats = 
-        symbolUses 
-        |> Array.groupBy (fun su -> System.IO.Path.GetFileName(su.Range.FileName))
-        |> Array.map (fun (fileName, symbols) -> fileName, symbols.Length)
-        |> Array.sortByDescending snd
-    
-    printfn "[REACHABILITY] File distribution:"
-    fileStats |> Array.iter (fun (file, count) -> 
-        printfn "  %s: %d symbols" file count)
-    
-    // Extract relationships from PSG instead of raw symbol uses
-    let relationships = extractRelationships psg
-    
-    // Detailed relationship analysis
-    printfn "[REACHABILITY] === Relationship Analysis ==="
-    printfn "[REACHABILITY] Total relationships extracted: %d" relationships.Length
-    
-    let relationshipsByType = 
-        relationships 
-        |> Array.groupBy (fun r -> r.RelationType)
-        |> Array.map (fun (relType, rels) -> relType, rels.Length)
-    
-    relationshipsByType |> Array.iter (fun (relType, count) ->
-        printfn "[REACHABILITY] %A relationships: %d" relType count)
-    
-    // Show sample relationships for debugging
-    let callRels = relationships |> Array.filter (fun r -> r.RelationType = RelationType.Calls)
-    let refRels = relationships |> Array.filter (fun r -> r.RelationType = RelationType.References)
-    
-    if callRels.Length > 0 then
-        printfn "[REACHABILITY] Sample CALL relationships:"
-        callRels 
-        |> Array.take (min 10 callRels.Length) 
-        |> Array.iter (fun rel ->
-            printfn "  %s -> %s (in %s)" 
-                rel.From.DisplayName 
-                rel.To.DisplayName 
-                (System.IO.Path.GetFileName(rel.Location.FileName)))
-    else
-        printfn "[REACHABILITY] ⚠️  NO CALL relationships found!"
-    
-    if refRels.Length > 0 then
-        printfn "[REACHABILITY] Sample REFERENCE relationships:"
-        refRels 
-        |> Array.take (min 5 refRels.Length) 
-        |> Array.iter (fun rel ->
-            printfn "  %s -> %s" rel.From.DisplayName rel.To.DisplayName)
-    
-    // Run existing analysis on ALL symbols to get complete reachability
-    let basicResult = analyzeReachability symbolUses relationships
-    
-    // Enhanced debug output for reachability results
-    printfn "[REACHABILITY] === Reachability Results ==="
-    printfn "[REACHABILITY] Entry points found: %d" basicResult.EntryPoints.Length
-    
-    if basicResult.EntryPoints.Length > 0 then
-        basicResult.EntryPoints |> List.iter (fun ep ->
-            printfn "  Entry Point: %s (%s)" ep.DisplayName ep.FullName)
-    else
-        printfn "[REACHABILITY] ⚠️  NO ENTRY POINTS found!"
-    
-    printfn "[REACHABILITY] Call graph entries: %d" (Map.count basicResult.CallGraph)
-    printfn "[REACHABILITY] Reachable symbols: %d" (Set.count basicResult.ReachableSymbols)
-    
-    // Show call graph structure
-    if Map.count basicResult.CallGraph > 0 then
-        printfn "[REACHABILITY] Sample call graph entries:"
-        basicResult.CallGraph 
+    // Count Application nodes for debugging
+    let applicationCount = 
+        psg.Nodes 
         |> Map.toSeq 
-        |> Seq.take (min 10 (Map.count basicResult.CallGraph))
-        |> Seq.iter (fun (from, targets) ->
-            printfn "  %s calls: [%s]" from (String.concat "; " targets))
-    else
-        printfn "[REACHABILITY] ⚠️  CALL GRAPH IS EMPTY!"
+        |> Seq.filter (fun (_, node) -> node.SyntaxKind = "Application") 
+        |> Seq.length
     
-    // Show sample reachable symbols
-    if Set.count basicResult.ReachableSymbols > 1 then
-        printfn "[REACHABILITY] Sample reachable symbols:"
-        basicResult.ReachableSymbols 
-        |> Set.toArray 
-        |> Array.take (min 15 (Set.count basicResult.ReachableSymbols))
-        |> Array.iter (fun symbolId -> printfn "  ✓ %s" symbolId)
-    else
-        printfn "[REACHABILITY] ⚠️  Only %d symbol(s) reachable (expected hundreds)" (Set.count basicResult.ReachableSymbols)
+    printfn "[REACHABILITY] Application nodes (function calls): %d" applicationCount
     
-    // Analyze what symbols are NOT being reached
-    let allDefinedSymbolIds = 
-        definitions 
-        |> Array.map (fun def -> getSymbolId def.Symbol)
-        |> Set.ofArray
-    
-    let unreachableCount = Set.count (Set.difference allDefinedSymbolIds basicResult.ReachableSymbols)
-    printfn "[REACHABILITY] Unreachable symbols: %d" unreachableCount
-    
-    // Show some unreachable Alloy symbols for debugging
-    let unreachableAlloy = 
-        Set.difference allDefinedSymbolIds basicResult.ReachableSymbols
-        |> Set.filter (fun symbolId -> symbolId.StartsWith("Alloy."))
-        |> Set.toArray
-        |> Array.take (min 10 unreachableCount)
-    
-    if unreachableAlloy.Length > 0 then
-        printfn "[REACHABILITY] Sample unreachable Alloy symbols:"
-        unreachableAlloy |> Array.iter (fun symbolId -> printfn "  ✗ %s" symbolId)
-    
-    // Library categorization and final results
-    let libraryCategories = 
-        symbolUses
-        |> Array.map (fun symbolUse -> getSymbolId symbolUse.Symbol, classifySymbol symbolUse.Symbol)
-        |> Map.ofArray
-    
-    // Show library distribution
-    let libStats = 
-        libraryCategories 
-        |> Map.toSeq 
-        |> Seq.groupBy snd 
-        |> Seq.map (fun (category, symbols) -> category, Seq.length symbols)
+    // Extract all meaningful symbols
+    let allSymbols = 
+        psg.Nodes
+        |> Map.toSeq
+        |> Seq.choose (fun (_, node) -> 
+            match node.Symbol with
+            | Some symbol -> 
+                let name = symbol.FullName
+                if not (name.Contains("@") || name.Contains("$") || name.Length < 3) then
+                    Some symbol
+                else None
+            | None -> None
+        )
         |> Seq.toArray
     
-    printfn "[REACHABILITY] Library category distribution:"
-    libStats |> Array.iter (fun (category, count) ->
-        printfn "  %A: %d symbols" category count)
+    let allSymbolNames = allSymbols |> Array.map (fun s -> s.FullName) |> Set.ofArray
+    
+    printfn "[REACHABILITY] Total meaningful symbols: %d" allSymbols.Length
+    
+    // Extract entry points
+    let entryPoints = extractEntryPoints psg
+    
+    printfn "[REACHABILITY] === Entry Point Analysis ==="
+    printfn "[REACHABILITY] Entry points found: %d" entryPoints.Length
+    
+    entryPoints |> List.iter (fun ep ->
+        printfn "  Entry Point: %s (%s)" ep.DisplayName ep.FullName)
+    
+    // Extract function calls from Application nodes
+    let functionCalls = extractFunctionCalls psg
+    
+    printfn "[REACHABILITY] === Function Call Analysis ==="
+    printfn "[REACHABILITY] Function relationships extracted: %d" functionCalls.Length
+    
+    if functionCalls.Length > 0 then
+        printfn "[REACHABILITY] Sample function calls:"
+        functionCalls 
+        |> List.take (min 10 functionCalls.Length)
+        |> List.iter (fun (src, tgt) ->
+            printfn "  %s -> %s" src tgt)
+    else
+        printfn "[REACHABILITY] ⚠️  NO FUNCTION CALLS found"
+    
+    // Build call graph
+    let callGraph = buildCallGraph functionCalls
+    
+    printfn "[REACHABILITY] Call graph entries: %d" (Map.count callGraph)
+    
+    // Compute reachable symbols
+    let reachableSymbols = computeReachableSymbols entryPoints callGraph allSymbolNames
+    let unreachableSymbols = Set.difference allSymbolNames reachableSymbols
+    
+    printfn "[REACHABILITY] === Reachability Results ==="
+    printfn "[REACHABILITY] Reachable symbols: %d" (Set.count reachableSymbols)
+    printfn "[REACHABILITY] Unreachable symbols: %d" (Set.count unreachableSymbols)
+    
+    if Set.count reachableSymbols > 0 then
+        printfn "[REACHABILITY] Sample reachable symbols:"
+        reachableSymbols 
+        |> Set.toArray 
+        |> Array.take (min 15 (Set.count reachableSymbols))
+        |> Array.iter (fun symbolId -> printfn "  ✓ %s" symbolId)
+    
+    // Generate library categorization
+    let libraryCategories = 
+        allSymbols
+        |> Array.map (fun symbol -> symbol.FullName, classifySymbol symbol)
+        |> Map.ofArray
     
     let endTime = DateTime.UtcNow
     let computationTime = (endTime - startTime).TotalMilliseconds |> int64
     
+    let basicResult = {
+        EntryPoints = entryPoints
+        ReachableSymbols = reachableSymbols
+        UnreachableSymbols = unreachableSymbols
+        CallGraph = callGraph
+    }
+    
     let pruningStats = {
-        TotalSymbols = symbolUses.Length
-        ReachableSymbols = Set.count basicResult.ReachableSymbols
-        EliminatedSymbols = symbolUses.Length - Set.count basicResult.ReachableSymbols
+        TotalSymbols = allSymbols.Length
+        ReachableSymbols = Set.count reachableSymbols
+        EliminatedSymbols = allSymbols.Length - Set.count reachableSymbols
         ComputationTimeMs = computationTime
     }
     
+    let eliminationRate = 
+        if allSymbols.Length > 0 then 
+            (float pruningStats.EliminatedSymbols / float allSymbols.Length) * 100.0 
+        else 0.0
+    
     printfn "[REACHABILITY] === Summary ==="
     printfn "[REACHABILITY] Analysis completed in %dms" computationTime
-    printfn "[REACHABILITY] Elimination rate: %.2f%%" 
-        (if symbolUses.Length > 0 then (float pruningStats.EliminatedSymbols / float symbolUses.Length) * 100.0 else 0.0)
+    printfn "[REACHABILITY] Elimination rate: %.2f%%" eliminationRate
     printfn "[REACHABILITY] ==========================="
     
     {
@@ -482,97 +247,3 @@ let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) (symbolUses: F
         LibraryCategories = libraryCategories
         PruningStatistics = pruningStats
     }
-
-/// Generate pruned symbol list for debug output
-let generatePrunedSymbolData (result: LibraryAwareReachability) (symbolUses: FSharpSymbolUse[]) =
-    symbolUses
-    |> Array.map (fun symbolUse ->
-        let symbolId = getSymbolId symbolUse.Symbol
-        {|
-            SymbolName = symbolUse.Symbol.DisplayName
-            SymbolKind = symbolUse.Symbol.GetType().Name
-            SymbolHash = symbolUse.Symbol.GetHashCode()
-            Range = {|
-                File = symbolUse.Range.FileName
-                StartLine = symbolUse.Range.Start.Line
-                StartColumn = symbolUse.Range.Start.Column
-                EndLine = symbolUse.Range.End.Line
-                EndColumn = symbolUse.Range.End.Column
-            |}
-            IsReachable = Set.contains symbolId result.BasicResult.ReachableSymbols
-            LibraryCategory = Map.tryFind symbolId result.LibraryCategories |> Option.map (sprintf "%A")
-        |})
-    |> Array.filter (fun symbolData -> symbolData.IsReachable)
-
-/// Generate reachability comparison report
-let generateComparisonData (beforeSymbols: FSharpSymbolUse[]) (result: LibraryAwareReachability) =
-    {|
-        Summary = {|
-            OriginalSymbolCount = beforeSymbols.Length
-            ReachableSymbolCount = result.PruningStatistics.ReachableSymbols
-            EliminatedCount = result.PruningStatistics.EliminatedSymbols
-            EliminationRate = 
-                if beforeSymbols.Length > 0 then
-                    (float result.PruningStatistics.EliminatedSymbols / float beforeSymbols.Length) * 100.0
-                else 0.0
-            ComputationTimeMs = result.PruningStatistics.ComputationTimeMs
-        |}
-        EntryPoints = result.BasicResult.EntryPoints |> List.map (fun ep -> ep.DisplayName)
-        CallGraph = result.BasicResult.CallGraph
-    |}
-
-/// Generate call graph data structure for visualization
-let generateCallGraphData (result: LibraryAwareReachability) =
-    // Generate nodes for ALL reachable symbols, not just entry points
-    let nodes = 
-        result.BasicResult.ReachableSymbols 
-        |> Set.toArray 
-        |> Array.map (fun symbolId -> {|
-            Id = symbolId
-            Name = symbolId
-            IsReachable = true
-        |})
-    
-    // Generate edges only between reachable symbols
-    let edges = 
-        result.BasicResult.CallGraph 
-        |> Map.toSeq
-        |> Seq.collect (fun (from, targets) ->
-            targets |> List.map (fun target -> {|
-                Source = from
-                Target = target
-                Kind = "References"
-            |}))
-        |> Seq.toArray
-    
-    {|
-        Nodes = nodes
-        Edges = edges
-        NodeCount = nodes.Length
-        EdgeCount = edges.Length
-    |}
-
-/// Generate library boundary analysis data
-let generateLibraryBoundaryData (result: LibraryAwareReachability) =
-    result.LibraryCategories
-    |> Map.toSeq
-    |> Seq.groupBy (fun (_, category) -> category)
-    |> Seq.map (fun (category, symbols) -> {|
-        LibraryCategory = sprintf "%A" category
-        SymbolCount = Seq.length symbols
-        IncludedInAnalysis = 
-            match category with
-            | UserCode | AlloyLibrary -> true
-            | FSharpCore -> false
-            | Other _ -> false
-    |})
-    |> Seq.toArray
-
-/// Generate all debug assets for pruned PSG
-let generatePrunedPSGAssets (beforeSymbols: FSharpSymbolUse[]) (result: LibraryAwareReachability) =
-    {|
-        CorrelationData = generatePrunedSymbolData result beforeSymbols
-        ComparisonData = generateComparisonData beforeSymbols result
-        CallGraphData = generateCallGraphData result
-        LibraryBoundaryData = generateLibraryBoundaryData result
-    |}

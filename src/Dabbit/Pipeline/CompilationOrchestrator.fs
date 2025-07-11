@@ -4,11 +4,8 @@ open System
 open System.IO
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Text
-open Core.XParsec.Foundation
 open Core.IngestionPipeline
 open Core.FCS.ProjectContext
-open Core.Meta.AlloyHints
-open Core.Analysis.MemoryLayout
 open Core.Utilities.IntermediateWriter
 open Dabbit.Pipeline.CompilationTypes
 
@@ -16,39 +13,35 @@ open Dabbit.Pipeline.CompilationTypes
 // Pipeline Integration Types
 // ===================================================================
 
-/// Extended compilation result with MLIR/LLVM outputs
+/// Extended compilation result with outputs
 type CompilationResult = {
     Success: bool
     Diagnostics: CompilerError list
     Statistics: CompilationStatistics
     Intermediates: IntermediateOutputs
-    MLIROutput: string option
-    LLVMOutput: string option
 }
 
 /// Intermediate file outputs
 and IntermediateOutputs = {
-    TypeCheckedAST: string option
-    ReachabilityAnalysis: string option
+    ProjectAnalysis: string option
     PSGRepresentation: string option
-    MLIRDialects: string option
-    LLVMAssembly: string option
+    ReachabilityAnalysis: string option
+    PrunedSymbols: string option
 }
 
 /// Empty intermediates for initialization
 let emptyIntermediates = {
-    TypeCheckedAST = None
-    ReachabilityAnalysis = None
+    ProjectAnalysis = None
     PSGRepresentation = None
-    MLIRDialects = None
-    LLVMAssembly = None
+    ReachabilityAnalysis = None
+    PrunedSymbols = None
 }
 
 // ===================================================================
 // Pipeline Configuration Bridge
 // ===================================================================
 
-/// Convert ingestion pipeline config to compilation config
+/// Convert compilation config to ingestion pipeline config
 let createPipelineConfig (config: CompilationConfig) (intermediatesDir: string option) : PipelineConfig = {
     CacheStrategy = Balanced
     TemplateName = None
@@ -72,51 +65,11 @@ let convertSeverity (severity: DiagnosticSeverity) : ErrorSeverity =
 
 /// Convert IngestionPipeline.Diagnostic to CompilerError
 let convertDiagnostic (diag: Diagnostic) : CompilerError = {
-    Phase = "Ingestion"
+    Phase = "Pipeline"
     Message = diag.Message
     Location = diag.Location
     Severity = convertSeverity diag.Severity
 }
-
-/// Convert FireflyError to CompilerError
-let convertFireflyError (error: FireflyError) : CompilerError =
-    match error with
-    | SyntaxError(pos, msg, _) -> {
-        Phase = "Syntax"
-        Message = msg
-        Location = Some $"{pos.File}:{pos.Line}:{pos.Column}"
-        Severity = ErrorSeverity.Error
-      }
-    | ConversionError(phase, _, _, msg) -> {
-        Phase = phase
-        Message = msg
-        Location = None
-        Severity = ErrorSeverity.Error
-      }
-    | TypeCheckError(construct, msg, pos) -> {
-        Phase = "TypeCheck"
-        Message = $"{construct}: {msg}"
-        Location = Some $"{pos.File}:{pos.Line}:{pos.Column}"
-        Severity = ErrorSeverity.Error
-      }
-    | InternalError(phase, msg, _) -> {
-        Phase = phase
-        Message = msg
-        Location = None
-        Severity = ErrorSeverity.Error
-      }
-    | ParseError(pos, msg) -> {
-        Phase = "Parse"
-        Message = msg
-        Location = Some $"{pos.File}:{pos.Line}:{pos.Column}"
-        Severity = ErrorSeverity.Error
-      }
-    | DependencyResolutionError(symbol, msg) -> {
-        Phase = "DependencyResolution"
-        Message = $"{symbol}: {msg}"
-        Location = None
-        Severity = ErrorSeverity.Error
-      }
 
 // ===================================================================
 // Progress Reporting
@@ -127,88 +80,67 @@ let reportPhase (progress: ProgressCallback) (phase: CompilationPhase) (message:
     progress phase message
 
 // ===================================================================
-// AST Transformation Pipeline
+// Statistics Collection
 // ===================================================================
 
-/// Transform FCS AST to PSG representation
-let transformToSemanticGraph 
-    (projectResults: ProjectResults) 
-    (config: PipelineConfig) 
-    (progress: ProgressCallback) = async {
+/// Generate meaningful compilation statistics from pipeline results
+let generateStatistics (pipelineResult: PipelineResult) (startTime: DateTime) : CompilationStatistics =
+    let endTime = DateTime.UtcNow
+    let duration = endTime - startTime
     
-    reportPhase progress CompilationPhase.ASTTransformation "Building Program Semantic Graph..."
+    let totalFiles = 
+        match pipelineResult.ProjectResults with
+        | Some projectResults -> projectResults.CompilationOrder.Length
+        | None -> 0
     
-    // TODO: Implement actual PSG construction
-    // For now, return a placeholder with structured JSON
-    let psgData = {|
-        modules = projectResults.CompilationOrder.Length
-        types = 50  // placeholder
-        functions = 100  // placeholder
-        entryPoints = []
-    |}
+    let totalSymbols =
+        match pipelineResult.ReachabilityAnalysis with
+        | Some analysis -> analysis.PruningStatistics.TotalSymbols
+        | None -> 0
     
-    let psgJson = System.Text.Json.JsonSerializer.Serialize(psgData, 
-        System.Text.Json.JsonSerializerOptions(WriteIndented = true))
+    let reachableSymbols =
+        match pipelineResult.ReachabilityAnalysis with
+        | Some analysis -> analysis.PruningStatistics.ReachableSymbols
+        | None -> 0
     
-    return Success psgJson
-}
-
-/// Generate MLIR from semantic graph
-let generateMLIR 
-    (psgData: string) 
-    (memoryLayout: LayoutStrategy option)
-    (config: PipelineConfig) 
-    (progress: ProgressCallback) = async {
+    let eliminatedSymbols =
+        match pipelineResult.ReachabilityAnalysis with
+        | Some analysis -> analysis.PruningStatistics.EliminatedSymbols
+        | None -> 0
     
-    reportPhase progress CompilationPhase.MLIRGeneration "Generating MLIR dialects..."
-    
-    // TODO: Implement actual MLIR generation
-    // For now, return a placeholder
-    let mlir = """
-module {
-    func.func @main() -> i32 {
-        %0 = arith.constant 0 : i32
-        return %0 : i32
+    {
+        TotalFiles = totalFiles
+        TotalSymbols = totalSymbols
+        ReachableSymbols = reachableSymbols
+        EliminatedSymbols = eliminatedSymbols
+        CompilationTimeMs = float duration.TotalMilliseconds
     }
-}
-"""
-    return Success mlir
-}
-
-/// Generate LLVM from MLIR
-let generateLLVM 
-    (mlirCode: string) 
-    (config: PipelineConfig) 
-    (progress: ProgressCallback) = async {
-    
-    reportPhase progress CompilationPhase.LLVMGeneration "Lowering MLIR to LLVM IR..."
-    
-    // TODO: Implement actual LLVM generation via MLIR lowering
-    // For now, return a placeholder
-    let llvm = """
-define i32 @main() {
-entry:
-    ret i32 0
-}
-"""
-    return Success llvm
-}
 
 // ===================================================================
-// Intermediate File Writing
+// Intermediate File Management
 // ===================================================================
 
-/// Write intermediate JSON data
-let writeIntermediateJson (filePath: string) (data: obj) =
-    let json = System.Text.Json.JsonSerializer.Serialize(data, 
-        System.Text.Json.JsonSerializerOptions(WriteIndented = true))
-    writeFileToPath filePath json |> ignore
+/// Collect intermediate file paths from pipeline execution
+let collectIntermediates (intermediatesDir: string option) : IntermediateOutputs =
+    match intermediatesDir with
+    | None -> emptyIntermediates
+    | Some dir ->
+        let tryFindFile fileName =
+            let path = Path.Combine(dir, fileName)
+            if File.Exists(path) then Some path else None
+        
+        {
+            ProjectAnalysis = tryFindFile "project.analysis.json"
+            PSGRepresentation = tryFindFile "psg.summary.json"
+            ReachabilityAnalysis = tryFindFile "reachability.analysis.json"
+            PrunedSymbols = tryFindFile "psg.pruned.symbols.json"
+        }
 
 // ===================================================================
 // Main Compilation Entry Points
 // ===================================================================
 
-/// Compile a project file with deep FCS integration
+/// Compile a project file using the ingestion pipeline
 let compileProject 
     (projectPath: string) 
     (outputPath: string)
@@ -218,135 +150,43 @@ let compileProject
     (progress: ProgressCallback) = async {
     
     let startTime = DateTime.UtcNow
-    let mutable intermediates = emptyIntermediates
     
     // Convert CompilationConfig to PipelineConfig
     let pipelineConfig = createPipelineConfig compilationConfig intermediatesDir
     
     try
-        // Step 1: Run FCS ingestion pipeline
-        reportPhase progress CompilationPhase.Initialization "Starting FCS ingestion pipeline..."
+        // Execute the complete ingestion and analysis pipeline
+        printfn "[Compilation] Starting compilation pipeline..."
         let! pipelineResult = runPipeline projectPath pipelineConfig
         
-        if not pipelineResult.Success then
-            let errors = pipelineResult.Diagnostics |> List.map convertDiagnostic
-            return {
-                Success = false
-                Diagnostics = errors
-                Statistics = CompilationStatistics.empty
-                Intermediates = intermediates
-                MLIROutput = None
-                LLVMOutput = None
-            }
+        // Convert diagnostics and generate statistics
+        let diagnostics = pipelineResult.Diagnostics |> List.map convertDiagnostic
+        let statistics = generateStatistics pipelineResult startTime
+        let intermediates = collectIntermediates intermediatesDir
+        
+        // Report final results
+        if pipelineResult.Success then
+            printfn "[Compilation] Compilation completed successfully"
+            
+            match pipelineResult.ReachabilityAnalysis with
+            | Some analysis ->
+                printfn "[Compilation] Final statistics: %d/%d symbols reachable (%.1f%% eliminated)" 
+                    analysis.PruningStatistics.ReachableSymbols
+                    analysis.PruningStatistics.TotalSymbols
+                    ((float analysis.PruningStatistics.EliminatedSymbols / float analysis.PruningStatistics.TotalSymbols) * 100.0)
+            | None -> ()
         else
+            printfn "[Compilation] Compilation failed"
         
-        let projectResults = pipelineResult.ProjectResults.Value
-        
-        // Write type-checked AST if requested
-        if pipelineConfig.OutputIntermediates && intermediatesDir.IsSome then
-            reportPhase progress CompilationPhase.IntermediateGeneration "Writing type-checked AST..."
-            let astPath = Path.Combine(intermediatesDir.Value, "typeChecked.json")
-            
-            // Create simplified representation for serialization
-            let astData = {|
-                Files = projectResults.CompilationOrder
-                SymbolCount = projectResults.SymbolUses.Length
-                Timestamp = DateTime.UtcNow
-            |}
-            writeIntermediateJson astPath astData
-            intermediates <- { intermediates with TypeCheckedAST = Some astPath }
-        
-        // Step 2: Transform to PSG
-        let! psgResult = transformToSemanticGraph projectResults pipelineConfig progress
-        
-        match psgResult with
-        | CompilerFailure errors -> 
-            return {
-                Success = false
-                Diagnostics = errors |> List.map convertFireflyError
-                Statistics = CompilationStatistics.empty
-                Intermediates = intermediates
-                MLIROutput = None
-                LLVMOutput = None
-            }
-        | Success psgData ->
-            
-            // Write PSG if requested
-            if pipelineConfig.OutputIntermediates && intermediatesDir.IsSome then
-                let psgPath = Path.Combine(intermediatesDir.Value, "semantic.psg.json")
-                writeFileToPath psgPath psgData |> ignore
-                intermediates <- { intermediates with PSGRepresentation = Some psgPath }
-            
-            // Step 3: Generate MLIR
-            let! mlirResult = generateMLIR psgData pipelineResult.MemoryLayout pipelineConfig progress
-            
-            match mlirResult with
-            | CompilerFailure errors ->
-                return {
-                    Success = false
-                    Diagnostics = errors |> List.map convertFireflyError
-                    Statistics = CompilationStatistics.empty
-                    Intermediates = intermediates
-                    MLIROutput = None
-                    LLVMOutput = None
-                }
-            | Success mlirCode ->
-                
-                // Write MLIR if requested
-                if pipelineConfig.OutputIntermediates && intermediatesDir.IsSome then
-                    let mlirPath = Path.Combine(intermediatesDir.Value, "output.mlir")
-                    writeFileToPath mlirPath mlirCode |> ignore
-                    intermediates <- { intermediates with MLIRDialects = Some mlirPath }
-                
-                // Step 4: Generate LLVM
-                let! llvmResult = generateLLVM mlirCode pipelineConfig progress
-                
-                match llvmResult with
-                | CompilerFailure errors ->
-                    return {
-                        Success = false
-                        Diagnostics = errors |> List.map convertFireflyError
-                        Statistics = CompilationStatistics.empty
-                        Intermediates = intermediates
-                        MLIROutput = Some mlirCode
-                        LLVMOutput = None
-                    }
-                | Success llvmCode ->
-                    
-                    // Write LLVM if requested
-                    if pipelineConfig.OutputIntermediates && intermediatesDir.IsSome then
-                        let llvmPath = Path.Combine(intermediatesDir.Value, "output.ll")
-                        writeFileToPath llvmPath llvmCode |> ignore
-                        intermediates <- { intermediates with LLVMAssembly = Some llvmPath }
-                    
-                    // Calculate statistics
-                    let endTime = DateTime.UtcNow
-                    let stats = {
-                        TotalFiles = projectResults.CompilationOrder.Length
-                        TotalSymbols = projectResults.SymbolUses.Length
-                        ReachableSymbols = 
-                            match pipelineResult.ReachabilityAnalysis with
-                            | Some ra -> ra.BasicResult.ReachableSymbols.Count
-                            | None -> projectResults.SymbolUses.Length
-                        EliminatedSymbols = 
-                            match pipelineResult.ReachabilityAnalysis with
-                            | Some ra -> ra.BasicResult.UnreachableSymbols.Count
-                            | None -> 0
-                        CompilationTimeMs = (endTime - startTime).TotalMilliseconds
-                    }
-                    
-                    reportPhase progress CompilationPhase.Finalization "Compilation completed successfully"
-                    
-                    return {
-                        Success = true
-                        Diagnostics = []
-                        Statistics = stats
-                        Intermediates = intermediates
-                        MLIROutput = Some mlirCode
-                        LLVMOutput = Some llvmCode
-                    }
+        return {
+            Success = pipelineResult.Success
+            Diagnostics = diagnostics
+            Statistics = statistics
+            Intermediates = intermediates
+        }
         
     with ex ->
+        printfn "[Compilation] Compilation failed: %s" ex.Message
         return {
             Success = false
             Diagnostics = [{
@@ -356,9 +196,7 @@ let compileProject
                 Severity = ErrorSeverity.Error
             }]
             Statistics = CompilationStatistics.empty
-            Intermediates = intermediates
-            MLIROutput = None
-            LLVMOutput = None
+            Intermediates = emptyIntermediates
         }
 }
 
@@ -380,21 +218,35 @@ let compile
     // Create F# checker and load project
     let checker = FSharpChecker.Create()
     
-    // Read the project file content and create ISourceText
-    let content = File.ReadAllText(projectPath)
-    let sourceText = SourceText.ofString content
+    try
+        // Read the project file content and create ISourceText
+        let content = File.ReadAllText(projectPath)
+        let sourceText = SourceText.ofString content
+        
+        // Get project options from script
+        let! (projectOptions, diagnostics) = checker.GetProjectOptionsFromScript(projectPath, sourceText)
+        
+        // Check for critical errors in diagnostics
+        if diagnostics.Length > 0 then
+            printfn "[Compilation] Project loading diagnostics:"
+            for diag in diagnostics do
+                printfn "  %s" diag.Message
+        
+        // Use a default output path
+        let outputPath = Path.ChangeExtension(projectPath, ".exe")
+        
+        return! compileProject projectPath outputPath projectOptions compilationConfig intermediatesDir progress
     
-    // Get project options from script
-    let! (projectOptions, diagnostics) = checker.GetProjectOptionsFromScript(projectPath, sourceText)
-    
-    // Check for critical errors in diagnostics
-    if diagnostics.Length > 0 then
-        printfn "Project loading diagnostics:"
-        for diag in diagnostics do
-            printfn "  %s" diag.Message
-    
-    // Use a default output path
-    let outputPath = Path.ChangeExtension(projectPath, ".exe")
-    
-    return! compileProject projectPath outputPath projectOptions compilationConfig intermediatesDir progress
+    with ex ->
+        return {
+            Success = false
+            Diagnostics = [{
+                Phase = "ProjectLoading"
+                Message = ex.Message
+                Location = Some projectPath
+                Severity = ErrorSeverity.Error
+            }]
+            Statistics = CompilationStatistics.empty
+            Intermediates = emptyIntermediates
+        }
 }
