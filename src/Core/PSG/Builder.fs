@@ -8,6 +8,7 @@ open FSharp.Compiler.CodeAnalysis
 open Core.PSG.Types
 open Core.PSG.Correlation
 open Core.PSG.SymbolAnalysis
+open Core.FCS.Helpers
 
 /// Build context for PSG construction
 type BuildContext = {
@@ -110,7 +111,18 @@ and processBinding
     // Process expression
     processExpression expr (Some bindingNode.Id) fileName context graph''
 
-/// Process an expression
+/// Find the nearest function binding in the parent chain
+and findNearestFunctionParent (parentId: NodeId option) (graph: ProgramSemanticGraph) : NodeId option =
+    match parentId with
+    | None -> None
+    | Some pid ->
+        match Map.tryFind pid.Value graph.Nodes with
+        | Some node when node.Symbol.IsSome && isFunction node.Symbol.Value -> Some pid
+        | Some node when node.SyntaxKind = "Binding" && node.Symbol.IsSome -> Some pid  // Any binding
+        | Some node -> findNearestFunctionParent node.ParentId graph
+        | None -> None
+
+/// Enhanced processExpression with smart parent linking
 and processExpression 
     (expr: SynExpr) 
     (parentId: NodeId option) 
@@ -137,24 +149,79 @@ and processExpression
     
     let exprNode = createNode exprKind expr.Range fileName symbol parentId
     let graph' = { graph with Nodes = Map.add exprNode.Id.Value exprNode graph.Nodes }
-    
+
+    let graph'' = 
+        match parentId with
+        | Some pid ->
+            let edge : PSGEdge = { Source = pid; Target = exprNode.Id; Kind = ChildOf }
+            printfn "[PSG Builder] Created ChildOf edge: %s -> %s (effective)" pid.Value exprNode.Id.Value
+            { graph' with Edges = edge :: graph'.Edges }
+        | None -> 
+            printfn "[PSG Builder] No parent for node: %s" exprNode.Id.Value
+            graph'
+
     // Process subexpressions and create edges
     match expr with
     | SynExpr.App(_, _, funcExpr, argExpr, _) ->
-        let graph'' = processExpression funcExpr (Some exprNode.Id) fileName context graph'
-        processExpression argExpr (Some exprNode.Id) fileName context graph''
+        // Process function and argument expressions - USE GRAPH'' WITH CHILOF EDGE
+        let graph''' = processExpression funcExpr (Some exprNode.Id) fileName context graph''
+        let graph'''' = processExpression argExpr (Some exprNode.Id) fileName context graph'''
+        
+        // Create direct edge from Application to target function for reachability
+        match funcExpr with
+        | SynExpr.Ident ident ->
+            let identName = ident.idText
+            printfn "[PSG Builder] Processing App: %s" identName
+            // Try correlation context first, then local table
+            let symbolOpt = 
+                tryCorrelateSymbol funcExpr.Range fileName context.CorrelationContext
+                |> Option.orElse (Map.tryFind identName graph''''.SymbolTable)
+            
+            match symbolOpt with
+            | Some targetSymbol ->
+                printfn "[PSG Builder] ✅ Created CallsFunction edge: %s -> %s" 
+                    exprNode.Id.Value targetSymbol.FullName
+                let edge : PSGEdge = { Source = exprNode.Id; Target = NodeId.FromSymbol(targetSymbol); Kind = CallsFunction }
+                { graph'''' with Edges = edge :: graph''''.Edges }
+            | None -> 
+                printfn "[PSG Builder] ❌ Symbol not found: %s" identName
+                graph''''
+            
+        | SynExpr.LongIdent(_, lid, _, _) ->
+            let fullName = lid.LongIdent |> List.map (fun id -> id.idText) |> String.concat "."
+            match Map.tryFind fullName graph''''.SymbolTable with
+            | Some targetSymbol ->
+                let edge : PSGEdge = {
+                    Source = exprNode.Id
+                    Target = NodeId.FromSymbol(targetSymbol)
+                    Kind = CallsFunction
+                }
+                { graph'''' with Edges = edge :: graph''''.Edges }
+            | None -> 
+                // Try to find in correlation context for external functions
+                let correlatedSymbol = tryCorrelateSymbol funcExpr.Range fileName context.CorrelationContext
+                match correlatedSymbol with
+                | Some targetSymbol ->
+                    let edge : PSGEdge = {
+                        Source = exprNode.Id
+                        Target = NodeId.FromSymbol(targetSymbol)
+                        Kind = CallsFunction
+                    }
+                    { graph'''' with Edges = edge :: graph''''.Edges }
+                | None -> graph''''
+        | _ -> graph''''
         
     | SynExpr.Lambda(_, _, _, bodyExpr, _, _, _) ->
-        processExpression bodyExpr (Some exprNode.Id) fileName context graph'
-        
-    | SynExpr.LetOrUse(_, _, bindings, bodyExpr, _, _) ->
-        let graph'' = 
-            bindings 
-            |> List.fold (fun g b -> processBinding b (Some exprNode.Id) fileName context g) graph'
         processExpression bodyExpr (Some exprNode.Id) fileName context graph''
+
+    | SynExpr.LetOrUse(_, _, bindings, bodyExpr, _, _) ->
+        let graph''' = 
+            bindings 
+            |> List.fold (fun g b -> processBinding b (Some exprNode.Id) fileName context g) graph''
+        processExpression bodyExpr (Some exprNode.Id) fileName context graph'''
         
     | SynExpr.Match(_, matchExpr, clauses, _, _) ->
-        let graph'' = processExpression matchExpr (Some exprNode.Id) fileName context graph'
+        let graph''' = processExpression matchExpr (Some exprNode.Id) fileName context graph''
         clauses
         |> List.fold (fun g clause ->
             let (SynMatchClause(pat, whenExpr, resultExpr, _, _, _)) = clause
@@ -164,54 +231,42 @@ and processExpression
                 | Some e -> processExpression e (Some exprNode.Id) fileName context g'
                 | None -> g'
             processExpression resultExpr (Some exprNode.Id) fileName context g''
-        ) graph''
+        ) graph'''
         
     | SynExpr.Sequential(_, _, expr1, expr2, _, _) ->
-        let g' = processExpression expr1 (Some exprNode.Id) fileName context graph'
+        let g' = processExpression expr1 (Some exprNode.Id) fileName context graph''
         processExpression expr2 (Some exprNode.Id) fileName context g'
         
     | SynExpr.IfThenElse(ifExpr, thenExpr, elseExpr, _, _, _, _) ->
-        let g' = processExpression ifExpr (Some exprNode.Id) fileName context graph'
+        let g' = processExpression ifExpr (Some exprNode.Id) fileName context graph''
         let g'' = processExpression thenExpr (Some exprNode.Id) fileName context g'
         match elseExpr with
         | Some expr -> processExpression expr (Some exprNode.Id) fileName context g''
         | None -> g''
         
     | SynExpr.TypeApp(expr, _, _, _, _, _, _) ->
-        processExpression expr (Some exprNode.Id) fileName context graph'
+        processExpression expr (Some exprNode.Id) fileName context graph''
         
     | SynExpr.Paren(expr, _, _, _) ->
-        processExpression expr (Some exprNode.Id) fileName context graph'
+        processExpression expr (Some exprNode.Id) fileName context graph''
         
     | SynExpr.Tuple(_, exprs, _, _) ->
         exprs 
-        |> List.fold (fun g e -> processExpression e (Some exprNode.Id) fileName context g) graph'
-        
-    | SynExpr.Ident ident ->
-        let identName = ident.idText
-        match Map.tryFind identName graph'.SymbolTable with
-        | Some targetSymbol ->
-            let edge : PSGEdge = {
-                Source = exprNode.Id
-                Target = NodeId.FromSymbol(targetSymbol)
-                Kind = SymRef
-            }
-            { graph' with Edges = edge :: graph'.Edges }
-        | None -> graph'
+        |> List.fold (fun g e -> processExpression e (Some exprNode.Id) fileName context g) graph''
         
     | SynExpr.LongIdent(_, lid, _, _) ->
         let fullName = lid.LongIdent |> List.map (fun id -> id.idText) |> String.concat "."
-        match Map.tryFind fullName graph'.SymbolTable with
+        match Map.tryFind fullName graph''.SymbolTable with
         | Some targetSymbol ->
             let edge : PSGEdge = {
                 Source = exprNode.Id
                 Target = NodeId.FromSymbol(targetSymbol)
                 Kind = SymRef
             }
-            { graph' with Edges = edge :: graph'.Edges }
-        | None -> graph'
+            { graph'' with Edges = edge :: graph''.Edges }
+        | None -> graph''
         
-    | _ -> graph'
+    | _ -> graph''
 
 /// Process a pattern
 and processPattern 
@@ -416,6 +471,10 @@ let buildProgramSemanticGraph
             SymbolTable = fullSymbolTable
             Edges = referenceEdges @ mergedGraph.Edges
     }
+    
+    // Add validation
+    let childOfEdges = finalGraph.Edges |> List.filter (fun e -> e.Kind = ChildOf)
+    printfn "[PSG Debug] Final graph ChildOf edges: %d" childOfEdges.Length
     
     Success finalGraph
 
