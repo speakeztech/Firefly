@@ -41,41 +41,32 @@ let classifySymbol (symbol: FSharpSymbol) : LibraryCategory =
     | name when name.StartsWith("FSharp.Core.") || name.StartsWith("Microsoft.FSharp.") -> FSharpCore
     | _ -> UserCode
 
-/// Extract function calls by analyzing Application nodes and their References edges
+/// Extract function calls by finding References edges to library functions
 let extractFunctionCalls (psg: ProgramSemanticGraph) =
-    // Find all Application nodes (function calls)
-    let applicationNodes = 
-        psg.Nodes
-        |> Map.toSeq
-        |> Seq.filter (fun (_, node) -> node.SyntaxKind = "Application")
-        |> Seq.map fst
-        |> Set.ofSeq
-    
-    // Find References edges from Application nodes to function symbols
     psg.Edges
     |> List.choose (fun edge ->
         match edge.Kind with
-        | SymRef when Set.contains edge.Source.Value applicationNodes ->
-            // This is a reference from a function call site
-            let sourceNode = Map.tryFind edge.Source.Value psg.Nodes
+        | SymRef ->
             let targetNode = Map.tryFind edge.Target.Value psg.Nodes
-            
-            match sourceNode, targetNode with
-            | Some src, Some tgt ->
-                match src.Symbol, tgt.Symbol with
-                | Some srcSymbol, Some tgtSymbol ->
-                    let srcName = srcSymbol.FullName
+            match targetNode with
+            | Some tgt ->
+                match tgt.Symbol with
+                | Some tgtSymbol ->
                     let tgtName = tgtSymbol.FullName
-                    
-                    // Include calls to library functions and user functions
-                    if (tgtName.StartsWith("Alloy.") || 
-                        tgtName.StartsWith("FSharp.Core.") ||
-                        tgtName.StartsWith("Examples.")) &&
-                       srcName <> tgtName then
-                        Some (srcName, tgtName)
+                    // Find any reference to a library function
+                    if tgtName.StartsWith("Alloy.") || 
+                       tgtName.StartsWith("FSharp.Core.") ||
+                       tgtName.Contains("Console") ||
+                       tgtName.Contains("sprintf") then
+                        // Find the calling context
+                        let sourceNode = Map.tryFind edge.Source.Value psg.Nodes
+                        match sourceNode with
+                        | Some src when src.Symbol.IsSome ->
+                            Some (src.Symbol.Value.FullName, tgtName)
+                        | _ -> Some ("UnknownCaller", tgtName)
                     else None
-                | _ -> None
-            | _ -> None
+                | None -> None
+            | None -> None
         | _ -> None
     )
 
