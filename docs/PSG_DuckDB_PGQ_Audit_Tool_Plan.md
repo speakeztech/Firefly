@@ -200,64 +200,267 @@ FROM function_calls
 GROUP BY caller_file;
 ```
 
-### 1.5 Python/F# Script for Automated Analysis
+### 1.5 Shared PSG Audit Module
 
-```python
-# psg_audit.py
-import duckdb
-import json
-import sys
-from pathlib import Path
+```fsharp
+// src/Core/Analysis/PSGAudit.fs
+module Core.Analysis.PSGAudit
 
-class PSGAuditor:
-    def __init__(self, intermediates_dir):
-        self.conn = duckdb.connect('psg_audit.db')
-        self.intermediates_dir = Path(intermediates_dir)
-        
-    def load_json_files(self):
-        """Load all PSG JSON files into DuckDB"""
-        # Implementation of schema creation and loading
-        
-    def generate_report(self):
-        """Generate comprehensive PSG health report"""
-        report = {
-            "graph_structure": self.analyze_structure(),
-            "correlation": self.analyze_correlation(),
-            "reachability": self.analyze_reachability(),
-            "coupling_cohesion": self.analyze_coupling_cohesion()
-        }
-        return report
-    
-    def analyze_structure(self):
-        """Analyze basic graph structure integrity"""
-        results = {}
-        
-        # Orphaned nodes
-        orphans = self.conn.execute("""
-            SELECT COUNT(*) as count FROM raw_nodes 
+open System
+open System.IO
+open DuckDB.NET
+open Core.PSG.Types
+
+type AuditReport = {
+    GraphStructure: StructureAnalysis
+    CorrelationAnalysis: CorrelationStats
+    ReachabilityAnalysis: ReachabilityStats
+    CouplingCohesion: CouplingStats
+}
+
+and StructureAnalysis = {
+    TotalNodes: int
+    OrphanedNodes: int
+    SelfReferencingEdges: int
+    DisconnectedComponents: int
+}
+
+and CorrelationStats = {
+    TotalSymbols: int
+    CorrelatedSymbols: int
+    Rate: float
+}
+
+and ReachabilityStats = {
+    ReachableNodes: int
+    UnreachableNodes: int
+    DeadCodePercentage: float
+}
+
+and CouplingStats = {
+    ModuleCoupling: ModuleCouplingInfo list
+    AverageCoupling: float
+}
+
+/// Core analysis functions used by both standalone and integrated modes
+module Analysis =
+    let analyzeStructure (conn: DuckDBConnection) =
+        let orphans = conn.ExecuteScalar<int>("""
+            SELECT COUNT(*) FROM raw_nodes 
             WHERE parentId IS NULL AND kind != 'Module'
-        """).fetchone()
-        results['orphaned_nodes'] = orphans[0]
+        """)
         
-        # Self-referencing edges
-        self_refs = self.conn.execute("""
+        let selfRefs = conn.ExecuteScalar<int>("""
             SELECT COUNT(*) FROM raw_edges WHERE source = target
-        """).fetchone()
-        results['self_referencing_edges'] = self_refs[0]
+        """)
         
-        return results
+        let components = conn.ExecuteScalar<int>("""
+            WITH RECURSIVE component_assignment AS (
+                SELECT id, id as component_id FROM raw_nodes
+                UNION
+                SELECT e.target, c.component_id
+                FROM raw_edges e
+                JOIN component_assignment c ON e.source = c.id
+            )
+            SELECT COUNT(DISTINCT component_id) FROM component_assignment
+        """)
+        
+        {
+            TotalNodes = conn.ExecuteScalar<int>("SELECT COUNT(*) FROM raw_nodes")
+            OrphanedNodes = orphans
+            SelfReferencingEdges = selfRefs
+            DisconnectedComponents = components
+        }
 
-# F# wrapper for integration
-module PSGAudit =
-    open System.Diagnostics
+    let analyzeCorrelation (conn: DuckDBConnection) =
+        let stats = conn.QuerySingle<{| total: int; correlated: int |}>("""
+            SELECT 
+                COUNT(*) as total,
+                COUNT(CASE WHEN symbol IS NOT NULL THEN 1 END) as correlated
+            FROM raw_nodes
+            WHERE kind IN ('Binding', 'Application', 'Identifier')
+        """)
+        
+        {
+            TotalSymbols = stats.total
+            CorrelatedSymbols = stats.correlated
+            Rate = if stats.total > 0 then 100.0 * float stats.correlated / float stats.total else 0.0
+        }
+
+/// Load JSON files from intermediates directory
+let loadFromJson (conn: DuckDBConnection) (intermediatesDir: string) =
+    // Create tables
+    conn.Execute("""
+        CREATE TABLE IF NOT EXISTS raw_nodes AS 
+        SELECT * FROM read_json('{}/*.nodes.json', 
+            columns = {
+                id: 'VARCHAR',
+                kind: 'VARCHAR', 
+                symbol: 'VARCHAR',
+                range: 'STRUCT(startLine INT, startColumn INT, endLine INT, endColumn INT)',
+                sourceFile: 'VARCHAR',
+                parentId: 'VARCHAR',
+                children: 'VARCHAR[]'
+            });
+    """, Path.Combine(intermediatesDir))
     
-    let runAudit intermediatesDir =
-        let psi = ProcessStartInfo("python", $"psg_audit.py {intermediatesDir}")
-        psi.RedirectStandardOutput <- true
-        use proc = Process.Start(psi)
-        let output = proc.StandardOutput.ReadToEnd()
-        proc.WaitForExit()
-        output
+    conn.Execute("""
+        CREATE TABLE IF NOT EXISTS raw_edges AS
+        SELECT * FROM read_json('{}/*.edges.json',
+            columns = {
+                source: 'VARCHAR',
+                target: 'VARCHAR',
+                kind: 'VARCHAR'
+            });
+    """, Path.Combine(intermediatesDir))
+
+/// Load from in-memory PSG (used during compilation)
+let loadFromPSG (conn: DuckDBConnection) (psg: ProgramSemanticGraph) =
+    // Clear existing data
+    conn.Execute("DROP TABLE IF EXISTS raw_nodes; DROP TABLE IF EXISTS raw_edges;")
+    
+    // Create and populate nodes table
+    conn.Execute("""
+        CREATE TABLE raw_nodes (
+            id VARCHAR,
+            kind VARCHAR,
+            symbol VARCHAR,
+            sourceFile VARCHAR,
+            parentId VARCHAR
+        )
+    """)
+    
+    use insertNode = conn.PrepareStatement(
+        "INSERT INTO raw_nodes VALUES (?, ?, ?, ?, ?)"
+    )
+    
+    psg.Nodes |> Map.iter (fun nodeId node ->
+        insertNode.Execute(
+            nodeId,
+            node.SyntaxKind,
+            node.Symbol |> Option.map (fun s -> s.DisplayName) |> Option.defaultValue null,
+            node.SourceFile,
+            node.ParentId |> Option.map (fun p -> p.Value) |> Option.defaultValue null
+        )
+    )
+    
+    // Create and populate edges table
+    conn.Execute("""
+        CREATE TABLE raw_edges (
+            source VARCHAR,
+            target VARCHAR,
+            kind VARCHAR
+        )
+    """)
+    
+    use insertEdge = conn.PrepareStatement(
+        "INSERT INTO raw_edges VALUES (?, ?, ?)"
+    )
+    
+    psg.Edges |> List.iter (fun edge ->
+        insertEdge.Execute(
+            edge.Source.Value,
+            edge.Target.Value,
+            edge.Kind.ToString()
+        )
+    )
+
+/// Generate full audit report
+let generateReport (conn: DuckDBConnection) : AuditReport =
+    {
+        GraphStructure = Analysis.analyzeStructure conn
+        CorrelationAnalysis = Analysis.analyzeCorrelation conn
+        ReachabilityAnalysis = { 
+            ReachableNodes = 0; UnreachableNodes = 0; DeadCodePercentage = 0.0 
+        } // TODO
+        CouplingCohesion = { 
+            ModuleCoupling = []; AverageCoupling = 0.0 
+        } // TODO
+    }
+
+/// Format report for console output
+let formatReportForConsole (report: AuditReport) (verbose: bool) =
+    if verbose then
+        printfn "=== PSG STRUCTURE ANALYSIS ==="
+        printfn "  Total nodes: %d" report.GraphStructure.TotalNodes
+        printfn "  Orphaned nodes: %d" report.GraphStructure.OrphanedNodes
+        printfn "  Self-referencing edges: %d" report.GraphStructure.SelfReferencingEdges
+        printfn "  Disconnected components: %d" report.GraphStructure.DisconnectedComponents
+        printfn ""
+        printfn "=== SYMBOL CORRELATION ==="
+        printfn "  Total symbols: %d" report.CorrelationAnalysis.TotalSymbols
+        printfn "  Correlated: %d (%.1f%%)" 
+            report.CorrelationAnalysis.CorrelatedSymbols 
+            report.CorrelationAnalysis.Rate
+    else
+        // Compact output for normal compilation
+        if report.GraphStructure.OrphanedNodes > 0 then
+            printfn "⚠️  PSG: %d orphaned nodes detected" report.GraphStructure.OrphanedNodes
+        if report.CorrelationAnalysis.Rate < 90.0 then
+            printfn "⚠️  PSG: Low symbol correlation (%.1f%%)" report.CorrelationAnalysis.Rate
+```
+
+### 1.6 Standalone Audit Tool
+
+```fsharp
+// src/Tools/PSGAudit/Program.fs
+module PSGAudit.Program
+
+open System
+open Core.Analysis.PSGAudit
+open DuckDB.NET
+
+[<EntryPoint>]
+let main argv =
+    match argv with
+    | [| intermediatesDir |] ->
+        use conn = new DuckDBConnection(":memory:")
+        conn.Open()
+        
+        // Load JSON files
+        printfn "Loading PSG JSON files from %s..." intermediatesDir
+        loadFromJson conn intermediatesDir
+        
+        // Generate and display report
+        let report = generateReport conn
+        formatReportForConsole report true  // Always verbose for standalone
+        
+        0
+    | _ ->
+        eprintfn "Usage: PSGAudit <intermediates-directory>"
+        1
+```
+
+### 1.7 Integration in Firefly Compilation Pipeline
+
+```fsharp
+// Modified src/Core/IngestionPipeline.fs
+module Core.IngestionPipeline
+
+open Core.Analysis.PSGAudit
+
+let runIngestionPipeline (config: PipelineConfig) (projectFile: string) =
+    // ... existing PSG construction ...
+    
+    // Integrated PSG audit during compilation
+    if config.VerboseOutput || config.ShowPSGStats then
+        use auditConn = new DuckDBConnection(":memory:")
+        auditConn.Open()
+        
+        // Load current PSG state
+        PSGAudit.loadFromPSG auditConn currentPSG
+        
+        // Generate report
+        let report = PSGAudit.generateReport auditConn
+        
+        // Display inline during compilation
+        PSGAudit.formatReportForConsole report config.VerboseOutput
+        
+        // After reachability analysis
+        if prunedPSG.Nodes.Count < currentPSG.Nodes.Count then
+            printfn "✓ Dead code elimination: %d nodes removed (%.1f%%)" 
+                (currentPSG.Nodes.Count - prunedPSG.Nodes.Count)
+                (100.0 * float (currentPSG.Nodes.Count - prunedPSG.Nodes.Count) / float currentPSG.Nodes.Count)
 ```
 
 ## Phase 2: Partial DuckDB Integration
