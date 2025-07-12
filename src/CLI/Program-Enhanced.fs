@@ -134,7 +134,7 @@ let main (args: string[]) : int =
             Console.ResetColor()
             1
         | Some projectFile ->
-            let outputDir = results.GetResult(Output, defaultValue = "./output")
+            let outputDir = results.GetResult(Output, defaultValue = "./build")
             let generateIntermediates = results.Contains(Intermediates)
             let verbose = results.Contains(Verbose)
             let astOnly = results.Contains(AST_Only)
