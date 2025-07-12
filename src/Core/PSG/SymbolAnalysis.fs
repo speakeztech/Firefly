@@ -19,26 +19,24 @@ let extractRelationships (psg: ProgramSemanticGraph) : SymbolRelation[] =
                 // Convert to SymbolRelation if both nodes have symbols
                 match sourceNode.Symbol, targetNode.Symbol with
                 | Some fromSymbol, Some toSymbol ->
-                    let relationType = 
-                        match edge.Kind with
-                        | CallsFunction -> Calls
-                        | SymRef -> References
-                        | ChildOf -> Contains
-                        | TypeOf -> Inherits
-                        | Instantiates -> Implements
-                    
-                    // Debug main/hello relationships
-                    if fromSymbol.DisplayName.Contains("main") || 
-                       toSymbol.DisplayName.Contains("hello") then
-                        printfn "[RELATIONSHIP] ✅ %s -> %s (%A)" 
-                            fromSymbol.FullName toSymbol.FullName relationType
-                    
-                    Some {
-                        From = fromSymbol
-                        To = toSymbol
-                        RelationType = relationType
-                        Location = sourceNode.Range
-                    }
+                    // Map EdgeKind to SymbolRelation
+                    match edge.Kind with
+                    | FunctionCall -> 
+                        match toSymbol with
+                        | :? FSharpMemberOrFunctionOrValue as mfv -> 
+                            Some (CallsSymbol mfv)
+                        | _ -> None
+                    | SymRef | SymbolUse -> Some (ReferencesSymbol toSymbol)
+                    | ModuleContainment | ChildOf -> None  // Skip structural relationships
+                    | TypeOf -> 
+                        match toSymbol with
+                        | :? FSharpEntity as entity -> Some (InheritsFrom entity)
+                        | _ -> None
+                    | Instantiates | TypeInstantiation _ -> 
+                        match toSymbol with
+                        | :? FSharpEntity as entity -> Some (ImplementsInterface entity)
+                        | _ -> None
+                    | _ -> None
                 | _ -> None
             | _ -> None
         )
@@ -47,60 +45,41 @@ let extractRelationships (psg: ProgramSemanticGraph) : SymbolRelation[] =
     printfn "[RELATIONSHIP] Converted %d PSG edges to %d symbol relationships" 
         psg.Edges.Length relationships.Length
     
-    // Check for entry point relationships
-    let entryPointRels = 
-        relationships 
-        |> Array.filter (fun r -> 
-            r.From.DisplayName.Contains("main") || 
-            r.From.FullName.Contains("HelloWorldDirect"))
-    
-    if entryPointRels.Length > 0 then
-        printfn "[RELATIONSHIP] ✅ Entry point relationships from PSG:"
-        entryPointRels |> Array.iter (fun r ->
-            printfn "  %s -> %s" r.From.FullName r.To.FullName)
-    else
-        printfn "[RELATIONSHIP] ⚠️ No entry point relationships in PSG"
-    
     relationships
     
 /// Get all symbols defined in a specific file
 let getFileSymbols (fileName: string) (symbolUses: FSharpSymbolUse[]) =
     symbolUses
-    |> Array.filter (fun (symbolUse: FSharpSymbolUse) -> 
+    |> Array.filter (fun symbolUse -> 
         symbolUse.IsFromDefinition && 
         symbolUse.Range.FileName.EndsWith(fileName)
     )
-    |> Array.map (fun (symbolUse: FSharpSymbolUse) -> symbolUse.Symbol)
+    |> Array.map (fun symbolUse -> symbolUse.Symbol)
     |> Array.distinct
 
 /// Find all references to a symbol
 let findReferences (symbol: FSharpSymbol) (symbolUses: FSharpSymbolUse[]) =
     symbolUses
-    |> Array.filter (fun (symbolUse: FSharpSymbolUse) -> 
+    |> Array.filter (fun symbolUse -> 
         symbolUse.Symbol = symbol && symbolUse.IsFromUse
     )
 
 /// Find symbol definition
 let findDefinition (symbol: FSharpSymbol) (symbolUses: FSharpSymbolUse[]) =
     symbolUses
-    |> Array.tryFind (fun (symbolUse: FSharpSymbolUse) -> 
+    |> Array.tryFind (fun symbolUse -> 
         symbolUse.Symbol = symbol && symbolUse.IsFromDefinition
     )
 
 /// Group symbols by containing module/namespace
 let groupByContainer (symbolUses: FSharpSymbolUse[]) =
     symbolUses
-    |> Array.filter (fun (symbolUse: FSharpSymbolUse) -> symbolUse.IsFromDefinition)
-    |> Array.groupBy (fun (symbolUse: FSharpSymbolUse) ->
+    |> Array.filter (fun symbolUse -> symbolUse.IsFromDefinition)
+    |> Array.groupBy (fun symbolUse ->
         let symbol = symbolUse.Symbol
-        match symbol with
-        | :? FSharpEntity as entity when entity.IsFSharpModule || entity.IsNamespace ->
-            entity.FullName
-        | _ ->
-            // Use helper function to get declaring entity
-            match getDeclaringEntity symbol with
-            | Some entity -> entity.FullName
-            | None -> "<global>"
+        match getDeclaringEntity symbol with  
+        | Some entity -> entity.FullName
+        | None -> "<global>"
     )
     |> Map.ofArray
 
@@ -111,20 +90,36 @@ type SymbolMetrics = {
     Depth: int         // Nesting depth in module hierarchy
 }
 
-let calculateMetrics (symbol: FSharpSymbol) (relationships: SymbolRelation[]) =
+let calculateMetrics (symbol: FSharpSymbol) (psg: ProgramSemanticGraph) =
+    // Calculate in-degree: count edges pointing to this symbol's nodes
+    let symbolNodes = 
+        psg.Nodes 
+        |> Map.toSeq
+        |> Seq.filter (fun (_, node) -> 
+            node.Symbol |> Option.map (fun s -> s = symbol) |> Option.defaultValue false
+        )
+        |> Seq.map fst
+        |> Set.ofSeq
+    
     let inDegree = 
-        relationships 
-        |> Array.filter (fun r -> r.To = symbol)
-        |> Array.length
+        psg.Edges
+        |> List.filter (fun edge -> 
+            Set.contains edge.Target.Value symbolNodes
+        )
+        |> List.length
     
+    // Calculate out-degree: count edges originating from this symbol's nodes
     let outDegree = 
-        relationships 
-        |> Array.filter (fun r -> r.From = symbol)
-        |> Array.length
+        psg.Edges
+        |> List.filter (fun edge -> 
+            Set.contains edge.Source.Value symbolNodes
+        )
+        |> List.length
     
+    // Calculate depth in module hierarchy
     let depth =
         let rec countDepth (s: FSharpSymbol) acc =
-            match getDeclaringEntity s with  // Use helper function
+            match getDeclaringEntity s with
             | Some entity -> countDepth (entity :> FSharpSymbol) (acc + 1)
             | None -> acc
         countDepth symbol 0
@@ -148,7 +143,7 @@ type SymbolCorrelation = {
 /// Extract comprehensive symbol data for PSG correlation
 let extractSymbolCorrelations (checkResults: FSharpCheckProjectResults) =
     // Get all symbol uses using FCS bulk extraction
-    let allSymbolUses = checkResults.GetAllUsesOfAllSymbols()
+    let allSymbolUses = checkResults.GetAllUsesOfAllSymbols() |> Array.ofSeq
     
     // Group by symbol for efficient correlation
     let symbolGroups = 
@@ -172,7 +167,7 @@ let buildPositionIndex (symbolUses: FSharpSymbolUse[]) =
     symbolUses
     |> Array.map (fun symbolUse ->
         let range = symbolUse.Range
-        let key = (range.FileName, range.Start.Line, range.Start.Column, range.End.Line, range.End.Column)
+        let key = (range.FileName, range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
         (key, symbolUse)
     )
     |> Map.ofArray
@@ -185,62 +180,13 @@ let getEntryPointSymbols (symbolUses: FSharpSymbolUse[]) =
         match symbolUse.Symbol with
         | :? FSharpMemberOrFunctionOrValue as mfv ->
             // Check for EntryPoint attribute
-            mfv.Attributes 
-            |> Seq.exists (fun attr -> 
-                attr.AttributeType.FullName = "Microsoft.FSharp.Core.EntryPointAttribute" ||
-                attr.AttributeType.FullName = "System.STAThreadAttribute"
+            mfv.Attributes |> Seq.exists (fun attr ->
+                attr.AttributeType.DisplayName = "EntryPointAttribute" ||
+                attr.AttributeType.DisplayName = "EntryPoint"
             ) ||
-            // Also check for main function pattern
-            (mfv.DisplayName = "main" && mfv.IsModuleValueOrMember)
+            // Or check for main function pattern
+            (mfv.DisplayName = "main" && mfv.DeclaringEntity.IsSome &&
+             mfv.DeclaringEntity.Value.DisplayName.EndsWith("Program"))
         | _ -> false
     )
     |> Array.map (fun symbolUse -> symbolUse.Symbol)
-
-/// Extract symbols in definition order for a file
-let getFileSymbolsInOrder (fileName: string) (symbolUses: FSharpSymbolUse[]) =
-    symbolUses
-    |> Array.filter (fun symbolUse -> 
-        symbolUse.IsFromDefinition && 
-        symbolUse.Range.FileName = fileName
-    )
-    |> Array.sortBy (fun symbolUse -> 
-        symbolUse.Range.Start.Line, symbolUse.Range.Start.Column
-    )
-    |> Array.map (fun symbolUse -> symbolUse.Symbol, symbolUse.Range)
-
-/// Build symbol dependency graph for reachability analysis
-type SymbolDependency = {
-    Symbol: FSharpSymbol
-    DirectDependencies: FSharpSymbol[]
-    TransitiveClosure: FSharpSymbol[] option  // Computed lazily
-}
-
-let buildDependencyGraph (symbolCorrelations: SymbolCorrelation[]) =
-    let symbolMap = 
-        symbolCorrelations 
-        |> Array.map (fun sc -> sc.Hash, sc)
-        |> Map.ofArray
-    
-    symbolCorrelations
-    |> Array.map (fun correlation ->
-        // Find all symbols referenced in the definition scope
-        let dependencies = 
-            match correlation.Definition with
-            | Some def ->
-                // Get all uses in the same range as the definition
-                correlation.Uses
-                |> Array.filter (fun useSym ->
-                    useSym.Range.FileName = def.Range.FileName &&
-                    useSym.Range.Start.Line >= def.Range.Start.Line &&
-                    useSym.Range.End.Line <= def.Range.End.Line
-                )
-                |> Array.map (fun useSym -> useSym.Symbol)
-                |> Array.distinct
-            | None -> [||]
-        
-        {
-            Symbol = correlation.Symbol
-            DirectDependencies = dependencies
-            TransitiveClosure = None
-        }
-    )

@@ -1,12 +1,13 @@
 module Core.PSG.Types
 
+open System
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
 
-/// Node identifier using symbol hash or range fallback
+/// Unique identifier for nodes in the PSG
 type NodeId = 
     | SymbolNode of symbolHash: int * symbolName: string
-    | RangeNode of file: string * startLine: int * startCol: int * endLine: int * endCol: int
+    | RangeNode of fileName: string * startLine: int * startCol: int * endLine: int * endCol: int
     
     member this.Value =
         match this with
@@ -16,15 +17,38 @@ type NodeId =
                 (System.IO.Path.GetFileNameWithoutExtension file) sl sc el ec
     
     static member FromSymbol(symbol: FSharpSymbol) =
-        SymbolNode(symbol.GetHashCode(), symbol.DisplayName)
+        SymbolNode(symbol.GetHashCode(), symbol.DisplayName.Replace(".", "_"))
     
-    static member FromRange(file: string, range: range) =
-        RangeNode(file, range.Start.Line, range.Start.Column, range.End.Line, range.End.Column)
+    static member FromRange(fileName: string, range: range) =
+        RangeNode(fileName, range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
 
-/// Unified PSG node containing both syntax and semantic information
+/// Types of control flow
+type ControlFlowKind =
+    | Sequential
+    | Conditional
+    | Loop
+    | Match
+    | Exception
+
+/// Comprehensive edge types for complete graph representation
+type EdgeKind =
+    | SymbolDef       // Symbol definition site
+    | SymbolUse       // Symbol usage
+    | FunctionCall    // Direct function invocation (renamed from CallsFunction)
+    | TypeInstantiation of typeArgs: FSharpType list
+    | ControlFlow of kind: ControlFlowKind
+    | DataDependency
+    | ModuleContainment
+    | TypeMembership
+    | ChildOf         // Parent-child relationship (kept for compatibility)
+    | SymRef          // Symbol reference (kept for compatibility)
+    | TypeOf          // Type relationship (kept for compatibility)
+    | Instantiates    // Generic instantiation (kept for compatibility)
+
+/// PSG node - keeping original structure
 type PSGNode = {
     Id: NodeId
-    SyntaxKind: string  // "Binding", "Expression", "Type", etc.
+    SyntaxKind: string
     Symbol: FSharpSymbol option
     Range: range
     SourceFile: string
@@ -32,55 +56,29 @@ type PSGNode = {
     Children: NodeId list
 }
 
-/// Edge types in the PSG
-type EdgeKind =
-    | ChildOf          // Syntactic parent-child
-    | SymRef       // Symbol reference
-    | TypeOf          // Type relationship
-    | CallsFunction   // Function call
-    | Instantiates    // Generic instantiation
-
-/// Directed edge in the PSG
+/// Edge between PSG nodes
 type PSGEdge = {
     Source: NodeId
     Target: NodeId
     Kind: EdgeKind
 }
 
-/// Relationship types for reachability analysis
-type RelationType =
-    | Calls           // Function call
-    | References      // Type or value reference
-    | Inherits        // Type inheritance
-    | Implements      // Interface implementation
-    | Contains        // Module/namespace containment
+/// Symbol relationship types for analysis
+type SymbolRelation =
+    | DefinesType of FSharpEntity
+    | UsesType of FSharpEntity
+    | CallsSymbol of FSharpMemberOrFunctionOrValue      // Renamed from CallsFunction
+    | ImplementsInterface of FSharpEntity
+    | InheritsFrom of FSharpEntity
+    | ReferencesSymbol of FSharpSymbol                  // Renamed from References
 
-/// Symbol relationship for reachability analysis
-type SymbolRelation = {
-    From: FSharpSymbol
-    To: FSharpSymbol
-    RelationType: RelationType
-    Location: range
-}
-
-/// The complete Program Semantic Graph
+/// Complete Program Semantic Graph - keeping original structure
 type ProgramSemanticGraph = {
-    /// All nodes indexed by their ID
     Nodes: Map<string, PSGNode>
-    
-    /// All edges in the graph
     Edges: PSGEdge list
-    
-    /// Symbol table for quick lookup
     SymbolTable: Map<string, FSharpSymbol>
-    
-    /// Entry point nodes
     EntryPoints: NodeId list
-    
-    /// Source file content for reference
     SourceFiles: Map<string, string>
-    
-    /// Compilation order
     CompilationOrder: string list
 }
 
@@ -100,69 +98,5 @@ and PSGErrorKind =
     | MissingSymbol
     | InvalidNode
     | BuilderError
-
-/// JSON-friendly representation of a PSG node
-type NodeJson = {
-    Id: string
-    Kind: string
-    Symbol: string option
-    Range: {| StartLine: int; StartColumn: int; EndLine: int; EndColumn: int |}
-    SourceFile: string
-    ParentId: string option
-    Children: string[]
-}
-
-/// JSON-friendly representation of an edge
-type EdgeJson = {
-    Source: string
-    Target: string
-    Kind: string
-}
-
-/// JSON-friendly representation of correlation entry
-type CorrelationJson = {
-    Range: {| File: string; StartLine: int; StartColumn: int; EndLine: int; EndColumn: int |}
-    SymbolName: string
-    SymbolKind: string
-    SymbolHash: int
-}
-
-/// Semantic unit representing a cohesive component
-type SemanticUnit = 
-    | Module of FSharpEntity
-    | Namespace of string
-    | FunctionGroup of FSharpMemberOrFunctionOrValue list
-    | TypeCluster of FSharpEntity list
-
-/// Coupling measurement between semantic units
-type Coupling = {
-    From: SemanticUnit
-    To: SemanticUnit
-    Strength: float  // 0.0 to 1.0
-    Dependencies: SymbolRelation list
-}
-
-/// Cohesion measurement within a semantic unit
-type Cohesion = {
-    Unit: SemanticUnit
-    Score: float  // 0.0 to 1.0
-    InternalRelations: int
-    ExternalRelations: int
-}
-
-/// Component identified through coupling/cohesion analysis
-type CodeComponent = {
-    Id: string
-    Units: SemanticUnit list
-    Cohesion: float
-    AverageCoupling: float
-    Boundaries: ComponentBoundary list
-}
-
-and ComponentBoundary = {
-    Interface: FSharpSymbol list
-    Direction: BoundaryDirection
-}
-
-and BoundaryDirection = Inbound | Outbound | Bidirectional
-
+    | TypeResolutionError
+    | MemoryAnalysisError

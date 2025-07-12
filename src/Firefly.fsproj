@@ -50,9 +50,7 @@
       <Compile Include="Core/Templates/TemplateLoader.fs" />
       
       <!-- Analysis Engine (new) -->
-      <Compile Include="Core/Analysis/CouplingCohesion.fs" />
       <Compile Include="Core/Analysis/Reachability.fs" />
-      <Compile Include="Core/Analysis/MemoryLayout.fs" />
       
       <!-- FCS Ingestion Pipeline (new) -->
       <Compile Include="Core/IngestionPipeline.fs" />

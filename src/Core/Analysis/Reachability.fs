@@ -4,7 +4,6 @@ open System
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
 open Core.PSG.Types
-open Core.Analysis.CouplingCohesion
 
 /// Reachability analysis result
 type ReachabilityResult = {
@@ -101,7 +100,7 @@ let extractFunctionCallsFromPSG (psg: ProgramSemanticGraph) =
     psg.Edges
     |> List.choose (fun edge ->
         match edge.Kind with
-        | SymRef | CallsFunction ->
+        | SymRef | FunctionCall ->  // CHANGED from CallsFunction
             let sourceSymbol = Map.tryFind edge.Source.Value nodeIdToSymbolName
             let targetSymbol = Map.tryFind edge.Target.Value nodeIdToSymbolName
             
@@ -119,7 +118,7 @@ let extractComprehensiveFunctionCalls (psg: ProgramSemanticGraph) =
     let applicationCalls = 
         psg.Edges
         |> List.choose (fun edge ->
-            if edge.Kind = CallsFunction then
+            if edge.Kind = FunctionCall then
                 let sourceNode = Map.tryFind edge.Source.Value psg.Nodes
                 let targetNode = Map.tryFind edge.Target.Value psg.Nodes
                 

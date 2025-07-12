@@ -14,22 +14,36 @@ type CorrelationContext = {
     FileIndex: Map<string, FSharpSymbolUse[]>
 }
 
+/// Check if a range contains a position
+let private rangeContainsPosition (range: range) (pos: pos) =
+    range.StartLine <= pos.Line && 
+    pos.Line <= range.EndLine &&
+    (pos.Line > range.StartLine || pos.Column >= range.StartColumn) &&
+    (pos.Line < range.EndLine || pos.Column <= range.EndColumn)
+
+/// Check if two ranges overlap
+let private rangesOverlap (r1: range) (r2: range) =
+    r1.FileName = r2.FileName &&
+    r1.StartLine <= r2.EndLine &&
+    r2.StartLine <= r1.EndLine &&
+    (r1.StartLine <> r2.EndLine || r1.StartColumn <= r2.EndColumn) &&
+    (r2.StartLine <> r1.EndLine || r2.StartColumn <= r1.EndColumn)
+
 /// Create correlation context from FCS results
 let createContext (checkResults: FSharpCheckProjectResults) =
-    // Use GetAllUsesOfAllSymbols() instead of GetAllUsesOfAllSymbolsInFile()
-    let allSymbolUses = checkResults.GetAllUsesOfAllSymbols()
+    let allSymbolUses = checkResults.GetAllUsesOfAllSymbols() |> Array.ofSeq
     
-    printfn "[Correlation Debug] Found %d total symbol uses" allSymbolUses.Length
-    printfn "[Correlation Debug] Definition count: %d" 
+    printfn "[Correlation] Found %d total symbol uses" allSymbolUses.Length
+    printfn "[Correlation] Definition count: %d" 
         (allSymbolUses |> Array.filter (fun su -> su.IsFromDefinition) |> Array.length)
-    printfn "[Correlation Debug] Use count: %d" 
+    printfn "[Correlation] Use count: %d" 
         (allSymbolUses |> Array.filter (fun su -> su.IsFromUse) |> Array.length)
     
     let positionIndex = 
         allSymbolUses
         |> Array.map (fun symbolUse ->
             let r = symbolUse.Range
-            let key = (r.FileName, r.Start.Line, r.Start.Column, r.End.Line, r.End.Column)
+            let key = (r.FileName, r.StartLine, r.StartColumn, r.EndLine, r.EndColumn)
             (key, symbolUse)
         )
         |> Map.ofArray
@@ -45,44 +59,56 @@ let createContext (checkResults: FSharpCheckProjectResults) =
         FileIndex = fileIndex
     }
 
-/// Correlate a syntax node with its symbol using range matching
-let tryCorrelateSymbol (range: range) (fileName: string) (context: CorrelationContext) =
-    // Try exact range match first
-    let key = (fileName, range.Start.Line, range.Start.Column, range.End.Line, range.End.Column)
+/// Try to correlate a syntax node with its symbol using enhanced matching
+let tryCorrelateSymbol (range: range) (fileName: string) (context: CorrelationContext) : FSharpSymbol option =
+    // Strategy 1: Try exact range match first
+    let key = (fileName, range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
     match Map.tryFind key context.PositionIndex with
     | Some symbolUse -> Some symbolUse.Symbol
     | None ->
-        // Fall back to searching overlapping ranges
+        // Strategy 2: Search for symbols in the same file with overlapping or nearby ranges
         match Map.tryFind fileName context.FileIndex with
         | Some fileUses ->
-            // First try to find exact containment
-            let exactMatch = 
+            // First try exact containment
+            let containmentMatch = 
                 fileUses
                 |> Array.tryFind (fun symbolUse ->
                     let sr = symbolUse.Range
-                    sr.Start.Line = range.Start.Line && 
-                    sr.Start.Column = range.Start.Column &&
-                    sr.End.Line = range.End.Line && 
-                    sr.End.Column = range.End.Column
+                    rangeContainsPosition sr range.Start &&
+                    rangeContainsPosition sr range.End
                 )
             
-            match exactMatch with
+            match containmentMatch with
             | Some symbolUse -> Some symbolUse.Symbol
             | None ->
-                // Try to find symbol that contains this range
-                fileUses
-                |> Array.tryFind (fun symbolUse ->
-                    let sr = symbolUse.Range
-                    // Symbol range contains the query range
-                    sr.Start.Line <= range.Start.Line && 
-                    sr.End.Line >= range.End.Line &&
-                    (sr.Start.Line < range.Start.Line || sr.Start.Column <= range.Start.Column) &&
-                    (sr.End.Line > range.End.Line || sr.End.Column >= range.End.Column)
-                )
-                |> Option.map (fun symbolUse -> symbolUse.Symbol)
+                // Try overlapping ranges
+                let overlapMatch =
+                    fileUses
+                    |> Array.tryFind (fun symbolUse ->
+                        rangesOverlap symbolUse.Range range
+                    )
+                
+                match overlapMatch with
+                | Some symbolUse -> Some symbolUse.Symbol
+                | None ->
+                    // Last resort: find closest symbol within 2 lines
+                    let closeMatch =
+                        fileUses
+                        |> Array.filter (fun symbolUse ->
+                            abs(symbolUse.Range.StartLine - range.StartLine) <= 2
+                        )
+                        |> Array.sortBy (fun symbolUse ->
+                            abs(symbolUse.Range.StartLine - range.StartLine) +
+                            abs(symbolUse.Range.StartColumn - range.StartColumn)
+                        )
+                        |> Array.tryHead
+                    
+                    match closeMatch with
+                    | Some symbolUse -> Some symbolUse.Symbol
+                    | None -> None
         | None -> None
 
-/// Visitor pattern for syntax tree traversal with correlation
+/// Visitor pattern for AST traversal with correlation
 type CorrelationVisitor = {
     OnBinding: SynBinding -> range -> FSharpSymbol option -> unit
     OnExpression: SynExpr -> range -> FSharpSymbol option -> unit
@@ -91,83 +117,33 @@ type CorrelationVisitor = {
     OnMember: SynMemberDefn -> range -> FSharpSymbol option -> unit
 }
 
-/// Traverse syntax tree with correlation
-let rec traverseWithCorrelation 
-    (node: obj) 
-    (fileName: string) 
-    (context: CorrelationContext) 
-    (visitor: CorrelationVisitor) =
-    
+/// Traverse AST with correlation
+let rec traverseWithCorrelation (node: obj) (fileName: string) (context: CorrelationContext) (visitor: CorrelationVisitor) =
     match node with
     | :? SynBinding as binding ->
         let symbol = tryCorrelateSymbol binding.RangeOfBindingWithRhs fileName context
         visitor.OnBinding binding binding.RangeOfBindingWithRhs symbol
-        // Extract expression from binding using pattern matching
-        let (SynBinding(_, _, _, _, _, _, _, _, _, expr, _, _, _)) = binding
-        traverseWithCorrelation expr fileName context visitor
         
     | :? SynExpr as expr ->
         let symbol = tryCorrelateSymbol expr.Range fileName context
         visitor.OnExpression expr expr.Range symbol
         
-        // Traverse subexpressions
-        match expr with
-        | SynExpr.App(_, _, funcExpr, argExpr, _) ->
-            traverseWithCorrelation funcExpr fileName context visitor
-            traverseWithCorrelation argExpr fileName context visitor
-            
-        | SynExpr.Lambda(_, _, _, bodyExpr, _, _, _) ->
-            traverseWithCorrelation bodyExpr fileName context visitor
-            
-        | SynExpr.LetOrUse(_, _, bindings, bodyExpr, _, _) ->
-            bindings |> List.iter (fun b -> traverseWithCorrelation b fileName context visitor)
-            traverseWithCorrelation bodyExpr fileName context visitor
-            
-        | SynExpr.Match(_, expr, clauses, _, _) ->
-            traverseWithCorrelation expr fileName context visitor
-            clauses |> List.iter (fun clause ->
-                let (SynMatchClause(pat, whenExpr, resultExpr, _, _, _)) = clause // 6 args with trivia
-                traverseWithCorrelation pat fileName context visitor
-                whenExpr |> Option.iter (fun e -> traverseWithCorrelation e fileName context visitor)
-                traverseWithCorrelation resultExpr fileName context visitor
-            )
-            
-        | SynExpr.Sequential(_, _, expr1, expr2, _, _) ->
-            traverseWithCorrelation expr1 fileName context visitor
-            traverseWithCorrelation expr2 fileName context visitor
-            
-        | SynExpr.Ident _ | SynExpr.LongIdent _ | SynExpr.Const _ ->
-            () // Leaf nodes, no further traversal needed
-            
-        | _ -> () // Handle other expression types as needed
-        
-    | :? SynPat as pattern ->
-        let symbol = tryCorrelateSymbol pattern.Range fileName context
-        visitor.OnPattern pattern pattern.Range symbol
-        
-        // Traverse sub-patterns
-        match pattern with
-        | SynPat.Named(_, _, _, _) | SynPat.Wild _ | SynPat.Const _ ->
-            () // Leaf patterns
-        | SynPat.Paren(pat, _) ->
-            traverseWithCorrelation pat fileName context visitor
-        | SynPat.Tuple(_, pats, _, _) ->
-            pats |> List.iter (fun p -> traverseWithCorrelation p fileName context visitor)
-        | _ -> ()
+    | :? SynPat as pat ->
+        let symbol = tryCorrelateSymbol pat.Range fileName context
+        visitor.OnPattern pat pat.Range symbol
         
     | :? SynType as synType ->
         let symbol = tryCorrelateSymbol synType.Range fileName context
         visitor.OnType synType synType.Range symbol
         
     | :? SynModuleDecl as moduleDecl ->
-        // Handle module declarations
         match moduleDecl with
         | SynModuleDecl.Let(_, bindings, _) ->
             bindings |> List.iter (fun b -> traverseWithCorrelation b fileName context visitor)
         | SynModuleDecl.Types(typeDefs, _) ->
             typeDefs |> List.iter (fun td -> traverseWithCorrelation td fileName context visitor)
-        | SynModuleDecl.Open(target, _) ->
-            () // No traversal needed for opens
+        | SynModuleDecl.Open(_, _) ->
+            ()
         | SynModuleDecl.NestedModule(_, _, decls, _, _, _) ->
             decls |> List.iter (fun d -> traverseWithCorrelation d fileName context visitor)
         | _ -> ()
@@ -217,7 +193,7 @@ let correlateFile
     
     match parsedInput with
     | ParsedInput.ImplFile(ParsedImplFileInput(fileName, _, _, _, _, modules, _, _, _)) ->
-        printfn "[Correlation Debug] Processing file: %s with %d modules" 
+        printfn "[Correlation] Processing file: %s with %d modules" 
             (System.IO.Path.GetFileName fileName) modules.Length
             
         let correlations = 
@@ -225,12 +201,11 @@ let correlateFile
             |> List.map (fun m -> correlateModule m fileName context)
             |> Array.concat
             
-        printfn "[Correlation Debug] Found %d correlations in %s" 
+        printfn "[Correlation] Found %d correlations in %s" 
             correlations.Length (System.IO.Path.GetFileName fileName)
             
         correlations
     | ParsedInput.SigFile _ ->
-        // Signature files not yet supported
         [||]
 
 /// Generate correlation statistics for debugging
@@ -251,7 +226,6 @@ let generateStats (context: CorrelationContext) (correlations: (range * FSharpSy
             | :? FSharpEntity -> "Entity"
             | :? FSharpGenericParameter -> "GenericParameter"
             | :? FSharpParameter -> "Parameter"
-            | :? FSharpStaticParameter -> "StaticParameter"
             | :? FSharpActivePatternCase -> "ActivePatternCase"
             | :? FSharpUnionCase -> "UnionCase"
             | :? FSharpField -> "Field"
@@ -263,11 +237,11 @@ let generateStats (context: CorrelationContext) (correlations: (range * FSharpSy
     let fileCoverage =
         context.FileIndex
         |> Map.map (fun fileName fileUses ->
-            let correlatedInFile = 
+            let correlatedCount = 
                 correlations 
-                |> Array.filter (fun (r, _) -> r.FileName = fileName)
+                |> Array.filter (fun (r, _) -> r.FileName = fileName) 
                 |> Array.length
-            float correlatedInFile / float fileUses.Length
+            float correlatedCount / float fileUses.Length * 100.0
         )
     
     {

@@ -10,6 +10,30 @@ open Core.PSG.Types
 open Core.PSG.Correlation
 open Core.Utilities.IntermediateWriter
 
+// Define JSON types locally since they're only needed for serialization
+type private NodeJson = {
+    Id: string
+    Kind: string
+    Symbol: string option
+    Range: {| StartLine: int; StartColumn: int; EndLine: int; EndColumn: int |}
+    SourceFile: string
+    ParentId: string option
+    Children: string[]
+}
+
+type private EdgeJson = {
+    Source: string
+    Target: string
+    Kind: string
+}
+
+type private CorrelationJson = {
+    Range: {| File: string; StartLine: int; StartColumn: int; EndLine: int; EndColumn: int |}
+    SymbolName: string
+    SymbolKind: string
+    SymbolHash: int
+}
+
 // Configure JSON options for consistent serialization
 let private jsonOptions = 
     let opts = JsonSerializerOptions(WriteIndented = true)
@@ -17,7 +41,7 @@ let private jsonOptions =
     opts
 
 /// Convert PSG node to JSON representation
-let nodeToJson (node: PSGNode) : NodeJson =
+let private nodeToJson (node: PSGNode) : NodeJson =
     {
         Id = node.Id.Value
         Kind = node.SyntaxKind
@@ -34,17 +58,24 @@ let nodeToJson (node: PSGNode) : NodeJson =
     }
 
 /// Convert edge to JSON representation
-let edgeToJson (edge: PSGEdge) : EdgeJson =
+let private edgeToJson (edge: PSGEdge) : EdgeJson =
     {
         Source = edge.Source.Value
         Target = edge.Target.Value
         Kind = 
             match edge.Kind with
             | ChildOf -> "ChildOf"
-            | SymRef -> "References"
+            | SymRef -> "SymRef"
             | TypeOf -> "TypeOf"
-            | CallsFunction -> "CallsFunction"
+            | FunctionCall -> "FunctionCall"
             | Instantiates -> "Instantiates"
+            | SymbolDef -> "SymbolDef"
+            | SymbolUse -> "SymbolUse"
+            | TypeInstantiation _ -> "TypeInstantiation"
+            | ControlFlow kind -> sprintf "ControlFlow:%A" kind
+            | DataDependency -> "DataDependency"
+            | ModuleContainment -> "ModuleContainment"
+            | TypeMembership -> "TypeMembership"
     }
 
 /// Generate correlation map for debugging
@@ -58,10 +89,10 @@ let generateCorrelationMap
             {
                 Range = {| 
                     File = Path.GetFileName(range.FileName)
-                    StartLine = range.Start.Line
-                    StartColumn = range.Start.Column
-                    EndLine = range.End.Line
-                    EndColumn = range.End.Column 
+                    StartLine = range.StartLine
+                    StartColumn = range.StartColumn
+                    EndLine = range.EndLine
+                    EndColumn = range.EndColumn 
                 |}
                 SymbolName = symbol.DisplayName
                 SymbolKind = 
@@ -72,9 +103,10 @@ let generateCorrelationMap
                     | :? FSharpParameter -> "Parameter"
                     | :? FSharpUnionCase -> "UnionCase"
                     | :? FSharpField -> "Field"
+                    | :? FSharpActivePatternCase -> "ActivePatternCase"
                     | _ -> "Other"
                 SymbolHash = symbol.GetHashCode()
-            }
+            } : CorrelationJson
         )
     
     let json = JsonSerializer.Serialize(correlationData, jsonOptions)
@@ -211,9 +243,11 @@ Symbol Distribution:
             graph.Nodes.Count
             graph.Edges.Length
             graph.EntryPoints.Length
-            (float stats.CorrelatedNodes / float stats.TotalSymbols * 100.0)
+            (if stats.TotalSymbols > 0 then float stats.CorrelatedNodes / float stats.TotalSymbols * 100.0 else 0.0)
             stats.FileCoverage.Count
-            (stats.FileCoverage |> Map.toSeq |> Seq.map snd |> Seq.average |> (*) 100.0)
+            (if stats.FileCoverage.Count > 0 then 
+                stats.FileCoverage |> Map.toSeq |> Seq.map snd |> Seq.average
+             else 0.0)
             (stats.SymbolsByKind 
              |> Map.toSeq 
              |> Seq.map (fun (kind, count) -> sprintf "  %s: %d" kind count)

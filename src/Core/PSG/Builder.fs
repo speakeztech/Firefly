@@ -1,5 +1,6 @@
 module Core.PSG.Builder
 
+open System
 open System.IO
 open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
@@ -7,7 +8,6 @@ open FSharp.Compiler.Syntax
 open FSharp.Compiler.CodeAnalysis
 open Core.PSG.Types
 open Core.PSG.Correlation
-open Core.PSG.SymbolAnalysis
 open Core.FCS.Helpers
 
 /// Build context for PSG construction
@@ -18,14 +18,8 @@ type BuildContext = {
     SourceFiles: Map<string, string>
 }
 
-/// Create a PSG node from syntax element
-let createNode 
-    (syntaxKind: string) 
-    (range: range) 
-    (fileName: string) 
-    (symbol: FSharpSymbol option) 
-    (parentId: NodeId option) =
-    
+/// Create a PSG node
+let private createNode syntaxKind range fileName symbol parentId =
     let nodeId = 
         match symbol with
         | Some sym -> NodeId.FromSymbol(sym)
@@ -38,294 +32,255 @@ let createNode
         Range = range
         SourceFile = fileName
         ParentId = parentId
-        Children = []
+        Children = []  // Will be populated by parent
     }
 
-/// Process a module declaration
-let rec processModuleDecl 
-    (decl: SynModuleDecl) 
-    (parentId: NodeId option) 
-    (fileName: string) 
-    (context: BuildContext) 
-    (graph: ProgramSemanticGraph) =
+/// Add child to parent and return updated graph
+let private addChildToParent (childId: NodeId) (parentId: NodeId option) (graph: ProgramSemanticGraph) =
+    match parentId with
+    | None -> graph
+    | Some pid ->
+        match Map.tryFind pid.Value graph.Nodes with
+        | Some parentNode ->
+            let updatedParent = { parentNode with Children = childId :: parentNode.Children }
+            { graph with Nodes = Map.add pid.Value updatedParent graph.Nodes }
+        | None -> graph
+
+/// Process a binding (let/member)
+let rec private processBinding binding parentId fileName context graph =
+    let (SynBinding(_, _, _, _, _, _, _, pat, _, expr, range, _, _)) = binding
     
-    match decl with
-    | SynModuleDecl.Let(isRec, bindings, range) ->
-        let declNode = createNode "LetDeclaration" range fileName None parentId
-        let graph' = { graph with Nodes = Map.add declNode.Id.Value declNode graph.Nodes }
-        
-        bindings 
-        |> List.fold (fun g binding -> 
-            processBinding binding (Some declNode.Id) fileName context g
-        ) graph'
-        
-    | SynModuleDecl.Types(typeDefs, range) ->
-        let declNode = createNode "TypeDeclaration" range fileName None parentId
-        let graph' = { graph with Nodes = Map.add declNode.Id.Value declNode graph.Nodes }
-        
-        typeDefs 
-        |> List.fold (fun g typeDef -> 
-            processTypeDef typeDef (Some declNode.Id) fileName context g
-        ) graph'
-        
-    | SynModuleDecl.NestedModule(componentInfo, _, decls, _, range, _) ->
+    let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
+    let bindingNode = createNode "Binding" range fileName symbol parentId
+    
+    // Add node to graph
+    let graph' = { graph with Nodes = Map.add bindingNode.Id.Value bindingNode graph.Nodes }
+    
+    // Update parent's children
+    let graph'' = addChildToParent bindingNode.Id parentId graph'
+    
+    // Update symbol table if we have a symbol
+    let graph''' = 
+        match symbol with
+        | Some sym -> 
+            { graph'' with SymbolTable = Map.add sym.DisplayName sym graph''.SymbolTable }
+        | None -> graph''
+    
+    // Process pattern and expression
+    let graph'''' = processPattern pat (Some bindingNode.Id) fileName context graph'''
+    processExpression expr (Some bindingNode.Id) fileName context graph''''
+
+/// Process a pattern
+and private processPattern pat parentId fileName context graph =
+    match pat with
+    | SynPat.Named(synIdent, _, _, range) ->
+        let (SynIdent(ident, _)) = synIdent
         let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
-        let moduleNode = createNode "NestedModule" range fileName symbol parentId
-        let graph' = { graph with Nodes = Map.add moduleNode.Id.Value moduleNode graph.Nodes }
+        let patNode = createNode (sprintf "Pattern:Named:%s" ident.idText) range fileName symbol parentId
         
-        decls 
-        |> List.fold (fun g decl -> 
-            processModuleDecl decl (Some moduleNode.Id) fileName context g
-        ) graph'
+        let graph' = { graph with Nodes = Map.add patNode.Id.Value patNode graph.Nodes }
+        let graph'' = addChildToParent patNode.Id parentId graph'
         
-    | SynModuleDecl.Open(_, range) ->
-        let openNode = createNode "OpenDeclaration" range fileName None parentId
-        { graph with Nodes = Map.add openNode.Id.Value openNode graph.Nodes }
+        // Add to symbol table if correlated
+        match symbol with
+        | Some sym ->
+            { graph'' with SymbolTable = Map.add ident.idText sym graph''.SymbolTable }
+        | None -> graph''
+        
+    | SynPat.Wild range ->
+        let wildNode = createNode "Pattern:Wild" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add wildNode.Id.Value wildNode graph.Nodes }
+        addChildToParent wildNode.Id parentId graph'
+        
+    | SynPat.Typed(innerPat, _, range) ->
+        let typedNode = createNode "Pattern:Typed" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add typedNode.Id.Value typedNode graph.Nodes }
+        let graph'' = addChildToParent typedNode.Id parentId graph'
+        processPattern innerPat (Some typedNode.Id) fileName context graph''
         
     | _ -> graph
 
-/// Process a binding
-and processBinding 
-    (binding: SynBinding) 
-    (parentId: NodeId option) 
-    (fileName: string) 
-    (context: BuildContext) 
-    (graph: ProgramSemanticGraph) =
-    
-    let (SynBinding(_, _, _, _, _, _, valData, headPat, _, expr, bindingRange, _, _)) = binding
-    
-    // Get symbol from correlation
-    let symbol = tryCorrelateSymbol bindingRange fileName context.CorrelationContext
-    let bindingNode = createNode "Binding" bindingRange fileName symbol parentId
-    
-    // Add to graph
-    let graph' = { graph with Nodes = Map.add bindingNode.Id.Value bindingNode graph.Nodes }
-    
-    // Add symbol to symbol table if present
-    let graph'' = 
-        match symbol with
-        | Some sym -> 
-            { graph' with SymbolTable = Map.add (sym.DisplayName) sym graph'.SymbolTable }
-        | None -> graph'
-    
-    // Process expression
-    processExpression expr (Some bindingNode.Id) fileName context graph''
-
-/// Find the nearest function binding in the parent chain
-and findNearestFunctionParent (parentId: NodeId option) (graph: ProgramSemanticGraph) : NodeId option =
-    match parentId with
-    | None -> None
-    | Some pid ->
-        match Map.tryFind pid.Value graph.Nodes with
-        | Some node when node.Symbol.IsSome && isFunction node.Symbol.Value -> Some pid
-        | Some node when node.SyntaxKind = "Binding" && node.Symbol.IsSome -> Some pid  // Any binding
-        | Some node -> findNearestFunctionParent node.ParentId graph
-        | None -> None
-
-/// Enhanced processExpression with smart parent linking
-and processExpression 
-    (expr: SynExpr) 
-    (parentId: NodeId option) 
-    (fileName: string) 
-    (context: BuildContext) 
-    (graph: ProgramSemanticGraph) =
-    
-    let symbol = tryCorrelateSymbol expr.Range fileName context.CorrelationContext
-    let exprKind = 
-        match expr with
-        | SynExpr.App _ -> "Application"
-        | SynExpr.Lambda _ -> "Lambda"
-        | SynExpr.LetOrUse _ -> "LetOrUse"
-        | SynExpr.Match _ -> "Match"
-        | SynExpr.Ident _ -> "Identifier"
-        | SynExpr.LongIdent _ -> "LongIdentifier"
-        | SynExpr.Const _ -> "Constant"
-        | SynExpr.Sequential _ -> "Sequential"
-        | SynExpr.IfThenElse _ -> "IfThenElse"
-        | SynExpr.TypeApp _ -> "TypeApplication"
-        | SynExpr.Paren _ -> "Parenthesized"
-        | SynExpr.Tuple _ -> "Tuple"
-        | _ -> "Expression"
-    
-    let exprNode = createNode exprKind expr.Range fileName symbol parentId
-    let graph' = { graph with Nodes = Map.add exprNode.Id.Value exprNode graph.Nodes }
-
-    let graph'' = 
-        match parentId with
-        | Some pid ->
-            let edge : PSGEdge = { Source = pid; Target = exprNode.Id; Kind = ChildOf }
-            printfn "[PSG Builder] Created ChildOf edge: %s -> %s (effective)" pid.Value exprNode.Id.Value
-            { graph' with Edges = edge :: graph'.Edges }
-        | None -> 
-            printfn "[PSG Builder] No parent for node: %s" exprNode.Id.Value
-            graph'
-
-    // Process subexpressions and create edges
+/// Process an expression
+and private processExpression expr parentId fileName context graph =
     match expr with
-    | SynExpr.App(_, _, funcExpr, argExpr, _) ->
-        // Process function and argument expressions - USE GRAPH'' WITH CHILOF EDGE
-        let graph''' = processExpression funcExpr (Some exprNode.Id) fileName context graph''
-        let graph'''' = processExpression argExpr (Some exprNode.Id) fileName context graph'''
+    | SynExpr.Ident ident ->
+        let identNode = createNode (sprintf "Ident:%s" ident.idText) expr.Range fileName None parentId
+        let graph' = { graph with Nodes = Map.add identNode.Id.Value identNode graph.Nodes }
+        let graph'' = addChildToParent identNode.Id parentId graph'
         
-        // Create direct edge from Application to target function for reachability
-        match funcExpr with
-        | SynExpr.Ident ident ->
-            let identName = ident.idText
-            printfn "[PSG Builder] Processing App: %s" identName
-            // Try correlation context first, then local table
-            let symbolOpt = 
-                tryCorrelateSymbol funcExpr.Range fileName context.CorrelationContext
-                |> Option.orElse (Map.tryFind identName graph''''.SymbolTable)
-            
-            match symbolOpt with
-            | Some targetSymbol ->
-                printfn "[PSG Builder] ✅ Created CallsFunction edge: %s -> %s" 
-                    exprNode.Id.Value targetSymbol.FullName
-                let edge : PSGEdge = { Source = exprNode.Id; Target = NodeId.FromSymbol(targetSymbol); Kind = CallsFunction }
-                { graph'''' with Edges = edge :: graph''''.Edges }
-            | None -> 
-                printfn "[PSG Builder] ❌ Symbol not found: %s" identName
-                graph''''
-            
-        | SynExpr.LongIdent(_, lid, _, _) ->
-            let fullName = lid.LongIdent |> List.map (fun id -> id.idText) |> String.concat "."
-            match Map.tryFind fullName graph''''.SymbolTable with
-            | Some targetSymbol ->
-                let edge : PSGEdge = {
-                    Source = exprNode.Id
-                    Target = NodeId.FromSymbol(targetSymbol)
-                    Kind = CallsFunction
-                }
-                { graph'''' with Edges = edge :: graph''''.Edges }
-            | None -> 
-                // Try to find in correlation context for external functions
-                let correlatedSymbol = tryCorrelateSymbol funcExpr.Range fileName context.CorrelationContext
-                match correlatedSymbol with
-                | Some targetSymbol ->
-                    let edge : PSGEdge = {
-                        Source = exprNode.Id
-                        Target = NodeId.FromSymbol(targetSymbol)
-                        Kind = CallsFunction
-                    }
-                    { graph'''' with Edges = edge :: graph''''.Edges }
-                | None -> graph''''
-        | _ -> graph''''
-        
-    | SynExpr.Lambda(_, _, _, bodyExpr, _, _, _) ->
-        processExpression bodyExpr (Some exprNode.Id) fileName context graph''
-
-    | SynExpr.LetOrUse(_, _, bindings, bodyExpr, _, _) ->
-        let graph''' = 
-            bindings 
-            |> List.fold (fun g b -> processBinding b (Some exprNode.Id) fileName context g) graph''
-        processExpression bodyExpr (Some exprNode.Id) fileName context graph'''
-        
-    | SynExpr.Match(_, matchExpr, clauses, _, _) ->
-        let graph''' = processExpression matchExpr (Some exprNode.Id) fileName context graph''
-        clauses
-        |> List.fold (fun g clause ->
-            let (SynMatchClause(pat, whenExpr, resultExpr, _, _, _)) = clause
-            let g' = processPattern pat (Some exprNode.Id) fileName context g
-            let g'' = 
-                match whenExpr with
-                | Some e -> processExpression e (Some exprNode.Id) fileName context g'
-                | None -> g'
-            processExpression resultExpr (Some exprNode.Id) fileName context g''
-        ) graph'''
-        
-    | SynExpr.Sequential(_, _, expr1, expr2, _, _) ->
-        let g' = processExpression expr1 (Some exprNode.Id) fileName context graph''
-        processExpression expr2 (Some exprNode.Id) fileName context g'
-        
-    | SynExpr.IfThenElse(ifExpr, thenExpr, elseExpr, _, _, _, _) ->
-        let g' = processExpression ifExpr (Some exprNode.Id) fileName context graph''
-        let g'' = processExpression thenExpr (Some exprNode.Id) fileName context g'
-        match elseExpr with
-        | Some expr -> processExpression expr (Some exprNode.Id) fileName context g''
-        | None -> g''
-        
-    | SynExpr.TypeApp(expr, _, _, _, _, _, _) ->
-        processExpression expr (Some exprNode.Id) fileName context graph''
-        
-    | SynExpr.Paren(expr, _, _, _) ->
-        processExpression expr (Some exprNode.Id) fileName context graph''
-        
-    | SynExpr.Tuple(_, exprs, _, _) ->
-        exprs 
-        |> List.fold (fun g e -> processExpression e (Some exprNode.Id) fileName context g) graph''
-        
-    | SynExpr.LongIdent(_, lid, _, _) ->
-        let fullName = lid.LongIdent |> List.map (fun id -> id.idText) |> String.concat "."
-        match Map.tryFind fullName graph''.SymbolTable with
+        // Create edge to symbol definition if found
+        match Map.tryFind ident.idText graph''.SymbolTable with
         | Some targetSymbol ->
-            let edge : PSGEdge = {
-                Source = exprNode.Id
+            let edge = {
+                Source = identNode.Id
                 Target = NodeId.FromSymbol(targetSymbol)
                 Kind = SymRef
             }
             { graph'' with Edges = edge :: graph''.Edges }
         | None -> graph''
         
-    | _ -> graph''
+    | SynExpr.App(_, _, funcExpr, argExpr, range) ->
+        let appNode = createNode "Application" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add appNode.Id.Value appNode graph.Nodes }
+        let graph'' = addChildToParent appNode.Id parentId graph'
+        
+        // Process function and argument
+        let graph''' = processExpression funcExpr (Some appNode.Id) fileName context graph''
+        let graph'''' = processExpression argExpr (Some appNode.Id) fileName context graph'''
+        
+        // Try to create call edge
+        match funcExpr with
+        | SynExpr.Ident funcIdent ->
+            match Map.tryFind funcIdent.idText graph''''.SymbolTable with
+            | Some funcSymbol ->
+                let edge = {
+                    Source = appNode.Id
+                    Target = NodeId.FromSymbol(funcSymbol)
+                    Kind = FunctionCall
+                }
+                { graph'''' with Edges = edge :: graph''''.Edges }
+            | None -> graph''''
+        | _ -> graph''''
+        
+    | SynExpr.LetOrUse(_, _, bindings, body, range, _) ->
+        let letNode = createNode "LetOrUse" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add letNode.Id.Value letNode graph.Nodes }
+        let graph'' = addChildToParent letNode.Id parentId graph'
+        
+        // Process bindings
+        let graph''' = 
+            bindings |> List.fold (fun g binding ->
+                processBinding binding (Some letNode.Id) fileName context g
+            ) graph''
+            
+        // Process body
+        processExpression body (Some letNode.Id) fileName context graph'''
+        
+    | SynExpr.Sequential(_, _, expr1, expr2, range, _) ->
+        let seqNode = createNode "Sequential" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add seqNode.Id.Value seqNode graph.Nodes }
+        let graph'' = addChildToParent seqNode.Id parentId graph'
+        
+        let graph''' = processExpression expr1 (Some seqNode.Id) fileName context graph''
+        processExpression expr2 (Some seqNode.Id) fileName context graph'''
+        
+    | SynExpr.Lambda(_, _, args, body, _, range, _) ->
+        let lambdaNode = createNode "Lambda" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add lambdaNode.Id.Value lambdaNode graph.Nodes }
+        let graph'' = addChildToParent lambdaNode.Id parentId graph'
+        
+        let graph''' = processSimplePats args (Some lambdaNode.Id) fileName context graph''
+        processExpression body (Some lambdaNode.Id) fileName context graph'''
+        
+    | SynExpr.Match(_, matchExpr, clauses, range, _) ->
+        let matchNode = createNode "Match" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add matchNode.Id.Value matchNode graph.Nodes }
+        let graph'' = addChildToParent matchNode.Id parentId graph'
+        
+        let graph''' = processExpression matchExpr (Some matchNode.Id) fileName context graph''
+        
+        clauses |> List.fold (fun g clause ->
+            processMatchClause clause (Some matchNode.Id) fileName context g
+        ) graph'''
+        
+    | _ -> graph
 
-/// Process a pattern
-and processPattern 
-    (pat: SynPat) 
-    (parentId: NodeId option) 
-    (fileName: string) 
-    (context: BuildContext) 
-    (graph: ProgramSemanticGraph) =
-    
-    let symbol = tryCorrelateSymbol pat.Range fileName context.CorrelationContext
-    let patNode = createNode "Pattern" pat.Range fileName symbol parentId
-    let graph' = { graph with Nodes = Map.add patNode.Id.Value patNode graph.Nodes }
-    
+/// Process simple patterns (lambda args)
+and private processSimplePats pats parentId fileName context graph =
+    let (SynSimplePats.SimplePats(patterns, _, _)) = pats
+    patterns |> List.fold (fun g pat ->
+        processSimplePat pat parentId fileName context g
+    ) graph
+
+and private processSimplePat pat parentId fileName context graph =
     match pat with
-    | SynPat.Named(synIdent, _, _, _) ->
-        let (SynIdent(ident, _)) = synIdent
-        match symbol with
-        | Some sym ->
-            { graph' with SymbolTable = Map.add ident.idText sym graph'.SymbolTable }
-        | None -> graph'
-    | _ -> graph'
+    | SynSimplePat.Id(ident, _, _, _, _, range) ->
+        let patNode = createNode (sprintf "SimplePat:%s" ident.idText) range fileName None parentId
+        let graph' = { graph with Nodes = Map.add patNode.Id.Value patNode graph.Nodes }
+        addChildToParent patNode.Id parentId graph'
+    | _ -> graph
 
-/// Process a type definition
-and processTypeDef 
-    (typeDef: SynTypeDefn) 
-    (parentId: NodeId option) 
-    (fileName: string) 
-    (context: BuildContext) 
-    (graph: ProgramSemanticGraph) =
+/// Process match clause
+and private processMatchClause clause parentId fileName context graph =
+    let (SynMatchClause(pat, whenExpr, resultExpr, range, _, _)) = clause
+    let clauseNode = createNode "MatchClause" range fileName None parentId
+    let graph' = { graph with Nodes = Map.add clauseNode.Id.Value clauseNode graph.Nodes }
+    let graph'' = addChildToParent clauseNode.Id parentId graph'
     
-    let (SynTypeDefn(componentInfo, typeRepr, members, _, range, _)) = typeDef
+    let graph''' = processPattern pat (Some clauseNode.Id) fileName context graph''
+    
+    let graph'''' = 
+        match whenExpr with
+        | Some expr -> processExpression expr (Some clauseNode.Id) fileName context graph'''
+        | None -> graph'''
+        
+    processExpression resultExpr (Some clauseNode.Id) fileName context graph''''
+
+/// Process module declaration
+let rec private processModuleDecl decl parentId fileName context graph =
+    match decl with
+    | SynModuleDecl.Let(_, bindings, range) ->
+        let letDeclNode = createNode "LetDeclaration" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add letDeclNode.Id.Value letDeclNode graph.Nodes }
+        let graph'' = addChildToParent letDeclNode.Id parentId graph'
+        
+        bindings |> List.fold (fun g binding ->
+            processBinding binding (Some letDeclNode.Id) fileName context g
+        ) graph''
+        
+    | SynModuleDecl.Types(typeDefs, range) ->
+        let typesDeclNode = createNode "TypesDeclaration" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add typesDeclNode.Id.Value typesDeclNode graph.Nodes }
+        let graph'' = addChildToParent typesDeclNode.Id parentId graph'
+        
+        typeDefs |> List.fold (fun g typeDef ->
+            processTypeDef typeDef (Some typesDeclNode.Id) fileName context g
+        ) graph''
+        
+    | SynModuleDecl.NestedModule(componentInfo, _, decls, _, range, _) ->
+        let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = componentInfo
+        let moduleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
+        let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
+        let moduleNode = createNode (sprintf "NestedModule:%s" moduleName) range fileName symbol parentId
+        
+        let graph' = { graph with Nodes = Map.add moduleNode.Id.Value moduleNode graph.Nodes }
+        let graph'' = addChildToParent moduleNode.Id parentId graph'
+        
+        decls |> List.fold (fun g decl ->
+            processModuleDecl decl (Some moduleNode.Id) fileName context g
+        ) graph''
+        
+    | SynModuleDecl.Open(target, range) ->
+        let openNode = createNode "Open" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add openNode.Id.Value openNode graph.Nodes }
+        addChildToParent openNode.Id parentId graph'
+        
+    | _ -> graph
+
+/// Process type definition
+and private processTypeDef typeDef parentId fileName context graph =
+    let (SynTypeDefn(componentInfo, _, members, _, range, _)) = typeDef
+    let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = componentInfo
+    let typeName = longId |> List.map (fun id -> id.idText) |> String.concat "."
     let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
-    let typeNode = createNode "TypeDefinition" range fileName symbol parentId
+    let typeNode = createNode (sprintf "TypeDef:%s" typeName) range fileName symbol parentId
     
     let graph' = { graph with Nodes = Map.add typeNode.Id.Value typeNode graph.Nodes }
+    let graph'' = addChildToParent typeNode.Id parentId graph'
     
-    members 
-    |> List.fold (fun g member' -> 
-        processMember member' (Some typeNode.Id) fileName context g
-    ) graph'
+    members |> List.fold (fun g memberDefn ->
+        processMemberDefn memberDefn (Some typeNode.Id) fileName context g
+    ) graph''
 
-/// Process a member definition
-and processMember 
-    (memberDefn: SynMemberDefn) 
-    (parentId: NodeId option) 
-    (fileName: string) 
-    (context: BuildContext) 
-    (graph: ProgramSemanticGraph) =
-    
+/// Process member definition
+and private processMemberDefn memberDefn parentId fileName context graph =
     match memberDefn with
-    | SynMemberDefn.Member(binding, range) ->
+    | SynMemberDefn.Member(binding, _) ->
         processBinding binding parentId fileName context graph
     | _ -> graph
 
-/// Build PSG from parsed implementation file
-let buildFromImplementationFile 
-    (implFile: ParsedImplFileInput) 
-    (context: BuildContext) =
-    
+/// Process implementation file
+let private processImplFile implFile context =
     let (ParsedImplFileInput(fileName, _, _, _, _, modules, _, _, _)) = implFile
     
     let initialGraph = {
@@ -337,174 +292,132 @@ let buildFromImplementationFile
         CompilationOrder = []
     }
     
-    let finalGraph = 
-        modules 
-        |> List.fold (fun graph moduleOrNs ->
-            let (SynModuleOrNamespace(_, _, _, decls, _, _, _, range, _)) = moduleOrNs
-            let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
-            let moduleNode = createNode "Module" range fileName symbol None
-            let graph' = { graph with Nodes = Map.add moduleNode.Id.Value moduleNode graph.Nodes }
-            
-            let graph'' = 
-                match symbol with
-                | Some sym -> 
-                    { graph' with SymbolTable = Map.add sym.DisplayName sym graph'.SymbolTable }
-                | None -> graph'
-            
-            decls 
-            |> List.fold (fun g decl -> 
-                processModuleDecl decl (Some moduleNode.Id) fileName context g
+    modules |> List.fold (fun graph modOrNs ->
+        let (SynModuleOrNamespace(longId, _, _, decls, _, _, _, range, _)) = modOrNs
+        let modulePath = longId |> List.map (fun id -> id.idText) |> String.concat "."
+        let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
+        let moduleNode = createNode (sprintf "Module:%s" modulePath) range fileName symbol None
+        
+        let graph' = { graph with Nodes = Map.add moduleNode.Id.Value moduleNode graph.Nodes }
+        
+        // Add to symbol table if correlated
+        let graph'' = 
+            match symbol with
+            | Some sym -> 
+                { graph' with SymbolTable = Map.add sym.DisplayName sym graph'.SymbolTable }
+            | None -> graph'
+        
+        // Check if this is an entry point
+        let graph''' = 
+            decls |> List.fold (fun g decl ->
+                match decl with
+                | SynModuleDecl.Let(_, bindings, _) ->
+                    bindings |> List.fold (fun g2 binding ->
+                        let (SynBinding(_, _, _, _, attrs, _, _, pat, _, _, _, _, _)) = binding
+                        let hasEntryPoint = 
+                            attrs |> List.exists (fun attrList ->
+                                attrList.Attributes |> List.exists (fun attr ->
+                                    match attr.TypeName with
+                                    | SynLongIdent(ids, _, _) ->
+                                        ids |> List.exists (fun id -> 
+                                            id.idText = "EntryPoint" || 
+                                            id.idText = "EntryPointAttribute"
+                                        )
+                                )
+                            )
+                        
+                        if hasEntryPoint then
+                            match pat with
+                            | SynPat.Named(SynIdent(ident, _), _, _, _) ->
+                                let entryNode = NodeId.FromRange(fileName, pat.Range)
+                                { g2 with EntryPoints = entryNode :: g2.EntryPoints }
+                            | _ -> g2
+                        else g2
+                    ) g
+                | _ -> g
             ) graph''
-        ) initialGraph
         
-    printfn "[PSG Debug] Built graph for %s: %d nodes" 
-        (Path.GetFileName fileName) finalGraph.Nodes.Count
-        
-    finalGraph
+        // Process all declarations
+        decls |> List.fold (fun g decl ->
+            processModuleDecl decl (Some moduleNode.Id) fileName context g
+        ) graph'''
+    ) initialGraph
 
 /// Build complete PSG from project results
 let buildProgramSemanticGraph 
     (checkResults: FSharpCheckProjectResults) 
-    (parseResults: FSharpParseFileResults[]) =
+    (parseResults: FSharpParseFileResults[]) : ProgramSemanticGraph =
     
-    printfn "[PSG Debug] CheckResults has errors: %b" checkResults.HasCriticalErrors
-    printfn "[PSG Debug] AssemblyContents files: %d" checkResults.AssemblyContents.ImplementationFiles.Length
+    printfn "[PSG] Building Program Semantic Graph"
+    printfn "[PSG] Parse results: %d files" parseResults.Length
     
+    // Create enhanced correlation context
     let correlationContext = createContext checkResults
     
-    printfn "[PSG Debug] Symbol uses found: %d across %d files" 
-        correlationContext.SymbolUses.Length
-        correlationContext.FileIndex.Count
+    printfn "[PSG] Symbol uses found: %d" correlationContext.SymbolUses.Length
     
-    let sourceFiles = 
+    // Load source files
+    let sourceFiles =
         parseResults
-        |> Array.map (fun pr -> 
-            let fileName = pr.FileName
+        |> Array.map (fun pr ->
             let content = 
-                try File.ReadAllText(fileName) 
-                with _ -> ""
-            fileName, content
+                if File.Exists pr.FileName then
+                    File.ReadAllText pr.FileName
+                else ""
+            pr.FileName, content
         )
         |> Map.ofArray
     
-    let buildContext = {
+    // Create build context
+    let context = {
         CheckResults = checkResults
         ParseResults = parseResults
         CorrelationContext = correlationContext
         SourceFiles = sourceFiles
     }
     
+    // Process each file and merge results
     let graphs = 
         parseResults
         |> Array.choose (fun pr ->
             match pr.ParseTree with
             | ParsedInput.ImplFile implFile ->
-                Some (buildFromImplementationFile implFile buildContext)
+                Some (processImplFile implFile context)
             | _ -> None
         )
     
-    printfn "[PSG Debug] Built %d file graphs" graphs.Length
-    
-    let mergedGraph = 
-        graphs 
-        |> Array.fold (fun acc g ->
+    // Merge all graphs
+    let mergedGraph =
+        if Array.isEmpty graphs then
             {
-                Nodes = Map.fold (fun m k v -> Map.add k v m) acc.Nodes g.Nodes
-                Edges = g.Edges @ acc.Edges
-                SymbolTable = Map.fold (fun m k v -> Map.add k v m) acc.SymbolTable g.SymbolTable
-                EntryPoints = g.EntryPoints @ acc.EntryPoints
-                SourceFiles = acc.SourceFiles
-                CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> Array.toList
+                Nodes = Map.empty
+                Edges = []
+                SymbolTable = Map.empty
+                EntryPoints = []
+                SourceFiles = sourceFiles
+                CompilationOrder = []
             }
-        ) {
-            Nodes = Map.empty
-            Edges = []
-            SymbolTable = Map.empty
-            EntryPoints = []
-            SourceFiles = sourceFiles
-            CompilationOrder = []
-        }
-    
-    let fullSymbolTable =
-        correlationContext.SymbolUses
-        |> Array.filter (fun su -> su.IsFromDefinition)
-        |> Array.fold (fun table su ->
-            let key = su.Symbol.DisplayName
-            Map.add key su.Symbol table
-        ) mergedGraph.SymbolTable
-    
-    printfn "[PSG Debug] Symbol table size: %d (was %d)" fullSymbolTable.Count mergedGraph.SymbolTable.Count
-    
-    let entryPoints = 
-        getEntryPointSymbols correlationContext.SymbolUses
-        |> Array.map NodeId.FromSymbol
-        |> Array.toList
-    
-    let referenceEdges =
-        correlationContext.SymbolUses
-        |> Array.filter (fun su -> su.IsFromUse)
-        |> Array.choose (fun useSym ->
-            let defOpt = 
-                correlationContext.SymbolUses
-                |> Array.tryFind (fun def -> 
-                    def.IsFromDefinition && 
-                    def.Symbol = useSym.Symbol
-                )
-            
-            match defOpt with
-            | Some def when useSym.Range <> def.Range ->
-                let edge : PSGEdge = {
-                    Source = NodeId.FromRange(useSym.Range.FileName, useSym.Range)
-                    Target = NodeId.FromSymbol(def.Symbol)
-                    Kind = SymRef
+        else
+            graphs |> Array.reduce (fun g1 g2 ->
+                {
+                    Nodes = Map.fold (fun acc k v -> Map.add k v acc) g1.Nodes g2.Nodes
+                    Edges = g1.Edges @ g2.Edges
+                    SymbolTable = Map.fold (fun acc k v -> Map.add k v acc) g1.SymbolTable g2.SymbolTable
+                    EntryPoints = g1.EntryPoints @ g2.EntryPoints
+                    SourceFiles = Map.fold (fun acc k v -> Map.add k v acc) g1.SourceFiles g2.SourceFiles
+                    CompilationOrder = g1.CompilationOrder @ g2.CompilationOrder
                 }
-                Some edge
-            | _ -> None
-        )
-        |> Array.toList
+            )
     
-    printfn "[PSG Debug] Created %d reference edges" referenceEdges.Length
-    
-    let finalGraph = { 
-        mergedGraph with 
-            EntryPoints = entryPoints
-            SymbolTable = fullSymbolTable
-            Edges = referenceEdges @ mergedGraph.Edges
-    }
-    
-    // Add validation
-    let childOfEdges = finalGraph.Edges |> List.filter (fun e -> e.Kind = ChildOf)
-    printfn "[PSG Debug] Final graph ChildOf edges: %d" childOfEdges.Length
-    
-    Success finalGraph
-
-/// Validate PSG structure
-let validateGraph (graph: ProgramSemanticGraph) =
-    let errors = ResizeArray<PSGError>()
-    
-    graph.Edges |> List.iter (fun edge ->
-        if not (Map.containsKey edge.Source.Value graph.Nodes) then
-            errors.Add {
-                Message = sprintf "Edge source node not found: %s" edge.Source.Value
-                Location = None
-                ErrorKind = InvalidNode
-            }
-        if not (Map.containsKey edge.Target.Value graph.Nodes) then
-            errors.Add {
-                Message = sprintf "Edge target node not found: %s" edge.Target.Value
-                Location = None
-                ErrorKind = InvalidNode
-            }
-    )
-    
-    if graph.EntryPoints.IsEmpty then
-        errors.Add {
-            Message = "No entry points found in PSG"
-            Location = None
-            ErrorKind = BuilderError
+    // Set compilation order based on file order
+    let finalGraph = 
+        { mergedGraph with 
+            CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> List.ofArray 
         }
     
-    if errors.Count > 0 then
-        Failure (errors.ToArray() |> Array.toList)
-    else
-        Success graph
+    printfn "[PSG] Complete: %d nodes, %d edges, %d entry points"
+        finalGraph.Nodes.Count 
+        finalGraph.Edges.Length 
+        finalGraph.EntryPoints.Length
+        
+    finalGraph
