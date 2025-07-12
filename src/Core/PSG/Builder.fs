@@ -2,7 +2,6 @@ module Core.PSG.Builder
 
 open System
 open System.IO
-open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.CodeAnalysis
@@ -323,7 +322,7 @@ and private processMemberDefn memberDefn parentId fileName context graph =
     | _ -> graph
 
 /// Process implementation file
-let private processImplFile implFile context =
+and private processImplFile implFile context =
     let (ParsedImplFileInput(fileName, _, _, _, _, modules, _, _, _)) = implFile
     
     let initialGraph = {
@@ -400,3 +399,81 @@ let private processImplFile implFile context =
         ) graph'''
     ) initialGraph
 
+/// Build complete PSG from project results
+let buildProgramSemanticGraph 
+    (checkResults: FSharpCheckProjectResults) 
+    (parseResults: FSharpParseFileResults[]) : ProgramSemanticGraph =
+    
+    printfn "[PSG] Building Program Semantic Graph"
+    printfn "[PSG] Parse results: %d files" parseResults.Length
+    
+    // Create enhanced correlation context
+    let correlationContext = createContext checkResults
+    
+    printfn "[PSG] Symbol uses found: %d" correlationContext.SymbolUses.Length
+    
+    // Load source files
+    let sourceFiles =
+        parseResults
+        |> Array.map (fun pr ->
+            let content = 
+                if File.Exists pr.FileName then
+                    File.ReadAllText pr.FileName
+                else ""
+            pr.FileName, content
+        )
+        |> Map.ofArray
+    
+    // Create build context
+    let context = {
+        CheckResults = checkResults
+        ParseResults = parseResults
+        CorrelationContext = correlationContext
+        SourceFiles = sourceFiles
+    }
+    
+    // Process each file and merge results
+    let graphs = 
+        parseResults
+        |> Array.choose (fun pr ->
+            match pr.ParseTree with
+            | ParsedInput.ImplFile implFile ->
+                Some (processImplFile implFile context)
+            | _ -> None
+        )
+    
+    // Merge all graphs
+    let mergedGraph =
+        if Array.isEmpty graphs then
+            {
+                Nodes = Map.empty
+                Edges = []
+                SymbolTable = Map.empty
+                EntryPoints = []
+                SourceFiles = sourceFiles
+                CompilationOrder = []
+            }
+        else
+            graphs |> Array.reduce (fun g1 g2 ->
+                {
+                    Nodes = Map.fold (fun acc k v -> Map.add k v acc) g1.Nodes g2.Nodes
+                    Edges = g1.Edges @ g2.Edges
+                    SymbolTable = Map.fold (fun acc k v -> Map.add k v acc) g1.SymbolTable g2.SymbolTable
+                    EntryPoints = g1.EntryPoints @ g2.EntryPoints
+                    SourceFiles = Map.fold (fun acc k v -> Map.add k v acc) g1.SourceFiles g2.SourceFiles
+                    CompilationOrder = g1.CompilationOrder @ g2.CompilationOrder
+                }
+            )
+    
+    // Set compilation order based on file order
+    let finalGraph = 
+        { mergedGraph with 
+            CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> List.ofArray 
+        }
+    
+    printfn "[PSG] Complete: %d nodes, %d edges, %d entry points"
+        finalGraph.Nodes.Count 
+        finalGraph.Edges.Length 
+        finalGraph.EntryPoints.Length
+        
+    finalGraph
