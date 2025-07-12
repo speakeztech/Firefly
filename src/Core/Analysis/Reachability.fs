@@ -111,7 +111,7 @@ let extractFunctionCallsFromPSG (psg: ProgramSemanticGraph) =
     )
 
 /// Enhanced function call extraction using multiple PSG traversal strategies
-let extractComprehensiveFunctionCalls (psg: ProgramSemanticGraph) =
+let extractFunctionCalls (psg: ProgramSemanticGraph) =
     printfn "[CALL EXTRACTION] === Comprehensive Function Call Analysis ==="
     
     // Strategy 1: Find Application nodes and their function targets via CallsFunction edges
@@ -176,96 +176,84 @@ let extractComprehensiveFunctionCalls (psg: ProgramSemanticGraph) =
     
     allCalls
 
-/// Build call graph from function relationships with enhanced entry point correlation
-let buildEnhancedCallGraph (entryPoints: FSharpSymbol list) (relationships: (string * string) list) =
-    let entryPointNames = entryPoints |> List.map (fun ep -> ep.FullName) |> Set.ofList
+
+/// Extract entry points from PSG with enhanced symbol resolution
+let extractEntryPoints (psg: ProgramSemanticGraph) =
+    printfn "[ENTRY POINTS] === Entry Point Extraction ==="
     
-    printfn "[CALL GRAPH] === Enhanced Call Graph Construction ==="
-    printfn "[CALL GRAPH] Entry points: %A" (Set.toList entryPointNames)
+    // Search all PSG nodes for main functions and EntryPoint attributes
+    let foundEntryPoints = 
+        psg.Nodes
+        |> Map.toSeq
+        |> Seq.choose (fun (_, node) ->
+            match node.Symbol with
+            | Some symbol when symbol.DisplayName = "main" ->
+                printfn "[ENTRY POINTS] Found main function: %s" symbol.FullName
+                Some symbol
+            | Some symbol ->
+                match symbol with
+                | :? FSharpMemberOrFunctionOrValue as mfv ->
+                    let hasEntryPoint = 
+                        mfv.Attributes |> Seq.exists (fun attr ->
+                            let name = attr.AttributeType.DisplayName
+                            name = "EntryPointAttribute" || 
+                            name = "EntryPoint" ||
+                            attr.AttributeType.FullName.EndsWith("EntryPointAttribute"))
+                    if hasEntryPoint then
+                        printfn "[ENTRY POINTS] Found EntryPoint function: %s" symbol.FullName
+                        Some symbol
+                    else None
+                | _ -> None
+            | None -> None
+        )
+        |> Seq.toList
     
-    // Group by caller and build basic call graph
-    let basicCallGraph = 
+    // If no symbols found, try PSG entry points list
+    let psgEntryPoints = 
+        if foundEntryPoints.IsEmpty then
+            psg.EntryPoints
+            |> List.choose (fun entryPointId ->
+                match entryPointId with
+                | SymbolNode(_, symbolName) ->
+                    Map.tryFind symbolName psg.SymbolTable
+                | _ -> None
+            )
+        else []
+    
+    let allEntryPoints = foundEntryPoints @ psgEntryPoints |> List.distinct
+    
+    printfn "[ENTRY POINTS] Total entry points: %d" allEntryPoints.Length
+    allEntryPoints |> List.iter (fun ep ->
+        printfn "[ENTRY POINTS]   %s" ep.FullName)
+    
+    allEntryPoints
+
+// REPLACE buildEnhancedCallGraph in src/Core/Analysis/Reachability.fs  
+let buildCallGraph (entryPoints: FSharpSymbol list) (relationships: (string * string) list) =
+    printfn "[CALL GRAPH] === Call Graph Construction ==="
+    
+    let callGraph = 
         relationships
         |> List.groupBy fst
         |> List.map (fun (caller, calls) ->
             caller, calls |> List.map snd |> List.distinct)
         |> Map.ofList
     
-    // Add entry points to call graph even if they don't appear as callers
-    let enhancedCallGraph = 
-        entryPointNames
-        |> Set.fold (fun graph entryPoint ->
-            if not (Map.containsKey entryPoint graph) then
-                // Find any calls that might originate from this entry point
-                let implicitCalls = 
-                    relationships
-                    |> List.choose (fun (caller, target) ->
-                        if caller = "ModuleScope" || caller = "UnknownCaller" then
-                            Some target
-                        else None)
-                    |> List.distinct
-                
-                Map.add entryPoint implicitCalls graph
+    // Ensure all entry points are in the graph
+    let finalCallGraph = 
+        entryPoints
+        |> List.fold (fun graph ep ->
+            let epName = ep.FullName
+            if not (Map.containsKey epName graph) then
+                Map.add epName [] graph
             else graph
-        ) basicCallGraph
+        ) callGraph
     
-    printfn "[CALL GRAPH] Basic call graph entries: %d" (Map.count basicCallGraph)
-    printfn "[CALL GRAPH] Enhanced call graph entries: %d" (Map.count enhancedCallGraph)
-    
-    enhancedCallGraph
+    printfn "[CALL GRAPH] Call graph entries: %d" (Map.count finalCallGraph)
+    finalCallGraph
 
-/// Extract entry points from PSG with enhanced symbol resolution
-let extractEnhancedEntryPoints (psg: ProgramSemanticGraph) =
-    printfn "[ENTRY POINTS] === Enhanced Entry Point Extraction ==="
-    
-    let directEntryPoints = 
-        psg.EntryPoints
-        |> List.choose (fun entryPointId ->
-            match entryPointId with
-            | SymbolNode(_, symbolName) ->
-                Map.tryFind symbolName psg.SymbolTable
-            | RangeNode(file, sl, sc, el, ec) ->
-                psg.Nodes
-                |> Map.toSeq
-                |> Seq.tryPick (fun (_, node) ->
-                    if node.Range.Start.Line = sl && 
-                       node.Range.Start.Column = sc &&
-                       node.Range.End.Line = el &&
-                       node.Range.End.Column = ec &&
-                       node.SourceFile.EndsWith(System.IO.Path.GetFileName(file))
-                    then node.Symbol
-                    else None
-                )
-        )
-    
-    // Also look for main functions by pattern matching
-    let mainFunctionEntryPoints = 
-        psg.Nodes
-        |> Map.toSeq
-        |> Seq.choose (fun (_, node) ->
-            match node.Symbol with
-            | Some symbol when symbol.DisplayName = "main" || symbol.FullName.EndsWith(".main") ->
-                Some symbol
-            | _ -> None
-        )
-        |> Seq.toList
-    
-    let allEntryPoints = 
-        [ directEntryPoints; mainFunctionEntryPoints ]
-        |> List.concat
-        |> List.distinct
-    
-    printfn "[ENTRY POINTS] Direct entry points: %d" directEntryPoints.Length
-    printfn "[ENTRY POINTS] Main function entry points: %d" mainFunctionEntryPoints.Length
-    printfn "[ENTRY POINTS] Total unique entry points: %d" allEntryPoints.Length
-    
-    allEntryPoints |> List.iter (fun ep ->
-        printfn "[ENTRY POINTS]   %s (%s)" ep.DisplayName ep.FullName)
-    
-    allEntryPoints
-
-/// Compute reachable symbols using enhanced breadth-first traversal
-let computeEnhancedReachableSymbols (entryPoints: FSharpSymbol list) (callGraph: Map<string, string list>) (allSymbols: Set<string>) =
+// REPLACE computeEnhancedReachableSymbols in src/Core/Analysis/Reachability.fs
+let computeReachableSymbols (entryPoints: FSharpSymbol list) (callGraph: Map<string, string list>) (allSymbols: Set<string>) =
     let rec traverse (visited: Set<string>) (queue: string list) =
         match queue with
         | [] -> visited
@@ -275,36 +263,37 @@ let computeEnhancedReachableSymbols (entryPoints: FSharpSymbol list) (callGraph:
             else
                 let newVisited = Set.add current visited
                 let callees = Map.tryFind current callGraph |> Option.defaultValue []
-                let filteredCallees = callees |> List.filter (fun callee -> not (Set.contains callee newVisited))
-                let newQueue = filteredCallees @ remaining
+                let newQueue = callees @ remaining
                 traverse newVisited newQueue
     
     let entryPointNames = entryPoints |> List.map (fun ep -> ep.FullName)
-    printfn "[REACHABILITY] Starting traversal from entry points: %A" entryPointNames
+    printfn "[REACHABILITY] Starting from entry points: %A" entryPointNames
     
-    let initialQueue = entryPointNames |> List.filter (fun name -> Set.contains name allSymbols)
-    printfn "[REACHABILITY] Valid entry points in symbol set: %d" initialQueue.Length
+    // Include entry points even if not in symbol set
+    let symbolsWithEntryPoints = 
+        entryPointNames 
+        |> List.fold (fun acc ep -> Set.add ep acc) allSymbols
     
-    let reachable = traverse Set.empty initialQueue
+    let reachable = traverse Set.empty entryPointNames
     
-    printfn "[REACHABILITY] Traversal completed, found %d reachable symbols" (Set.count reachable)
+    printfn "[REACHABILITY] Found %d reachable symbols" (Set.count reachable)
     if Set.count reachable > 0 then
-        printfn "[REACHABILITY] Sample reachable symbols:"
-        reachable |> Set.toArray |> Array.take (min 10 (Set.count reachable)) 
+        printfn "[REACHABILITY] Sample reachable:"
+        reachable |> Set.toArray |> Array.take (min 5 (Set.count reachable))
         |> Array.iter (fun s -> printfn "  ✓ %s" s)
     
     reachable
 
-/// Enhanced reachability analysis using comprehensive PSG traversal
+// REPLACE analyzeReachabilityWithBoundaries in src/Core/Analysis/Reachability.fs
 let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) : LibraryAwareReachability =
     let startTime = DateTime.UtcNow
     
-    printfn "[REACHABILITY] === Enhanced PSG-Based Analysis Start ==="
+    printfn "[REACHABILITY] === PSG-Based Analysis Start ==="
     printfn "[REACHABILITY] PSG nodes: %d" (Map.count psg.Nodes)
     printfn "[REACHABILITY] PSG edges: %d" psg.Edges.Length
-    printfn "[REACHABILITY] Entry points: %d" psg.EntryPoints.Length
+    printfn "[REACHABILITY] PSG entry points: %d" psg.EntryPoints.Length
     
-    // Extract all meaningful symbols with enhanced filtering
+    // Extract meaningful symbols
     let allSymbols = 
         psg.Nodes
         |> Map.toSeq
@@ -321,44 +310,22 @@ let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) : LibraryAware
         |> Seq.toArray
     
     let allSymbolNames = allSymbols |> Array.map (fun s -> s.FullName) |> Set.ofArray
-    
     printfn "[REACHABILITY] Total meaningful symbols: %d" allSymbols.Length
     
-    // Debug: Check if entry points are in symbol set
-    printfn "[REACHABILITY] Symbol set sample:"
-    allSymbolNames |> Set.toArray |> Array.take (min 10 (Set.count allSymbolNames))
-    |> Array.iter (fun s -> printfn "  - %s" s)
+    // Extract entry points using fixed function
+    let entryPoints = extractEntryPoints psg
     
-    // Extract entry points with enhanced resolution
-    let entryPoints = extractEnhancedEntryPoints psg
+    // Extract function calls
+    let functionCalls = extractFunctionCalls psg
     
-    // Ensure entry points are included in symbol set (critical fix)
-    let allSymbolsWithEntryPoints = 
-        let entryPointSet = entryPoints |> List.map (fun ep -> ep.FullName) |> Set.ofList
-        let currentSymbolSet = allSymbolNames
-        let missingEntryPoints = Set.difference entryPointSet currentSymbolSet
-        
-        if not (Set.isEmpty missingEntryPoints) then
-            printfn "[REACHABILITY] ⚠️  Adding missing entry points to symbol set:"
-            missingEntryPoints |> Set.iter (fun ep -> printfn "  + %s" ep)
-            Set.union currentSymbolSet missingEntryPoints
-        else 
-            printfn "[REACHABILITY] ✅ All entry points found in symbol set"
-            currentSymbolSet
+    // Build call graph
+    let callGraph = buildCallGraph entryPoints functionCalls
     
-    printfn "[REACHABILITY] Final symbol count: %d (including entry points)" (Set.count allSymbolsWithEntryPoints)
-    
-    // Extract function calls using comprehensive strategy
-    let functionCalls = extractComprehensiveFunctionCalls psg
-    
-    // Build enhanced call graph
-    let callGraph = buildEnhancedCallGraph entryPoints functionCalls
-    
-    // Compute reachable symbols with enhanced traversal
-    let reachableSymbols = computeEnhancedReachableSymbols entryPoints callGraph allSymbolsWithEntryPoints
+    // Compute reachable symbols
+    let reachableSymbols = computeReachableSymbols entryPoints callGraph allSymbolNames
     let unreachableSymbols = Set.difference allSymbolNames reachableSymbols
     
-    printfn "[REACHABILITY] === Final Results ==="
+    printfn "[REACHABILITY] === Results ==="
     printfn "[REACHABILITY] Reachable symbols: %d" (Set.count reachableSymbols)
     printfn "[REACHABILITY] Unreachable symbols: %d" (Set.count unreachableSymbols)
     
@@ -390,13 +357,12 @@ let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) : LibraryAware
             (float pruningStats.EliminatedSymbols / float allSymbols.Length) * 100.0 
         else 0.0
     
-    printfn "[REACHABILITY] === Summary ==="
     printfn "[REACHABILITY] Analysis completed in %dms" computationTime
     printfn "[REACHABILITY] Elimination rate: %.2f%%" eliminationRate
-    printfn "[REACHABILITY] ==========================="
     
     {
         BasicResult = basicResult
         LibraryCategories = libraryCategories
         PruningStatistics = pruningStats
     }
+

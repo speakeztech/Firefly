@@ -8,7 +8,7 @@ open FSharp.Compiler.Syntax
 open FSharp.Compiler.CodeAnalysis
 open Core.PSG.Types
 open Core.PSG.Correlation
-open Core.FCS.Helpers
+open Core.PSG.SymbolAnalysis
 
 /// Build context for PSG construction
 type BuildContext = {
@@ -34,6 +34,49 @@ let private createNode syntaxKind range fileName symbol parentId =
         ParentId = parentId
         Children = []  // Will be populated by parent
     }
+
+/// Verify entry point detection after PSG construction
+let private verifyEntryPoints (psg: ProgramSemanticGraph) (context: BuildContext) =
+    printfn "[PSG Builder] === Entry Point Verification ==="
+    printfn "[PSG Builder] PSG EntryPoints list: %d entries" psg.EntryPoints.Length
+    
+    // Log each entry point found
+    psg.EntryPoints |> List.iteri (fun i entryPoint ->
+        match entryPoint with
+        | SymbolNode(hash, symbolName) ->
+            printfn "[PSG Builder] Entry Point %d: Symbol=%s (hash=%d)" i symbolName hash
+        | RangeNode(file, sl, sc, el, ec) ->
+            printfn "[PSG Builder] Entry Point %d: Range=%s:%d:%d-%d:%d" i (Path.GetFileName(file)) sl sc el ec
+    )
+    
+    // Cross-check with FCS symbol data
+    let allSymbolUses = context.CheckResults.GetAllUsesOfAllSymbols() |> Array.ofSeq
+    let entryPointSymbols = getEntryPointSymbols allSymbolUses
+    
+    printfn "[PSG Builder] FCS found %d entry point symbols:" entryPointSymbols.Length
+    entryPointSymbols |> Array.iter (fun symbol ->
+        printfn "[PSG Builder]   FCS Entry Point: %s" symbol.FullName)
+    
+    // Check if PSG entry points match FCS entry points
+    let psgSymbolNames = 
+        psg.EntryPoints 
+        |> List.choose (fun ep ->
+            match ep with
+            | SymbolNode(_, name) -> Some name
+            | _ -> None)
+        |> Set.ofList
+    
+    let fcsSymbolNames = 
+        entryPointSymbols 
+        |> Array.map (fun s -> s.FullName) 
+        |> Set.ofArray
+    
+    let missing = Set.difference fcsSymbolNames psgSymbolNames
+    if not (Set.isEmpty missing) then
+        printfn "[PSG Builder] ⚠️  Missing entry points in PSG:"
+        missing |> Set.iter (fun name -> printfn "[PSG Builder]     Missing: %s" name)
+    else
+        printfn "[PSG Builder] ✅ All FCS entry points found in PSG"
 
 /// Add child to parent and return updated graph
 let private addChildToParent (childId: NodeId) (parentId: NodeId option) (graph: ProgramSemanticGraph) =
@@ -327,12 +370,26 @@ let private processImplFile implFile context =
                             )
                         
                         if hasEntryPoint then
-                            match pat with
-                            | SynPat.Named(SynIdent(ident, _), _, _, _) ->
-                                let entryNode = NodeId.FromRange(fileName, pat.Range)
-                                { g2 with EntryPoints = entryNode :: g2.EntryPoints }
-                            | _ -> g2
-                        else g2
+                            // FIXED: Actually add the entry point to the graph!
+                            let funcName = 
+                                match pat with
+                                | SynPat.Named(SynIdent(ident, _), _, _, _) -> ident.idText
+                                | _ -> "unknown"
+                            
+                            printfn "[PSG Builder] Found EntryPoint: %s at %s:%d:%d" 
+                                funcName fileName range.Start.Line range.Start.Column
+                            
+                            // Create entry point identifier
+                            let entryPointId = 
+                                let bindingSymbol = tryCorrelateSymbol range fileName context.CorrelationContext
+                                match bindingSymbol with
+                                | Some sym -> SymbolNode(sym.GetHashCode(), sym.FullName)
+                                | None -> RangeNode(fileName, range.Start.Line, range.Start.Column, range.End.Line, range.End.Column)
+                            
+                            // Add to entry points list
+                            { g2 with EntryPoints = entryPointId :: g2.EntryPoints }
+                        else 
+                            g2
                     ) g
                 | _ -> g
             ) graph''
@@ -343,81 +400,3 @@ let private processImplFile implFile context =
         ) graph'''
     ) initialGraph
 
-/// Build complete PSG from project results
-let buildProgramSemanticGraph 
-    (checkResults: FSharpCheckProjectResults) 
-    (parseResults: FSharpParseFileResults[]) : ProgramSemanticGraph =
-    
-    printfn "[PSG] Building Program Semantic Graph"
-    printfn "[PSG] Parse results: %d files" parseResults.Length
-    
-    // Create enhanced correlation context
-    let correlationContext = createContext checkResults
-    
-    printfn "[PSG] Symbol uses found: %d" correlationContext.SymbolUses.Length
-    
-    // Load source files
-    let sourceFiles =
-        parseResults
-        |> Array.map (fun pr ->
-            let content = 
-                if File.Exists pr.FileName then
-                    File.ReadAllText pr.FileName
-                else ""
-            pr.FileName, content
-        )
-        |> Map.ofArray
-    
-    // Create build context
-    let context = {
-        CheckResults = checkResults
-        ParseResults = parseResults
-        CorrelationContext = correlationContext
-        SourceFiles = sourceFiles
-    }
-    
-    // Process each file and merge results
-    let graphs = 
-        parseResults
-        |> Array.choose (fun pr ->
-            match pr.ParseTree with
-            | ParsedInput.ImplFile implFile ->
-                Some (processImplFile implFile context)
-            | _ -> None
-        )
-    
-    // Merge all graphs
-    let mergedGraph =
-        if Array.isEmpty graphs then
-            {
-                Nodes = Map.empty
-                Edges = []
-                SymbolTable = Map.empty
-                EntryPoints = []
-                SourceFiles = sourceFiles
-                CompilationOrder = []
-            }
-        else
-            graphs |> Array.reduce (fun g1 g2 ->
-                {
-                    Nodes = Map.fold (fun acc k v -> Map.add k v acc) g1.Nodes g2.Nodes
-                    Edges = g1.Edges @ g2.Edges
-                    SymbolTable = Map.fold (fun acc k v -> Map.add k v acc) g1.SymbolTable g2.SymbolTable
-                    EntryPoints = g1.EntryPoints @ g2.EntryPoints
-                    SourceFiles = Map.fold (fun acc k v -> Map.add k v acc) g1.SourceFiles g2.SourceFiles
-                    CompilationOrder = g1.CompilationOrder @ g2.CompilationOrder
-                }
-            )
-    
-    // Set compilation order based on file order
-    let finalGraph = 
-        { mergedGraph with 
-            CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> List.ofArray 
-        }
-    
-    printfn "[PSG] Complete: %d nodes, %d edges, %d entry points"
-        finalGraph.Nodes.Count 
-        finalGraph.Edges.Length 
-        finalGraph.EntryPoints.Length
-        
-    finalGraph

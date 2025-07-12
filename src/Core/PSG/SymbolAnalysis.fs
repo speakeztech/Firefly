@@ -174,19 +174,42 @@ let buildPositionIndex (symbolUses: FSharpSymbolUse[]) =
 
 /// Get all entry point symbols from the project
 let getEntryPointSymbols (symbolUses: FSharpSymbolUse[]) =
-    symbolUses
-    |> Array.filter (fun symbolUse ->
-        symbolUse.IsFromDefinition &&
-        match symbolUse.Symbol with
-        | :? FSharpMemberOrFunctionOrValue as mfv ->
-            // Check for EntryPoint attribute
-            mfv.Attributes |> Seq.exists (fun attr ->
-                attr.AttributeType.DisplayName = "EntryPointAttribute" ||
-                attr.AttributeType.DisplayName = "EntryPoint"
-            ) ||
-            // Or check for main function pattern
-            (mfv.DisplayName = "main" && mfv.DeclaringEntity.IsSome &&
-             mfv.DeclaringEntity.Value.DisplayName.EndsWith("Program"))
-        | _ -> false
-    )
-    |> Array.map (fun symbolUse -> symbolUse.Symbol)
+    printfn "[SYMBOL ANALYSIS] === Entry Point Symbol Detection ==="
+    printfn "[SYMBOL ANALYSIS] Analyzing %d symbol uses" symbolUses.Length
+    
+    let entryPointSymbols = 
+        symbolUses
+        |> Array.filter (fun symbolUse ->
+            symbolUse.IsFromDefinition &&
+            match symbolUse.Symbol with
+            | :? FSharpMemberOrFunctionOrValue as mfv ->
+                // Check for EntryPoint attribute
+                let hasEntryPointAttr = 
+                    mfv.Attributes |> Seq.exists (fun attr ->
+                        let displayName = attr.AttributeType.DisplayName
+                        let fullName = attr.AttributeType.FullName
+                        displayName = "EntryPointAttribute" ||
+                        displayName = "EntryPoint" ||
+                        fullName.EndsWith("EntryPointAttribute") ||
+                        fullName.EndsWith("EntryPoint") ||
+                        fullName = "System.EntryPointAttribute"
+                    )
+                
+                // Check for main function pattern
+                let isMainFunc = 
+                    (mfv.DisplayName = "main" || mfv.LogicalName = "main") &&
+                    mfv.IsModuleValueOrMember
+                
+                let isEntryPoint = hasEntryPointAttr || isMainFunc
+                
+                if isEntryPoint then
+                    printfn "[SYMBOL ANALYSIS] Found entry point: %s (Attr: %b, Main: %b)" 
+                        mfv.FullName hasEntryPointAttr isMainFunc
+                
+                isEntryPoint
+            | _ -> false
+        )
+        |> Array.map (fun symbolUse -> symbolUse.Symbol)
+    
+    printfn "[SYMBOL ANALYSIS] Found %d entry point symbols" entryPointSymbols.Length
+    entryPointSymbols
