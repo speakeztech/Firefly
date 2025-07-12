@@ -284,62 +284,64 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                     ReachabilityAnalysis = None
                     Diagnostics = List.ofSeq diagnostics
                 }
-            elif psg.EntryPoints.Length = 0 then
-                diagnostics.Add {
-                    Severity = Warning
-                    Message = "PSG has no entry points detected"
-                    Location = None
+            else
+                // Add warning if no entry points, but continue execution
+                if psg.EntryPoints.Length = 0 then
+                    diagnostics.Add {
+                        Severity = Warning
+                        Message = "PSG has no entry points detected"
+                        Location = None
+                    }
+                
+                printfn "[Pipeline] PSG construction complete: %d nodes, %d edges, %d entry points" 
+                    psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length
+                
+                // Step 5: Generate PSG debug outputs
+                if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                    printfn "[Pipeline] Writing PSG debug outputs..."
+                    
+                    let correlationContext = createContext projectResults.CheckResults
+                    let correlations = 
+                        projectResults.ParseResults
+                        |> Array.collect (fun pr -> correlateFile pr.ParseTree correlationContext)
+                    let stats = generateStats correlationContext correlations
+                    
+                    generateDebugOutputs psg correlations stats config.IntermediatesDir.Value
+                    writePSGSummary psg config.IntermediatesDir.Value
+                
+                // Step 6: Perform reachability analysis
+                printfn "[Pipeline] Performing PSG-based reachability analysis..."
+                let reachabilityResult = analyzeReachabilityWithBoundaries psg
+                
+                printfn "[Pipeline] Reachability analysis complete: %d/%d symbols reachable (%.1f%% eliminated)" 
+                    reachabilityResult.PruningStatistics.ReachableSymbols
+                    reachabilityResult.PruningStatistics.TotalSymbols
+                    ((float reachabilityResult.PruningStatistics.EliminatedSymbols / float reachabilityResult.PruningStatistics.TotalSymbols) * 100.0)
+                
+                // Step 7: Generate pruned PSG debug assets
+                if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                    printfn "[Pipeline] Writing pruned PSG debug assets..."
+                    
+                    let prunedSymbols = generatePrunedSymbolData psg reachabilityResult
+                    let comparisonData = generateComparisonData psg reachabilityResult
+                    let callGraphData = generateCallGraphData reachabilityResult
+                    let libraryBoundaryData = generateLibraryBoundaryData reachabilityResult
+                    
+                    writeJsonAsset config.IntermediatesDir.Value "psg.pruned.symbols.json" prunedSymbols
+                    writeJsonAsset config.IntermediatesDir.Value "reachability.analysis.json" comparisonData
+                    writeJsonAsset config.IntermediatesDir.Value "psg.callgraph.pruned.json" callGraphData
+                    writeJsonAsset config.IntermediatesDir.Value "library.boundaries.json" libraryBoundaryData
+                    
+                    printfn "[Pipeline] Pruned PSG debug assets written successfully"
+                
+                // Return successful pipeline result
+                return {
+                    Success = true
+                    ProjectResults = Some projectResults
+                    ProgramSemanticGraph = Some psg
+                    ReachabilityAnalysis = Some reachabilityResult
+                    Diagnostics = List.ofSeq diagnostics
                 }
-                
-            printfn "[Pipeline] PSG construction complete: %d nodes, %d edges, %d entry points" 
-                psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length
-            
-            // Step 5: Generate PSG debug outputs
-            if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-                printfn "[Pipeline] Writing PSG debug outputs..."
-                
-                let correlationContext = createContext projectResults.CheckResults
-                let correlations = 
-                    projectResults.ParseResults
-                    |> Array.collect (fun pr -> correlateFile pr.ParseTree correlationContext)
-                let stats = generateStats correlationContext correlations
-                
-                generateDebugOutputs psg correlations stats config.IntermediatesDir.Value
-                writePSGSummary psg config.IntermediatesDir.Value
-            
-            // Step 6: Perform reachability analysis
-            printfn "[Pipeline] Performing PSG-based reachability analysis..."
-            let reachabilityResult = analyzeReachabilityWithBoundaries psg
-            
-            printfn "[Pipeline] Reachability analysis complete: %d/%d symbols reachable (%.1f%% eliminated)" 
-                reachabilityResult.PruningStatistics.ReachableSymbols
-                reachabilityResult.PruningStatistics.TotalSymbols
-                ((float reachabilityResult.PruningStatistics.EliminatedSymbols / float reachabilityResult.PruningStatistics.TotalSymbols) * 100.0)
-            
-            // Step 7: Generate pruned PSG debug assets
-            if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-                printfn "[Pipeline] Writing pruned PSG debug assets..."
-                
-                let prunedSymbols = generatePrunedSymbolData psg reachabilityResult
-                let comparisonData = generateComparisonData psg reachabilityResult
-                let callGraphData = generateCallGraphData reachabilityResult
-                let libraryBoundaryData = generateLibraryBoundaryData reachabilityResult
-                
-                writeJsonAsset config.IntermediatesDir.Value "psg.pruned.symbols.json" prunedSymbols
-                writeJsonAsset config.IntermediatesDir.Value "reachability.analysis.json" comparisonData
-                writeJsonAsset config.IntermediatesDir.Value "psg.callgraph.pruned.json" callGraphData
-                writeJsonAsset config.IntermediatesDir.Value "library.boundaries.json" libraryBoundaryData
-                
-                printfn "[Pipeline] Pruned PSG debug assets written successfully"
-            
-            // Return successful pipeline result
-            return {
-                Success = true
-                ProjectResults = Some projectResults
-                ProgramSemanticGraph = Some psg
-                ReachabilityAnalysis = Some reachabilityResult
-                Diagnostics = List.ofSeq diagnostics
-            }
             
     with ex ->
         diagnostics.Add {
