@@ -45,7 +45,7 @@ type EdgeKind =
     | TypeOf          // Type relationship (kept for compatibility)
     | Instantiates    // Generic instantiation (kept for compatibility)
 
-/// PSG node - keeping original structure
+/// PSG node
 type PSGNode = {
     Id: NodeId
     SyntaxKind: string

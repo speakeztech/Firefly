@@ -17,21 +17,18 @@ type BuildContext = {
     SourceFiles: Map<string, string>
 }
 
-/// Create a PSG node
 let private createNode syntaxKind range fileName symbol parentId =
-    let nodeId = 
-        match symbol with
-        | Some sym -> NodeId.FromSymbol(sym)
-        | None -> NodeId.FromRange(fileName, range)
+    // Always use range-based IDs for syntax tree structure
+    let nodeId = NodeId.FromRange(fileName, range)
     
     {
         Id = nodeId
         SyntaxKind = syntaxKind
-        Symbol = symbol
+        Symbol = symbol  // Symbol correlation is separate from node identity
         Range = range
         SourceFile = fileName
         ParentId = parentId
-        Children = []  // Will be populated by parent
+        Children = []
     }
 
 /// Verify entry point detection after PSG construction
@@ -85,7 +82,18 @@ let private addChildToParent (childId: NodeId) (parentId: NodeId option) (graph:
         match Map.tryFind pid.Value graph.Nodes with
         | Some parentNode ->
             let updatedParent = { parentNode with Children = childId :: parentNode.Children }
-            { graph with Nodes = Map.add pid.Value updatedParent graph.Nodes }
+            
+            // Create ChildOf edge: parent -> child
+            let childOfEdge = {
+                Source = pid
+                Target = childId
+                Kind = ChildOf
+            }
+            
+            { graph with 
+                Nodes = Map.add pid.Value updatedParent graph.Nodes
+                Edges = childOfEdge :: graph.Edges  // ✅ ADD THE EDGE
+            }
         | None -> graph
 
 /// Process a binding (let/member)

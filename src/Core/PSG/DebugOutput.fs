@@ -8,6 +8,7 @@ open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
 open Core.PSG.Types
 open Core.PSG.Correlation
+open Core.FCS.Helpers
 open Core.Utilities.IntermediateWriter
 
 // Define JSON types locally since they're only needed for serialization
@@ -153,32 +154,46 @@ let generateSymbolTable
             {| 
                 Name = name
                 FullName = symbol.FullName
+                Hash = symbol.GetHashCode()
                 Kind = 
                     match symbol with
                     | :? FSharpMemberOrFunctionOrValue as mfv ->
                         if mfv.IsProperty then "Property"
                         elif mfv.IsEvent then "Event"
                         elif mfv.IsMember then "Member"
+                        elif mfv.IsFunction then "Function"
                         elif mfv.IsModuleValueOrMember then "ModuleValue"
-                        else "Function"
+                        else "Value"
                     | :? FSharpEntity as entity ->
-                        if entity.IsClass then "Class"
-                        elif entity.IsInterface then "Interface"
+                        if entity.IsNamespace then "Namespace"
                         elif entity.IsFSharpModule then "Module"
-                        elif entity.IsNamespace then "Namespace"
+                        elif entity.IsClass then "Class"
+                        elif entity.IsInterface then "Interface"
                         elif entity.IsFSharpRecord then "Record"
                         elif entity.IsFSharpUnion then "Union"
                         elif entity.IsEnum then "Enum"
                         elif entity.IsDelegate then "Delegate"
                         elif entity.IsFSharpAbbreviation then "Abbreviation"
+                        elif entity.IsArrayType then "Array"
                         else "Type"
+                    | :? FSharpField -> "Field"
+                    | :? FSharpUnionCase -> "UnionCase"
+                    | :? FSharpParameter -> "Parameter"
+                    | :? FSharpGenericParameter -> "GenericParameter"
+                    | :? FSharpActivePatternCase -> "ActivePattern"
                     | _ -> "Other"
-                Hash = symbol.GetHashCode()
                 Assembly = symbol.Assembly.SimpleName
+                IsFromDefinition = true
             |}
         )
     
-    let json = JsonSerializer.Serialize(symbolData, jsonOptions)
+    let exportData = {|
+        Symbols = symbolData
+        Count = symbolData.Length
+        HashToName = symbolData |> Array.map (fun s -> s.Hash, s.FullName) |> Map.ofArray
+    |}
+    
+    let json = JsonSerializer.Serialize(exportData, jsonOptions)
     writeFileToPath outputPath json
     printfn "  Wrote symbol table (%d symbols, %d bytes)" symbolData.Length json.Length
 

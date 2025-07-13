@@ -48,42 +48,43 @@ let isFunction (symbol: FSharpSymbol) : bool =
     | _ -> false
 
 /// Find enclosing function for a node by traversing containment edges upward
-let rec findEnclosingFunction (psg: ProgramSemanticGraph) (nodeId: string) (depth: int) : string option =
-    printfn "[ENCLOSING] Depth %d: Searching from node %s" depth nodeId
-    if depth > 10 then 
-        printfn "[ENCLOSING] Max depth reached"
-        None
-    else
-        match Map.tryFind nodeId psg.Nodes with
-        | Some node when node.Symbol.IsSome ->
-            let symbol = node.Symbol.Value
-            printfn "[ENCLOSING] Found symbol: %s (IsFunction: %b)" symbol.FullName (isFunction symbol)
-            if isFunction symbol then
-                Some symbol.FullName
-            else
-                let parentEdges = psg.Edges |> List.filter (fun edge -> edge.Target.Value = nodeId && edge.Kind = ChildOf)
-                printfn "[ENCLOSING] Found %d parent edges" parentEdges.Length
-                psg.Edges
-                |> List.tryPick (fun edge ->
-                    if edge.Target.Value = nodeId && edge.Kind = ChildOf then
-                        printfn "[ENCLOSING] Following parent edge to %s" edge.Source.Value
-                        findEnclosingFunction psg edge.Source.Value (depth + 1)
-                    else None
-                )
-        | Some node ->
-            printfn "[ENCLOSING] Node has no symbol, checking parents"
-            let parentEdges = psg.Edges |> List.filter (fun edge -> edge.Target.Value = nodeId && edge.Kind = ChildOf)
-            printfn "[ENCLOSING] Found %d parent edges" parentEdges.Length
+let rec findEnclosingFunction (psg: ProgramSemanticGraph) (nodeId: string) (visited: Set<string>) : string option =
+    if Set.contains nodeId visited then
+        printfn "[ERROR] Circular parent structure detected at %s" nodeId
+        printfn "[ERROR] Cycle path: %A" (Set.toList visited)
+        failwith "Circular parent-child relationships in PSG - invalid containment structure"
+    
+    if Set.count visited > 15 then 
+        printfn "[ERROR] Excessive depth reached, likely circular structure"
+        failwith "PSG containment depth exceeded - possible circular relationships"
+    
+    let newVisited = Set.add nodeId visited
+    
+    match Map.tryFind nodeId psg.Nodes with
+    | Some node when node.Symbol.IsSome ->
+        let symbol = node.Symbol.Value
+        if isFunction symbol then
+            Some symbol.FullName
+        else
             psg.Edges
             |> List.tryPick (fun edge ->
                 if edge.Target.Value = nodeId && edge.Kind = ChildOf then
-                    printfn "[ENCLOSING] Following parent edge to %s" edge.Source.Value
-                    findEnclosingFunction psg edge.Source.Value (depth + 1)
+                    findEnclosingFunction psg edge.Source.Value newVisited
                 else None
             )
-        | None ->
-            printfn "[ENCLOSING] Node not found: %s" nodeId
-            None
+    | Some node ->
+        psg.Edges
+        |> List.tryPick (fun edge ->
+            if edge.Target.Value = nodeId && edge.Kind = ChildOf then
+                findEnclosingFunction psg edge.Source.Value newVisited
+            else None
+        )
+    | None ->
+        None
+
+/// Public entry point for enclosing function search
+let findEnclosingFunctionSafe (psg: ProgramSemanticGraph) (nodeId: string) : string option =
+    findEnclosingFunction psg nodeId Set.empty
             
 /// Extract function calls using PSG structure and edge relationships
 let extractFunctionCallsFromPSG (psg: ProgramSemanticGraph) =
@@ -125,10 +126,12 @@ let extractFunctionCalls (psg: ProgramSemanticGraph) =
                 match sourceNode, targetNode with
                 | Some src, Some tgt when src.SyntaxKind = "Application" && tgt.Symbol.IsSome ->
                     // Find the calling context (parent function)
-                    let callingContext = findEnclosingFunction psg edge.Source.Value 0
+                    let callingContext = findEnclosingFunctionSafe psg edge.Source.Value
                     match callingContext with
                     | Some caller -> Some (caller, tgt.Symbol.Value.FullName)
-                    | None -> Some ("TopLevel", tgt.Symbol.Value.FullName)
+                    | None -> 
+                        printfn "[ERROR] Cannot determine calling context for %s" tgt.Symbol.Value.FullName
+                        failwith "Enclosing function detection failed - PSG parent structure broken"
                 | _ -> None
             else None
         )
