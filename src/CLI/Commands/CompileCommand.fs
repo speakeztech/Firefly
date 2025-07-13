@@ -9,8 +9,8 @@ open Core.XParsec.Foundation
 open Core.FCSIngestion.FileLoader
 open Core.Utilities.IntermediateWriter
 open CLI.Configurations.ProjectConfig
-open Dabbit.Pipeline.CompilationTypes
-open Dabbit.Pipeline.CompilationOrchestrator
+open Alex.Pipeline.CompilationTypes
+open Alex.Pipeline.CompilationOrchestrator
 
 /// Command line arguments for compile command
 type CompileArgs =

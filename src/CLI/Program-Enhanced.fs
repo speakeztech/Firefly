@@ -4,8 +4,8 @@ open System
 open System.IO
 open Argu
 open Core.XParsec.Foundation
-open Dabbit.Pipeline.CompilationOrchestrator
-open Dabbit.Pipeline.CompilationTypes
+open Alex.Pipeline.CompilationOrchestrator
+open Alex.Pipeline.CompilationTypes
 
 // ===================================================================
 // Command Line Interface Definition

@@ -4,7 +4,7 @@ open System
 open System.IO
 open Argu
 open Core.XParsec.Foundation
-open Dabbit.Pipeline.CompilationOrchestrator
+open Alex.Pipeline.CompilationOrchestrator
 
 /// Command line arguments for minimal testing
 type MinimalArgs =
