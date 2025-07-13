@@ -19,60 +19,19 @@ type BuildContext = {
 
 let private createNode syntaxKind range fileName symbol parentId =
     // Always use range-based IDs for syntax tree structure
-    let nodeId = NodeId.FromRange(fileName, range)
+    let cleanKind = (syntaxKind : string).Replace(":", "_").Replace(" ", "_")
+    let uniqueFileName = sprintf "%s_%s.fs" (System.IO.Path.GetFileNameWithoutExtension(fileName : string)) cleanKind
+    let nodeId = NodeId.FromRange(uniqueFileName, range)
     
     {
         Id = nodeId
         SyntaxKind = syntaxKind
         Symbol = symbol  // Symbol correlation is separate from node identity
         Range = range
-        SourceFile = fileName
+        SourceFile = fileName  // Keep original filename for the node
         ParentId = parentId
         Children = []
     }
-
-/// Verify entry point detection after PSG construction
-let private verifyEntryPoints (psg: ProgramSemanticGraph) (context: BuildContext) =
-    printfn "[PSG Builder] === Entry Point Verification ==="
-    printfn "[PSG Builder] PSG EntryPoints list: %d entries" psg.EntryPoints.Length
-    
-    // Log each entry point found
-    psg.EntryPoints |> List.iteri (fun i entryPoint ->
-        match entryPoint with
-        | SymbolNode(hash, symbolName) ->
-            printfn "[PSG Builder] Entry Point %d: Symbol=%s (hash=%d)" i symbolName hash
-        | RangeNode(file, sl, sc, el, ec) ->
-            printfn "[PSG Builder] Entry Point %d: Range=%s:%d:%d-%d:%d" i (Path.GetFileName(file)) sl sc el ec
-    )
-    
-    // Cross-check with FCS symbol data
-    let allSymbolUses = context.CheckResults.GetAllUsesOfAllSymbols() |> Array.ofSeq
-    let entryPointSymbols = getEntryPointSymbols allSymbolUses
-    
-    printfn "[PSG Builder] FCS found %d entry point symbols:" entryPointSymbols.Length
-    entryPointSymbols |> Array.iter (fun symbol ->
-        printfn "[PSG Builder]   FCS Entry Point: %s" symbol.FullName)
-    
-    // Check if PSG entry points match FCS entry points
-    let psgSymbolNames = 
-        psg.EntryPoints 
-        |> List.choose (fun ep ->
-            match ep with
-            | SymbolNode(_, name) -> Some name
-            | _ -> None)
-        |> Set.ofList
-    
-    let fcsSymbolNames = 
-        entryPointSymbols 
-        |> Array.map (fun s -> s.FullName) 
-        |> Set.ofArray
-    
-    let missing = Set.difference fcsSymbolNames psgSymbolNames
-    if not (Set.isEmpty missing) then
-        printfn "[PSG Builder] ⚠️  Missing entry points in PSG:"
-        missing |> Set.iter (fun name -> printfn "[PSG Builder]     Missing: %s" name)
-    else
-        printfn "[PSG Builder] ✅ All FCS entry points found in PSG"
 
 /// Add child to parent and return updated graph
 let private addChildToParent (childId: NodeId) (parentId: NodeId option) (graph: ProgramSemanticGraph) =
@@ -125,8 +84,28 @@ and private processPattern pat parentId fileName context graph =
     match pat with
     | SynPat.Named(synIdent, _, _, range) ->
         let (SynIdent(ident, _)) = synIdent
+        
+        // DEBUG: Log the details before creating the node
+        let futureNodeId = NodeId.FromRange(fileName, range)
+        printfn "[DEBUG-PATTERN] Processing pattern '%s' at %s:%d:%d" 
+            ident.idText fileName range.Start.Line range.Start.Column
+        printfn "[DEBUG-PATTERN] Future node ID: %s" futureNodeId.Value
+        printfn "[DEBUG-PATTERN] Received parentId: %A" 
+            (parentId |> Option.map (fun id -> id.Value) |> Option.defaultValue "None")
+        
+        // Check for self-reference before creating
+        match parentId with
+        | Some pid when pid.Value = futureNodeId.Value ->
+            printfn "[ERROR] SELF-REFERENCE DETECTED!"
+            printfn "[ERROR] Pattern '%s' would have itself as parent: %s" ident.idText pid.Value
+            failwith "Pattern node assigned itself as parent"
+        | _ -> ()
+        
         let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
         let patNode = createNode (sprintf "Pattern:Named:%s" ident.idText) range fileName symbol parentId
+        
+        printfn "[DEBUG-PATTERN] Created node: %s with parent: %A" 
+            patNode.Id.Value (patNode.ParentId |> Option.map (fun id -> id.Value))
         
         let graph' = { graph with Nodes = Map.add patNode.Id.Value patNode graph.Nodes }
         let graph'' = addChildToParent patNode.Id parentId graph'
@@ -138,11 +117,25 @@ and private processPattern pat parentId fileName context graph =
         | None -> graph''
         
     | SynPat.Wild range ->
+        let futureNodeId = NodeId.FromRange(fileName, range)
+        printfn "[DEBUG-PATTERN] Processing Wild pattern at %s:%d:%d" 
+            fileName range.Start.Line range.Start.Column
+        printfn "[DEBUG-PATTERN] Future node ID: %s" futureNodeId.Value
+        printfn "[DEBUG-PATTERN] Received parentId: %A" 
+            (parentId |> Option.map (fun id -> id.Value) |> Option.defaultValue "None")
+            
         let wildNode = createNode "Pattern:Wild" range fileName None parentId
         let graph' = { graph with Nodes = Map.add wildNode.Id.Value wildNode graph.Nodes }
         addChildToParent wildNode.Id parentId graph'
         
     | SynPat.Typed(innerPat, _, range) ->
+        let futureNodeId = NodeId.FromRange(fileName, range)
+        printfn "[DEBUG-PATTERN] Processing Typed pattern at %s:%d:%d" 
+            fileName range.Start.Line range.Start.Column
+        printfn "[DEBUG-PATTERN] Future node ID: %s" futureNodeId.Value
+        printfn "[DEBUG-PATTERN] Received parentId: %A" 
+            (parentId |> Option.map (fun id -> id.Value) |> Option.defaultValue "None")
+            
         let typedNode = createNode "Pattern:Typed" range fileName None parentId
         let graph' = { graph with Nodes = Map.add typedNode.Id.Value typedNode graph.Nodes }
         let graph'' = addChildToParent typedNode.Id parentId graph'

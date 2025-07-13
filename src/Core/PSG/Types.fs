@@ -22,6 +22,9 @@ type NodeId =
     static member FromRange(fileName: string, range: range) =
         RangeNode(fileName, range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
 
+    static member FromRangeWithKind(fileName: string, range: range, syntaxKind: string) =
+        RangeNode(fileName, range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
+
 /// Types of control flow
 type ControlFlowKind =
     | Sequential
