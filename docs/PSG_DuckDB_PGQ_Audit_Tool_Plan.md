@@ -848,6 +848,81 @@ let compileIncremental (changedFiles: Set<string>) (db: DuckDBConnection) =
     affectedSegments |> Seq.iter recompileSegment
 ```
 
+### 3.3 Tombstone method for dimensional pruned graph
+
+#### **Dimensional PSG with Soft Deletes**
+
+Instead of physically removing nodes, you'd add reachability metadata:
+
+```fsharp
+type PSGNode = {
+    // Existing fields
+    Id: NodeId
+    SyntaxKind: string
+    Symbol: FSharpSymbol option
+    Type: FSharpType option  // NEW: Type information
+    MemoryLayout: MemoryInfo option  // NEW: Memory requirements
+    Range: range
+    SourceFile: string
+    ParentId: NodeId option
+    ChildIds: NodeId list  
+    IncomingEdges: Set<EdgeId>  // NEW: For efficient traversal
+    OutgoingEdges: Set<EdgeId>  // NEW: For reachability
+    IsReachable: bool
+    EliminationPass: int option  // Which pass marked it dead
+    EliminationReason: string option  // Why eliminated
+    ReachabilityDistance: int option  // Steps from entry point
+}
+```
+
+#### **Powerful Dimensional Queries**
+
+
+```sql
+-- Elimination analysis by file
+SELECT 
+    Range.File,
+    COUNT(*) as total_nodes,
+    COUNT(CASE WHEN IsReachable THEN 1 END) as reachable,
+    ROUND(100.0 * COUNT(CASE WHEN NOT IsReachable THEN 1 END) / COUNT(*), 1) as elimination_rate
+FROM psg_nodes.json
+GROUP BY Range.File;
+```
+
+```sql
+-- Dead code hotspots
+SELECT 
+    EliminationReason,
+    COUNT(*) as eliminated_count
+FROM psg_nodes.json 
+WHERE NOT IsReachable
+GROUP BY EliminationReason;
+```
+
+#### **Benefits for Firefly**
+
+1. **Debugging**: "Why was this function eliminated?"
+2. **Metrics**: Real-time elimination rates during compilation
+3. **Incremental**: Change entry point → re-mark reachability without rebuilding
+4. **Transparency**: Developers can see exactly what gets pruned
+5. **Validation**: Compare multiple reachability algorithms on same graph
+6. **MLIR Generation**: Dabbit only processes `WHERE IsReachable = true` nodes
+
+#### **Pipeline Becomes Stateful**
+
+```fsharp
+// Instead of creating new pruned PSG
+let psgWithReachability = markReachability originalPsg entryPoints
+
+// DuckDB queries work on the same graph with different filters
+generateStats psgWithReachability "all"     // Full graph
+generateStats psgWithReachability "pruned"  // IsReachable only
+```
+
+This is **exactly** how production compilers handle intermediate representations - rich metadata that survives through passes for debugging and analysis. Your PSG becomes a living document of the entire compilation process!
+
+Are you thinking of implementing this as the next step after the current pruning works?
+
 ### 3.3 Benefits of DuckDB Integration
 
 1. **Efficient Graph Operations**: PGQ provides optimized graph traversal
@@ -864,6 +939,6 @@ let compileIncremental (changedFiles: Set<string>) (db: DuckDBConnection) =
 1. **Immediate**: External audit tool using existing JSON files
 2. **Short-term**: Partial integration for compilation statistics
 3. **Medium-term**: Replace in-memory PSG with DuckDB-backed implementation
-4. **Long-term**: Full integration with incremental compilation support
+4. **Long-term**: Full integration with incremental compilation support with tombstoning/soft deletes
 
 This approach provides immediate value for debugging the current PSG implementation while building toward a more sophisticated graph analysis infrastructure.

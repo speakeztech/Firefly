@@ -56,8 +56,8 @@
       <Compile Include="Core/IngestionPipeline.fs" />
       
       <!-- Dabbit Pipeline - MLIR Generation (existing) -->
-      <Compile Include="Dabbit/Pipeline/CompilationTypes.fs" />           
-      <Compile Include="Dabbit/Pipeline/CompilationOrchestrator.fs" />    
+      <Compile Include="Alex/Pipeline/CompilationTypes.fs" />           
+      <Compile Include="Alex/Pipeline/CompilationOrchestrator.fs" />    
       
       <!-- CLI - Firefly Entry Point (existing) -->
       <Compile Include="CLI/Program-Enhanced.fs" />                       
