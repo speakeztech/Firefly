@@ -178,19 +178,55 @@ and private processExpression expr parentId fileName context graph =
         let graph''' = processExpression funcExpr (Some appNode.Id) fileName context graph''
         let graph'''' = processExpression argExpr (Some appNode.Id) fileName context graph'''
         
-        // Try to create call edge
+        // Try to create call edge - handle different function expression types
         match funcExpr with
         | SynExpr.Ident funcIdent ->
             match Map.tryFind funcIdent.idText graph''''.SymbolTable with
             | Some funcSymbol ->
-                let edge = {
-                    Source = appNode.Id
-                    Target = NodeId.FromSymbol(funcSymbol)
-                    Kind = FunctionCall
-                }
-                { graph'''' with Edges = edge :: graph''''.Edges }
+                // Find the actual node that has this symbol
+                let targetNode = 
+                    graph''''.Nodes
+                    |> Map.tryPick (fun nodeId node -> 
+                        match node.Symbol with
+                        | Some sym when sym = funcSymbol -> Some node
+                        | _ -> None)
+                
+                match targetNode with
+                | Some target ->
+                    let edge = {
+                        Source = appNode.Id
+                        Target = target.Id  // ✅ Use the actual node's ID
+                        Kind = FunctionCall
+                    }
+                    { graph'''' with Edges = edge :: graph''''.Edges }
+                | None -> graph''''
             | None -> graph''''
-        | _ -> graph''''
+        | SynExpr.LongIdent(_, longIdent, _, _) ->
+            // Handle qualified function calls like Module.func
+            let (SynLongIdent(ids, _, _)) = longIdent
+            let funcName = ids |> List.map (fun id -> id.idText) |> String.concat "."
+            match Map.tryFind funcName graph''''.SymbolTable with
+            | Some funcSymbol ->
+                let targetNode = 
+                    graph''''.Nodes
+                    |> Map.tryPick (fun nodeId node -> 
+                        match node.Symbol with
+                        | Some sym when sym = funcSymbol -> Some node
+                        | _ -> None)
+                
+                match targetNode with
+                | Some target ->
+                    let edge = {
+                        Source = appNode.Id
+                        Target = target.Id  // ✅ Use the actual node's ID
+                        Kind = FunctionCall
+                    }
+                    { graph'''' with Edges = edge :: graph''''.Edges }
+                | None -> graph''''
+            | None -> graph''''
+        | _ -> 
+            // For other function expression types, just process without creating call edge
+            graph''''
         
     | SynExpr.LetOrUse(_, _, bindings, body, range, _) ->
         let letNode = createNode "LetOrUse" range fileName None parentId

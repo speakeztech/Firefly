@@ -63,9 +63,18 @@ let rec findEnclosingFunction (psg: ProgramSemanticGraph) (nodeId: string) (visi
     match Map.tryFind nodeId psg.Nodes with
     | Some node when node.Symbol.IsSome ->
         let symbol = node.Symbol.Value
-        if isFunction symbol then
-            Some symbol.FullName
-        else
+        // Accept functions, modules, and other meaningful contexts
+        match symbol with
+        | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsFunction ->
+            Some symbol.FullName  // True function
+        | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsModuleValueOrMember ->
+            Some symbol.FullName  // Module-level value/member
+        | :? FSharpEntity as entity when entity.IsFSharpModule ->
+            Some symbol.FullName  // Module context
+        | :? FSharpEntity as entity ->
+            Some symbol.FullName  // Type/entity context (handles Result, etc.)
+        | _ ->
+            // Continue searching for enclosing context
             psg.Edges
             |> List.tryPick (fun edge ->
                 if edge.Target.Value = nodeId && edge.Kind = ChildOf then
