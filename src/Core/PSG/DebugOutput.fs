@@ -1,6 +1,5 @@
 module Core.PSG.DebugOutput
 
-open System
 open System.IO
 open System.Text.Json
 open System.Text.Json.Serialization
@@ -8,7 +7,6 @@ open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
 open Core.PSG.Types
 open Core.PSG.Correlation
-open Core.FCS.Helpers
 open Core.Utilities.IntermediateWriter
 
 // Define JSON types locally since they're only needed for serialization
@@ -112,7 +110,6 @@ let generateCorrelationMap
     
     let json = JsonSerializer.Serialize(correlationData, jsonOptions)
     writeFileToPath outputPath json
-    printfn "  Wrote correlation map (%d entries, %d bytes)" correlations.Length json.Length
 
 /// Generate PSG node graph for visualization
 let generateNodeGraph 
@@ -139,8 +136,6 @@ let generateNodeGraph
     
     let json = JsonSerializer.Serialize(graphData, jsonOptions)
     writeFileToPath outputPath json
-    printfn "  Wrote node graph (%d nodes, %d edges, %d bytes)" 
-        nodesData.Length edgesData.Length json.Length
 
 /// Generate symbol table dump
 let generateSymbolTable 
@@ -195,7 +190,6 @@ let generateSymbolTable
     
     let json = JsonSerializer.Serialize(exportData, jsonOptions)
     writeFileToPath outputPath json
-    printfn "  Wrote symbol table (%d symbols, %d bytes)" symbolData.Length json.Length
 
 /// Generate all debug outputs
 let generateDebugOutputs 
@@ -203,8 +197,6 @@ let generateDebugOutputs
     (correlations: (range * FSharpSymbol)[]) 
     (stats: CorrelationStats) 
     (outputDir: string) =
-    
-    printfn "[PSG Debug] Generating debug outputs..."
     
     // Ensure output directory exists
     Directory.CreateDirectory(outputDir) |> ignore
@@ -238,7 +230,6 @@ let generateDebugOutputs
     let statsPath = Path.Combine(outputDir, "psg.stats.json")
     let statsJson = JsonSerializer.Serialize(statsData, jsonOptions)
     writeFileToPath statsPath statsJson
-    printfn "  Wrote correlation statistics (%d bytes)" statsJson.Length
     
     // Generate summary report
     let summary = 
@@ -270,6 +261,3 @@ Symbol Distribution:
     
     let summaryPath = Path.Combine(outputDir, "psg.summary.txt")
     File.WriteAllText(summaryPath, summary)
-    printfn "  Wrote summary report"
-    
-    printfn "[PSG Debug] Debug outputs complete"

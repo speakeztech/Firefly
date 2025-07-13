@@ -33,6 +33,7 @@ let private createNode syntaxKind range fileName symbol parentId =
         Children = []
     }
 
+
 /// Add child to parent and return updated graph
 let private addChildToParent (childId: NodeId) (parentId: NodeId option) (graph: ProgramSemanticGraph) =
     match parentId with
@@ -87,25 +88,16 @@ and private processPattern pat parentId fileName context graph =
         
         // DEBUG: Log the details before creating the node
         let futureNodeId = NodeId.FromRange(fileName, range)
-        printfn "[DEBUG-PATTERN] Processing pattern '%s' at %s:%d:%d" 
-            ident.idText fileName range.Start.Line range.Start.Column
-        printfn "[DEBUG-PATTERN] Future node ID: %s" futureNodeId.Value
-        printfn "[DEBUG-PATTERN] Received parentId: %A" 
-            (parentId |> Option.map (fun id -> id.Value) |> Option.defaultValue "None")
         
         // Check for self-reference before creating
         match parentId with
         | Some pid when pid.Value = futureNodeId.Value ->
-            printfn "[ERROR] SELF-REFERENCE DETECTED!"
-            printfn "[ERROR] Pattern '%s' would have itself as parent: %s" ident.idText pid.Value
             failwith "Pattern node assigned itself as parent"
         | _ -> ()
         
         let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
         let patNode = createNode (sprintf "Pattern:Named:%s" ident.idText) range fileName symbol parentId
         
-        printfn "[DEBUG-PATTERN] Created node: %s with parent: %A" 
-            patNode.Id.Value (patNode.ParentId |> Option.map (fun id -> id.Value))
         
         let graph' = { graph with Nodes = Map.add patNode.Id.Value patNode graph.Nodes }
         let graph'' = addChildToParent patNode.Id parentId graph'
@@ -117,24 +109,12 @@ and private processPattern pat parentId fileName context graph =
         | None -> graph''
         
     | SynPat.Wild range ->
-        let futureNodeId = NodeId.FromRange(fileName, range)
-        printfn "[DEBUG-PATTERN] Processing Wild pattern at %s:%d:%d" 
-            fileName range.Start.Line range.Start.Column
-        printfn "[DEBUG-PATTERN] Future node ID: %s" futureNodeId.Value
-        printfn "[DEBUG-PATTERN] Received parentId: %A" 
-            (parentId |> Option.map (fun id -> id.Value) |> Option.defaultValue "None")
-            
         let wildNode = createNode "Pattern:Wild" range fileName None parentId
         let graph' = { graph with Nodes = Map.add wildNode.Id.Value wildNode graph.Nodes }
         addChildToParent wildNode.Id parentId graph'
         
     | SynPat.Typed(innerPat, _, range) ->
         let futureNodeId = NodeId.FromRange(fileName, range)
-        printfn "[DEBUG-PATTERN] Processing Typed pattern at %s:%d:%d" 
-            fileName range.Start.Line range.Start.Column
-        printfn "[DEBUG-PATTERN] Future node ID: %s" futureNodeId.Value
-        printfn "[DEBUG-PATTERN] Received parentId: %A" 
-            (parentId |> Option.map (fun id -> id.Value) |> Option.defaultValue "None")
             
         let typedNode = createNode "Pattern:Typed" range fileName None parentId
         let graph' = { graph with Nodes = Map.add typedNode.Id.Value typedNode graph.Nodes }
@@ -412,9 +392,6 @@ and private processImplFile implFile context =
                                 | SynPat.Named(SynIdent(ident, _), _, _, _) -> ident.idText
                                 | _ -> "unknown"
                             
-                            printfn "[PSG Builder] Found EntryPoint: %s at %s:%d:%d" 
-                                funcName fileName range.Start.Line range.Start.Column
-                            
                             // Create entry point identifier
                             let entryPointId = 
                                 let bindingSymbol = tryCorrelateSymbol range fileName context.CorrelationContext
@@ -441,13 +418,8 @@ let buildProgramSemanticGraph
     (checkResults: FSharpCheckProjectResults) 
     (parseResults: FSharpParseFileResults[]) : ProgramSemanticGraph =
     
-    printfn "[PSG] Building Program Semantic Graph"
-    printfn "[PSG] Parse results: %d files" parseResults.Length
-    
     // Create enhanced correlation context
     let correlationContext = createContext checkResults
-    
-    printfn "[PSG] Symbol uses found: %d" correlationContext.SymbolUses.Length
     
     // Load source files
     let sourceFiles =
@@ -507,10 +479,5 @@ let buildProgramSemanticGraph
         { mergedGraph with 
             CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> List.ofArray 
         }
-    
-    printfn "[PSG] Complete: %d nodes, %d edges, %d entry points"
-        finalGraph.Nodes.Count 
-        finalGraph.Edges.Length 
-        finalGraph.EntryPoints.Length
         
     finalGraph
