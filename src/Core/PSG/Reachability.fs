@@ -77,7 +77,7 @@ let isFunction (symbol: FSharpSymbol) : bool =
     | :? FSharpMemberOrFunctionOrValue as mfv -> mfv.IsFunction || mfv.IsMember
     | _ -> false
 
-/// Find the containing function for a given node
+/// FIXED: Find the containing function for a given node with proper function detection
 let findContainingFunction (psg: ProgramSemanticGraph) (nodeId: string) : string option =
     let visited = System.Collections.Generic.HashSet<string>()
     
@@ -89,16 +89,43 @@ let findContainingFunction (psg: ProgramSemanticGraph) (nodeId: string) : string
             visited.Add(currentId) |> ignore
             match Map.tryFind currentId psg.Nodes with
             | Some node ->
+                // Check if current node has a function symbol
                 match node.Symbol with
-                | Some (:? FSharpMemberOrFunctionOrValue as mfv) when mfv.IsFunction ->
-                    Some mfv.FullName
-                | _ ->
+                | Some symbol ->
+                    match symbol with
+                    | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsFunction ->
+                        // Found a REAL function - return its full name
+                        Some symbol.FullName
+                    | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsModuleValueOrMember ->
+                        // Module value or member - check if it's actually a function
+                        if mfv.IsFunction then
+                            Some symbol.FullName
+                        else
+                            // NOT a function (like let bindings) - continue traversing up
+                            match node.ParentId with
+                            | Some parentId -> traverse parentId.Value
+                            | None -> None
+                    | :? FSharpEntity as entity when entity.IsFSharpModule ->
+                        // Found a module - only accept as last resort
+                        match node.ParentId with
+                        | Some parentId -> 
+                            // Try to continue up first
+                            match traverse parentId.Value with
+                            | Some higherFunction -> Some higherFunction
+                            | None -> Some symbol.FullName  // Use module as fallback
+                        | None -> Some symbol.FullName
+                    | _ ->
+                        // Other symbol type - continue traversing up
+                        match node.ParentId with
+                        | Some parentId -> traverse parentId.Value
+                        | None -> None
+                | None ->
+                    // No symbol - continue traversing up parent chain
                     match node.ParentId with
-                    | Some parentId -> 
-                        traverse parentId.Value
-                    | None -> 
-                        None
+                    | Some parentId -> traverse parentId.Value
+                    | None -> None
             | None -> 
+                // Node not found in graph
                 None
     
     traverse nodeId
@@ -201,44 +228,68 @@ let extractEntryPoints (psg: ProgramSemanticGraph) =
     
     allEntryPoints
 
-/// Extract function calls using PSG FunctionCall edges
+/// FIXED: Extract function calls using PSG FunctionCall edges with better error handling
 let extractFunctionCalls (psg: ProgramSemanticGraph) =
-    // printfn "[CALL EXTRACTION] === Function Call Analysis ==="
+    printfn "[CALL EXTRACTION] === Function Call Analysis ==="
+    
+    let functionCallEdges = psg.Edges |> List.filter (fun e -> e.Kind = FunctionCall)
+    printfn "[CALL EXTRACTION] Processing %d FunctionCall edges" functionCallEdges.Length
     
     let functionCalls = 
-        psg.Edges
+        functionCallEdges
         |> List.choose (fun edge ->
-            if edge.Kind = FunctionCall then
-                let sourceNode = Map.tryFind edge.Source.Value psg.Nodes
-                let targetNode = Map.tryFind edge.Target.Value psg.Nodes
-                
-                match sourceNode, targetNode with
-                | Some src, Some tgt when tgt.Symbol.IsSome ->
-                    let callingContext = findContainingFunction psg edge.Source.Value
-                    match callingContext with
-                    | Some caller -> 
-                        Some (caller, tgt.Symbol.Value.FullName)
+            let sourceNode = Map.tryFind edge.Source.Value psg.Nodes
+            let targetNode = Map.tryFind edge.Target.Value psg.Nodes
+            
+            match sourceNode, targetNode with
+            | Some src, Some tgt when tgt.Symbol.IsSome ->
+                // Try to find containing function
+                let callingContext = findContainingFunction psg edge.Source.Value
+                match callingContext with
+                | Some caller -> 
+                    printfn "[CALL EXTRACTION] %s -> %s (context: %s)" caller tgt.Symbol.Value.FullName caller
+                    Some (caller, tgt.Symbol.Value.FullName)
+                | None -> 
+                    // Fallback: use source node's symbol if available
+                    match src.Symbol with
+                    | Some srcSymbol -> 
+                        printfn "[CALL EXTRACTION] %s -> %s (direct)" srcSymbol.FullName tgt.Symbol.Value.FullName
+                        Some (srcSymbol.FullName, tgt.Symbol.Value.FullName)
                     | None -> 
-                        match src.Symbol with
-                        | Some srcSymbol -> Some (srcSymbol.FullName, tgt.Symbol.Value.FullName)
-                        | None -> 
-                            // printfn "[CALL EXTRACTION] Cannot determine calling context for %s" tgt.Symbol.Value.FullName
-                            None
-                | _ -> None
-            else None
+                        printfn "[CALL EXTRACTION] Cannot determine calling context for %s" tgt.Symbol.Value.FullName
+                        None
+            | Some _, Some tgt ->
+                printfn "[CALL EXTRACTION] Target node %s has no symbol" edge.Target.Value
+                None
+            | Some _, None ->
+                printfn "[CALL EXTRACTION] Target node %s not found" edge.Target.Value
+                None
+            | None, _ ->
+                printfn "[CALL EXTRACTION] Source node %s not found" edge.Source.Value
+                None
         )
     
-    // printfn "[CALL EXTRACTION] Function calls found: %d" functionCalls.Length
-    (*
+    printfn "[CALL EXTRACTION] Function calls found: %d" functionCalls.Length
+    
     if functionCalls.Length > 0 then
         printfn "[CALL EXTRACTION] Function calls:"
         functionCalls 
         |> List.iter (fun (src, tgt) -> printfn "  %s -> %s" src tgt)
     else
         printfn "[CALL EXTRACTION] WARNING: No function calls detected!"
-        let functionCallEdges = psg.Edges |> List.filter (fun e -> e.Kind = FunctionCall) |> List.length
-        printfn "[CALL EXTRACTION] FunctionCall edges available: %d" functionCallEdges
-    *)
+        printfn "[CALL EXTRACTION] Available FunctionCall edges: %d" functionCallEdges.Length
+        
+        // Debug: Show what edges we have
+        if functionCallEdges.Length > 0 then
+            printfn "[CALL EXTRACTION] Sample FunctionCall edges:"
+            functionCallEdges
+            |> List.take (min 5 functionCallEdges.Length)
+            |> List.iter (fun edge ->
+                let srcExists = Map.containsKey edge.Source.Value psg.Nodes
+                let tgtExists = Map.containsKey edge.Target.Value psg.Nodes
+                printfn "  %s -> %s (src exists: %b, tgt exists: %b)" 
+                    edge.Source.Value edge.Target.Value srcExists tgtExists)
+    
     functionCalls
 
 /// Build comprehensive call graph with entry point integration

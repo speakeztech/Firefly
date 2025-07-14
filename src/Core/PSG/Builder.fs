@@ -5,6 +5,7 @@ open System.IO
 open FSharp.Compiler.Text
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.Symbols
 open Core.PSG.Types
 open Core.PSG.Correlation
 open Core.PSG.TypeIntegration
@@ -46,22 +47,22 @@ let private addChildToParent (childId: NodeId) (parentId: NodeId option) (graph:
 
 /// Process a binding (let/member) - Using existing FCS 43.9.300 patterns (preserved from original)
 let rec private processBinding binding parentId fileName context graph =
-    let (SynBinding(accessibility, kind, isInline, isMutable, attributes, xmlDoc, valData, pat, returnInfo, expr, range, seqPoint, trivia)) = binding
-    
-    let symbol : FSharp.Compiler.Symbols.FSharpSymbol option = tryCorrelateSymbol range fileName context.CorrelationContext
-    let bindingNode = createNode "Binding" range fileName symbol parentId
-    
-    let graph' = { graph with Nodes = Map.add bindingNode.Id.Value bindingNode graph.Nodes }
-    let graph'' = addChildToParent bindingNode.Id parentId graph'
-    
-    let graph''' = 
-        match symbol with
-        | Some sym -> 
-            { graph'' with SymbolTable = Map.add sym.DisplayName sym graph''.SymbolTable }
-        | None -> graph''
-    
-    let graph'''' = processPattern pat (Some bindingNode.Id) fileName context graph'''
-    processExpression expr (Some bindingNode.Id) fileName context graph''''
+    match binding with
+    | SynBinding(accessibility, kind, isInline, isMutable, attributes, xmlDoc, valData, pat, returnInfo, expr, range, seqPoint, trivia) ->
+        let symbol : FSharp.Compiler.Symbols.FSharpSymbol option = tryCorrelateSymbol range fileName context.CorrelationContext
+        let bindingNode = createNode "Binding" range fileName symbol parentId
+        
+        let graph' = { graph with Nodes = Map.add bindingNode.Id.Value bindingNode graph.Nodes }
+        let graph'' = addChildToParent bindingNode.Id parentId graph'
+        
+        let graph''' = 
+            match symbol with
+            | Some sym -> 
+                { graph'' with SymbolTable = Map.add sym.DisplayName sym graph''.SymbolTable }
+            | None -> graph''
+        
+        let graph'''' = processPattern pat (Some bindingNode.Id) fileName context graph'''
+        processExpression expr (Some bindingNode.Id) fileName context graph''''
 
 /// Process a pattern - Using existing FCS 43.9.300 patterns (preserved from original)
 and private processPattern pat parentId fileName context graph =
@@ -579,6 +580,11 @@ and private processExpression (expr: SynExpr) (parentId: NodeId option) (fileNam
         let graph' = { graph with Nodes = Map.add discardNode.Id.Value discardNode graph.Nodes }
         let graph'' = addChildToParent discardNode.Id parentId graph'
         processExpression expr (Some discardNode.Id) fileName context graph''
+
+    | SynExpr.DebugPoint(_, _, expr) ->
+        // DebugPoint wraps an expression with debug metadata - process the inner expression
+        processExpression expr parentId fileName context graph
+
             
 
 /// Process a module declaration - Using existing FCS 43.9.300 patterns (preserved from original)
@@ -599,7 +605,7 @@ and private processModuleDecl decl parentId fileName context graph =
         addChildToParent openNode.Id parentId graph'
         
     | SynModuleDecl.NestedModule(componentInfo, _, decls, _, range, _) ->
-        let (SynComponentInfo(attributes, typeParams, constraints, longId, xmlDoc, preferPostfix, accessibility, range2)) = componentInfo
+        let (SynComponentInfo(attributes, typeArgs, constraints, longId, xmlDoc, preferPostfix, accessibility, range2)) = componentInfo
         let moduleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
         
         let symbol : FSharp.Compiler.Symbols.FSharpSymbol option = tryCorrelateSymbol range fileName context.CorrelationContext
@@ -741,30 +747,48 @@ let buildProgramSemanticGraph
                     | Parent childIds -> childIds
                     | _ -> []
                 
-                // Look for Ident child nodes that represent the function being called
+                // Look for LongIdent child nodes that represent the function being called
                 children
                 |> List.tryPick (fun childId ->
                     match Map.tryFind childId.Value graph.Nodes with
-                    | Some childNode when childNode.SyntaxKind.StartsWith("Ident:") ->
+                    | Some childNode when childNode.SyntaxKind.StartsWith("LongIdent:") ->
+                        // Found a LongIdent node - this represents a function call
                         match childNode.Symbol with
                         | Some funcSymbol ->
-                            // Find the target function node by symbol
-                            let targetNode = 
-                                graph.Nodes
-                                |> Map.tryPick (fun _ node -> 
-                                    match node.Symbol with
-                                    | Some sym when sym.FullName = funcSymbol.FullName -> Some node
-                                    | _ -> None)
-                            match targetNode with
-                            | Some target ->
-                                Some { Source = appNode.Id; Target = target.Id; Kind = FunctionCall }
-                            | None -> None
+                            // Create edge from App node to the LongIdent node (not some other binding!)
+                            Some { Source = appNode.Id; Target = childNode.Id; Kind = FunctionCall }
+                        | None -> None
+                    | Some childNode when childNode.SyntaxKind.StartsWith("Ident:") ->
+                        // Also handle simple Ident nodes for function calls
+                        match childNode.Symbol with
+                        | Some funcSymbol ->
+                            // Check if this is actually a function (not a variable)
+                            match funcSymbol with
+                            | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsFunction ->
+                                Some { Source = appNode.Id; Target = childNode.Id; Kind = FunctionCall }
+                            | _ -> None
                         | None -> None
                     | _ -> None
                 )
             )
         
         printfn "[BUILDER] Created %d function call edges" functionCallEdges.Length
+        
+        // Debug: Show what edges we're creating
+        if functionCallEdges.Length > 0 then
+            printfn "[BUILDER] Sample function call edges:"
+            functionCallEdges
+            |> List.take (min 5 functionCallEdges.Length)
+            |> List.iter (fun edge ->
+                let sourceNode = Map.tryFind edge.Source.Value graph.Nodes
+                let targetNode = Map.tryFind edge.Target.Value graph.Nodes
+                match sourceNode, targetNode with
+                | Some src, Some tgt ->
+                    let targetSymbol = tgt.Symbol |> Option.map (fun s -> s.FullName) |> Option.defaultValue "no symbol"
+                    printfn "  %s -> %s (%s)" src.SyntaxKind tgt.SyntaxKind targetSymbol
+                | _ -> printfn "  Invalid edge: %s -> %s" edge.Source.Value edge.Target.Value
+            )
+        
         { graph with Edges = graph.Edges @ functionCallEdges }
     
     let edgeEnhancedGraph = createFunctionCallEdges typeEnhancedGraph
