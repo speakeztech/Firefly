@@ -79,17 +79,27 @@ let isFunction (symbol: FSharpSymbol) : bool =
 
 /// Find the containing function for a given node
 let findContainingFunction (psg: ProgramSemanticGraph) (nodeId: string) : string option =
+    let visited = System.Collections.Generic.HashSet<string>()
+    
     let rec traverse currentId =
-        match Map.tryFind currentId psg.Nodes with
-        | Some node ->
-            match node.Symbol with
-            | Some (:? FSharpMemberOrFunctionOrValue as mfv) when mfv.IsFunction ->
-                Some mfv.FullName
-            | _ ->
-                match node.ParentId with
-                | Some parentId -> traverse parentId.Value
-                | None -> None
-        | None -> None
+        if visited.Contains(currentId) then
+            printfn "[CYCLE] Detected cycle at node: %s" currentId
+            None
+        else
+            visited.Add(currentId) |> ignore
+            match Map.tryFind currentId psg.Nodes with
+            | Some node ->
+                match node.Symbol with
+                | Some (:? FSharpMemberOrFunctionOrValue as mfv) when mfv.IsFunction ->
+                    Some mfv.FullName
+                | _ ->
+                    match node.ParentId with
+                    | Some parentId -> 
+                        traverse parentId.Value
+                    | None -> 
+                        None
+            | None -> 
+                None
     
     traverse nodeId
 
@@ -193,7 +203,7 @@ let extractEntryPoints (psg: ProgramSemanticGraph) =
 
 /// Extract function calls using PSG FunctionCall edges
 let extractFunctionCalls (psg: ProgramSemanticGraph) =
-    printfn "[CALL EXTRACTION] === Function Call Analysis ==="
+    // printfn "[CALL EXTRACTION] === Function Call Analysis ==="
     
     let functionCalls = 
         psg.Edges
@@ -212,14 +222,14 @@ let extractFunctionCalls (psg: ProgramSemanticGraph) =
                         match src.Symbol with
                         | Some srcSymbol -> Some (srcSymbol.FullName, tgt.Symbol.Value.FullName)
                         | None -> 
-                            printfn "[CALL EXTRACTION] Cannot determine calling context for %s" tgt.Symbol.Value.FullName
+                            // printfn "[CALL EXTRACTION] Cannot determine calling context for %s" tgt.Symbol.Value.FullName
                             None
                 | _ -> None
             else None
         )
     
-    printfn "[CALL EXTRACTION] Function calls found: %d" functionCalls.Length
-    
+    // printfn "[CALL EXTRACTION] Function calls found: %d" functionCalls.Length
+    (*
     if functionCalls.Length > 0 then
         printfn "[CALL EXTRACTION] Function calls:"
         functionCalls 
@@ -228,7 +238,7 @@ let extractFunctionCalls (psg: ProgramSemanticGraph) =
         printfn "[CALL EXTRACTION] WARNING: No function calls detected!"
         let functionCallEdges = psg.Edges |> List.filter (fun e -> e.Kind = FunctionCall) |> List.length
         printfn "[CALL EXTRACTION] FunctionCall edges available: %d" functionCallEdges
-    
+    *)
     functionCalls
 
 /// Build comprehensive call graph with entry point integration
