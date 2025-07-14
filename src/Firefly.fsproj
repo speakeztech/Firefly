@@ -7,7 +7,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.4.103</Version>
+    <Version>0.4.111</Version>
     <Description>Firefly F# Compiler - Deep FCS Integration</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
@@ -71,6 +71,14 @@
   </ItemGroup>
 
 </Project>
+
+
+
+
+
+
+
+
 
 
 

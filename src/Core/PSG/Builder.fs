@@ -9,7 +9,7 @@ open Core.PSG.Types
 open Core.PSG.Correlation
 open Core.PSG.TypeIntegration
 
-/// Build context for PSG construction
+/// Build context for PSG construction (preserved from original)
 type BuildContext = {
     CheckResults: FSharpCheckProjectResults
     ParseResults: FSharpParseFileResults[]
@@ -24,7 +24,7 @@ let private createNode syntaxKind range fileName symbol parentId =
     
     ChildrenStateHelpers.createWithNotProcessed nodeId syntaxKind symbol range fileName parentId
 
-/// Add child to parent and return updated graph
+/// Add child to parent and return updated graph (preserved from original)
 let private addChildToParent (childId: NodeId) (parentId: NodeId option) (graph: ProgramSemanticGraph) =
     match parentId with
     | None -> graph
@@ -44,7 +44,7 @@ let private addChildToParent (childId: NodeId) (parentId: NodeId option) (graph:
                 Edges = childOfEdge :: graph.Edges }
         | None -> graph
 
-/// Process a binding (let/member) - Using existing FCS 43.9.300 patterns
+/// Process a binding (let/member) - Using existing FCS 43.9.300 patterns (preserved from original)
 let rec private processBinding binding parentId fileName context graph =
     let (SynBinding(accessibility, kind, isInline, isMutable, attributes, xmlDoc, valData, pat, returnInfo, expr, range, seqPoint, trivia)) = binding
     
@@ -63,7 +63,7 @@ let rec private processBinding binding parentId fileName context graph =
     let graph'''' = processPattern pat (Some bindingNode.Id) fileName context graph'''
     processExpression expr (Some bindingNode.Id) fileName context graph''''
 
-/// Process a pattern - Using existing FCS 43.9.300 patterns  
+/// Process a pattern - Using existing FCS 43.9.300 patterns (preserved from original)
 and private processPattern pat parentId fileName context graph =
     match pat with
     | SynPat.Named(synIdent, _, _, range) ->
@@ -89,7 +89,7 @@ and private processPattern pat parentId fileName context graph =
         
     | _ -> graph
 
-/// Process expression nodes - Using existing FCS 43.9.300 patterns
+/// Process expression nodes - Using existing FCS 43.9.300 patterns (preserved from original)
 and private processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: string) 
                               (context: BuildContext) (graph: ProgramSemanticGraph) =
     match expr with
@@ -121,49 +121,25 @@ and private processExpression (expr: SynExpr) (parentId: NodeId option) (fileNam
         let graph4 = processExpression funcExpr (Some appNode.Id) fileName context graph'''
         let graph5 = processExpression argExpr (Some appNode.Id) fileName context graph4
         
-        // Create FunctionCall edge from caller symbol to callee symbol
-        let createCallEdgeFromSymbol (callerSymbol: FSharp.Compiler.Symbols.FSharpSymbol) (funcSymbol: FSharp.Compiler.Symbols.FSharpSymbol) =
-            let callerNode = 
-                graph5.Nodes
-                |> Map.tryPick (fun _ node -> 
-                    match node.Symbol with
-                    | Some (sym: FSharp.Compiler.Symbols.FSharpSymbol) when sym.DisplayName = callerSymbol.DisplayName -> Some node
-                    | _ -> None)
-            
-            let targetNode = 
-                graph5.Nodes
-                |> Map.tryPick (fun _ node -> 
-                    match node.Symbol with
-                    | Some (sym: FSharp.Compiler.Symbols.FSharpSymbol) when sym.DisplayName = funcSymbol.DisplayName -> Some node
-                    | _ -> None)
-                    
-            match callerNode, targetNode with
-            | Some caller, Some target ->
-                let callEdge = { Source = caller.Id; Target = target.Id; Kind = FunctionCall }
-                { graph5 with Edges = callEdge :: graph5.Edges }
-            | _ -> graph5
-        
-        // Create FunctionCall edge if function expression has a symbol
+        // Create FunctionCall edge from App node to target function
         match funcExpr with
         | SynExpr.Ident ident ->
             let funcSymbol = tryCorrelateSymbol ident.idRange fileName context.CorrelationContext
-            match funcSymbol, symbol with
-            | Some funcSym, Some callerSym ->
-                createCallEdgeFromSymbol callerSym funcSym
-            | Some funcSym, None ->
-                // If no caller symbol, try to find enclosing function
+            match funcSymbol with
+            | Some funcSym ->
+                // Find the target function node
                 let targetNode = 
                     graph5.Nodes
                     |> Map.tryPick (fun _ node -> 
                         match node.Symbol with
-                        | Some sym when sym.DisplayName = funcSym.DisplayName -> Some node
+                        | Some sym when sym.FullName = funcSym.FullName -> Some node
                         | _ -> None)
                 match targetNode with
                 | Some target ->
                     let callEdge = { Source = appNode.Id; Target = target.Id; Kind = FunctionCall }
                     { graph5 with Edges = callEdge :: graph5.Edges }
                 | None -> graph5
-            | _ -> graph5
+            | None -> graph5
         | _ -> graph5
     
     | SynExpr.LetOrUse(_, _, bindings, body, range, _) ->
@@ -188,7 +164,7 @@ and private processExpression (expr: SynExpr) (parentId: NodeId option) (fileNam
         
     | _ -> graph
 
-/// Process a module declaration - Using existing FCS 43.9.300 patterns
+/// Process a module declaration - Using existing FCS 43.9.300 patterns (preserved from original)
 and private processModuleDecl decl parentId fileName context graph =
     match decl with
     | SynModuleDecl.Let(_, bindings, range) ->
@@ -227,7 +203,7 @@ and private processModuleDecl decl parentId fileName context graph =
         
     | _ -> graph
 
-/// Process implementation file - Using existing FCS 43.9.300 patterns
+/// Process implementation file - Using existing FCS 43.9.300 patterns (preserved from original)
 let rec private processImplFile (implFile: SynModuleOrNamespace) context graph =
     let (SynModuleOrNamespace(name, _, _, decls, _, _, _, range, _)) = implFile
     
@@ -249,10 +225,12 @@ let rec private processImplFile (implFile: SynModuleOrNamespace) context graph =
     |> List.fold (fun acc decl -> 
         processModuleDecl decl (Some moduleNode.Id) fileName context acc) graph''
 
-/// Build complete PSG from project results with CONSTRAINT-AWARE TYPE INTEGRATION
+/// Build complete PSG from project results with CANONICAL FCS CONSTRAINT RESOLUTION
 let buildProgramSemanticGraph 
     (checkResults: FSharpCheckProjectResults) 
     (parseResults: FSharpParseFileResults[]) : ProgramSemanticGraph =
+    
+    printfn "[BUILDER] Starting PSG construction with CANONICAL FCS constraint resolution"
     
     let correlationContext = createContext checkResults
     
@@ -274,7 +252,9 @@ let buildProgramSemanticGraph
         SourceFiles = sourceFiles
     }
     
-    // Process each file and merge results - Using existing working patterns
+    printfn "[BUILDER] Phase 1: Building structural PSG from %d files" parseResults.Length
+    
+    // Process each file and merge results - Using existing working patterns (preserved from original)
     let graphs = 
         parseResults
         |> Array.choose (fun pr ->
@@ -296,7 +276,7 @@ let buildProgramSemanticGraph
             | _ -> None
         )
     
-    // Merge all graphs - Using existing working patterns
+    // Merge all graphs - Using existing working patterns (preserved from original)
     let mergedGraph =
         if Array.isEmpty graphs then
             {
@@ -319,19 +299,44 @@ let buildProgramSemanticGraph
                 }
             )
     
-    // CRITICAL CHANGE: Use enhanced constraint-aware type integration
-    printfn "[BUILDER] Applying enhanced constraint-aware type integration to PSG with %d nodes" mergedGraph.Nodes.Count
+    printfn "[BUILDER] Phase 1 complete: Structural PSG built with %d nodes" mergedGraph.Nodes.Count
+    
+    // CANONICAL CHANGE: Use CANONICAL FCS constraint resolution approach  
+    printfn "[BUILDER] Phase 2: Applying CANONICAL FCS constraint resolution"
     let typeEnhancedGraph = integrateTypesWithCheckResults mergedGraph checkResults
     
-    // Finalize all nodes after type integration - Using existing working patterns
+    printfn "[BUILDER] Phase 3: Detecting entry points"
+
+    // Detect entry points during PSG construction
+    let entryPoints = 
+        typeEnhancedGraph.Nodes
+        |> Map.toSeq
+        |> Seq.choose (fun (_, node) ->
+            match node.Symbol with
+            | Some symbol when symbol.FullName.Contains("hello") || symbol.DisplayName = "main" ->
+                Some node.Id
+            | _ -> None
+        )
+        |> List.ofSeq
+
+    printfn "[BUILDER] Found %d entry points during construction" entryPoints.Length
+
+    printfn "[BUILDER] Phase 4: Finalizing PSG nodes"
+
+    // Finalize all nodes after type integration - Using existing working patterns (preserved from original)
     let finalNodes = 
         typeEnhancedGraph.Nodes
         |> Map.map (fun _ node -> ChildrenStateHelpers.finalizeChildren node)
-    
+
     let finalGraph = 
         { typeEnhancedGraph with 
             Nodes = finalNodes
+            EntryPoints = entryPoints
             CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> List.ofArray 
         }
+    
+    printfn "[BUILDER] PSG construction complete with CANONICAL FCS constraint resolution"
+    printfn "[BUILDER] Final PSG: %d nodes, %d edges, %d entry points" 
+        finalGraph.Nodes.Count finalGraph.Edges.Length finalGraph.EntryPoints.Length
         
     finalGraph

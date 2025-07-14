@@ -53,13 +53,13 @@ type EdgeKind =
     | TypeOf          // Type relationship
     | Instantiates    // Generic instantiation
 
-/// PSG node with explicit children state and CRITICAL TYPE INTEGRATION
+/// PSG node with explicit children state and CANONICAL TYPE INTEGRATION
 type PSGNode = {
     Id: NodeId
     SyntaxKind: string
     Symbol: FSharpSymbol option
-    Type: FSharpType option          // CRITICAL: Type information from typed AST
-    Constraints: FSharpGenericParameterConstraint list option  // NEW: Direct constraint capture
+    Type: FSharpType option          // CANONICAL: Type information from completed FCS constraint resolution
+    Constraints: FSharpGenericParameterConstraint list option  // CANONICAL: Constraint information from completed FCS resolution
     Range: range
     SourceFile: string
     ParentId: NodeId option
@@ -119,8 +119,8 @@ module ChildrenStateHelpers =
         Id = id
         SyntaxKind = syntaxKind
         Symbol = symbol
-        Type = None                  // Initialize without type - TypeIntegration.fs will populate
-        Constraints = None           // Initialize without constraints - TypeIntegration.fs will populate
+        Type = None                  // Initialize without type - Canonical TypeIntegration.fs will populate from completed FCS results
+        Constraints = None           // Initialize without constraints - Canonical TypeIntegration.fs will populate from completed FCS results
         Range = range
         SourceFile = sourceFile
         ParentId = parentId

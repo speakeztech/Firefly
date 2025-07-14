@@ -77,49 +77,21 @@ let isFunction (symbol: FSharpSymbol) : bool =
     | :? FSharpMemberOrFunctionOrValue as mfv -> mfv.IsFunction || mfv.IsMember
     | _ -> false
 
-/// Find enclosing function context using ChildrenState-compatible parent traversal
-let rec findEnclosingFunction (psg: ProgramSemanticGraph) (nodeId: string) (visited: Set<string>) : string option =
-    if Set.contains nodeId visited then
-        printfn "[ERROR] Circular parent structure detected at %s" nodeId
-        failwith "Circular parent-child relationships in PSG"
-    
-    if Set.count visited > 20 then 
-        printfn "[ERROR] Excessive traversal depth reached"
-        failwith "PSG containment depth exceeded"
-    
-    let newVisited = Set.add nodeId visited
-    
-    match Map.tryFind nodeId psg.Nodes with
-    | Some node when node.Symbol.IsSome ->
-        let symbol = node.Symbol.Value
-        match symbol with
-        | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsFunction ->
-            Some symbol.FullName
-        | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsModuleValueOrMember ->
-            Some symbol.FullName
-        | :? FSharpEntity as entity when entity.IsFSharpModule ->
-            Some symbol.FullName
-        | :? FSharpEntity as entity ->
-            Some symbol.FullName
-        | _ ->
-            match node.ParentId with
-            | Some parentId -> findEnclosingFunction psg parentId.Value newVisited
-            | None -> None
-    | Some node ->
-        match node.ParentId with
-        | Some parentId -> findEnclosingFunction psg parentId.Value newVisited
+/// Find the containing function for a given node
+let findContainingFunction (psg: ProgramSemanticGraph) (nodeId: string) : string option =
+    let rec traverse currentId =
+        match Map.tryFind currentId psg.Nodes with
+        | Some node ->
+            match node.Symbol with
+            | Some (:? FSharpMemberOrFunctionOrValue as mfv) when mfv.IsFunction ->
+                Some mfv.FullName
+            | _ ->
+                match node.ParentId with
+                | Some parentId -> traverse parentId.Value
+                | None -> None
         | None -> None
-    | None ->
-        None
-
-/// Safe wrapper for enclosing function detection
-let findEnclosingFunctionSafe (psg: ProgramSemanticGraph) (nodeId: string) : string option =
-    try
-        findEnclosingFunction psg nodeId Set.empty
-    with
-    | ex ->
-        printfn "[WARNING] Enclosing function detection failed for %s: %s" nodeId ex.Message
-        None
+    
+    traverse nodeId
 
 /// Enhanced entry point detection using multiple comprehensive strategies
 let extractEntryPoints (psg: ProgramSemanticGraph) =
@@ -219,12 +191,11 @@ let extractEntryPoints (psg: ProgramSemanticGraph) =
     
     allEntryPoints
 
-/// Extract function calls using enhanced PSG analysis with ChildrenState compatibility
+/// Extract function calls using PSG FunctionCall edges
 let extractFunctionCalls (psg: ProgramSemanticGraph) =
-    printfn "[CALL EXTRACTION] === Comprehensive Function Call Analysis ==="
+    printfn "[CALL EXTRACTION] === Function Call Analysis ==="
     
-    // Strategy 1: Extract application-based function calls via FunctionCall edges
-    let applicationCalls = 
+    let functionCalls = 
         psg.Edges
         |> List.choose (fun edge ->
             if edge.Kind = FunctionCall then
@@ -232,8 +203,8 @@ let extractFunctionCalls (psg: ProgramSemanticGraph) =
                 let targetNode = Map.tryFind edge.Target.Value psg.Nodes
                 
                 match sourceNode, targetNode with
-                | Some src, Some tgt when src.SyntaxKind = "Application" && tgt.Symbol.IsSome ->
-                    let callingContext = findEnclosingFunctionSafe psg edge.Source.Value
+                | Some src, Some tgt when tgt.Symbol.IsSome ->
+                    let callingContext = findContainingFunction psg edge.Source.Value
                     match callingContext with
                     | Some caller -> 
                         Some (caller, tgt.Symbol.Value.FullName)
@@ -247,52 +218,18 @@ let extractFunctionCalls (psg: ProgramSemanticGraph) =
             else None
         )
     
-    printfn "[CALL EXTRACTION] Application-based calls found: %d" applicationCalls.Length
+    printfn "[CALL EXTRACTION] Function calls found: %d" functionCalls.Length
     
-    // Strategy 2: Extract direct function-to-function references via SymRef edges
-    let directFunctionCalls = 
-        psg.Edges
-        |> List.choose (fun edge ->
-            match edge.Kind with
-            | SymRef ->
-                let sourceNode = Map.tryFind edge.Source.Value psg.Nodes
-                let targetNode = Map.tryFind edge.Target.Value psg.Nodes
-                
-                match sourceNode, targetNode with
-                | Some src, Some tgt when src.Symbol.IsSome && tgt.Symbol.IsSome ->
-                    let srcSymbol = src.Symbol.Value
-                    let tgtSymbol = tgt.Symbol.Value
-                    
-                    if isFunction tgtSymbol && srcSymbol.FullName <> tgtSymbol.FullName then
-                        Some (srcSymbol.FullName, tgtSymbol.FullName)
-                    else None
-                | _ -> None
-            | _ -> None
-        )
-    
-    printfn "[CALL EXTRACTION] Direct function calls found: %d" directFunctionCalls.Length
-    
-    // Combine and deduplicate all function calls
-    let allCalls = 
-        [ applicationCalls; directFunctionCalls ]
-        |> List.concat
-        |> List.distinct
-        |> List.filter (fun (src, tgt) -> src <> tgt)
-    
-    printfn "[CALL EXTRACTION] Total unique calls after filtering: %d" allCalls.Length
-    
-    if allCalls.Length > 0 then
-        printfn "[CALL EXTRACTION] Sample function calls:"
-        allCalls 
-        |> List.take (min 10 allCalls.Length)
+    if functionCalls.Length > 0 then
+        printfn "[CALL EXTRACTION] Function calls:"
+        functionCalls 
         |> List.iter (fun (src, tgt) -> printfn "  %s -> %s" src tgt)
     else
         printfn "[CALL EXTRACTION] WARNING: No function calls detected!"
         let functionCallEdges = psg.Edges |> List.filter (fun e -> e.Kind = FunctionCall) |> List.length
-        let symRefEdges = psg.Edges |> List.filter (fun e -> e.Kind = SymRef) |> List.length
-        printfn "[CALL EXTRACTION] FunctionCall edges: %d, SymRef edges: %d" functionCallEdges symRefEdges
+        printfn "[CALL EXTRACTION] FunctionCall edges available: %d" functionCallEdges
     
-    allCalls
+    functionCalls
 
 /// Build comprehensive call graph with entry point integration
 let buildCallGraph (functionCalls: (string * string) list) (entryPoints: FSharpSymbol list) =
