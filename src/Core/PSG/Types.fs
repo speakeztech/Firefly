@@ -1,8 +1,7 @@
 module Core.PSG.Types
 
-open System
-open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
+open FSharp.Compiler.Symbols
 
 /// Unique identifier for nodes in the PSG
 type NodeId = 
@@ -20,10 +19,16 @@ type NodeId =
         SymbolNode(symbol.GetHashCode(), symbol.DisplayName.Replace(".", "_"))
     
     static member FromRange(fileName: string, range: range) =
-        RangeNode(fileName, range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
+        RangeNode(fileName, range.Start.Line, range.Start.Column, range.End.Line, range.End.Column)
 
     static member FromRangeWithKind(fileName: string, range: range, syntaxKind: string) =
-        RangeNode(fileName, range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
+        RangeNode(fileName, range.Start.Line, range.Start.Column, range.End.Line, range.End.Column)
+
+/// Explicit state representation for children relationships eliminating ambiguity
+type ChildrenState =
+    | NotProcessed                    // Children relationships not yet established during construction
+    | Leaf                           // Affirmatively verified as having no children (terminal nodes)
+    | Parent of NodeId list          // Verified parent with specific children
 
 /// Types of control flow
 type ControlFlowKind =
@@ -48,7 +53,7 @@ type EdgeKind =
     | TypeOf          // Type relationship (kept for compatibility)
     | Instantiates    // Generic instantiation (kept for compatibility)
 
-/// PSG node
+/// PSG node with explicit children state
 type PSGNode = {
     Id: NodeId
     SyntaxKind: string
@@ -56,7 +61,7 @@ type PSGNode = {
     Range: range
     SourceFile: string
     ParentId: NodeId option
-    Children: NodeId list
+    Children: ChildrenState          // Enhanced from NodeId list to explicit state
 }
 
 /// Edge between PSG nodes
@@ -103,3 +108,37 @@ and PSGErrorKind =
     | BuilderError
     | TypeResolutionError
     | MemoryAnalysisError
+
+/// Helper functions for working with ChildrenState
+module ChildrenStateHelpers =
+    
+    /// Create a new node with NotProcessed children state
+    let createWithNotProcessed id syntaxKind symbol range sourceFile parentId = {
+        Id = id
+        SyntaxKind = syntaxKind
+        Symbol = symbol
+        Range = range
+        SourceFile = sourceFile
+        ParentId = parentId
+        Children = NotProcessed
+    }
+    
+    /// Add a child to a node's children state
+    let addChild childId node =
+        match node.Children with
+        | NotProcessed -> { node with Children = Parent [childId] }
+        | Leaf -> { node with Children = Parent [childId] }  // Convert leaf to parent
+        | Parent existingChildren -> { node with Children = Parent (childId :: existingChildren) }
+    
+    /// Finalize a node's children state (convert NotProcessed to Leaf if no children added)
+    let finalizeChildren node =
+        match node.Children with
+        | NotProcessed -> { node with Children = Leaf }
+        | other -> node
+    
+    /// Get children as list for compatibility with existing code
+    let getChildrenList node =
+        match node.Children with
+        | NotProcessed -> []
+        | Leaf -> []
+        | Parent children -> children
