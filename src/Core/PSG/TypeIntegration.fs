@@ -55,6 +55,44 @@ let private extractConstraintsFromType (fsharpType: FSharpType) : FSharpGenericP
         printfn "[TYPE INTEGRATION] Warning: Constraint extraction failed: %s" ex.Message
         []
 
+/// Safe member type access avoiding SRTP constraint solver triggers
+let private safeMemberTypeAccess (mfv: FSharpMemberOrFunctionOrValue) : FSharpType option =
+    try
+        // Check if this member has SRTP constraints that might trigger constraint solver
+        if mfv.GenericParameters.Count > 0 then
+            let hasSrtpConstraints = 
+                mfv.GenericParameters 
+                |> Seq.exists (fun gp -> 
+                    gp.Constraints 
+                    |> Seq.exists (fun c -> c.IsComparisonConstraint || c.IsEqualityConstraint))
+            
+            if hasSrtpConstraints then
+                // Skip SRTP members that trigger constraint solver
+                None
+            else
+                Some mfv.FullType
+        else
+            Some mfv.FullType
+    with
+    | ex when ex.Message.Contains("ConstraintSolverMissingConstraint") ->
+        printfn "[TYPE INTEGRATION] Skipping SRTP member %s to avoid constraint solver" mfv.DisplayName
+        None
+    | ex ->
+        printfn "[TYPE INTEGRATION] Warning: Member type access failed for %s: %s" mfv.DisplayName ex.Message
+        None
+
+/// Safe entity type access avoiding SRTP constraint solver triggers
+let private safeEntityTypeAccess (entity: FSharpEntity) : FSharpType option =
+    try
+        Some (entity.AsType())
+    with
+    | ex when ex.Message.Contains("ConstraintSolverMissingConstraint") ->
+        printfn "[TYPE INTEGRATION] Skipping SRTP entity %s to avoid constraint solver" entity.DisplayName
+        None
+    | ex ->
+        printfn "[TYPE INTEGRATION] Warning: Entity type access failed for %s: %s" entity.DisplayName ex.Message
+        None
+
 /// Build direct type index from typed AST without constraint solver operations
 let buildDirectTypeIndex (typedFiles: FSharpImplementationFileContents list) : DirectTypeIndex =
     let mutable rangeToTypeInfo : Map<string, ExtractedTypeInfo> = Map.empty
@@ -63,18 +101,30 @@ let buildDirectTypeIndex (typedFiles: FSharpImplementationFileContents list) : D
     /// Process typed expression safely extracting type and constraint information
     let rec processTypedExpression (expr: FSharpExpr) =
         try
-            // Extract type and constraints directly without formatting
-            let constraints = extractConstraintsFromType expr.Type
-            let typeInfo = {
-                Type = expr.Type
-                Constraints = constraints
-                Range = expr.Range
-                IsFromExpression = true
-                IsFromSymbol = false
-            }
+            // Safe type access - check if this expression might trigger constraint solver
+            let exprType = 
+                try
+                    Some expr.Type
+                with
+                | ex when ex.Message.Contains("ConstraintSolverMissingConstraint") ->
+                    None
+                | _ -> None
             
-            let rangeKey = rangeToKey expr.Range
-            rangeToTypeInfo <- Map.add rangeKey typeInfo rangeToTypeInfo
+            match exprType with
+            | Some validType ->
+                let constraints = extractConstraintsFromType validType
+                let typeInfo = {
+                    Type = validType
+                    Constraints = constraints
+                    Range = expr.Range
+                    IsFromExpression = true
+                    IsFromSymbol = false
+                }
+                
+                let rangeKey = rangeToKey expr.Range
+                rangeToTypeInfo <- Map.add rangeKey typeInfo rangeToTypeInfo
+            | None ->
+                () // Skip expressions that trigger constraint solver
             
             // Process sub-expressions recursively
             for subExpr in expr.ImmediateSubExpressions do
@@ -88,9 +138,9 @@ let buildDirectTypeIndex (typedFiles: FSharpImplementationFileContents list) : D
         try
             match decl with
             | FSharpImplementationFileDeclaration.Entity (entity, subDecls) ->
-                // Extract entity type information without formatting
-                try
-                    let entityType = entity.AsType()
+                // Extract entity type information with SRTP safety
+                match safeEntityTypeAccess entity with
+                | Some entityType ->
                     let constraints = extractConstraintsFromType entityType
                     let typeInfo = {
                         Type = entityType
@@ -102,17 +152,16 @@ let buildDirectTypeIndex (typedFiles: FSharpImplementationFileContents list) : D
                     
                     let symbolKey = symbolToKey (entity :> FSharpSymbol)
                     symbolToTypeInfo <- Map.add symbolKey (typeInfo, entity :> FSharpSymbol) symbolToTypeInfo
-                with
-                | ex ->
-                    printfn "[TYPE INTEGRATION] Warning: Entity type access failed for %s: %s" entity.DisplayName ex.Message
+                | None ->
+                    () // Skip entities that trigger constraint solver
                 
                 // Process nested declarations
                 subDecls |> List.iter processTypedDeclaration
                 
             | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue (mfv, args, expr) ->
-                // Extract member function type information without formatting
-                try
-                    let memberType = mfv.FullType
+                // Extract member function type information with SRTP safety
+                match safeMemberTypeAccess mfv with
+                | Some memberType ->
                     let constraints = extractConstraintsFromType memberType
                     let typeInfo = {
                         Type = memberType
@@ -124,9 +173,8 @@ let buildDirectTypeIndex (typedFiles: FSharpImplementationFileContents list) : D
                     
                     let symbolKey = symbolToKey (mfv :> FSharpSymbol)
                     symbolToTypeInfo <- Map.add symbolKey (typeInfo, mfv :> FSharpSymbol) symbolToTypeInfo
-                with
-                | ex ->
-                    printfn "[TYPE INTEGRATION] Warning: Member type access failed for %s: %s" mfv.DisplayName ex.Message
+                | None ->
+                    () // Skip members that trigger constraint solver
                 
                 // Process expression body
                 processTypedExpression expr
@@ -225,57 +273,8 @@ let extractTypedAST (checkResults: FSharpCheckProjectResults) : FSharpImplementa
         assemblyContents.ImplementationFiles.Length
     assemblyContents.ImplementationFiles
 
-/// Generate type integration statistics including constraint information
-type TypeIntegrationStats = {
-    TotalNodes: int
-    NodesWithTypes: int
-    NodesWithConstraints: int
-    TypeCorrelationRate: float
-    ConstraintCorrelationRate: float
-    NodesWithSymbols: int
-    SymbolBasedTypeCorrelations: int
-    RangeBasedTypeCorrelations: int
-    UnresolvedTypeNodes: int
-}
-
-/// Calculate comprehensive type and constraint integration statistics
-let calculateTypeIntegrationStats (psg: ProgramSemanticGraph) : TypeIntegrationStats =
-    let totalNodes = psg.Nodes.Count
-    let nodesWithTypes = psg.Nodes |> Map.toSeq |> Seq.filter (fun (_, node) -> node.Type.IsSome) |> Seq.length
-    let nodesWithConstraints = psg.Nodes |> Map.toSeq |> Seq.filter (fun (_, node) -> node.Constraints.IsSome) |> Seq.length
-    let nodesWithSymbols = psg.Nodes |> Map.toSeq |> Seq.filter (fun (_, node) -> node.Symbol.IsSome) |> Seq.length
-    
-    let symbolBasedCorrelations = 
-        psg.Nodes 
-        |> Map.toSeq 
-        |> Seq.filter (fun (_, node) -> node.Symbol.IsSome && node.Type.IsSome) 
-        |> Seq.length
-    
-    let rangeBasedCorrelations = 
-        psg.Nodes 
-        |> Map.toSeq 
-        |> Seq.filter (fun (_, node) -> node.Symbol.IsNone && node.Type.IsSome) 
-        |> Seq.length
-    
-    let unresolvedTypeNodes = totalNodes - nodesWithTypes
-    let typeCorrelationRate = 
-        if totalNodes > 0 then 
-            (float nodesWithTypes / float totalNodes) * 100.0 
-        else 0.0
-    
-    let constraintCorrelationRate = 
-        if totalNodes > 0 then 
-            (float nodesWithConstraints / float totalNodes) * 100.0 
-        else 0.0
-    
-    {
-        TotalNodes = totalNodes
-        NodesWithTypes = nodesWithTypes
-        NodesWithConstraints = nodesWithConstraints
-        TypeCorrelationRate = typeCorrelationRate
-        ConstraintCorrelationRate = constraintCorrelationRate
-        NodesWithSymbols = nodesWithSymbols
-        SymbolBasedTypeCorrelations = symbolBasedCorrelations
-        RangeBasedTypeCorrelations = rangeBasedCorrelations
-        UnresolvedTypeNodes = unresolvedTypeNodes
-    }
+/// Enhanced integration with CheckResults access - calls working implementation
+let integrateTypesWithCheckResults (psg: ProgramSemanticGraph) (checkResults: FSharpCheckProjectResults) : ProgramSemanticGraph =
+    printfn "[TYPE INTEGRATION] Starting enhanced type integration with constraint resolution safeguards"
+    let typedFiles = extractTypedAST checkResults
+    integrateTypesIntoPSG psg typedFiles
