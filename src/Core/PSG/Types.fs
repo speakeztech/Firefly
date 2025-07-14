@@ -59,6 +59,7 @@ type PSGNode = {
     SyntaxKind: string
     Symbol: FSharpSymbol option
     Type: FSharpType option          // CRITICAL: Type information from typed AST
+    Constraints: FSharpGenericParameterConstraint list option  // NEW: Direct constraint capture
     Range: range
     SourceFile: string
     ParentId: NodeId option
@@ -119,6 +120,7 @@ module ChildrenStateHelpers =
         SyntaxKind = syntaxKind
         Symbol = symbol
         Type = None                  // Initialize without type - TypeIntegration.fs will populate
+        Constraints = None           // Initialize without constraints - TypeIntegration.fs will populate
         Range = range
         SourceFile = sourceFile
         ParentId = parentId
