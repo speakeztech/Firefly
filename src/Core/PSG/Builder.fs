@@ -7,7 +7,7 @@ open FSharp.Compiler.Syntax
 open FSharp.Compiler.CodeAnalysis
 open Core.PSG.Types
 open Core.PSG.Correlation
-open Core.PSG.SymbolAnalysis
+open Core.PSG.TypeIntegration
 
 /// Build context for PSG construction
 type BuildContext = {
@@ -18,12 +18,10 @@ type BuildContext = {
 }
 
 let private createNode syntaxKind range fileName symbol parentId =
-    // Always use range-based IDs for syntax tree structure
     let cleanKind = (syntaxKind : string).Replace(":", "_").Replace(" ", "_")
     let uniqueFileName = sprintf "%s_%s.fs" (System.IO.Path.GetFileNameWithoutExtension(fileName : string)) cleanKind
     let nodeId = NodeId.FromRange(uniqueFileName, range)
     
-    // Use helper function to create node with NotProcessed children state
     ChildrenStateHelpers.createWithNotProcessed nodeId syntaxKind symbol range fileName parentId
 
 /// Add child to parent and return updated graph
@@ -33,10 +31,8 @@ let private addChildToParent (childId: NodeId) (parentId: NodeId option) (graph:
     | Some pid ->
         match Map.tryFind pid.Value graph.Nodes with
         | Some parentNode ->
-            // Use helper function to add child to parent's children state
             let updatedParent = ChildrenStateHelpers.addChild childId parentNode
             
-            // Create ChildOf edge: parent -> child
             let childOfEdge = {
                 Source = pid
                 Target = childId
@@ -48,52 +44,44 @@ let private addChildToParent (childId: NodeId) (parentId: NodeId option) (graph:
                 Edges = childOfEdge :: graph.Edges }
         | None -> graph
 
-/// Process a binding (let/member)
+/// Process a binding (let/member) - Fixed for FCS 43.9.300
 let rec private processBinding binding parentId fileName context graph =
-    let (SynBinding(_, _, _, _, _, _, _, pat, _, expr, range, _, _)) = binding
+    let (SynBinding(accessibility, kind, isInline, isMutable, attributes, xmlDoc, valData, pat, returnInfo, expr, range, seqPoint, trivia)) = binding
     
-    let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
+    let symbol : FSharp.Compiler.Symbols.FSharpSymbol option = tryCorrelateSymbol range fileName context.CorrelationContext
     let bindingNode = createNode "Binding" range fileName symbol parentId
     
-    // Add node to graph
     let graph' = { graph with Nodes = Map.add bindingNode.Id.Value bindingNode graph.Nodes }
-    
-    // Update parent's children
     let graph'' = addChildToParent bindingNode.Id parentId graph'
     
-    // Update symbol table if we have a symbol
     let graph''' = 
         match symbol with
         | Some sym -> 
             { graph'' with SymbolTable = Map.add sym.DisplayName sym graph''.SymbolTable }
         | None -> graph''
     
-    // Process pattern and expression
     let graph'''' = processPattern pat (Some bindingNode.Id) fileName context graph'''
     processExpression expr (Some bindingNode.Id) fileName context graph''''
 
-/// Process a pattern
+/// Process a pattern - Fixed for FCS 43.9.300
 and private processPattern pat parentId fileName context graph =
     match pat with
     | SynPat.Named(synIdent, _, _, range) ->
         let (SynIdent(ident, _)) = synIdent
         
-        // DEBUG: Log the details before creating the node
         let futureNodeId = NodeId.FromRange(fileName, range)
         
-        // Check for self-reference before creating
         match parentId with
         | Some pid when pid.Value = futureNodeId.Value ->
             failwith "Pattern node assigned itself as parent"
         | _ -> ()
         
-        let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
+        let symbol : FSharp.Compiler.Symbols.FSharpSymbol option = tryCorrelateSymbol range fileName context.CorrelationContext
         let patNode = createNode (sprintf "Pattern:Named:%s" ident.idText) range fileName symbol parentId
         
         let graph' = { graph with Nodes = Map.add patNode.Id.Value patNode graph.Nodes }
         let graph'' = addChildToParent patNode.Id parentId graph'
         
-        // Add to symbol table if correlated
         match symbol with
         | Some sym ->
             { graph'' with SymbolTable = Map.add ident.idText sym graph''.SymbolTable }
@@ -112,7 +100,7 @@ and private processPattern pat parentId fileName context graph =
         
     | _ -> graph
 
-/// Process an expression
+/// Process an expression - Fixed for FCS 43.9.300
 and private processExpression expr parentId fileName context graph =
     match expr with
     | SynExpr.Ident ident ->
@@ -120,7 +108,6 @@ and private processExpression expr parentId fileName context graph =
         let graph' = { graph with Nodes = Map.add identNode.Id.Value identNode graph.Nodes }
         let graph'' = addChildToParent identNode.Id parentId graph'
         
-        // Create edge to symbol definition if found
         match Map.tryFind ident.idText graph''.SymbolTable with
         | Some targetSymbol ->
             let edge = {
@@ -136,16 +123,13 @@ and private processExpression expr parentId fileName context graph =
         let graph' = { graph with Nodes = Map.add appNode.Id.Value appNode graph.Nodes }
         let graph'' = addChildToParent appNode.Id parentId graph'
         
-        // Process function and argument
         let graph''' = processExpression funcExpr (Some appNode.Id) fileName context graph''
         let graph'''' = processExpression argExpr (Some appNode.Id) fileName context graph'''
         
-        // Try to create call edge - handle different function expression types
         match funcExpr with
         | SynExpr.Ident funcIdent ->
             match Map.tryFind funcIdent.idText graph''''.SymbolTable with
             | Some funcSymbol ->
-                // Find the actual node that has this symbol
                 let targetNode = 
                     graph''''.Nodes
                     |> Map.tryPick (fun nodeId node -> 
@@ -157,14 +141,13 @@ and private processExpression expr parentId fileName context graph =
                 | Some target ->
                     let edge = {
                         Source = appNode.Id
-                        Target = target.Id  // ✅ Use the actual node's ID
+                        Target = target.Id
                         Kind = FunctionCall
                     }
                     { graph'''' with Edges = edge :: graph''''.Edges }
                 | None -> graph''''
             | None -> graph''''
         | SynExpr.LongIdent(_, longIdent, _, _) ->
-            // Handle qualified function calls like Module.func
             let (SynLongIdent(ids, _, _)) = longIdent
             let funcName = ids |> List.map (fun id -> id.idText) |> String.concat "."
             
@@ -194,13 +177,11 @@ and private processExpression expr parentId fileName context graph =
         let graph' = { graph with Nodes = Map.add letNode.Id.Value letNode graph.Nodes }
         let graph'' = addChildToParent letNode.Id parentId graph'
         
-        // Process bindings
         let graph''' = 
             bindings
             |> List.fold (fun acc binding -> 
                 processBinding binding (Some letNode.Id) fileName context acc) graph''
         
-        // Process body
         processExpression body (Some letNode.Id) fileName context graph'''
         
     | SynExpr.Paren(innerExpr, _, _, range) ->
@@ -216,7 +197,7 @@ and private processExpression expr parentId fileName context graph =
         
     | _ -> graph
 
-/// Process a module declaration
+/// Process a module declaration - Fixed for FCS 43.9.300
 and private processModuleDecl decl parentId fileName context graph =
     match decl with
     | SynModuleDecl.Let(_, bindings, range) ->
@@ -234,9 +215,10 @@ and private processModuleDecl decl parentId fileName context graph =
         addChildToParent openNode.Id parentId graph'
         
     | SynModuleDecl.NestedModule(componentInfo, _, decls, _, range, _) ->
-        let (SynComponentInfo(_, _, _, longId, _, _, _, _)) = componentInfo
+        let (SynComponentInfo(attributes, typeParams, constraints, longId, xmlDoc, preferPostfix, accessibility, range2)) = componentInfo
         let moduleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
-        let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
+        
+        let symbol : FSharp.Compiler.Symbols.FSharpSymbol option = tryCorrelateSymbol range fileName context.CorrelationContext
         let nestedModuleNode = createNode (sprintf "NestedModule:%s" moduleName) range fileName symbol parentId
         
         let graph' = { graph with Nodes = Map.add nestedModuleNode.Id.Value nestedModuleNode graph.Nodes }
@@ -254,14 +236,14 @@ and private processModuleDecl decl parentId fileName context graph =
         
     | _ -> graph
 
-/// Process implementation file - using correct FCS 43.9.300 pattern
+/// Process implementation file - Fixed for FCS 43.9.300
 let rec private processImplFile (implFile: SynModuleOrNamespace) context graph =
     let (SynModuleOrNamespace(name, _, _, decls, _, _, _, range, _)) = implFile
     
     let moduleName = name |> List.map (fun i -> i.idText) |> String.concat "."
     let fileName = range.FileName
     
-    let symbol = tryCorrelateSymbol range fileName context.CorrelationContext
+    let symbol : FSharp.Compiler.Symbols.FSharpSymbol option = tryCorrelateSymbol range fileName context.CorrelationContext
     let moduleNode = createNode (sprintf "Module:%s" moduleName) range fileName symbol None
     
     let graph' = { graph with Nodes = Map.add moduleNode.Id.Value moduleNode graph.Nodes }
@@ -276,15 +258,13 @@ let rec private processImplFile (implFile: SynModuleOrNamespace) context graph =
     |> List.fold (fun acc decl -> 
         processModuleDecl decl (Some moduleNode.Id) fileName context acc) graph''
 
-/// Build complete PSG from project results
+/// Build complete PSG from project results with CRITICAL TYPE INTEGRATION
 let buildProgramSemanticGraph 
     (checkResults: FSharpCheckProjectResults) 
     (parseResults: FSharpParseFileResults[]) : ProgramSemanticGraph =
     
-    // Create enhanced correlation context
     let correlationContext = createContext checkResults
     
-    // Load source files
     let sourceFiles =
         parseResults
         |> Array.map (fun pr ->
@@ -296,7 +276,6 @@ let buildProgramSemanticGraph
         )
         |> Map.ofArray
     
-    // Create build context
     let context = {
         CheckResults = checkResults
         ParseResults = parseResults
@@ -310,7 +289,6 @@ let buildProgramSemanticGraph
         |> Array.choose (fun pr ->
             match pr.ParseTree with
             | ParsedInput.ImplFile implFile ->
-                // Correct FCS 43.9.300 pattern for ParsedImplFileInput
                 let (ParsedImplFileInput(contents = modules)) = implFile
                 let emptyGraph = {
                     Nodes = Map.empty
@@ -320,7 +298,6 @@ let buildProgramSemanticGraph
                     SourceFiles = sourceFiles
                     CompilationOrder = []
                 }
-                // Process each module in the file
                 let processedGraph = 
                     modules |> List.fold (fun acc implFile -> 
                         processImplFile implFile context acc) emptyGraph
@@ -351,13 +328,18 @@ let buildProgramSemanticGraph
                 }
             )
     
-    // Set compilation order based on file order and finalize all nodes
+    // CRITICAL TYPE INTEGRATION - Apply type information from typed AST
+    printfn "[BUILDER] Applying type integration to PSG with %d nodes" mergedGraph.Nodes.Count
+    let typedFiles = extractTypedAST checkResults
+    let typeEnhancedGraph = integrateTypesIntoPSG mergedGraph typedFiles
+    
+    // Finalize all nodes after type integration
     let finalNodes = 
-        mergedGraph.Nodes
+        typeEnhancedGraph.Nodes
         |> Map.map (fun _ node -> ChildrenStateHelpers.finalizeChildren node)
     
     let finalGraph = 
-        { mergedGraph with 
+        { typeEnhancedGraph with 
             Nodes = finalNodes
             CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> List.ofArray 
         }

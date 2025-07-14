@@ -1,4 +1,4 @@
-module Core.Analysis.Reachability
+module Core.PSG.Reachability
 
 open System
 open FSharp.Compiler.Symbols

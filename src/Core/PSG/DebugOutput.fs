@@ -1,78 +1,30 @@
 module Core.PSG.DebugOutput
 
+open System
 open System.IO
 open System.Text.Json
 open System.Text.Json.Serialization
-open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
+open FSharp.Compiler.Symbols
 open Core.PSG.Types
 open Core.PSG.Correlation
-open Core.Utilities.IntermediateWriter
+open Core.PSG.Reachability
 
-/// Standardized symbol extraction with consistent filtering criteria across all analysis components
-module UnifiedSymbolExtraction =
-    
-    /// Extract meaningful symbols using standardized filtering logic
-    let extractMeaningfulSymbols (psg: ProgramSemanticGraph) : FSharpSymbol array =
-        psg.Nodes
-        |> Map.toSeq
-        |> Seq.choose (fun (_, node) -> 
-            match node.Symbol with
-            | Some symbol -> 
-                let name = symbol.FullName
-                // Apply consistent filtering criteria across all analysis components
-                if not (name.Contains("@") || name.Contains("$") || name.Length < 3) 
-                   && not (name.StartsWith("op_") || name.Contains(".cctor") || name.Contains("..ctor"))
-                   && not (name.Contains("get_") || name.Contains("set_")) then
-                    Some symbol
-                else None
-            | None -> None
-        )
-        |> Seq.distinctBy (fun s -> s.FullName)
-        |> Seq.toArray
-    
-    /// Extract nodes with valid symbol correlations
-    let extractCorrelatedNodes (psg: ProgramSemanticGraph) : (string * PSGNode) array =
-        psg.Nodes
-        |> Map.toSeq
-        |> Seq.filter (fun (_, node) -> node.Symbol.IsSome)
-        |> Seq.toArray
-    
-    /// Calculate comprehensive symbol statistics using unified extraction
-    let calculateSymbolStatistics (psg: ProgramSemanticGraph) (reachableSymbols: Set<string>) =
-        let meaningfulSymbols = extractMeaningfulSymbols psg
-        let correlatedNodes = extractCorrelatedNodes psg
-        let meaningfulSymbolNames = meaningfulSymbols |> Array.map (fun s -> s.FullName) |> Set.ofArray
-        
-        let reachableCount = Set.intersect meaningfulSymbolNames reachableSymbols |> Set.count
-        let unreachableCount = meaningfulSymbols.Length - reachableCount
-        
-        let eliminationRate = 
-            if meaningfulSymbols.Length > 0 then
-                (float unreachableCount / float meaningfulSymbols.Length) * 100.0
-            else 0.0
-        
-        {|
-            TotalMeaningfulSymbols = meaningfulSymbols.Length
-            CorrelatedNodeCount = correlatedNodes.Length
-            ReachableSymbols = reachableCount
-            UnreachableSymbols = unreachableCount
-            EliminationRate = eliminationRate
-            MeaningfulSymbolSet = meaningfulSymbolNames
-        |}
-
-/// Enhanced JSON serialization configuration for comprehensive debug output
+/// Configure JSON serialization with F# support
 let private jsonOptions = 
-    let opts = JsonSerializerOptions(WriteIndented = true)
-    opts.Converters.Add(JsonFSharpConverter())
-    opts
+    let options = JsonSerializerOptions(WriteIndented = true)
+    options.Converters.Add(JsonFSharpConverter())
+    options
 
-/// Comprehensive PSG node representation with ChildrenState analysis
+/// Enhanced node representation with complete metadata including type information
 type private EnhancedNodeJson = {
     Id: string
     Kind: string
     Symbol: string option
     SymbolFullName: string option
+    Type: string option
+    TypeFullName: string option
+    HasTypeInformation: bool
     Range: {| File: string; StartLine: int; StartColumn: int; EndLine: int; EndColumn: int |}
     ParentId: string option
     Children: string array
@@ -92,6 +44,8 @@ type private EnhancedEdgeJson = {
     TargetNodeKind: string option
     SourceHasSymbol: bool
     TargetHasSymbol: bool
+    SourceHasType: bool
+    TargetHasType: bool
 }
 
 /// Consolidated correlation analysis with source range information
@@ -103,9 +57,11 @@ type private EnhancedCorrelationJson = {
     SymbolHash: int
     IsFunction: bool
     LibraryCategory: string
+    HasTypeInformation: bool
+    TypeName: string option
 }
 
-/// Convert PSG node to enhanced JSON representation with complete ChildrenState analysis
+/// Convert PSG node to enhanced JSON representation with complete type analysis
 let private nodeToEnhancedJson (node: PSGNode) : EnhancedNodeJson =
     let childrenList = ChildrenStateHelpers.getChildrenList node
     let (childrenStateDescription, childrenCount) = 
@@ -114,11 +70,22 @@ let private nodeToEnhancedJson (node: PSGNode) : EnhancedNodeJson =
         | Leaf -> ("Leaf", 0)
         | Parent children -> ("Parent", children.Length)
     
+    let (typeDisplayName, typeFullName, hasTypeInfo) = 
+        match node.Type with
+        | Some fsharpType -> 
+            let displayName = fsharpType.Format(FSharpDisplayContext.Empty)
+            let fullName = fsharpType.Format(FSharpDisplayContext.Empty)
+            (Some displayName, Some fullName, true)
+        | None -> (None, None, false)
+    
     {
         Id = node.Id.Value
         Kind = node.SyntaxKind
         Symbol = node.Symbol |> Option.map (fun s -> s.DisplayName)
         SymbolFullName = node.Symbol |> Option.map (fun s -> s.FullName)
+        Type = typeDisplayName
+        TypeFullName = typeFullName
+        HasTypeInformation = hasTypeInfo
         Range = {| 
             File = Path.GetFileName(node.SourceFile)
             StartLine = node.Range.Start.Line
@@ -134,7 +101,7 @@ let private nodeToEnhancedJson (node: PSGNode) : EnhancedNodeJson =
         IsCorrelated = node.Symbol.IsSome
     }
 
-/// Convert PSG edge to enhanced JSON representation with node metadata
+/// Convert PSG edge to enhanced JSON representation with type metadata
 let private edgeToEnhancedJson (edge: PSGEdge) (psg: ProgramSemanticGraph) : EnhancedEdgeJson =
     let sourceNode = Map.tryFind edge.Source.Value psg.Nodes
     let targetNode = Map.tryFind edge.Target.Value psg.Nodes
@@ -148,9 +115,11 @@ let private edgeToEnhancedJson (edge: PSGEdge) (psg: ProgramSemanticGraph) : Enh
         TargetNodeKind = targetNode |> Option.map (fun n -> n.SyntaxKind)
         SourceHasSymbol = sourceNode |> Option.map (fun n -> n.Symbol.IsSome) |> Option.defaultValue false
         TargetHasSymbol = targetNode |> Option.map (fun n -> n.Symbol.IsSome) |> Option.defaultValue false
+        SourceHasType = sourceNode |> Option.map (fun n -> n.Type.IsSome) |> Option.defaultValue false
+        TargetHasType = targetNode |> Option.map (fun n -> n.Type.IsSome) |> Option.defaultValue false
     }
 
-/// Convert correlation data to enhanced JSON with comprehensive symbol analysis
+/// Convert correlation data to enhanced JSON with comprehensive symbol and type analysis
 let private correlationToEnhancedJson (range: range) (symbol: FSharpSymbol) : EnhancedCorrelationJson =
     let isFunction = 
         match symbol with
@@ -163,6 +132,18 @@ let private correlationToEnhancedJson (range: range) (symbol: FSharpSymbol) : En
         | name when name.StartsWith("Alloy.") -> "AlloyLibrary"
         | name when name.StartsWith("FSharp.Core.") || name.StartsWith("Microsoft.FSharp.") -> "FSharpCore"
         | _ -> "UserCode"
+    
+    let (hasTypeInfo, typeName) = 
+        match symbol with
+        | :? FSharpMemberOrFunctionOrValue as mfv -> 
+            (true, Some (mfv.FullType.Format(FSharpDisplayContext.Empty)))
+        | :? FSharpEntity as entity -> 
+            if entity.IsFSharpRecord || entity.IsFSharpUnion || entity.IsClass then
+                (true, Some (entity.AsType().Format(FSharpDisplayContext.Empty)))
+            else (false, None)
+        | :? FSharpField as field -> 
+            (true, Some (field.FieldType.Format(FSharpDisplayContext.Empty)))
+        | _ -> (false, None)
     
     {
         Range = {|
@@ -178,14 +159,15 @@ let private correlationToEnhancedJson (range: range) (symbol: FSharpSymbol) : En
         SymbolHash = symbol.GetHashCode()
         IsFunction = isFunction
         LibraryCategory = libraryCategory
+        HasTypeInformation = hasTypeInfo
+        TypeName = typeName
     }
 
-/// Generate comprehensive PSG debug output with unified symbol analysis
+/// Generate comprehensive PSG debug output with unified symbol and type analysis
 let generatePSGDebugOutput (psg: ProgramSemanticGraph) (outputDir: string) =
     try
         Directory.CreateDirectory(outputDir) |> ignore
         
-        // Generate enhanced nodes with complete ChildrenState analysis
         let enhancedNodes = 
             psg.Nodes
             |> Map.toSeq
@@ -195,7 +177,6 @@ let generatePSGDebugOutput (psg: ProgramSemanticGraph) (outputDir: string) =
         let nodesPath = Path.Combine(outputDir, "psg_nodes_enhanced.json")
         File.WriteAllText(nodesPath, JsonSerializer.Serialize(enhancedNodes, jsonOptions))
         
-        // Generate enhanced edges with node metadata
         let enhancedEdges = 
             psg.Edges
             |> List.map (fun edge -> edgeToEnhancedJson edge psg)
@@ -204,7 +185,39 @@ let generatePSGDebugOutput (psg: ProgramSemanticGraph) (outputDir: string) =
         let edgesPath = Path.Combine(outputDir, "psg_edges_enhanced.json")
         File.WriteAllText(edgesPath, JsonSerializer.Serialize(enhancedEdges, jsonOptions))
         
-        // Generate comprehensive ChildrenState distribution analysis
+        let typeAnalysisSummary = 
+            let totalNodes = enhancedNodes.Length
+            let nodesWithTypes = enhancedNodes |> Array.filter (fun n -> n.HasTypeInformation) |> Array.length
+            let nodesWithSymbols = enhancedNodes |> Array.filter (fun n -> n.HasSymbol) |> Array.length
+            let edgesWithSourceTypes = enhancedEdges |> Array.filter (fun e -> e.SourceHasType) |> Array.length
+            let edgesWithTargetTypes = enhancedEdges |> Array.filter (fun e -> e.TargetHasType) |> Array.length
+            
+            {|
+                Summary = {|
+                    TotalNodes = totalNodes
+                    NodesWithTypeInformation = nodesWithTypes
+                    NodesWithSymbols = nodesWithSymbols
+                    TypeCorrelationRate = if totalNodes > 0 then Math.Round(float nodesWithTypes / float totalNodes * 100.0, 2) else 0.0
+                    SymbolCorrelationRate = if totalNodes > 0 then Math.Round(float nodesWithSymbols / float totalNodes * 100.0, 2) else 0.0
+                |}
+                EdgeTypeAnalysis = {|
+                    TotalEdges = enhancedEdges.Length
+                    EdgesWithSourceTypes = edgesWithSourceTypes
+                    EdgesWithTargetTypes = edgesWithTargetTypes
+                    SourceTypeRate = if enhancedEdges.Length > 0 then Math.Round(float edgesWithSourceTypes / float enhancedEdges.Length * 100.0, 2) else 0.0
+                    TargetTypeRate = if enhancedEdges.Length > 0 then Math.Round(float edgesWithTargetTypes / float enhancedEdges.Length * 100.0, 2) else 0.0
+                |}
+                TypeDistribution = 
+                    enhancedNodes 
+                    |> Array.filter (fun n -> n.HasTypeInformation)
+                    |> Array.groupBy (fun n -> n.Type |> Option.defaultValue "Unknown")
+                    |> Array.map (fun (typeName, nodes) -> {| TypeName = typeName; Count = nodes.Length |})
+                    |> Array.sortByDescending (fun entry -> entry.Count)
+            |}
+        
+        let typeAnalysisPath = Path.Combine(outputDir, "psg_type_analysis.json")
+        File.WriteAllText(typeAnalysisPath, JsonSerializer.Serialize(typeAnalysisSummary, jsonOptions))
+        
         let childrenStateAnalysis = 
             psg.Nodes
             |> Map.toSeq
@@ -224,13 +237,14 @@ let generatePSGDebugOutput (psg: ProgramSemanticGraph) (outputDir: string) =
         printfn "Files created:"
         printfn "  - psg_nodes_enhanced.json (%d nodes)" enhancedNodes.Length
         printfn "  - psg_edges_enhanced.json (%d edges)" enhancedEdges.Length
+        printfn "  - psg_type_analysis.json (comprehensive type distribution)"
         printfn "  - psg_children_state_analysis.json (comprehensive state distribution)"
         
     with
     | ex -> 
         printfn "Error generating enhanced PSG debug output: %s" ex.Message
 
-/// Generate comprehensive correlation debug output with enhanced symbol analysis
+/// Generate comprehensive correlation debug output with enhanced symbol and type analysis
 let generateCorrelationDebugOutput (context: CorrelationContext) (outputDir: string) =
     try
         Directory.CreateDirectory(outputDir) |> ignore
@@ -242,26 +256,39 @@ let generateCorrelationDebugOutput (context: CorrelationContext) (outputDir: str
         let correlationsPath = Path.Combine(outputDir, "correlations_enhanced.json")
         File.WriteAllText(correlationsPath, JsonSerializer.Serialize(enhancedCorrelations, jsonOptions))
         
-        // Generate correlation statistics summary
         let correlationStats = {|
             TotalSymbolUses = context.SymbolUses.Length
             UniqueSymbols = context.SymbolUses |> Array.map (fun su -> su.Symbol.FullName) |> Array.distinct |> Array.length
             FunctionCount = enhancedCorrelations |> Array.filter (fun c -> c.IsFunction) |> Array.length
+            SymbolsWithTypeInfo = enhancedCorrelations |> Array.filter (fun c -> c.HasTypeInformation) |> Array.length
+            TypeCorrelationRate = 
+                let totalSymbols = enhancedCorrelations.Length
+                if totalSymbols > 0 then
+                    let withTypes = enhancedCorrelations |> Array.filter (fun c -> c.HasTypeInformation) |> Array.length
+                    Math.Round(float withTypes / float totalSymbols * 100.0, 2)
+                else 0.0
             LibraryDistribution = 
                 enhancedCorrelations 
                 |> Array.groupBy (fun c -> c.LibraryCategory)
                 |> Array.map (fun (category, items) -> {| Category = category; Count = items.Length |})
+            TypeDistribution = 
+                enhancedCorrelations 
+                |> Array.filter (fun c -> c.HasTypeInformation)
+                |> Array.groupBy (fun c -> c.TypeName |> Option.defaultValue "Unknown")
+                |> Array.map (fun (typeName, items) -> {| TypeName = typeName; Count = items.Length |})
+                |> Array.sortByDescending (fun entry -> entry.Count)
+                |> Array.take (Math.Min(20, enhancedCorrelations.Length))
         |}
         
         let statsPath = Path.Combine(outputDir, "correlation_statistics.json")
         File.WriteAllText(statsPath, JsonSerializer.Serialize(correlationStats, jsonOptions))
         
         printfn "Enhanced correlation debug output generated: %s" correlationsPath
-        printfn "Total correlations: %d" enhancedCorrelations.Length
-        printfn "Correlation statistics: %s" statsPath
+        printfn "Type correlation rate: %.1f%% (%d/%d symbols)" 
+            correlationStats.TypeCorrelationRate correlationStats.SymbolsWithTypeInfo context.SymbolUses.Length
         
     with
-    | ex ->
+    | ex -> 
         printfn "Error generating enhanced correlation debug output: %s" ex.Message
 
 /// Generate unified debug outputs with consistent symbol measurement methodology
@@ -273,10 +300,13 @@ let generateDebugOutputs
     
     Directory.CreateDirectory(outputDir) |> ignore
     
-    // Extract unified symbol measurements for consistent statistics
-    let unifiedStats = UnifiedSymbolExtraction.calculateSymbolStatistics graph Set.empty
+    let meaningfulSymbols = UnifiedSymbolExtraction.extractMeaningfulSymbols graph
+    let correlatedNodes = UnifiedSymbolExtraction.extractCorrelatedNodes graph
+    let unifiedStats = {|
+        TotalMeaningfulSymbols = meaningfulSymbols.Length
+        CorrelatedNodeCount = correlatedNodes.Length
+    |}
     
-    // Generate enhanced node output with ChildrenState analysis
     let enhancedNodes = 
         graph.Nodes
         |> Map.toSeq
@@ -311,7 +341,6 @@ let generateDebugOutputs
     let nodesPath = Path.Combine(outputDir, "psg_nodes.json")
     File.WriteAllText(nodesPath, JsonSerializer.Serialize(enhancedNodes, jsonOptions))
     
-    // Generate enhanced edge output with metadata
     let enhancedEdges = 
         graph.Edges 
         |> List.map (fun edge -> {|
@@ -326,7 +355,6 @@ let generateDebugOutputs
     let edgesPath = Path.Combine(outputDir, "psg_edges.json")
     File.WriteAllText(edgesPath, JsonSerializer.Serialize(enhancedEdges, jsonOptions))
     
-    // Generate unified ChildrenState distribution summary
     let childrenStateSummary = 
         graph.Nodes
         |> Map.toSeq
@@ -342,7 +370,6 @@ let generateDebugOutputs
     let statePath = Path.Combine(outputDir, "psg_children_state_summary.json")
     File.WriteAllText(statePath, JsonSerializer.Serialize(childrenStateSummary, jsonOptions))
     
-    // Generate enhanced correlation output
     let enhancedCorrelations = 
         correlations
         |> Array.map (fun (range, symbol) -> correlationToEnhancedJson range symbol)
@@ -350,7 +377,6 @@ let generateDebugOutputs
     let correlationPath = Path.Combine(outputDir, "psg_correlations.json")
     File.WriteAllText(correlationPath, JsonSerializer.Serialize(enhancedCorrelations, jsonOptions))
     
-    // Generate comprehensive unified statistics report
     let unifiedStatsReport = {|
         UnifiedSymbolAnalysis = {|
             TotalMeaningfulSymbols = unifiedStats.TotalMeaningfulSymbols
@@ -398,9 +424,13 @@ let generateComprehensiveDebugOutput (psg: ProgramSemanticGraph) (context: Corre
     generatePSGDebugOutput psg debugDir
     generateCorrelationDebugOutput context debugDir
     
-    // Generate consolidated summary with unified symbol measurements
     let summaryPath = Path.Combine(debugDir, "debug_summary.txt")
-    let unifiedStats = UnifiedSymbolExtraction.calculateSymbolStatistics psg Set.empty
+    let meaningfulSymbols = UnifiedSymbolExtraction.extractMeaningfulSymbols psg
+    let correlatedNodes = UnifiedSymbolExtraction.extractCorrelatedNodes psg
+    let unifiedStats = {|
+        TotalMeaningfulSymbols = meaningfulSymbols.Length
+        CorrelatedNodeCount = correlatedNodes.Length
+    |}
     
     let lines = [
         "PSG Debug Summary - Generated: " + System.DateTime.Now.ToString()

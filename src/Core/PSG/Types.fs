@@ -42,26 +42,27 @@ type ControlFlowKind =
 type EdgeKind =
     | SymbolDef       // Symbol definition site
     | SymbolUse       // Symbol usage
-    | FunctionCall    // Direct function invocation (renamed from CallsFunction)
+    | FunctionCall    // Direct function invocation
     | TypeInstantiation of typeArgs: FSharpType list
     | ControlFlow of kind: ControlFlowKind
     | DataDependency
     | ModuleContainment
     | TypeMembership
-    | ChildOf         // Parent-child relationship (kept for compatibility)
-    | SymRef          // Symbol reference (kept for compatibility)
-    | TypeOf          // Type relationship (kept for compatibility)
-    | Instantiates    // Generic instantiation (kept for compatibility)
+    | ChildOf         // Parent-child relationship
+    | SymRef          // Symbol reference
+    | TypeOf          // Type relationship
+    | Instantiates    // Generic instantiation
 
-/// PSG node with explicit children state
+/// PSG node with explicit children state and CRITICAL TYPE INTEGRATION
 type PSGNode = {
     Id: NodeId
     SyntaxKind: string
     Symbol: FSharpSymbol option
+    Type: FSharpType option          // CRITICAL: Type information from typed AST
     Range: range
     SourceFile: string
     ParentId: NodeId option
-    Children: ChildrenState          // Enhanced from NodeId list to explicit state
+    Children: ChildrenState
 }
 
 /// Edge between PSG nodes
@@ -75,12 +76,12 @@ type PSGEdge = {
 type SymbolRelation =
     | DefinesType of FSharpEntity
     | UsesType of FSharpEntity
-    | CallsSymbol of FSharpMemberOrFunctionOrValue      // Renamed from CallsFunction
+    | CallsSymbol of FSharpMemberOrFunctionOrValue
     | ImplementsInterface of FSharpEntity
     | InheritsFrom of FSharpEntity
-    | ReferencesSymbol of FSharpSymbol                  // Renamed from References
+    | ReferencesSymbol of FSharpSymbol
 
-/// Complete Program Semantic Graph - keeping original structure
+/// Complete Program Semantic Graph
 type ProgramSemanticGraph = {
     Nodes: Map<string, PSGNode>
     Edges: PSGEdge list
@@ -117,6 +118,7 @@ module ChildrenStateHelpers =
         Id = id
         SyntaxKind = syntaxKind
         Symbol = symbol
+        Type = None                  // Initialize without type - TypeIntegration.fs will populate
         Range = range
         SourceFile = sourceFile
         ParentId = parentId
@@ -127,16 +129,16 @@ module ChildrenStateHelpers =
     let addChild childId node =
         match node.Children with
         | NotProcessed -> { node with Children = Parent [childId] }
-        | Leaf -> { node with Children = Parent [childId] }  // Convert leaf to parent
+        | Leaf -> { node with Children = Parent [childId] }
         | Parent existingChildren -> { node with Children = Parent (childId :: existingChildren) }
     
-    /// Finalize a node's children state (convert NotProcessed to Leaf if no children added)
+    /// Finalize a node's children state
     let finalizeChildren node =
         match node.Children with
         | NotProcessed -> { node with Children = Leaf }
         | other -> node
     
-    /// Get children as list for compatibility with existing code
+    /// Get children as list for compatibility
     let getChildrenList node =
         match node.Children with
         | NotProcessed -> []

@@ -10,7 +10,7 @@ open Core.PSG.Types
 open Core.PSG.Builder
 open Core.PSG.Correlation
 open Core.PSG.DebugOutput
-open Core.Analysis.Reachability
+open Core.PSG.Reachability
 open Core.Utilities.IntermediateWriter
 open Core.Utilities.RemoveIntermediates
 

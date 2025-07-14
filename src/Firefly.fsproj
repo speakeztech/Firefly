@@ -7,7 +7,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.4.086</Version>
+    <Version>0.4.091</Version>
     <Description>Firefly F# Compiler - Deep FCS Integration</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
@@ -36,6 +36,8 @@
       
       <!-- Program Semantic Graph (new) -->
       <Compile Include="Core/PSG/Types.fs" />
+      <Compile Include="Core/PSG/Reachability.fs" />
+      <Compile Include="Core/PSG/TypeIntegration.fs" />
       <Compile Include="Core/PSG/Correlation.fs" />
       <Compile Include="Core/PSG/SymbolAnalysis.fs" />
       <Compile Include="Core/PSG/Builder.fs" />
@@ -48,9 +50,6 @@
       <!-- Platform Templates (new) -->
       <Compile Include="Core/Templates/TemplateTypes.fs" />
       <Compile Include="Core/Templates/TemplateLoader.fs" />
-      
-      <!-- Analysis Engine (new) -->
-      <Compile Include="Core/Analysis/Reachability.fs" />
       
       <!-- FCS Ingestion Pipeline (new) -->
       <Compile Include="Core/IngestionPipeline.fs" />
@@ -72,6 +71,11 @@
   </ItemGroup>
 
 </Project>
+
+
+
+
+
 
 
 
