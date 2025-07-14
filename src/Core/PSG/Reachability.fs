@@ -2,7 +2,6 @@ module Core.PSG.Reachability
 
 open System
 open FSharp.Compiler.Symbols
-open FSharp.Compiler.Text
 open Core.PSG.Types
 
 /// Reachability analysis result with comprehensive symbol tracking
@@ -25,6 +24,9 @@ type LibraryAwareReachability = {
     BasicResult: ReachabilityResult
     LibraryCategories: Map<string, LibraryCategory>
     PruningStatistics: PruningStatistics
+    
+    // NEW: Soft-delete support
+    MarkedPSG: ProgramSemanticGraph  // Contains all nodes with IsReachable flags
 }
 
 and PruningStatistics = {
@@ -361,6 +363,28 @@ let computeReachableSymbols (entryPoints: FSharpSymbol list) (callGraph: Map<str
     
     reachable
 
+/// NEW: Mark nodes as reachable/unreachable with soft-delete support
+let markReachabilityInPSG (psg: ProgramSemanticGraph) (reachableSymbols: Set<string>) : ProgramSemanticGraph =
+    printfn "[SOFT DELETE] === Marking Reachability ==="
+    
+    let updatedNodes = 
+        psg.Nodes
+        |> Map.map (fun nodeId node ->
+            match node.Symbol with
+            | Some symbol when Set.contains symbol.FullName reachableSymbols ->
+                ReachabilityHelpers.markReachable 0 node
+            | Some symbol ->
+                ReachabilityHelpers.markUnreachable 1 "Unreachable from entry points" node
+            | None ->
+                // Nodes without symbols inherit from parent if available
+                ReachabilityHelpers.markUnreachable 1 "Node without symbol" node)
+    
+    let reachableCount = updatedNodes |> Map.toSeq |> Seq.map snd |> Seq.filter (fun n -> n.IsReachable) |> Seq.length
+    let unreachableCount = (Map.count updatedNodes) - reachableCount
+    printfn "[SOFT DELETE] Marked %d nodes as reachable, %d as unreachable" reachableCount unreachableCount
+    
+    { psg with Nodes = updatedNodes }
+
 /// Main entry point for PSG-based reachability analysis with unified symbol extraction
 let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) : LibraryAwareReachability =
     let startTime = DateTime.UtcNow
@@ -390,6 +414,9 @@ let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) : LibraryAware
     // Compute reachable symbols from entry points
     let reachableSymbols = computeReachableSymbols entryPoints callGraph meaningfulSymbolNames
     let unreachableSymbols = Set.difference meaningfulSymbolNames reachableSymbols
+    
+    // NEW: Mark reachability instead of physical removal
+    let markedPSG = markReachabilityInPSG psg reachableSymbols
     
     // Generate library classifications using meaningful symbols
     let libraryCategories = 
@@ -436,4 +463,5 @@ let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) : LibraryAware
         BasicResult = basicResult
         LibraryCategories = libraryCategories
         PruningStatistics = pruningStats
+        MarkedPSG = markedPSG  // NEW: Contains all nodes with IsReachable flags
     }

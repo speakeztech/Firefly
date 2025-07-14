@@ -1,72 +1,44 @@
 module Core.PSG.Types
 
+open System
 open FSharp.Compiler.Text
 open FSharp.Compiler.Symbols
 
 /// Unique identifier for nodes in the PSG
-type NodeId = 
-    | SymbolNode of symbolHash: int * symbolName: string
-    | RangeNode of fileName: string * startLine: int * startCol: int * endLine: int * endCol: int
-    
-    member this.Value =
-        match this with
-        | SymbolNode(hash, name) -> sprintf "sym_%s_%08x" name hash
-        | RangeNode(file, sl, sc, el, ec) -> 
-            sprintf "rng_%s_%d_%d_%d_%d" 
-                (System.IO.Path.GetFileNameWithoutExtension file) sl sc el ec
-    
-    static member FromSymbol(symbol: FSharpSymbol) =
-        SymbolNode(symbol.GetHashCode(), symbol.DisplayName.Replace(".", "_"))
-    
+type NodeId = {
+    Value: string
+}
+with
+    static member Create(value: string) = { Value = value }
     static member FromRange(fileName: string, range: range) =
-        RangeNode(fileName, range.Start.Line, range.Start.Column, range.End.Line, range.End.Column)
+        let cleanFileName = System.IO.Path.GetFileNameWithoutExtension(fileName)
+        let rangeStr = sprintf "%d_%d_%d_%d" range.Start.Line range.Start.Column range.End.Line range.End.Column
+        { Value = sprintf "rng_%s_%s" cleanFileName rangeStr }
+    static member FromSymbol(symbol: FSharpSymbol) =
+        let hashCode = symbol.GetHashCode().ToString("x8")
+        { Value = sprintf "sym_%s_%s" symbol.DisplayName hashCode }
 
-    static member FromRangeWithKind(fileName: string, range: range, syntaxKind: string) =
-        RangeNode(fileName, range.Start.Line, range.Start.Column, range.End.Line, range.End.Column)
-
-/// Explicit state representation for children relationships eliminating ambiguity
+/// Child processing state with compile-time guarantees
 type ChildrenState =
-    | NotProcessed                    // Children relationships not yet established during construction
-    | Leaf                           // Affirmatively verified as having no children (terminal nodes)
-    | Parent of NodeId list          // Verified parent with specific children
+    | NotProcessed
+    | Parent of NodeId list
+    | NoChildren
 
-/// Types of control flow
-type ControlFlowKind =
-    | Sequential
-    | Conditional
-    | Loop
-    | Match
-    | Exception
-
-/// Comprehensive edge types for complete graph representation
+/// Types of edges in the PSG
 type EdgeKind =
-    | SymbolDef       // Symbol definition site
-    | SymbolUse       // Symbol usage
-    | FunctionCall    // Direct function invocation
+    | ChildOf
+    | FunctionCall
+    | SymRef
+    | TypeOf
+    | Instantiates
+    | SymbolDef
+    | SymbolUse
     | TypeInstantiation of typeArgs: FSharpType list
-    | ControlFlow of kind: ControlFlowKind
+    | ControlFlow of kind: string
     | DataDependency
     | ModuleContainment
-    | TypeMembership
-    | ChildOf         // Parent-child relationship
-    | SymRef          // Symbol reference
-    | TypeOf          // Type relationship
-    | Instantiates    // Generic instantiation
 
-/// PSG node with explicit children state and CANONICAL TYPE INTEGRATION
-type PSGNode = {
-    Id: NodeId
-    SyntaxKind: string
-    Symbol: FSharpSymbol option
-    Type: FSharpType option          // CANONICAL: Type information from completed FCS constraint resolution
-    Constraints: FSharpGenericParameterConstraint list option  // CANONICAL: Constraint information from completed FCS resolution
-    Range: range
-    SourceFile: string
-    ParentId: NodeId option
-    Children: ChildrenState
-}
-
-/// Edge between PSG nodes
+/// Edge in the program semantic graph
 type PSGEdge = {
     Source: NodeId
     Target: NodeId
@@ -81,6 +53,26 @@ type SymbolRelation =
     | ImplementsInterface of FSharpEntity
     | InheritsFrom of FSharpEntity
     | ReferencesSymbol of FSharpSymbol
+
+/// Enhanced PSG node with soft-delete support added to existing structure
+type PSGNode = {
+    // EXISTING FIELDS - DO NOT CHANGE
+    Id: NodeId
+    SyntaxKind: string
+    Symbol: FSharpSymbol option
+    Type: FSharpType option          
+    Constraints: FSharpGenericParameterConstraint list option  
+    Range: range
+    SourceFile: string
+    ParentId: NodeId option
+    Children: ChildrenState
+    
+    // NEW FIELDS - Soft-delete support
+    IsReachable: bool
+    EliminationPass: int option
+    EliminationReason: string option
+    ReachabilityDistance: int option
+}
 
 /// Complete Program Semantic Graph
 type ProgramSemanticGraph = {
@@ -119,30 +111,58 @@ module ChildrenStateHelpers =
         Id = id
         SyntaxKind = syntaxKind
         Symbol = symbol
-        Type = None                  // Initialize without type - Canonical TypeIntegration.fs will populate from completed FCS results
-        Constraints = None           // Initialize without constraints - Canonical TypeIntegration.fs will populate from completed FCS results
+        Type = None                  
+        Constraints = None           
         Range = range
         SourceFile = sourceFile
         ParentId = parentId
         Children = NotProcessed
+        
+        // Initialize new soft-delete fields with defaults
+        IsReachable = true  
+        EliminationPass = None
+        EliminationReason = None
+        ReachabilityDistance = None
     }
     
     /// Add a child to a node's children state
     let addChild childId node =
         match node.Children with
         | NotProcessed -> { node with Children = Parent [childId] }
-        | Leaf -> { node with Children = Parent [childId] }
         | Parent existingChildren -> { node with Children = Parent (childId :: existingChildren) }
+        | NoChildren -> { node with Children = Parent [childId] }
     
     /// Finalize a node's children state
     let finalizeChildren node =
         match node.Children with
-        | NotProcessed -> { node with Children = Leaf }
+        | NotProcessed -> { node with Children = NoChildren }
         | other -> node
     
-    /// Get children as list for compatibility
+    /// Get children as list for compatibility with DebugOutput.fs
     let getChildrenList node =
         match node.Children with
         | NotProcessed -> []
-        | Leaf -> []
+        | NoChildren -> []
         | Parent children -> children
+
+/// Helper functions for soft-delete reachability
+module ReachabilityHelpers =
+    
+    /// Mark a node as reachable
+    let markReachable (distance: int) (node: PSGNode) =
+        { node with 
+            IsReachable = true
+            ReachabilityDistance = Some distance
+            EliminationPass = None
+            EliminationReason = None }
+    
+    /// Mark a node as unreachable
+    let markUnreachable (pass: int) (reason: string) (node: PSGNode) =
+        { node with 
+            IsReachable = false
+            EliminationPass = Some pass
+            EliminationReason = Some reason
+            ReachabilityDistance = None }
+    
+    /// Check if node is reachable
+    let isReachable (node: PSGNode) = node.IsReachable
