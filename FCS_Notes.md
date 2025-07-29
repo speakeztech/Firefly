@@ -150,8 +150,8 @@ When pattern matching on AST nodes, handle all new fields appropriately, especia
 
 ## Practical implementation patterns
 
-For effective AST manipulation in 43.9.300, establish clear patterns for handling the enhanced type system. When creating AST nodes programmatically, always use SynIdent instead of plain Ident for identifiers that appear in patterns or expressions. Initialize trivia fields appropriately, even if just with default values.
+For effective AST manipulation in 43.9.300, establish clear patterns for handling the type system. When creating AST nodes programmatically, always use SynIdent instead of plain Ident for identifiers that appear in patterns or expressions. Initialize trivia fields appropriately, even if just with default values.
 
-The enhanced lambda representation with parsedData enables more accurate source transformations. Tools should prefer the parsed data when available, falling back to simplified patterns only when necessary. This dual representation supports both compiler optimization needs and tooling accuracy requirements.
+The lambda representation with parsedData enables more accurate source transformations. Tools should prefer the parsed data when available, falling back to simplified patterns only when necessary. This dual representation supports both compiler optimization needs and tooling accuracy requirements.
 
 Integration with the F# compiler service now requires careful attention to the multi-layered identifier types. Use the appropriate level of abstraction for your use case: Ident for basic operations, SynIdent for AST construction, and full pattern types for comprehensive source analysis.

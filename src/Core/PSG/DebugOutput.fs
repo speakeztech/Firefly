@@ -16,461 +16,440 @@ let private jsonOptions =
     options.Converters.Add(JsonFSharpConverter())
     options
 
-/// Enhanced node representation with complete metadata including type information
-type private EnhancedNodeJson = {
-    Id: string
-    Kind: string
-    Symbol: string option
-    SymbolFullName: string option
-    Type: string option
-    TypeFullName: string option
-    HasTypeInformation: bool
-    Range: {| File: string; StartLine: int; StartColumn: int; EndLine: int; EndColumn: int |}
-    ParentId: string option
-    Children: string array
-    ChildrenState: string
-    ChildrenCount: int
-    HasSymbol: bool
-    IsCorrelated: bool
-}
+/// Helper to convert range to simple object for JSON
+let private rangeToJson (range: range) = {|
+    File = Path.GetFileName(range.FileName)
+    StartLine = range.Start.Line
+    StartColumn = range.Start.Column
+    EndLine = range.End.Line
+    EndColumn = range.End.Column
+|}
 
-/// Enhanced edge representation with comprehensive metadata
-type private EnhancedEdgeJson = {
-    Id: string
-    Source: string
-    Target: string
-    Kind: string
-    SourceNodeKind: string option
-    TargetNodeKind: string option
-    SourceHasSymbol: bool
-    TargetHasSymbol: bool
-    SourceHasType: bool
-    TargetHasType: bool
-}
+/// Helper to convert NodeId to string for JSON
+let private nodeIdToString (nodeId: NodeId) = nodeId.Value
 
-/// Consolidated correlation analysis with source range information
-type private EnhancedCorrelationJson = {
-    Range: {| File: string; StartLine: int; StartColumn: int; EndLine: int; EndColumn: int |}
-    SymbolName: string
-    SymbolFullName: string
-    SymbolKind: string
-    SymbolHash: int
-    IsFunction: bool
-    LibraryCategory: string
-    HasTypeInformation: bool
-    TypeName: string option
-}
-
-/// Convert PSG node to enhanced JSON representation with complete type analysis
-let private nodeToEnhancedJson (node: PSGNode) : EnhancedNodeJson =
-    let childrenList = ChildrenStateHelpers.getChildrenList node
-    let (childrenStateDescription, childrenCount) = 
+/// Enhanced PSG Node serialization with detailed symbol correlation info
+let private preparePSGNodeForJson (node: PSGNode) = {|
+    Id = nodeIdToString node.Id
+    SyntaxKind = node.SyntaxKind
+    SymbolFullName = node.Symbol |> Option.map (fun s -> s.FullName)
+    SymbolDisplayName = node.Symbol |> Option.map (fun s -> s.DisplayName)
+    SymbolTypeName = node.Symbol |> Option.map (fun s -> s.GetType().Name)
+    SymbolHash = node.Symbol |> Option.map (fun s -> s.GetHashCode())
+    TypeName = node.Type |> Option.map (fun t -> t.Format(FSharpDisplayContext.Empty))
+    Range = rangeToJson node.Range
+    SourceFile = Path.GetFileName(node.SourceFile)
+    ParentId = node.ParentId |> Option.map nodeIdToString
+    Children = 
         match node.Children with
-        | NotProcessed -> ("NotProcessed", 0)
-        | Leaf -> ("Leaf", 0)
-        | Parent children -> ("Parent", children.Length)
-    
-    let (typeDisplayName, typeFullName, hasTypeInfo) = 
-        match node.Type with
-        | Some fsharpType -> 
-            let displayName = fsharpType.Format(FSharpDisplayContext.Empty)
-            let fullName = fsharpType.Format(FSharpDisplayContext.Empty)
-            (Some displayName, Some fullName, true)
-        | None -> (None, None, false)
-    
-    {
-        Id = node.Id.Value
-        Kind = node.SyntaxKind
-        Symbol = node.Symbol |> Option.map (fun s -> s.DisplayName)
-        SymbolFullName = node.Symbol |> Option.map (fun s -> s.FullName)
-        Type = typeDisplayName
-        TypeFullName = typeFullName
-        HasTypeInformation = hasTypeInfo
-        Range = {| 
-            File = Path.GetFileName(node.SourceFile)
-            StartLine = node.Range.Start.Line
-            StartColumn = node.Range.Start.Column
-            EndLine = node.Range.End.Line
-            EndColumn = node.Range.End.Column 
+        | NotProcessed -> [||]
+        | NoChildren -> [||]
+        | Parent children -> children |> List.map nodeIdToString |> List.toArray
+    ChildrenState = 
+        match node.Children with
+        | NotProcessed -> "NotProcessed"
+        | NoChildren -> "NoChildren"
+        | Parent children -> $"Parent({children.Length})"
+    HasSymbol = node.Symbol.IsSome
+    IsCorrelated = node.Symbol.IsSome
+    // Soft-delete fields
+    IsReachable = node.IsReachable
+    EliminationReason = node.EliminationReason
+    EliminationPass = node.EliminationPass
+    ReachabilityDistance = node.ReachabilityDistance
+    // Enhanced debugging fields
+    SymbolIsFunction = 
+        node.Symbol |> Option.map (fun s ->
+            match s with
+            | :? FSharpMemberOrFunctionOrValue as mfv -> mfv.IsFunction || mfv.IsMember
+            | _ -> false) |> Option.defaultValue false
+    LibraryCategory = 
+        node.Symbol |> Option.map (fun s ->
+            let fullName = s.FullName
+            match fullName with
+            | name when name.StartsWith("Alloy.") -> "AlloyLibrary"
+            | name when name.StartsWith("FSharp.Core.") || name.StartsWith("Microsoft.FSharp.") -> "FSharpCore"
+            | name when name.StartsWith("Examples.") -> "UserCode"
+            | _ -> "UserCode") |> Option.defaultValue "Unknown"
+|}
+
+/// Enhanced PSGEdge serialization
+let private preparePSGEdgeForJson (edge: PSGEdge) = {|
+    Source = nodeIdToString edge.Source
+    Target = nodeIdToString edge.Target
+    Kind = edge.Kind.ToString()
+|}
+
+/// Generate symbol correlation analysis for debugging
+let generateSymbolCorrelationAnalysis (psg: ProgramSemanticGraph) (reachableSymbols: Set<string>) (outputDir: string) =
+    try
+        // Extract all symbols from PSG nodes for analysis
+        let psgSymbols = 
+            psg.Nodes
+            |> Map.toSeq
+            |> Seq.choose (fun (_, node) -> 
+                node.Symbol |> Option.map (fun s -> s, node))
+            |> Seq.toArray
+        
+        // Create correlation analysis
+        let correlationAnalysis = {|
+            Summary = {|
+                TotalPSGNodes = psg.Nodes.Count
+                NodesWithSymbols = psgSymbols.Length
+                NodesWithoutSymbols = psg.Nodes.Count - psgSymbols.Length
+                ReachableSymbolTargets = Set.count reachableSymbols
+                ReachableNodesFound = psg.Nodes |> Map.filter (fun _ node -> node.IsReachable) |> Map.count
+            |}
+            ReachableTargets = reachableSymbols |> Set.toArray |> Array.sort
+            PSGSymbolSample = 
+                psgSymbols 
+                |> Array.take (min 20 psgSymbols.Length)
+                |> Array.map (fun (symbol, node) -> {|
+                    FullName = symbol.FullName
+                    DisplayName = symbol.DisplayName
+                    NodeId = nodeIdToString node.Id
+                    SyntaxKind = node.SyntaxKind
+                    IsReachable = node.IsReachable
+                    SymbolType = symbol.GetType().Name
+                    MatchesAnyTarget = reachableSymbols |> Set.exists (fun target ->
+                        symbol.FullName = target || 
+                        symbol.DisplayName = target ||
+                        symbol.FullName.EndsWith("." + target) ||
+                        target.EndsWith("." + symbol.FullName))
+                |})
+            SymbolMatching = 
+                reachableSymbols
+                |> Set.toArray
+                |> Array.map (fun target -> {|
+                    Target = target
+                    ExactMatches = 
+                        psgSymbols 
+                        |> Array.filter (fun (symbol, _) -> symbol.FullName = target)
+                        |> Array.map (fun (symbol, node) -> {|
+                            FullName = symbol.FullName
+                            NodeId = nodeIdToString node.Id
+                            IsReachable = node.IsReachable
+                        |})
+                    PartialMatches = 
+                        psgSymbols 
+                        |> Array.filter (fun (symbol, _) -> 
+                            symbol.FullName <> target && (
+                                symbol.FullName.Contains(target) || 
+                                target.Contains(symbol.FullName) ||
+                                symbol.DisplayName = target ||
+                                symbol.FullName.EndsWith("." + target)))
+                        |> Array.take 5  // Limit to prevent huge output
+                        |> Array.map (fun (symbol, node) -> {|
+                            FullName = symbol.FullName
+                            DisplayName = symbol.DisplayName
+                            NodeId = nodeIdToString node.Id
+                            IsReachable = node.IsReachable
+                            MatchReason = 
+                                if symbol.DisplayName = target then "DisplayName exact"
+                                elif symbol.FullName.EndsWith("." + target) then "FullName suffix"
+                                elif symbol.FullName.Contains(target) then "FullName contains"
+                                elif target.Contains(symbol.FullName) then "Target contains"
+                                else "Unknown"
+                        |})
+                |})
         |}
-        ParentId = node.ParentId |> Option.map (fun id -> id.Value)
-        Children = childrenList |> List.map (fun id -> id.Value) |> List.toArray
-        ChildrenState = childrenStateDescription
-        ChildrenCount = childrenCount
-        HasSymbol = node.Symbol.IsSome
-        IsCorrelated = node.Symbol.IsSome
-    }
+        
+        let correlationPath = Path.Combine(outputDir, "symbol_correlation_analysis.json")
+        File.WriteAllText(correlationPath, JsonSerializer.Serialize(correlationAnalysis, jsonOptions))
+        
+        printfn "Symbol correlation analysis written to: %s" correlationPath
+        
+    with
+    | ex -> 
+        printfn "Error generating symbol correlation analysis: %s" ex.Message
 
-/// Convert PSG edge to enhanced JSON representation with type metadata
-let private edgeToEnhancedJson (edge: PSGEdge) (psg: ProgramSemanticGraph) : EnhancedEdgeJson =
-    let sourceNode = Map.tryFind edge.Source.Value psg.Nodes
-    let targetNode = Map.tryFind edge.Target.Value psg.Nodes
-    
-    {
-        Id = sprintf "%s_to_%s_%s" edge.Source.Value edge.Target.Value (edge.Kind.ToString())
-        Source = edge.Source.Value
-        Target = edge.Target.Value
-        Kind = edge.Kind.ToString()
-        SourceNodeKind = sourceNode |> Option.map (fun n -> n.SyntaxKind)
-        TargetNodeKind = targetNode |> Option.map (fun n -> n.SyntaxKind)
-        SourceHasSymbol = sourceNode |> Option.map (fun n -> n.Symbol.IsSome) |> Option.defaultValue false
-        TargetHasSymbol = targetNode |> Option.map (fun n -> n.Symbol.IsSome) |> Option.defaultValue false
-        SourceHasType = sourceNode |> Option.map (fun n -> n.Type.IsSome) |> Option.defaultValue false
-        TargetHasType = targetNode |> Option.map (fun n -> n.Type.IsSome) |> Option.defaultValue false
-    }
-
-/// Convert correlation data to enhanced JSON with comprehensive symbol and type analysis
-let private correlationToEnhancedJson (range: range) (symbol: FSharpSymbol) : EnhancedCorrelationJson =
-    let isFunction = 
-        match symbol with
-        | :? FSharpMemberOrFunctionOrValue as mfv -> mfv.IsFunction || mfv.IsMember
-        | _ -> false
-    
-    let libraryCategory = 
-        let fullName = symbol.FullName
-        match fullName with
-        | name when name.StartsWith("Alloy.") -> "AlloyLibrary"
-        | name when name.StartsWith("FSharp.Core.") || name.StartsWith("Microsoft.FSharp.") -> "FSharpCore"
-        | _ -> "UserCode"
-    
-    let (hasTypeInfo, typeName) = 
-        match symbol with
-        | :? FSharpMemberOrFunctionOrValue as mfv -> 
-            (true, Some (mfv.FullType.Format(FSharpDisplayContext.Empty)))
-        | :? FSharpEntity as entity -> 
-            if entity.IsFSharpRecord || entity.IsFSharpUnion || entity.IsClass then
-                (true, Some (entity.AsType().Format(FSharpDisplayContext.Empty)))
-            else (false, None)
-        | :? FSharpField as field -> 
-            (true, Some (field.FieldType.Format(FSharpDisplayContext.Empty)))
-        | _ -> (false, None)
-    
-    {
-        Range = {|
-            File = Path.GetFileName(range.FileName)
-            StartLine = range.Start.Line
-            StartColumn = range.Start.Column
-            EndLine = range.End.Line
-            EndColumn = range.End.Column
-        |}
-        SymbolName = symbol.DisplayName
-        SymbolFullName = symbol.FullName
-        SymbolKind = symbol.GetType().Name
-        SymbolHash = symbol.GetHashCode()
-        IsFunction = isFunction
-        LibraryCategory = libraryCategory
-        HasTypeInformation = hasTypeInfo
-        TypeName = typeName
-    }
-
-/// Generate comprehensive PSG debug output with unified symbol and type analysis
+/// Generate complete PSG debug output with enhanced symbol tracking
 let generatePSGDebugOutput (psg: ProgramSemanticGraph) (outputDir: string) =
     try
         Directory.CreateDirectory(outputDir) |> ignore
         
-        let enhancedNodes = 
+        // Enhanced node serialization
+        let nodes = 
             psg.Nodes
             |> Map.toSeq
-            |> Seq.map (snd >> nodeToEnhancedJson)
+            |> Seq.map (snd >> preparePSGNodeForJson)
             |> Seq.toArray
         
-        let nodesPath = Path.Combine(outputDir, "psg_nodes_enhanced.json")
-        File.WriteAllText(nodesPath, JsonSerializer.Serialize(enhancedNodes, jsonOptions))
+        let nodesPath = Path.Combine(outputDir, "psg_nodes.json")
+        File.WriteAllText(nodesPath, JsonSerializer.Serialize(nodes, jsonOptions))
         
-        let enhancedEdges = 
+        // Edge serialization
+        let edges = 
             psg.Edges
-            |> List.map (fun edge -> edgeToEnhancedJson edge psg)
+            |> List.map preparePSGEdgeForJson
             |> List.toArray
         
-        let edgesPath = Path.Combine(outputDir, "psg_edges_enhanced.json")
-        File.WriteAllText(edgesPath, JsonSerializer.Serialize(enhancedEdges, jsonOptions))
+        let edgesPath = Path.Combine(outputDir, "psg_edges.json")
+        File.WriteAllText(edgesPath, JsonSerializer.Serialize(edges, jsonOptions))
         
-        let typeAnalysisSummary = 
-            let totalNodes = enhancedNodes.Length
-            let nodesWithTypes = enhancedNodes |> Array.filter (fun n -> n.HasTypeInformation) |> Array.length
-            let nodesWithSymbols = enhancedNodes |> Array.filter (fun n -> n.HasSymbol) |> Array.length
-            let edgesWithSourceTypes = enhancedEdges |> Array.filter (fun e -> e.SourceHasType) |> Array.length
-            let edgesWithTargetTypes = enhancedEdges |> Array.filter (fun e -> e.TargetHasType) |> Array.length
-            
-            {|
-                Summary = {|
-                    TotalNodes = totalNodes
-                    NodesWithTypeInformation = nodesWithTypes
-                    NodesWithSymbols = nodesWithSymbols
-                    TypeCorrelationRate = if totalNodes > 0 then Math.Round(float nodesWithTypes / float totalNodes * 100.0, 2) else 0.0
-                    SymbolCorrelationRate = if totalNodes > 0 then Math.Round(float nodesWithSymbols / float totalNodes * 100.0, 2) else 0.0
-                |}
-                EdgeTypeAnalysis = {|
-                    TotalEdges = enhancedEdges.Length
-                    EdgesWithSourceTypes = edgesWithSourceTypes
-                    EdgesWithTargetTypes = edgesWithTargetTypes
-                    SourceTypeRate = if enhancedEdges.Length > 0 then Math.Round(float edgesWithSourceTypes / float enhancedEdges.Length * 100.0, 2) else 0.0
-                    TargetTypeRate = if enhancedEdges.Length > 0 then Math.Round(float edgesWithTargetTypes / float enhancedEdges.Length * 100.0, 2) else 0.0
-                |}
-                TypeDistribution = 
-                    enhancedNodes 
-                    |> Array.filter (fun n -> n.HasTypeInformation)
-                    |> Array.groupBy (fun n -> n.Type |> Option.defaultValue "Unknown")
-                    |> Array.map (fun (typeName, nodes) -> {| TypeName = typeName; Count = nodes.Length |})
-                    |> Array.sortByDescending (fun entry -> entry.Count)
+        // Enhanced reachability analysis
+        let reachabilityAnalysis = {|
+            TotalNodes = nodes.Length
+            ReachableNodes = nodes |> Array.filter (fun n -> n.IsReachable) |> Array.length
+            UnreachableNodes = nodes |> Array.filter (fun n -> not n.IsReachable) |> Array.length
+            EliminationRate = 
+                let unreachable = nodes |> Array.filter (fun n -> not n.IsReachable) |> Array.length
+                if nodes.Length > 0 then 
+                    Math.Round(float unreachable / float nodes.Length * 100.0, 2)
+                else 0.0
+            EliminationReasons = 
+                nodes 
+                |> Array.filter (fun n -> not n.IsReachable && n.EliminationReason.IsSome)
+                |> Array.groupBy (fun n -> n.EliminationReason.Value)
+                |> Array.map (fun (reason, nodes) -> {| Reason = reason; Count = nodes.Length |})
+            ReachabilityDistanceDistribution = 
+                nodes
+                |> Array.filter (fun n -> n.IsReachable && n.ReachabilityDistance.IsSome)
+                |> Array.groupBy (fun n -> n.ReachabilityDistance.Value)
+                |> Array.map (fun (distance, nodes) -> {| Distance = distance; Count = nodes.Length |})
+                |> Array.sortBy (fun entry -> entry.Distance)
+            SymbolCorrelationStats = {|
+                NodesWithSymbols = nodes |> Array.filter (fun n -> n.HasSymbol) |> Array.length
+                NodesWithoutSymbols = nodes |> Array.filter (fun n -> not n.HasSymbol) |> Array.length
+                ReachableWithSymbols = nodes |> Array.filter (fun n -> n.IsReachable && n.HasSymbol) |> Array.length
+                ReachableWithoutSymbols = nodes |> Array.filter (fun n -> n.IsReachable && not n.HasSymbol) |> Array.length
+                UnreachableWithSymbols = nodes |> Array.filter (fun n -> not n.IsReachable && n.HasSymbol) |> Array.length
             |}
+            LibraryCategoryBreakdown = 
+                nodes
+                |> Array.filter (fun n -> n.HasSymbol)
+                |> Array.groupBy (fun n -> n.LibraryCategory)
+                |> Array.map (fun (category, categoryNodes) -> {|
+                    Category = category
+                    Total = categoryNodes.Length
+                    Reachable = categoryNodes |> Array.filter (fun n -> n.IsReachable) |> Array.length
+                    Unreachable = categoryNodes |> Array.filter (fun n -> not n.IsReachable) |> Array.length
+                |})
+        |}
         
-        let typeAnalysisPath = Path.Combine(outputDir, "psg_type_analysis.json")
-        File.WriteAllText(typeAnalysisPath, JsonSerializer.Serialize(typeAnalysisSummary, jsonOptions))
+        let reachabilityPath = Path.Combine(outputDir, "reachability_analysis.json")
+        File.WriteAllText(reachabilityPath, JsonSerializer.Serialize(reachabilityAnalysis, jsonOptions))
         
-        let childrenStateAnalysis = 
-            psg.Nodes
-            |> Map.toSeq
-            |> Seq.map (fun (_, node) ->
-                match node.Children with
-                | NotProcessed -> "NotProcessed"
-                | Leaf -> "Leaf"
-                | Parent children -> sprintf "Parent_%d" children.Length)
-            |> Seq.countBy id
-            |> Seq.map (fun (state, count) -> {| State = state; Count = count |})
-            |> Seq.toArray
+        // Generate PSG summary with entry point analysis
+        let psgSummary = {|
+            CompilationOrder = psg.CompilationOrder |> List.map Path.GetFileName
+            NodeCount = nodes.Length
+            EdgeCount = edges.Length
+            FileCount = psg.SourceFiles.Count
+            SymbolCount = nodes |> Array.filter (fun n -> n.HasSymbol) |> Array.length
+            EntryPoints = 
+                psg.EntryPoints 
+                |> List.choose (fun entryId ->
+                    Map.tryFind entryId.Value psg.Nodes
+                    |> Option.bind (fun node -> node.Symbol)
+                    |> Option.map (fun symbol -> {|
+                        NodeId = entryId.Value
+                        SymbolFullName = symbol.FullName
+                        SymbolDisplayName = symbol.DisplayName
+                        IsMarkedReachable = 
+                            Map.tryFind entryId.Value psg.Nodes
+                            |> Option.map (fun n -> n.IsReachable)
+                            |> Option.defaultValue false
+                    |}))
+        |}
         
-        let stateAnalysisPath = Path.Combine(outputDir, "psg_children_state_analysis.json")
-        File.WriteAllText(stateAnalysisPath, JsonSerializer.Serialize(childrenStateAnalysis, jsonOptions))
+        let summaryPath = Path.Combine(outputDir, "psg.summary.json")
+        File.WriteAllText(summaryPath, JsonSerializer.Serialize(psgSummary, jsonOptions))
         
         printfn "Enhanced PSG debug output generated successfully in: %s" outputDir
         printfn "Files created:"
-        printfn "  - psg_nodes_enhanced.json (%d nodes)" enhancedNodes.Length
-        printfn "  - psg_edges_enhanced.json (%d edges)" enhancedEdges.Length
-        printfn "  - psg_type_analysis.json (comprehensive type distribution)"
-        printfn "  - psg_children_state_analysis.json (comprehensive state distribution)"
+        printfn "  - psg_nodes.json (%d nodes)" nodes.Length
+        printfn "  - psg_edges.json (%d edges)" edges.Length
+        printfn "  - reachability_analysis.json (enhanced soft-delete analysis)"
+        printfn "  - psg.summary.json (PSG structure summary)"
+        printfn "Reachability: %d reachable, %d unreachable (%.1f%% eliminated)" 
+            reachabilityAnalysis.ReachableNodes 
+            reachabilityAnalysis.UnreachableNodes 
+            reachabilityAnalysis.EliminationRate
+        
+        // Show symbol correlation warning if needed
+        if reachabilityAnalysis.SymbolCorrelationStats.ReachableWithSymbols < 5 then
+            printfn "⚠️  WARNING: Very few nodes with symbols marked as reachable (%d)" reachabilityAnalysis.SymbolCorrelationStats.ReachableWithSymbols
+            printfn "   This suggests symbol correlation issues between reachability analysis and PSG nodes"
         
     with
     | ex -> 
         printfn "Error generating enhanced PSG debug output: %s" ex.Message
 
-/// Generate comprehensive correlation debug output with enhanced symbol and type analysis
-let generateCorrelationDebugOutput (context: CorrelationContext) (outputDir: string) =
+/// Generate enhanced correlation debug output
+let generateCorrelationDebugOutput (correlations: (range * FSharpSymbol)[]) (outputDir: string) =
     try
         Directory.CreateDirectory(outputDir) |> ignore
         
-        let enhancedCorrelations = 
-            context.SymbolUses
-            |> Array.map (fun symbolUse -> correlationToEnhancedJson symbolUse.Range symbolUse.Symbol)
+        let correlationData = 
+            correlations
+            |> Array.map (fun (range, symbol) -> {|
+                Range = rangeToJson range
+                SymbolName = symbol.DisplayName
+                SymbolFullName = symbol.FullName
+                SymbolKind = symbol.GetType().Name
+                SymbolHash = symbol.GetHashCode()
+                IsFunction = 
+                    match symbol with
+                    | :? FSharpMemberOrFunctionOrValue as mfv -> mfv.IsFunction || mfv.IsMember
+                    | _ -> false
+                LibraryCategory = 
+                    let fullName = symbol.FullName
+                    match fullName with
+                    | name when name.StartsWith("Alloy.") -> "AlloyLibrary"
+                    | name when name.StartsWith("FSharp.Core.") || name.StartsWith("Microsoft.FSharp.") -> "FSharpCore"
+                    | _ -> "UserCode"
+                HasTypeInformation = 
+                    match symbol with
+                    | :? FSharpMemberOrFunctionOrValue -> true
+                    | :? FSharpEntity -> true
+                    | :? FSharpField -> true
+                    | _ -> false
+                TypeName = 
+                    match symbol with
+                    | :? FSharpMemberOrFunctionOrValue as mfv -> 
+                        Some (mfv.FullType.Format(FSharpDisplayContext.Empty))
+                    | :? FSharpEntity as entity -> 
+                        if entity.IsFSharpRecord || entity.IsFSharpUnion || entity.IsClass then
+                            Some (entity.AsType().Format(FSharpDisplayContext.Empty))
+                        else None
+                    | :? FSharpField as field -> 
+                        Some (field.FieldType.Format(FSharpDisplayContext.Empty))
+                    | _ -> None
+            |})
         
-        let correlationsPath = Path.Combine(outputDir, "correlations_enhanced.json")
-        File.WriteAllText(correlationsPath, JsonSerializer.Serialize(enhancedCorrelations, jsonOptions))
-        
-        let correlationStats = {|
-            TotalSymbolUses = context.SymbolUses.Length
-            UniqueSymbols = context.SymbolUses |> Array.map (fun su -> su.Symbol.FullName) |> Array.distinct |> Array.length
-            FunctionCount = enhancedCorrelations |> Array.filter (fun c -> c.IsFunction) |> Array.length
-            SymbolsWithTypeInfo = enhancedCorrelations |> Array.filter (fun c -> c.HasTypeInformation) |> Array.length
-            TypeCorrelationRate = 
-                let totalSymbols = enhancedCorrelations.Length
-                if totalSymbols > 0 then
-                    let withTypes = enhancedCorrelations |> Array.filter (fun c -> c.HasTypeInformation) |> Array.length
-                    Math.Round(float withTypes / float totalSymbols * 100.0, 2)
-                else 0.0
-            LibraryDistribution = 
-                enhancedCorrelations 
-                |> Array.groupBy (fun c -> c.LibraryCategory)
-                |> Array.map (fun (category, items) -> {| Category = category; Count = items.Length |})
-            TypeDistribution = 
-                enhancedCorrelations 
-                |> Array.filter (fun c -> c.HasTypeInformation)
-                |> Array.groupBy (fun c -> c.TypeName |> Option.defaultValue "Unknown")
-                |> Array.map (fun (typeName, items) -> {| TypeName = typeName; Count = items.Length |})
-                |> Array.sortByDescending (fun entry -> entry.Count)
-                |> Array.take (Math.Min(20, enhancedCorrelations.Length))
-        |}
-        
-        let statsPath = Path.Combine(outputDir, "correlation_statistics.json")
-        File.WriteAllText(statsPath, JsonSerializer.Serialize(correlationStats, jsonOptions))
+        let correlationsPath = Path.Combine(outputDir, "psg_correlations.json")
+        File.WriteAllText(correlationsPath, JsonSerializer.Serialize(correlationData, jsonOptions))
         
         printfn "Enhanced correlation debug output generated: %s" correlationsPath
-        printfn "Type correlation rate: %.1f%% (%d/%d symbols)" 
-            correlationStats.TypeCorrelationRate correlationStats.SymbolsWithTypeInfo context.SymbolUses.Length
+        printfn "Total correlations: %d" correlationData.Length
         
     with
     | ex -> 
-        printfn "Error generating enhanced correlation debug output: %s" ex.Message
+        printfn "Error generating correlation debug output: %s" ex.Message
 
-/// Generate unified debug outputs with consistent symbol measurement methodology
+/// Generate reachability analysis debug output with symbol correlation
+let generateReachabilityDebugOutput (result: LibraryAwareReachability) (outputDir: string) =
+    try
+        Directory.CreateDirectory(outputDir) |> ignore
+        
+        let reachabilityData = {|
+            summary = {|
+                computationTimeMs = result.PruningStatistics.ComputationTimeMs
+                originalSymbolCount = result.PruningStatistics.TotalSymbols
+                reachableSymbolCount = result.PruningStatistics.ReachableSymbols
+                eliminatedCount = result.PruningStatistics.EliminatedSymbols
+                eliminationRate = 
+                    if result.PruningStatistics.TotalSymbols > 0 then
+                        float result.PruningStatistics.EliminatedSymbols / float result.PruningStatistics.TotalSymbols * 100.0
+                    else 0.0
+            |}
+            entryPoints = result.BasicResult.EntryPoints |> List.map (fun ep -> ep.FullName)
+            callGraph = result.BasicResult.CallGraph |> Map.toArray
+            psgMetadata = {|
+                totalNodes = result.MarkedPSG.Nodes.Count
+                totalEdges = result.MarkedPSG.Edges.Length
+                sourceFiles = result.MarkedPSG.SourceFiles.Keys |> Seq.map Path.GetFileName |> Seq.sort |> Seq.toArray
+                compilationOrder = result.MarkedPSG.CompilationOrder |> List.map Path.GetFileName
+            |}
+            reachableSymbols = result.BasicResult.ReachableSymbols |> Set.toArray |> Array.sort
+            libraryBoundaries = 
+                result.LibraryCategories
+                |> Map.toSeq
+                |> Seq.groupBy snd
+                |> Seq.map (fun (category, symbols) -> {|
+                    category = category.ToString()
+                    symbols = symbols |> Seq.map fst |> Seq.toArray
+                    count = symbols |> Seq.length
+                |})
+                |> Seq.toArray
+        |}
+        
+        let reachabilityPath = Path.Combine(outputDir, "reachability.analysis.json")
+        File.WriteAllText(reachabilityPath, JsonSerializer.Serialize(reachabilityData, jsonOptions))
+        
+        printfn "Reachability analysis debug output generated: %s" reachabilityPath
+        
+    with
+    | ex -> 
+        printfn "Error generating reachability debug output: %s" ex.Message
+
+/// Enhanced debug output generation with symbol correlation analysis
 let generateDebugOutputs 
     (graph: ProgramSemanticGraph) 
     (correlations: (range * FSharpSymbol)[]) 
     (stats: CorrelationStats) 
     (outputDir: string) =
     
-    Directory.CreateDirectory(outputDir) |> ignore
+    generatePSGDebugOutput graph outputDir
+    generateCorrelationDebugOutput correlations outputDir
     
-    let meaningfulSymbols = UnifiedSymbolExtraction.extractMeaningfulSymbols graph
-    let correlatedNodes = UnifiedSymbolExtraction.extractCorrelatedNodes graph
-    let unifiedStats = {|
-        TotalMeaningfulSymbols = meaningfulSymbols.Length
-        CorrelatedNodeCount = correlatedNodes.Length
-    |}
-    
-    let enhancedNodes = 
+    // Extract reachable symbols from the graph for correlation analysis
+    let reachableSymbols = 
         graph.Nodes
         |> Map.toSeq
-        |> Seq.map (fun (_, node) -> 
-            let childrenList = ChildrenStateHelpers.getChildrenList node
-            let childrenStateDescription = 
-                match node.Children with
-                | NotProcessed -> "NotProcessed"
-                | Leaf -> "Leaf"
-                | Parent children -> sprintf "Parent(%d)" children.Length
-            
-            {|
-                Id = node.Id.Value
-                Kind = node.SyntaxKind
-                Symbol = node.Symbol |> Option.map (fun s -> s.DisplayName)
-                SymbolFullName = node.Symbol |> Option.map (fun s -> s.FullName)
-                Range = {| 
-                    StartLine = node.Range.Start.Line
-                    StartColumn = node.Range.Start.Column
-                    EndLine = node.Range.End.Line
-                    EndColumn = node.Range.End.Column 
-                |}
-                SourceFile = Path.GetFileName(node.SourceFile)
-                ParentId = node.ParentId |> Option.map (fun id -> id.Value)
-                Children = childrenList |> List.map (fun id -> id.Value) |> List.toArray
-                ChildrenState = childrenStateDescription
-                HasSymbol = node.Symbol.IsSome
-                IsCorrelated = node.Symbol.IsSome
-            |})
-        |> Seq.toArray
+        |> Seq.choose (fun (_, node) -> 
+            if node.IsReachable then
+                node.Symbol |> Option.map (fun s -> s.FullName)
+            else None)
+        |> Set.ofSeq
     
-    let nodesPath = Path.Combine(outputDir, "psg_nodes.json")
-    File.WriteAllText(nodesPath, JsonSerializer.Serialize(enhancedNodes, jsonOptions))
+    generateSymbolCorrelationAnalysis graph reachableSymbols outputDir
     
-    let enhancedEdges = 
-        graph.Edges 
-        |> List.map (fun edge -> {|
-            Source = edge.Source.Value
-            Target = edge.Target.Value
-            Kind = edge.Kind.ToString()
-            SourceNodeExists = Map.containsKey edge.Source.Value graph.Nodes
-            TargetNodeExists = Map.containsKey edge.Target.Value graph.Nodes
-        |})
-        |> List.toArray
-    
-    let edgesPath = Path.Combine(outputDir, "psg_edges.json")
-    File.WriteAllText(edgesPath, JsonSerializer.Serialize(enhancedEdges, jsonOptions))
-    
-    let childrenStateSummary = 
-        graph.Nodes
-        |> Map.toSeq
-        |> Seq.map (fun (_, node) ->
-            match node.Children with
-            | NotProcessed -> "NotProcessed"
-            | Leaf -> "Leaf"
-            | Parent children -> "Parent")
-        |> Seq.countBy id
-        |> Seq.map (fun (state, count) -> {| State = state; Count = count |})
-        |> Seq.toArray
-    
-    let statePath = Path.Combine(outputDir, "psg_children_state_summary.json")
-    File.WriteAllText(statePath, JsonSerializer.Serialize(childrenStateSummary, jsonOptions))
-    
-    let enhancedCorrelations = 
-        correlations
-        |> Array.map (fun (range, symbol) -> correlationToEnhancedJson range symbol)
-    
-    let correlationPath = Path.Combine(outputDir, "psg_correlations.json")
-    File.WriteAllText(correlationPath, JsonSerializer.Serialize(enhancedCorrelations, jsonOptions))
-    
-    let unifiedStatsReport = {|
-        UnifiedSymbolAnalysis = {|
-            TotalMeaningfulSymbols = unifiedStats.TotalMeaningfulSymbols
-            CorrelatedNodeCount = unifiedStats.CorrelatedNodeCount
-            SymbolCorrelationRate = 
-                if unifiedStats.TotalMeaningfulSymbols > 0 then
-                    (float unifiedStats.CorrelatedNodeCount / float unifiedStats.TotalMeaningfulSymbols) * 100.0
-                else 0.0
-        |}
-        PSGStructureAnalysis = {|
+    // Generate summary
+    let summaryStats = {|
+        PSGStructure = {|
             TotalNodes = graph.Nodes.Count
             TotalEdges = graph.Edges.Length
-            NodesWithSymbols = enhancedNodes |> Array.filter (fun n -> n.HasSymbol) |> Array.length
-            EntryPointsDeclared = graph.EntryPoints.Length
+            EntryPoints = graph.EntryPoints.Length
+            SourceFiles = graph.SourceFiles.Count
         |}
-        ChildrenStateDistribution = childrenStateSummary
-        CorrelationAnalysis = {|
-            TotalCorrelations = enhancedCorrelations.Length
-            FunctionCorrelations = enhancedCorrelations |> Array.filter (fun c -> c.IsFunction) |> Array.length
-            LibraryDistribution = 
-                enhancedCorrelations 
-                |> Array.groupBy (fun c -> c.LibraryCategory)
-                |> Array.map (fun (category, items) -> {| Category = category; Count = items.Length |})
+        SoftDeleteAnalysis = {|
+            ReachableNodes = graph.Nodes |> Map.filter (fun _ node -> node.IsReachable) |> Map.count
+            UnreachableNodes = graph.Nodes |> Map.filter (fun _ node -> not node.IsReachable) |> Map.count
+            EliminationRate = 
+                let unreachable = graph.Nodes |> Map.filter (fun _ node -> not node.IsReachable) |> Map.count
+                if graph.Nodes.Count > 0 then 
+                    Math.Round(float unreachable / float graph.Nodes.Count * 100.0, 2)
+                else 0.0
+        |}
+        CorrelationStats = {|
+            TotalCorrelations = correlations.Length
+            UniqueSymbols = correlations |> Array.map (snd >> fun s -> s.FullName) |> Array.distinct |> Array.length
+        |}
+        SymbolCorrelationIssues = {|
+            ReachableSymbolsExtracted = Set.count reachableSymbols
+            PSGNodesMarkedReachable = graph.Nodes |> Map.filter (fun _ node -> node.IsReachable) |> Map.count
+            CorrelationGap = Set.count reachableSymbols > 0 && (graph.Nodes |> Map.filter (fun _ node -> node.IsReachable) |> Map.count) = 0
         |}
     |}
     
-    let unifiedStatsPath = Path.Combine(outputDir, "unified_statistics_report.json")
-    File.WriteAllText(unifiedStatsPath, JsonSerializer.Serialize(unifiedStatsReport, jsonOptions))
+    let summaryPath = Path.Combine(outputDir, "debug_summary.json")
+    File.WriteAllText(summaryPath, JsonSerializer.Serialize(summaryStats, jsonOptions))
     
-    printfn "PSG debug outputs generated successfully in: %s" outputDir
-    printfn "Files created:"
-    printfn "  - psg_nodes.json (%d nodes)" enhancedNodes.Length
-    printfn "  - psg_edges.json (%d edges)" enhancedEdges.Length
-    printfn "  - psg_children_state_summary.json (state distribution)"
-    printfn "  - psg_correlations.json (%d correlations)" enhancedCorrelations.Length
-    printfn "  - unified_statistics_report.json (comprehensive analysis)"
-    printfn "Unified Symbol Analysis: %d meaningful symbols, %d correlated nodes" 
-        unifiedStats.TotalMeaningfulSymbols unifiedStats.CorrelatedNodeCount
+    printfn "Enhanced debug outputs generated in: %s" outputDir
+    
+    // Provide actionable feedback
+    if summaryStats.SymbolCorrelationIssues.CorrelationGap then
+        printfn ""
+        printfn "🔍 SYMBOL CORRELATION ISSUE DETECTED:"
+        printfn "   - Reachability analysis found %d reachable symbols" (Set.count reachableSymbols)
+        printfn "   - But 0 PSG nodes were marked as reachable"
+        printfn "   - Check symbol_correlation_analysis.json for detailed matching analysis"
+        printfn "   - This indicates symbol name mismatches between analysis phases"
 
-/// Generate comprehensive debugging output coordinated with reachability analysis results
-let generateComprehensiveDebugOutput (psg: ProgramSemanticGraph) (context: CorrelationContext) (outputDir: string) =
-    let timestamp = System.DateTime.Now.ToString("yyyyMMdd_HHmmss")
-    let debugDir = Path.Combine(outputDir, sprintf "psg_debug_%s" timestamp)
+/// Generate all debug outputs (alternative API)
+let generateCompleteDebugOutput (psg: ProgramSemanticGraph) (correlations: (range * FSharpSymbol)[]) (outputDir: string) =
+    generatePSGDebugOutput psg outputDir
+    generateCorrelationDebugOutput correlations outputDir
     
-    generatePSGDebugOutput psg debugDir
-    generateCorrelationDebugOutput context debugDir
+    let reachableSymbols = 
+        psg.Nodes
+        |> Map.toSeq
+        |> Seq.choose (fun (_, node) -> 
+            if node.IsReachable then
+                node.Symbol |> Option.map (fun s -> s.FullName)
+            else None)
+        |> Set.ofSeq
     
-    let summaryPath = Path.Combine(debugDir, "debug_summary.txt")
-    let meaningfulSymbols = UnifiedSymbolExtraction.extractMeaningfulSymbols psg
-    let correlatedNodes = UnifiedSymbolExtraction.extractCorrelatedNodes psg
-    let unifiedStats = {|
-        TotalMeaningfulSymbols = meaningfulSymbols.Length
-        CorrelatedNodeCount = correlatedNodes.Length
-    |}
-    
-    let lines = [
-        "PSG Debug Summary - Generated: " + System.DateTime.Now.ToString()
-        ""
-        "=== Unified Symbol Analysis ==="
-        "Meaningful Symbols: " + unifiedStats.TotalMeaningfulSymbols.ToString()
-        "Correlated Nodes: " + unifiedStats.CorrelatedNodeCount.ToString()
-        "Symbol Correlation Rate: " + sprintf "%.1f%%" (if unifiedStats.TotalMeaningfulSymbols > 0 then (float unifiedStats.CorrelatedNodeCount / float unifiedStats.TotalMeaningfulSymbols) * 100.0 else 0.0)
-        ""
-        "=== PSG Structure Analysis ==="
-        "Total Nodes: " + psg.Nodes.Count.ToString()
-        "Total Edges: " + psg.Edges.Length.ToString()
-        "Entry Points: " + psg.EntryPoints.Length.ToString()
-        "Source Files: " + psg.SourceFiles.Count.ToString()
-        "Symbol Uses (Context): " + context.SymbolUses.Length.ToString()
-        ""
-        "=== ChildrenState Distribution ==="
-    ]
-    
-    let childrenStateLines = 
-        psg.Nodes 
-        |> Map.toSeq 
-        |> Seq.map (fun (_, node) -> 
-            match node.Children with
-            | NotProcessed -> "NotProcessed"
-            | Leaf -> "Leaf" 
-            | Parent children -> "Parent")
-        |> Seq.countBy id
-        |> Seq.map (fun (state, count) -> "  " + state + ": " + count.ToString())
-        |> Seq.toList
-    
-    let edgeTypeLines = 
-        [""; "=== Edge Type Distribution ==="] @
-        (psg.Edges 
-         |> List.map (fun edge -> edge.Kind.ToString())
-         |> List.countBy id
-         |> List.map (fun (kind, count) -> "  " + kind + ": " + count.ToString()))
-    
-    let allLines = lines @ childrenStateLines @ edgeTypeLines
-    let summaryContent = String.concat "\n" allLines
-    
-    File.WriteAllText(summaryPath, summaryContent)
-    printfn "Consolidated debug summary generated: %s" summaryPath
+    generateSymbolCorrelationAnalysis psg reachableSymbols outputDir

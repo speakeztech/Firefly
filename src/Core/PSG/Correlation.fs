@@ -15,14 +15,14 @@ type CorrelationContext = {
 }
 
 /// Check if a range contains a position
-let private rangeContainsPosition (range: range) (pos: pos) =
+let rangeContainsPosition (range: range) (pos: pos) =
     range.StartLine <= pos.Line && 
     pos.Line <= range.EndLine &&
     (pos.Line > range.StartLine || pos.Column >= range.StartColumn) &&
     (pos.Line < range.EndLine || pos.Column <= range.EndColumn)
 
 /// Check if two ranges overlap
-let private rangesOverlap (r1: range) (r2: range) =
+let rangesOverlap (r1: range) (r2: range) =
     r1.FileName = r2.FileName &&
     r1.StartLine <= r2.EndLine &&
     r2.StartLine <= r1.EndLine &&
@@ -59,53 +59,240 @@ let createContext (checkResults: FSharpCheckProjectResults) =
         FileIndex = fileIndex
     }
 
-/// Try to correlate a syntax node with its symbol using enhanced matching
-let tryCorrelateSymbol (range: range) (fileName: string) (context: CorrelationContext) : FSharpSymbol option =
-    // Strategy 1: Try exact range match first
+/// Enhanced correlation debugging for specific missing symbols
+let debugMissingSymbols (context: CorrelationContext) (fileName: string) =
+    let fileUses = Map.tryFind fileName context.FileIndex |> Option.defaultValue [||]
+    
+    printfn "[CORRELATION DEBUG] === Missing Symbol Analysis for %s ===" (System.IO.Path.GetFileName fileName)
+    printfn "[CORRELATION DEBUG] Total symbols in file: %d" fileUses.Length
+    
+    // Look for specific missing symbols
+    let missingTargets = [
+        "AsReadOnlySpan"; "spanToString"; "stackBuffer"; "sprintf"; 
+        "readInto"; "Write"; "WriteLine"; "Ok"; "Error"
+    ]
+    
+    for target in missingTargets do
+        let matches = 
+            fileUses
+            |> Array.filter (fun symbolUse ->
+                symbolUse.Symbol.DisplayName.Contains(target) ||
+                symbolUse.Symbol.FullName.Contains(target))
+        
+        if matches.Length > 0 then
+            printfn "[CORRELATION DEBUG] ✓ Found '%s': %d matches" target matches.Length
+            matches |> Array.take (min 3 matches.Length) |> Array.iter (fun su ->
+                printfn "    %s at %s" su.Symbol.FullName (su.Range.ToString()))
+        else
+            printfn "[CORRELATION DEBUG] ✗ Missing '%s': No matches found" target
+    
+    // Show sample of available symbols for comparison
+    printfn "[CORRELATION DEBUG] Sample available symbols:"
+    fileUses 
+    |> Array.take (min 10 fileUses.Length)
+    |> Array.iter (fun su ->
+        printfn "    %s (%s) at %s" su.Symbol.DisplayName (su.Symbol.GetType().Name) (su.Range.ToString()))
+
+/// Enhanced symbol correlation with syntax context and specialized matching
+let tryCorrelateSymbolEnhanced (range: range) (fileName: string) (syntaxKind: string) (context: CorrelationContext) : FSharpSymbol option =
+    
+    // Strategy 1: Exact range match (existing)
     let key = (fileName, range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
     match Map.tryFind key context.PositionIndex with
-    | Some symbolUse -> Some symbolUse.Symbol
+    | Some symbolUse -> 
+        printfn "[CORRELATION] ✓ Exact match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+        Some symbolUse.Symbol
     | None ->
-        // Strategy 2: Search for symbols in the same file with overlapping or nearby ranges
+        // Strategy 2: Enhanced range-based search with syntax-aware filtering
         match Map.tryFind fileName context.FileIndex with
         | Some fileUses ->
-            // First try exact containment
-            let containmentMatch = 
-                fileUses
-                |> Array.tryFind (fun symbolUse ->
-                    let sr = symbolUse.Range
-                    rangeContainsPosition sr range.Start &&
-                    rangeContainsPosition sr range.End
-                )
             
-            match containmentMatch with
-            | Some symbolUse -> Some symbolUse.Symbol
-            | None ->
-                // Try overlapping ranges
-                let overlapMatch =
-                    fileUses
-                    |> Array.tryFind (fun symbolUse ->
-                        rangesOverlap symbolUse.Range range
-                    )
+            // Strategy 2a: Method call specific correlation
+            if syntaxKind.StartsWith("MethodCall:") || syntaxKind.Contains("DotGet") then
+                let methodName = 
+                    if syntaxKind.Contains(":") then
+                        let parts = syntaxKind.Split(':')
+                        if parts.Length > 1 then parts.[parts.Length - 1] else ""
+                    else ""
                 
-                match overlapMatch with
-                | Some symbolUse -> Some symbolUse.Symbol
-                | None ->
-                    // Last resort: find closest symbol within 2 lines
-                    let closeMatch =
+                let methodCandidates = 
+                    fileUses
+                    |> Array.filter (fun symbolUse ->
+                        match symbolUse.Symbol with
+                        | :? FSharpMemberOrFunctionOrValue as mfv -> 
+                            (mfv.IsMember || mfv.IsProperty || mfv.IsFunction) &&
+                            (String.IsNullOrEmpty(methodName) || 
+                             mfv.DisplayName.Contains(methodName) ||
+                             mfv.DisplayName = methodName)
+                        | _ -> false)
+                    |> Array.filter (fun symbolUse ->
+                        rangesOverlap symbolUse.Range range ||
+                        (abs(symbolUse.Range.StartLine - range.StartLine) <= 1 &&
+                         abs(symbolUse.Range.StartColumn - range.StartColumn) <= 15))
+                
+                match methodCandidates |> Array.sortBy (fun su -> 
+                    abs(su.Range.StartLine - range.StartLine) + abs(su.Range.StartColumn - range.StartColumn)) |> Array.tryHead with
+                | Some symbolUse -> 
+                    printfn "[CORRELATION] ✓ Method match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                    Some symbolUse.Symbol
+                | None -> 
+                    printfn "[CORRELATION] ✗ No method match for: %s" syntaxKind
+                    None
+            
+            // Strategy 2b: Generic type application correlation
+            elif syntaxKind.StartsWith("TypeApp:") then
+                let genericCandidates = 
+                    fileUses
+                    |> Array.filter (fun symbolUse ->
+                        match symbolUse.Symbol with
+                        | :? FSharpMemberOrFunctionOrValue as mfv -> 
+                            (mfv.IsFunction && (mfv.GenericParameters.Count > 0 || mfv.DisplayName.Contains("stackBuffer"))) ||
+                            mfv.DisplayName.Contains("stackBuffer")
+                        | :? FSharpEntity as entity -> entity.GenericParameters.Count > 0
+                        | _ -> false)
+                    |> Array.filter (fun symbolUse ->
+                        rangesOverlap symbolUse.Range range ||
+                        (symbolUse.Range.StartLine = range.StartLine &&
+                         abs(symbolUse.Range.StartColumn - range.StartColumn) <= 10))
+                
+                match genericCandidates |> Array.tryHead with
+                | Some symbolUse -> 
+                    printfn "[CORRELATION] ✓ Generic match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                    Some symbolUse.Symbol
+                | None -> 
+                    printfn "[CORRELATION] ✗ No generic match for: %s" syntaxKind
+                    None
+            
+            // Strategy 2c: Union case constructor correlation (Ok, Error, Some, None)
+            elif syntaxKind.Contains("UnionCase:") then
+                let unionCaseName = 
+                    if syntaxKind.Contains("Ok") then "Ok"
+                    elif syntaxKind.Contains("Error") then "Error"
+                    elif syntaxKind.Contains("Some") then "Some"
+                    elif syntaxKind.Contains("None") then "None"
+                    else ""
+                
+                if not (String.IsNullOrEmpty(unionCaseName)) then
+                    let unionCaseCandidates = 
                         fileUses
                         |> Array.filter (fun symbolUse ->
-                            abs(symbolUse.Range.StartLine - range.StartLine) <= 2
-                        )
-                        |> Array.sortBy (fun symbolUse ->
-                            abs(symbolUse.Range.StartLine - range.StartLine) +
-                            abs(symbolUse.Range.StartColumn - range.StartColumn)
-                        )
-                        |> Array.tryHead
+                            match symbolUse.Symbol with
+                            | :? FSharpUnionCase as unionCase -> unionCase.Name = unionCaseName
+                            | :? FSharpMemberOrFunctionOrValue as mfv -> 
+                                mfv.DisplayName = unionCaseName ||
+                                mfv.FullName.EndsWith("." + unionCaseName)
+                            | :? FSharpEntity as entity -> 
+                                entity.DisplayName = unionCaseName ||
+                                entity.FullName.EndsWith("." + unionCaseName)
+                            | _ -> false)
+                        |> Array.filter (fun symbolUse ->
+                            rangesOverlap symbolUse.Range range ||
+                            (abs(symbolUse.Range.StartLine - range.StartLine) <= 2))
                     
-                    match closeMatch with
-                    | Some symbolUse -> Some symbolUse.Symbol
-                    | None -> None
+                    match unionCaseCandidates |> Array.tryHead with
+                    | Some symbolUse -> 
+                        printfn "[CORRELATION] ✓ Union case match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                        Some symbolUse.Symbol
+                    | None -> 
+                        printfn "[CORRELATION] ✗ No union case match for: %s" syntaxKind
+                        None
+                else None
+            
+            // Strategy 2d: Function call correlation by name matching
+            elif syntaxKind.Contains("Ident:") || syntaxKind.Contains("LongIdent:") then
+                let identName = 
+                    if syntaxKind.Contains(":") then
+                        let parts = syntaxKind.Split(':')
+                        if parts.Length > 0 then parts.[parts.Length - 1] else ""
+                    else ""
+                
+                if not (String.IsNullOrEmpty(identName)) then
+                    let functionCandidates = 
+                        fileUses
+                        |> Array.filter (fun symbolUse ->
+                            symbolUse.Symbol.DisplayName = identName ||
+                            symbolUse.Symbol.FullName.EndsWith("." + identName) ||
+                            symbolUse.Symbol.FullName.Contains(identName) ||
+                            (symbolUse.Symbol.DisplayName.Contains(identName) && 
+                             symbolUse.Symbol.DisplayName.Length <= identName.Length + 5))
+                        |> Array.filter (fun symbolUse ->
+                            rangesOverlap symbolUse.Range range ||
+                            (abs(symbolUse.Range.StartLine - range.StartLine) <= 1 &&
+                             abs(symbolUse.Range.StartColumn - range.StartColumn) <= 15))
+                    
+                    match functionCandidates |> Array.sortBy (fun su -> 
+                        let nameScore = if su.Symbol.DisplayName = identName then 0 else 1
+                        let rangeScore = abs(su.Range.StartLine - range.StartLine) + abs(su.Range.StartColumn - range.StartColumn)
+                        nameScore * 100 + rangeScore) |> Array.tryHead with
+                    | Some symbolUse -> 
+                        printfn "[CORRELATION] ✓ Function match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                        Some symbolUse.Symbol
+                    | None -> 
+                        printfn "[CORRELATION] ✗ No function match for: %s (name: %s)" syntaxKind identName
+                        None
+                else None
+            
+            // Strategy 3: Fallback to original logic for other cases
+            else
+                let containmentMatch = 
+                    fileUses
+                    |> Array.tryFind (fun symbolUse ->
+                        let sr = symbolUse.Range
+                        rangeContainsPosition sr range.Start &&
+                        rangeContainsPosition sr range.End)
+                
+                match containmentMatch with
+                | Some symbolUse -> 
+                    printfn "[CORRELATION] ✓ Containment match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                    Some symbolUse.Symbol
+                | None ->
+                    let overlapMatch =
+                        fileUses
+                        |> Array.tryFind (fun symbolUse ->
+                            rangesOverlap symbolUse.Range range)
+                    
+                    match overlapMatch with
+                    | Some symbolUse -> 
+                        printfn "[CORRELATION] ✓ Overlap match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                        Some symbolUse.Symbol
+                    | None ->
+                        let closeMatch =
+                            fileUses
+                            |> Array.filter (fun symbolUse ->
+                                abs(symbolUse.Range.StartLine - range.StartLine) <= 2)
+                            |> Array.sortBy (fun symbolUse ->
+                                abs(symbolUse.Range.StartLine - range.StartLine) +
+                                abs(symbolUse.Range.StartColumn - range.StartColumn))
+                            |> Array.tryHead
+                        
+                        match closeMatch with
+                        | Some symbolUse -> 
+                            printfn "[CORRELATION] ✓ Close match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                            Some symbolUse.Symbol
+                        | None -> 
+                            printfn "[CORRELATION] ✗ No match: %s at %s" syntaxKind (range.ToString())
+                            None
+        | None -> 
+            printfn "[CORRELATION] ✗ No file index for: %s" fileName
+            None
+
+/// Try to correlate a syntax node with its symbol using enhanced matching (ORIGINAL API)
+let tryCorrelateSymbol (range: range) (fileName: string) (context: CorrelationContext) : FSharpSymbol option =
+    // For backward compatibility, use enhanced correlation with generic syntax kind
+    tryCorrelateSymbolEnhanced range fileName "Generic" context
+
+/// Enhanced correlation function that passes syntax context (NEW API)
+let tryCorrelateSymbolWithContext (range: range) (fileName: string) (syntaxKind: string) (context: CorrelationContext) : FSharpSymbol option =
+    
+    // First try enhanced correlation
+    match tryCorrelateSymbolEnhanced range fileName syntaxKind context with
+    | Some symbol -> Some symbol
+    | None ->
+        // Fallback to original correlation for backward compatibility
+        match tryCorrelateSymbol range fileName context with
+        | Some symbol ->
+            printfn "[CORRELATION] ✓ Fallback correlation: %s -> %s" syntaxKind symbol.FullName
+            Some symbol
         | None -> None
 
 /// Visitor pattern for AST traversal with correlation

@@ -86,7 +86,7 @@ let nodeId = NodeId.FromRange(uniqueFileName, range)
 **Before**: `rng_Core_173_20_173_23` (collision between Binding and Pattern)  
 **After**: `rng_Core_Binding_173_20_173_23` vs `rng_Core_Pattern_Named_acc_173_20_173_23`
 
-### Solution 2: Enhanced Enclosing Context Detection
+### Solution 2: Extended Enclosing Context Detection
 **Change**: Expanded `findEnclosingFunction` to accept modules and entities as valid calling contexts  
 **Impact**: Handles module-level calls without crashes, provides proper attribution  
 

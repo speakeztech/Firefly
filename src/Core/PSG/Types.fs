@@ -54,7 +54,7 @@ type SymbolRelation =
     | InheritsFrom of FSharpEntity
     | ReferencesSymbol of FSharpSymbol
 
-/// Enhanced PSG node with soft-delete support added to existing structure
+/// PSG node with soft-delete support added to existing structure
 type PSGNode = {
     // EXISTING FIELDS - DO NOT CHANGE
     Id: NodeId
@@ -119,7 +119,7 @@ module ChildrenStateHelpers =
         Children = NotProcessed
         
         // Initialize new soft-delete fields with defaults
-        IsReachable = true  
+        IsReachable = false  
         EliminationPass = None
         EliminationReason = None
         ReachabilityDistance = None

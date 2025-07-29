@@ -25,7 +25,7 @@ type LibraryAwareReachability = {
     LibraryCategories: Map<string, LibraryCategory>
     PruningStatistics: PruningStatistics
     
-    // NEW: Soft-delete support
+    // Soft-delete support
     MarkedPSG: ProgramSemanticGraph  // Contains all nodes with IsReachable flags
 }
 
@@ -36,10 +36,10 @@ and PruningStatistics = {
     ComputationTimeMs: int64
 }
 
-/// Unified symbol extraction using identical filtering criteria as DebugOutput.fs
+/// Enhanced symbol extraction with better filtering
 module UnifiedSymbolExtraction =
     
-    /// Extract meaningful symbols using standardized filtering logic
+    /// Extract meaningful symbols using enhanced filtering logic
     let extractMeaningfulSymbols (psg: ProgramSemanticGraph) : FSharpSymbol array =
         psg.Nodes
         |> Map.toSeq
@@ -47,10 +47,12 @@ module UnifiedSymbolExtraction =
             match node.Symbol with
             | Some symbol -> 
                 let name = symbol.FullName
-                // Apply identical filtering criteria as DebugOutput.fs
-                if not (name.Contains("@") || name.Contains("$") || name.Length < 3) 
-                   && not (name.StartsWith("op_") || name.Contains(".cctor") || name.Contains("..ctor"))
-                   && not (name.Contains("get_") || name.Contains("set_")) then
+                // More permissive filtering - allow critical symbols through
+                if not (name.Contains("@") || name.Contains("$")) 
+                   && not (name.StartsWith("op_"))
+                   && not (name.Contains(".cctor"))
+                   && not (name.Contains("get_") && name.Contains("set_"))
+                   && name.Length >= 2 then
                     Some symbol
                 else None
             | None -> None
@@ -65,12 +67,41 @@ module UnifiedSymbolExtraction =
         |> Seq.filter (fun (_, node) -> node.Symbol.IsSome)
         |> Seq.toArray
 
+/// Enhanced symbol name normalization for consistent matching
+let normalizeSymbolName (symbolName: string) : string =
+    // Handle common symbol name variations
+    symbolName
+        .Replace("`", "")
+        .Replace("@", "")
+        .Replace("$", "")
+        .Trim()
+
+/// Enhanced symbol matching with multiple strategies
+let symbolMatches (psgSymbol: FSharpSymbol) (targetSymbolName: string) : bool =
+    let psgFullName = normalizeSymbolName psgSymbol.FullName
+    let psgDisplayName = normalizeSymbolName psgSymbol.DisplayName
+    let normalizedTarget = normalizeSymbolName targetSymbolName
+    
+    // Strategy 1: Exact full name match
+    if psgFullName = normalizedTarget then true
+    // Strategy 2: Exact display name match  
+    elif psgDisplayName = normalizedTarget then true
+    // Strategy 3: Full name ends with target (for qualified names)
+    elif psgFullName.EndsWith("." + normalizedTarget) then true
+    // Strategy 4: Target ends with full name (for qualified targets)
+    elif normalizedTarget.EndsWith("." + psgFullName) then true
+    // Strategy 5: Both contain the same core identifier
+    elif psgDisplayName.Length > 3 && normalizedTarget.Contains(psgDisplayName) then true
+    elif normalizedTarget.Length > 3 && psgFullName.Contains(normalizedTarget) then true
+    else false
+
 /// Classify symbol by library boundary for analysis purposes
 let classifySymbol (symbol: FSharpSymbol) : LibraryCategory =
     let fullName = symbol.FullName
     match fullName with
     | name when name.StartsWith("Alloy.") -> AlloyLibrary
     | name when name.StartsWith("FSharp.Core.") || name.StartsWith("Microsoft.FSharp.") -> FSharpCore
+    | name when name.StartsWith("Examples.") || name.StartsWith("HelloWorld") -> UserCode
     | _ -> UserCode
 
 /// Determine if symbol represents a callable function or method
@@ -79,62 +110,9 @@ let isFunction (symbol: FSharpSymbol) : bool =
     | :? FSharpMemberOrFunctionOrValue as mfv -> mfv.IsFunction || mfv.IsMember
     | _ -> false
 
-/// FIXED: Find the containing function for a given node with proper function detection
-let findContainingFunction (psg: ProgramSemanticGraph) (nodeId: string) : string option =
-    let visited = System.Collections.Generic.HashSet<string>()
-    
-    let rec traverse currentId =
-        if visited.Contains(currentId) then
-            printfn "[CYCLE] Detected cycle at node: %s" currentId
-            None
-        else
-            visited.Add(currentId) |> ignore
-            match Map.tryFind currentId psg.Nodes with
-            | Some node ->
-                // Check if current node has a function symbol
-                match node.Symbol with
-                | Some symbol ->
-                    match symbol with
-                    | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsFunction ->
-                        // Found a REAL function - return its full name
-                        Some symbol.FullName
-                    | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsModuleValueOrMember ->
-                        // Module value or member - check if it's actually a function
-                        if mfv.IsFunction then
-                            Some symbol.FullName
-                        else
-                            // NOT a function (like let bindings) - continue traversing up
-                            match node.ParentId with
-                            | Some parentId -> traverse parentId.Value
-                            | None -> None
-                    | :? FSharpEntity as entity when entity.IsFSharpModule ->
-                        // Found a module - only accept as last resort
-                        match node.ParentId with
-                        | Some parentId -> 
-                            // Try to continue up first
-                            match traverse parentId.Value with
-                            | Some higherFunction -> Some higherFunction
-                            | None -> Some symbol.FullName  // Use module as fallback
-                        | None -> Some symbol.FullName
-                    | _ ->
-                        // Other symbol type - continue traversing up
-                        match node.ParentId with
-                        | Some parentId -> traverse parentId.Value
-                        | None -> None
-                | None ->
-                    // No symbol - continue traversing up parent chain
-                    match node.ParentId with
-                    | Some parentId -> traverse parentId.Value
-                    | None -> None
-            | None -> 
-                // Node not found in graph
-                None
-    
-    traverse nodeId
-
-/// Enhanced entry point detection using multiple comprehensive strategies
+/// Enhanced entry point detection with comprehensive debugging
 let extractEntryPoints (psg: ProgramSemanticGraph) =
-    printfn "[ENTRY POINTS] === Entry Point Extraction ==="
+    printfn "[ENTRY POINTS] === Enhanced Entry Point Extraction ==="
     
     let meaningfulSymbols = UnifiedSymbolExtraction.extractMeaningfulSymbols psg
     let correlatedNodes = UnifiedSymbolExtraction.extractCorrelatedNodes psg
@@ -146,8 +124,8 @@ let extractEntryPoints (psg: ProgramSemanticGraph) =
         meaningfulSymbols
         |> Array.choose (fun symbol ->
             match symbol with
-            | symbol when symbol.DisplayName = "main" ->
-                printfn "[ENTRY POINTS] Found main function: %s" symbol.FullName
+            | symbol when symbol.DisplayName = "main" || symbol.DisplayName = "hello" ->
+                printfn "[ENTRY POINTS] Found entry function: %s (Display: %s)" symbol.FullName symbol.DisplayName
                 Some symbol
             | :? FSharpMemberOrFunctionOrValue as mfv ->
                 let hasEntryPoint = 
@@ -160,7 +138,7 @@ let extractEntryPoints (psg: ProgramSemanticGraph) =
                     | _ -> false
                 
                 if hasEntryPoint then
-                    printfn "[ENTRY POINTS] Found EntryPoint attribute: %s" symbol.FullName
+                    printfn "[ENTRY POINTS] Found EntryPoint attribute: %s (Display: %s)" symbol.FullName symbol.DisplayName
                     Some symbol
                 else None
             | _ -> None
@@ -173,31 +151,18 @@ let extractEntryPoints (psg: ProgramSemanticGraph) =
         |> Array.choose (fun (_, node) ->
             match node.Symbol with
             | Some symbol ->
-                let name = symbol.DisplayName.ToLowerInvariant()
-                if name = "main" || name.Contains("main") then
-                    printfn "[ENTRY POINTS] Found main-pattern in node: %s" symbol.FullName
-                    Some symbol
-                elif node.SyntaxKind.Contains("Binding") && symbol.FullName.Contains("main") then
-                    printfn "[ENTRY POINTS] Found main binding: %s" symbol.FullName
+                let syntaxKind = node.SyntaxKind
+                if syntaxKind.Contains("EntryPoint") || syntaxKind.Contains("Main") || 
+                   (syntaxKind.Contains("Binding") && symbol.DisplayName = "main") ||
+                   symbol.FullName.Contains("hello") then
+                    printfn "[ENTRY POINTS] Found entry point node: %s (%s)" symbol.FullName syntaxKind
                     Some symbol
                 else None
             | None -> None
         )
         |> Array.toList
     
-    // Strategy 3: Search for HelloWorld or DirectMain patterns (project-specific)
-    let projectSpecificEntryPoints = 
-        meaningfulSymbols
-        |> Array.choose (fun symbol ->
-            let fullName = symbol.FullName
-            if fullName.Contains("HelloWorld") || fullName.Contains("DirectMain") || fullName.Contains("hello") then
-                printfn "[ENTRY POINTS] Found project-specific entry point pattern: %s" fullName
-                Some symbol
-            else None
-        )
-        |> Array.toList
-    
-    // Strategy 4: Check PSG explicit entry points collection
+    // Strategy 3: Check PSG explicit entry points collection
     let explicitEntryPoints = 
         psg.EntryPoints
         |> List.choose (fun entryId ->
@@ -210,7 +175,7 @@ let extractEntryPoints (psg: ProgramSemanticGraph) =
     
     // Combine and deduplicate all entry points
     let allEntryPoints = 
-        [symbolBasedEntryPoints; nodeBasedEntryPoints; projectSpecificEntryPoints; explicitEntryPoints]
+        [symbolBasedEntryPoints; nodeBasedEntryPoints; explicitEntryPoints]
         |> List.concat
         |> List.distinctBy (fun ep -> ep.FullName)
     
@@ -218,26 +183,28 @@ let extractEntryPoints (psg: ProgramSemanticGraph) =
     
     if allEntryPoints.IsEmpty then
         printfn "[ENTRY POINTS] WARNING: No entry points detected using any strategy!"
-        printfn "[ENTRY POINTS] Meaningful symbols examined: %d" meaningfulSymbols.Length
-        printfn "[ENTRY POINTS] Correlated nodes examined: %d" correlatedNodes.Length
-        printfn "[ENTRY POINTS] Sample meaningful symbols:"
+        printfn "[ENTRY POINTS] Available symbols sample:"
         meaningfulSymbols 
         |> Array.take (min 10 meaningfulSymbols.Length)
         |> Array.iter (fun s -> printfn "  - %s (%s)" s.FullName s.DisplayName)
     else
         allEntryPoints |> List.iter (fun ep -> 
-            printfn "[ENTRY POINTS] ✓ %s" ep.FullName)
+            printfn "[ENTRY POINTS] ✓ %s (Display: %s)" ep.FullName ep.DisplayName)
     
     allEntryPoints
 
-/// FIXED: Extract function calls using PSG FunctionCall edges with better error handling
-let extractFunctionCalls (psg: ProgramSemanticGraph) =
-    printfn "[CALL EXTRACTION] === Function Call Analysis ==="
+/// Enhanced function call extraction using improved PSG edge analysis
+let rec extractFunctionCalls (psg: ProgramSemanticGraph) =
+    printfn "[CALL EXTRACTION] === Enhanced Function Call Analysis ==="
     
     let functionCallEdges = psg.Edges |> List.filter (fun e -> e.Kind = FunctionCall)
-    printfn "[CALL EXTRACTION] Processing %d FunctionCall edges" functionCallEdges.Length
+    let symRefEdges = psg.Edges |> List.filter (fun e -> e.Kind = SymRef)
     
-    let functionCalls = 
+    printfn "[CALL EXTRACTION] Processing %d FunctionCall edges and %d SymRef edges" 
+        functionCallEdges.Length symRefEdges.Length
+    
+    // Direct function call edges
+    let directFunctionCalls = 
         functionCallEdges
         |> List.choose (fun edge ->
             let sourceNode = Map.tryFind edge.Source.Value psg.Nodes
@@ -245,58 +212,74 @@ let extractFunctionCalls (psg: ProgramSemanticGraph) =
             
             match sourceNode, targetNode with
             | Some src, Some tgt when tgt.Symbol.IsSome ->
-                // Try to find containing function
-                let callingContext = findContainingFunction psg edge.Source.Value
-                match callingContext with
-                | Some caller -> 
-                    printfn "[CALL EXTRACTION] %s -> %s (context: %s)" caller tgt.Symbol.Value.FullName caller
-                    Some (caller, tgt.Symbol.Value.FullName)
+                match src.Symbol with
+                | Some srcSymbol -> 
+                    printfn "[CALL EXTRACTION] Direct call: %s -> %s" srcSymbol.FullName tgt.Symbol.Value.FullName
+                    Some (srcSymbol.FullName, tgt.Symbol.Value.FullName)
                 | None -> 
-                    // Fallback: use source node's symbol if available
-                    match src.Symbol with
-                    | Some srcSymbol -> 
-                        printfn "[CALL EXTRACTION] %s -> %s (direct)" srcSymbol.FullName tgt.Symbol.Value.FullName
-                        Some (srcSymbol.FullName, tgt.Symbol.Value.FullName)
-                    | None -> 
-                        printfn "[CALL EXTRACTION] Cannot determine calling context for %s" tgt.Symbol.Value.FullName
-                        None
-            | Some _, Some tgt ->
-                printfn "[CALL EXTRACTION] Target node %s has no symbol" edge.Target.Value
-                None
-            | Some _, None ->
-                printfn "[CALL EXTRACTION] Target node %s not found" edge.Target.Value
-                None
-            | None, _ ->
-                printfn "[CALL EXTRACTION] Source node %s not found" edge.Source.Value
-                None
+                    findContainingFunction psg edge.Source.Value |> Option.map (fun caller ->
+                        printfn "[CALL EXTRACTION] Context call: %s -> %s" caller tgt.Symbol.Value.FullName
+                        (caller, tgt.Symbol.Value.FullName))
+            | _ -> None
         )
     
-    printfn "[CALL EXTRACTION] Function calls found: %d" functionCalls.Length
+    // Symbol reference edges
+    let symbolRefCalls = 
+        symRefEdges
+        |> List.choose (fun edge ->
+            let sourceNode = Map.tryFind edge.Source.Value psg.Nodes
+            let targetNode = Map.tryFind edge.Target.Value psg.Nodes
+            
+            match sourceNode, targetNode with
+            | Some src, Some tgt when src.Symbol.IsSome && tgt.Symbol.IsSome ->
+                let srcSymbol = src.Symbol.Value
+                let tgtSymbol = tgt.Symbol.Value
+                
+                if isFunction tgtSymbol then
+                    printfn "[CALL EXTRACTION] Symbol ref call: %s -> %s" srcSymbol.FullName tgtSymbol.FullName
+                    Some (srcSymbol.FullName, tgtSymbol.FullName)
+                else None
+            | _ -> None
+        )
     
-    if functionCalls.Length > 0 then
-        printfn "[CALL EXTRACTION] Function calls:"
-        functionCalls 
-        |> List.iter (fun (src, tgt) -> printfn "  %s -> %s" src tgt)
-    else
-        printfn "[CALL EXTRACTION] WARNING: No function calls detected!"
-        printfn "[CALL EXTRACTION] Available FunctionCall edges: %d" functionCallEdges.Length
-        
-        // Debug: Show what edges we have
-        if functionCallEdges.Length > 0 then
-            printfn "[CALL EXTRACTION] Sample FunctionCall edges:"
-            functionCallEdges
-            |> List.take (min 5 functionCallEdges.Length)
-            |> List.iter (fun edge ->
-                let srcExists = Map.containsKey edge.Source.Value psg.Nodes
-                let tgtExists = Map.containsKey edge.Target.Value psg.Nodes
-                printfn "  %s -> %s (src exists: %b, tgt exists: %b)" 
-                    edge.Source.Value edge.Target.Value srcExists tgtExists)
+    let allFunctionCalls = [directFunctionCalls; symbolRefCalls] |> List.concat |> List.distinct
     
-    functionCalls
+    printfn "[CALL EXTRACTION] Total function calls found: %d" allFunctionCalls.Length
+    allFunctionCalls
+
+/// Find the containing function for a given node
+and findContainingFunction (psg: ProgramSemanticGraph) (nodeId: string) : string option =
+    let visited = System.Collections.Generic.HashSet<string>()
+    
+    let rec traverse currentId =
+        if visited.Contains(currentId) then
+            None
+        else
+            visited.Add(currentId) |> ignore
+            match Map.tryFind currentId psg.Nodes with
+            | Some node ->
+                match node.Symbol with
+                | Some symbol ->
+                    match symbol with
+                    | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsFunction ->
+                        Some symbol.FullName
+                    | :? FSharpMemberOrFunctionOrValue as mfv when mfv.IsModuleValueOrMember && mfv.IsFunction ->
+                        Some symbol.FullName
+                    | _ ->
+                        match node.ParentId with
+                        | Some parentId -> traverse parentId.Value
+                        | None -> None
+                | None ->
+                    match node.ParentId with
+                    | Some parentId -> traverse parentId.Value
+                    | None -> None
+            | None -> None
+    
+    traverse nodeId
 
 /// Build comprehensive call graph with entry point integration
 let buildCallGraph (functionCalls: (string * string) list) (entryPoints: FSharpSymbol list) =
-    printfn "[CALL GRAPH] === Call Graph Construction ==="
+    printfn "[CALL GRAPH] === Enhanced Call Graph Construction ==="
     
     let callGraph = 
         functionCalls
@@ -315,18 +298,9 @@ let buildCallGraph (functionCalls: (string * string) list) (entryPoints: FSharpS
         ) callGraph
     
     printfn "[CALL GRAPH] Call graph entries: %d" (Map.count finalCallGraph)
-    
-    if Map.isEmpty finalCallGraph then
-        printfn "[CALL GRAPH] WARNING: Empty call graph constructed!"
-    else
-        let sampleEntries = finalCallGraph |> Map.toSeq |> Seq.take (min 5 (Map.count finalCallGraph))
-        printfn "[CALL GRAPH] Sample entries:"
-        sampleEntries |> Seq.iter (fun (caller, callees) ->
-            printfn "  %s -> [%s]" caller (String.concat "; " callees))
-    
     finalCallGraph
 
-/// Compute reachable symbols using breadth-first traversal with comprehensive validation
+/// Compute reachable symbols using breadth-first traversal
 let computeReachableSymbols (entryPoints: FSharpSymbol list) (callGraph: Map<string, string list>) (allSymbolNames: Set<string>) =
     let rec traverse (visited: Set<string>) (queue: string list) =
         match queue with
@@ -353,59 +327,109 @@ let computeReachableSymbols (entryPoints: FSharpSymbol list) (callGraph: Map<str
     
     if Set.count reachable > 0 then
         printfn "[REACHABILITY] Sample reachable symbols:"
-        reachable |> Set.toArray |> Array.take (min 5 (Set.count reachable))
+        reachable |> Set.toArray |> Array.take (min 10 (Set.count reachable))
         |> Array.iter (fun s -> printfn "  ✓ %s" s)
-    else
-        printfn "[REACHABILITY] WARNING: No symbols marked as reachable!"
-        printfn "[REACHABILITY] Entry points provided: %d" entryPoints.Length
-        printfn "[REACHABILITY] Call graph size: %d" (Map.count callGraph)
-        printfn "[REACHABILITY] Available symbols: %d" (Set.count allSymbolNames)
     
     reachable
 
-/// NEW: Mark nodes as reachable/unreachable with soft-delete support
+/// ENHANCED: Mark nodes as reachable/unreachable with comprehensive symbol matching
 let markReachabilityInPSG (psg: ProgramSemanticGraph) (reachableSymbols: Set<string>) : ProgramSemanticGraph =
-    printfn "[SOFT DELETE] === Marking Reachability ==="
+    printfn "[SOFT DELETE] === Enhanced Reachability Marking with Symbol Correlation ==="
+    printfn "[SOFT DELETE] Attempting to mark %d reachable symbols in %d PSG nodes" (Set.count reachableSymbols) (Map.count psg.Nodes)
+    
+    // Debug: Show what reachable symbols we're looking for
+    printfn "[SOFT DELETE] Target reachable symbols:"
+    reachableSymbols |> Set.iter (fun s -> printfn "  Target: %s" s)
+    
+    let mutable reachableCount = 0
+    let mutable unreachableCount = 0
+    let mutable symbolMismatches = []
     
     let updatedNodes = 
         psg.Nodes
         |> Map.map (fun nodeId node ->
             match node.Symbol with
-            | Some symbol when Set.contains symbol.FullName reachableSymbols ->
-                ReachabilityHelpers.markReachable 0 node
             | Some symbol ->
-                ReachabilityHelpers.markUnreachable 1 "Unreachable from entry points" node
+                // Enhanced symbol matching with multiple strategies
+                let isReachable = reachableSymbols |> Set.exists (symbolMatches symbol)
+                
+                if isReachable then
+                    reachableCount <- reachableCount + 1
+                    printfn "[SOFT DELETE] ✓ Marking reachable: %s (PSG: %s)" symbol.FullName nodeId
+                    ReachabilityHelpers.markReachable 0 node
+                else
+                    unreachableCount <- unreachableCount + 1
+                    // Track symbol mismatches for debugging
+                    symbolMismatches <- (symbol.FullName, symbol.DisplayName) :: symbolMismatches
+                    ReachabilityHelpers.markUnreachable 1 "Unreachable from entry points" node
             | None ->
-                // Nodes without symbols inherit from parent if available
-                ReachabilityHelpers.markUnreachable 1 "Node without symbol" node)
+                // Nodes without symbols - check if parent is reachable
+                let isParentReachable = 
+                    match node.ParentId with
+                    | Some parentId ->
+                        match Map.tryFind parentId.Value psg.Nodes with
+                        | Some parentNode -> 
+                            parentNode.Symbol 
+                            |> Option.map (fun s -> reachableSymbols |> Set.exists (symbolMatches s))
+                            |> Option.defaultValue false
+                        | None -> false
+                    | None -> false
+                
+                if isParentReachable then
+                    reachableCount <- reachableCount + 1
+                    ReachabilityHelpers.markReachable 1 node
+                else
+                    unreachableCount <- unreachableCount + 1
+                    ReachabilityHelpers.markUnreachable 1 "Node without symbol or unreachable parent" node)
     
-    let reachableCount = updatedNodes |> Map.toSeq |> Seq.map snd |> Seq.filter (fun n -> n.IsReachable) |> Seq.length
-    let unreachableCount = (Map.count updatedNodes) - reachableCount
-    printfn "[SOFT DELETE] Marked %d nodes as reachable, %d as unreachable" reachableCount unreachableCount
+    printfn "[SOFT DELETE] Marking complete: %d reachable, %d unreachable" reachableCount unreachableCount
+    
+    // Debug symbol mismatches if we have very few reachable nodes
+    if reachableCount < 5 then
+        printfn "[SOFT DELETE] WARNING: Very few nodes marked as reachable. Symbol correlation analysis:"
+        printfn "[SOFT DELETE] Sample PSG symbols that weren't matched:"
+        symbolMismatches 
+        |> List.take (min 10 (List.length symbolMismatches))
+        |> List.iter (fun (fullName, displayName) -> 
+            printfn "  PSG Symbol: %s (Display: %s)" fullName displayName)
+        
+        printfn "[SOFT DELETE] Checking if any PSG symbols partially match targets:"
+        reachableSymbols |> Set.iter (fun target ->
+            let partialMatches = 
+                symbolMismatches 
+                |> List.filter (fun (fullName, displayName) ->
+                    fullName.Contains(target) || target.Contains(fullName) ||
+                    displayName.Contains(target) || target.Contains(displayName))
+            
+            if not (List.isEmpty partialMatches) then
+                printfn "  Target '%s' has potential matches:" target
+                partialMatches |> List.take (min 3 (List.length partialMatches)) |> List.iter (fun (fn, dn) ->
+                    printfn "    - %s (%s)" fn dn)
+        )
     
     { psg with Nodes = updatedNodes }
 
-/// Main entry point for PSG-based reachability analysis with unified symbol extraction
+/// Main entry point for enhanced PSG-based reachability analysis
 let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) : LibraryAwareReachability =
     let startTime = DateTime.UtcNow
     
-    printfn "[REACHABILITY] === PSG-Based Analysis Start ==="
+    printfn "[REACHABILITY] === Enhanced PSG-Based Analysis Start ==="
     printfn "[REACHABILITY] PSG nodes: %d" (Map.count psg.Nodes)
     printfn "[REACHABILITY] PSG edges: %d" psg.Edges.Length
     printfn "[REACHABILITY] PSG entry points: %d" psg.EntryPoints.Length
     
-    // Use unified symbol extraction for consistent measurements
+    // Use enhanced symbol extraction
     let meaningfulSymbols = UnifiedSymbolExtraction.extractMeaningfulSymbols psg
     let correlatedNodes = UnifiedSymbolExtraction.extractCorrelatedNodes psg
     let meaningfulSymbolNames = meaningfulSymbols |> Array.map (fun s -> s.FullName) |> Set.ofArray
     
-    printfn "[REACHABILITY] Total meaningful symbols (unified): %d" meaningfulSymbols.Length
+    printfn "[REACHABILITY] Total meaningful symbols (enhanced): %d" meaningfulSymbols.Length
     printfn "[REACHABILITY] Total correlated nodes: %d" correlatedNodes.Length
     
     // Extract entry points using enhanced detection
     let entryPoints = extractEntryPoints psg
     
-    // Extract function calls using ChildrenState-compatible analysis
+    // Extract function calls using enhanced analysis
     let functionCalls = extractFunctionCalls psg
     
     // Build comprehensive call graph
@@ -415,16 +439,16 @@ let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) : LibraryAware
     let reachableSymbols = computeReachableSymbols entryPoints callGraph meaningfulSymbolNames
     let unreachableSymbols = Set.difference meaningfulSymbolNames reachableSymbols
     
-    // NEW: Mark reachability instead of physical removal
+    // ENHANCED: Mark reachability with better symbol correlation
     let markedPSG = markReachabilityInPSG psg reachableSymbols
     
-    // Generate library classifications using meaningful symbols
+    // Generate library classifications
     let libraryCategories = 
         meaningfulSymbols
         |> Array.map (fun symbol -> symbol.FullName, classifySymbol symbol)
         |> Map.ofArray
     
-    // Calculate accurate statistics using unified measurements
+    // Calculate statistics
     let endTime = DateTime.UtcNow
     let computationTime = int64 (endTime - startTime).TotalMilliseconds
     
@@ -439,7 +463,7 @@ let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) : LibraryAware
         ComputationTimeMs = computationTime
     }
     
-    printfn "[REACHABILITY] === Results ==="
+    printfn "[REACHABILITY] === Enhanced Results ==="
     printfn "[REACHABILITY] Reachable symbols: %d" reachableCount
     printfn "[REACHABILITY] Unreachable symbols: %d" unreachableCount
     printfn "[REACHABILITY] Analysis completed in %dms" computationTime
@@ -451,7 +475,13 @@ let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) : LibraryAware
     
     printfn "[REACHABILITY] Elimination rate: %.2f%% (%d eliminated out of %d total)" eliminationRate unreachableCount totalCount
     
-    // Construct comprehensive result with accurate measurements
+    // Validate PSG node marking
+    let actualReachableNodes = markedPSG.Nodes |> Map.filter (fun _ node -> node.IsReachable) |> Map.count
+    printfn "[REACHABILITY] PSG node marking validation: %d nodes marked as reachable" actualReachableNodes
+    
+    if actualReachableNodes = 0 then
+        printfn "[REACHABILITY] CRITICAL: No PSG nodes marked as reachable despite %d reachable symbols!" reachableCount
+    
     let basicResult = {
         EntryPoints = entryPoints
         ReachableSymbols = reachableSymbols
@@ -463,5 +493,5 @@ let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) : LibraryAware
         BasicResult = basicResult
         LibraryCategories = libraryCategories
         PruningStatistics = pruningStats
-        MarkedPSG = markedPSG  // NEW: Contains all nodes with IsReachable flags
+        MarkedPSG = markedPSG
     }

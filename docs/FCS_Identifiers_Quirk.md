@@ -28,7 +28,7 @@ type SynLongIdent =
     | SynLongIdent of id: LongIdent * dotRanges: range list * trivia: IdentTrivia option list
 ```
 
-This enhanced type preserves source formatting information. It wraps the actual identifier list with metadata about dot positions and formatting trivia (like backticks or parentheses). You need to destructure it first:
+This type extension preserves source formatting information. It wraps the actual identifier list with metadata about dot positions and formatting trivia (like backticks or parentheses). You need to destructure it first:
 
 ```fsharp
 // Must pattern match to extract the inner list!
