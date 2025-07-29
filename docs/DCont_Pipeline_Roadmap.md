@@ -4,6 +4,12 @@
 
 This roadmap transforms the current FCS-based `ProgramSemanticGraph` into a continuation-centric compilation pipeline targeting WAMI (WebAssembly with stack switching) primarily through MLIR's delimited continuation dialect. The focus remains on rapid prototyping with in-memory processing to achieve demonstrable results quickly using simple CLI proofs-of-concept.
 
+## Critical Semantic Requirements: RAII Through Continuation Completion
+
+The compilation pipeline implements deterministic resource management through continuation completion semantics. Resource cleanup occurs when continuations terminate, fail, or complete rather than at arbitrary textual boundaries. When a continuation suspends, resources remain accessible for resumption. When a continuation completes, associated resources receive automatic cleanup as part of the continuation termination sequence.
+
+This approach aligns resource lifetimes with computation lifetimes, ensuring that cleanup operations execute at natural completion points determined by the continuation control flow structure. Stack-allocated resources map to continuation frames that release automatically when continuations terminate, while system resources such as file handles trigger cleanup operations as part of continuation completion sequences.
+
 ## Phase 0: PSG Foundation Cleanup
 
 **Goal**: Establish proper tombstone behavior and reachability analysis in existing `ProgramSemanticGraph`
@@ -24,13 +30,11 @@ This roadmap transforms the current FCS-based `ProgramSemanticGraph` into a cont
 
 ### Enhanced FCS Processing
 
-- [ ] Extend existing FCS correlation to identify async boundaries, resource scopes, and effect boundaries
-- [ ] Map F# `async { }` blocks to continuation delimiter metadata in PSG nodes
-- [ ] Track `use` bindings and `try-with` constructs as resource and exception boundaries
-- [ ] Preserve delimited continuation semantic information through existing PSG.Types structure
-- [ ] Validate continuation boundary detection with HelloWorldDirect example
+The FCS enhancement extends existing correlation systems to identify async boundaries, resource scopes, and effect boundaries within the F# source code. F# async blocks map to continuation delimiter metadata in PSG nodes, while use bindings and try-with constructs establish resource and exception boundaries that align with continuation completion points.
 
-**Success Criteria**: FCS processing identifies and marks continuation boundaries in existing `ProgramSemanticGraph` structure
+The processing preserves delimited continuation semantic information through the existing PSG.Types structure, ensuring that resource cleanup operations integrate naturally with continuation termination sequences. Validation occurs through the HelloWorldDirect example to confirm that continuation boundary detection functions correctly with realistic async patterns.
+
+**Success Criteria**: FCS processing identifies and marks continuation boundaries in existing `ProgramSemanticGraph` structure with integrated resource management points
 
 ## Phase 2: Bidirectional Zipper Implementation
 
@@ -93,23 +97,19 @@ let computeLiveVariables:  ProgramSemanticGraph -> LivenessInfo
 
 ### Effect Flow Properties
 
-- [ ] Track async effects, resource acquisition and cleanup, and exception boundaries
-- [ ] Store effect dependencies in memory-based graph structures
-- [ ] Generate effect flow property lists for MLIR effect dialect integration
+The effect flow analysis tracks async effects, resource acquisition and cleanup, and exception boundaries within the continuation structure. Effect dependencies are stored in memory-based graph structures that align with continuation completion points rather than arbitrary scope boundaries. This approach generates effect flow property lists that integrate naturally with MLIR effect dialect operations.
 
 **Success Criteria**: Complete flow analysis generates actionable property lists stored in memory with fast lookup and JSON debugging capability
 
 ## Phase 4: MLIR Integration Pipeline
 
-**Goal**: Compile `ProgramSemanticGraph` with continuation semantics to MLIR DCont dialect
+**Goal**: Compile `ProgramSemanticGraph` with continuation semantics to MLIR DCont dialect with integrated resource management
 
 ### MLIR Dialect Mapping Strategy
 
-- [ ] Map PSG nodes with continuation boundary metadata to MLIR DCont operations
-- [ ] Map async boundaries to `dcont.reset` and `dcont.shift` operations
-- [ ] Map resource boundaries to automatic cleanup patterns in MLIR
-- [ ] Preserve F# type information through MLIR type system
-- [ ] Validate mapping with HelloWorldDirect async patterns
+The MLIR dialect mapping transforms PSG nodes with continuation boundary metadata into appropriate MLIR DCont operations. Async boundaries map to `dcont.reset` and `dcont.shift` operations, while resource boundaries integrate cleanup operations with continuation completion sequences. Resource cleanup operations execute as part of continuation termination rather than as separate scope-based operations.
+
+The mapping preserves F# type information through the MLIR type system while ensuring that resource management aligns with continuation control flow. Validation occurs through HelloWorldDirect async patterns to confirm that resource management integrates correctly with continuation semantics.
 
 ### Type System Preservation
 
@@ -129,7 +129,7 @@ let compileContinuationNode:  PSGNode -> TypeMapping -> MLIRModule -> MLIROperat
 let compileEffectfulNode:     PSGNode -> TypeMapping -> MLIRBlock -> MLIROperation list
 ```
 
-**Success Criteria**: F# async code in PSG compiles to valid MLIR DCont dialect operations with preserved semantics
+**Success Criteria**: F# async code in PSG compiles to valid MLIR DCont dialect operations with preserved semantics and resource cleanup integrated with continuation completion
 
 ## Phase 5: WAMI Target Implementation
 
