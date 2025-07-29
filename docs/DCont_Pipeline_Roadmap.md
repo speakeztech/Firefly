@@ -2,11 +2,11 @@
 
 ## Overview: From PSG Morass to "DCont All The Way Down"
 
-This roadmap transforms your current FCS-based ProgramSemanticGraph into a continuation-centric compilation pipeline targeting WAMI (WebAssembly with stack switching) through MLIR's delimited continuation dialect. The focus remains on rapid prototyping with in-memory processing to achieve demonstrable results quickly using simple CLI proof-of-concepts.
+This roadmap transforms the current FCS-based `ProgramSemanticGraph` into a continuation-centric compilation pipeline targeting WAMI (WebAssembly with stack switching) primarily through MLIR's delimited continuation dialect. The focus remains on rapid prototyping with in-memory processing to achieve demonstrable results quickly using simple CLI proof-of-concepts.
 
 ## Phase 0: PSG Foundation Cleanup
 
-**Goal**: Establish proper tombstone behavior and reachability analysis in existing ProgramSemanticGraph
+**Goal**: Establish proper tombstone behavior and reachability analysis in existing `ProgramSemanticGraph`
 
 ### PSG Reachability Infrastructure
 
@@ -30,16 +30,16 @@ This roadmap transforms your current FCS-based ProgramSemanticGraph into a conti
 - [ ] Preserve delimited continuation semantic information through existing PSG.Types structure
 - [ ] Validate continuation boundary detection with HelloWorldDirect example
 
-**Success Criteria**: FCS processing identifies and marks continuation boundaries in existing ProgramSemanticGraph structure
+**Success Criteria**: FCS processing identifies and marks continuation boundaries in existing `ProgramSemanticGraph` structure
 
 ## Phase 2: Bidirectional Zipper Implementation
 
-**Goal**: Implement bidirectional zipper for ProgramSemanticGraph traversal and transformation
+**Goal**: Implement bidirectional zipper for `ProgramSemanticGraph` traversal and transformation
 
 ### Bidirectional Zipper Core
 
 ```fsharp
-// Bidirectional zipper operations for ProgramSemanticGraph
+// Bidirectional zipper operations for `ProgramSemanticGraph`
 module PSGZipper =
     let moveDown: NodeId -> PSGZipper -> PSGZipper option           // Navigate to child
     let moveUp: PSGZipper -> PSGZipper option                       // Navigate to parent  
@@ -101,7 +101,7 @@ let computeLiveVariables:  ProgramSemanticGraph -> LivenessInfo
 
 ## Phase 4: MLIR Integration Pipeline
 
-**Goal**: Compile ProgramSemanticGraph with continuation semantics to MLIR DCont dialect
+**Goal**: Compile `ProgramSemanticGraph` with continuation semantics to MLIR DCont dialect
 
 ### MLIR Dialect Mapping Strategy
 
@@ -217,7 +217,7 @@ WAMI WebAssembly successfully executes the HelloWorldDirect program with continu
 
 ## Integration Philosophy
 
-This roadmap preserves the existing ProgramSemanticGraph foundation while extending it with continuation-aware analysis capabilities. The approach builds incrementally on proven FCS integration patterns while adding the sophisticated analysis capabilities needed for modern functional language compilation.
+This roadmap preserves the existing `ProgramSemanticGraph` foundation while extending it with continuation-aware analysis capabilities. The approach builds incrementally on proven FCS integration patterns while adding the sophisticated analysis capabilities needed for modern functional language compilation.
 
 The bidirectional zipper provides the navigation and transformation capabilities needed for sophisticated compiler passes, while the property list approach separates analysis concerns from the core PSG structure. This separation enables the compiler to maintain multiple analysis perspectives on the same program structure while keeping the core representation clean and focused.
 
