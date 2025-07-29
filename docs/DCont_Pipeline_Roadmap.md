@@ -2,7 +2,7 @@
 
 ## Overview: From PSG Morass to "DCont All The Way Down"
 
-This roadmap transforms the current FCS-based `ProgramSemanticGraph` into a continuation-centric compilation pipeline targeting WAMI (WebAssembly with stack switching) primarily through MLIR's delimited continuation dialect. The focus remains on rapid prototyping with in-memory processing to achieve demonstrable results quickly using simple CLI proof-of-concepts.
+This roadmap transforms the current FCS-based `ProgramSemanticGraph` into a continuation-centric compilation pipeline targeting WAMI (WebAssembly with stack switching) primarily through MLIR's delimited continuation dialect. The focus remains on rapid prototyping with in-memory processing to achieve demonstrable results quickly using simple CLI proofs-of-concept.
 
 ## Phase 0: PSG Foundation Cleanup
 
