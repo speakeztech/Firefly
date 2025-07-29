@@ -2,15 +2,15 @@
 
 ## Overview: From PSG Morass to "DCont All The Way Down"
 
-This roadmap transforms the current FCS-generated `ProgramSemanticGraph` into a continuation-centric compilation pipeline targeting WAMI (WebAssembly with stack switching) primarily through MLIR's delimited continuation dialect. The focus remains on rapid prototyping with in-memory processing to achieve demonstrable results quickly using simple CLI proofs-of-concept.
+This roadmap transforms your current FCS-based ProgramSemanticGraph into a continuation-centric compilation pipeline targeting WAMI (WebAssembly with stack switching) through MLIR's delimited continuation dialect. The focus remains on rapid prototyping with in-memory processing to achieve demonstrable results quickly using simple CLI proof-of-concepts.
 
 ## Phase 0: PSG Foundation Cleanup
 
-**Goal**: Establish proper tombstone behavior and reachability analysis in existing `ProgramSemanticGraph`
+**Goal**: Establish proper tombstone behavior and reachability analysis in existing ProgramSemanticGraph
 
 ### PSG Reachability Infrastructure
 
-- [ ] Consolidate multiple intermediate PSGs into one cohesive model
+- [ ] Consolidate any remaining vestigial 'intermediate' graphs into one cohesive PSG
 - [ ] Complete tombstone behavior implementation for soft-delete reachability analysis
 - [ ] Finalize `ReachabilityHelpers.markReachable` and `ReachabilityHelpers.markUnreachable` functions
 - [ ] Ensure `IsReachable`, `EliminationPass`, and `EliminationReason` fields work correctly
@@ -18,7 +18,7 @@ This roadmap transforms the current FCS-generated `ProgramSemanticGraph` into a 
 
 **Success Criteria**: PSG reachability analysis works correctly with consistent tombstone behavior
 
-## Phase 1: FCS Pipeline Enhancement
+## Phase 1: FCS Pipeline Enhancement  
 
 **Goal**: Enhance FCS integration to extract continuation boundaries and preserve semantic information
 
