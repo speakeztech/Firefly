@@ -4,6 +4,37 @@
 
 This roadmap transforms the current FCS-based `ProgramSemanticGraph` into a continuation-centric compilation pipeline targeting WAMI (WebAssembly with stack switching) primarily through MLIR's delimited continuation dialect. The focus remains on rapid prototyping with in-memory processing to achieve demonstrable results quickly using simple CLI proofs-of-concept.
 
+### Understanding Continuations and CPS
+
+Before diving into the pipeline, it's worth clarifying what we mean by continuations. In Continuation-Passing Style (CPS), instead of functions returning values directly, they receive an extra parameter - a continuation - that represents "what to do next" with the result:
+
+```fsharp
+// Direct style
+let add x y = x + y
+let result = add 3 4  // Returns 7
+
+// CPS style
+let addCPS x y k = k (x + y)
+let result = addCPS 3 4 (fun sum -> sum)  // Passes 7 to continuation
+```
+
+Delimited continuations (DCont) improve on CPS by allowing us to capture and manipulate only *part* of the continuation - the part up to a delimiter. This is crucial for async/await:
+
+```fsharp
+// F# async is essentially delimited continuations
+async {
+    let! data = readAsync()    // Captures continuation from here...
+    return process data        // ...to here
+}
+
+// Compiles to something like:
+shift (fun k ->              // k is the delimited continuation
+    readAsync (fun data ->   // When read completes...
+        k (process data)))   // ...resume with processed data
+```
+
+The power of preserving continuations in our compilation pipeline is that async operations, generators, and effect handlers get first-class runtime support. The challenge is knowing when this flexibility is worth the overhead versus compiling directly to state machines.
+
 ## Critical Semantic Requirements: RAII Through Continuation Completion
 
 The compilation pipeline implements deterministic resource management through continuation completion semantics. Resource cleanup occurs when continuations terminate, fail, or complete rather than at arbitrary textual boundaries. When a continuation suspends, resources remain accessible for resumption. When a continuation completes, associated resources receive automatic cleanup as part of the continuation termination sequence.
@@ -31,8 +62,7 @@ This approach aligns resource lifetimes with computation lifetimes, ensuring tha
 - [ ] Finalize `ReachabilityHelpers.markReachable` and `ReachabilityHelpers.markUnreachable` functions
 - [ ] Ensure `IsReachable`, `EliminationPass`, and `EliminationReason` fields work correctly
 - [ ] Validate reachability analysis produces consistent results before adding continuation layers
-- [ ] Add minimal context tracking to PSG nodes
-
+- [ ] Add minimal context tracking to PSG nodes:
   ```fsharp
   type PSGNode = {
       // Existing fields...
@@ -40,9 +70,13 @@ This approach aligns resource lifetimes with computation lifetimes, ensuring tha
   }
   
   type ContextRequirement =
-      | Pure              // No external dependencies (coeffect: none)
-      | AsyncBoundary     // Suspension point (coeffect: async)
-      | ResourceAccess    // File/network access (coeffect: resource)
+      | Pure              // No external dependencies
+      | AsyncBoundary     // Suspension point
+      | ResourceAccess    // File/network access
+  
+  type ComputationPattern =
+      | DataDriven        // Push-based, eager evaluation
+      | DemandDriven      // Pull-based, lazy evaluation
   ```
 
 **Success Criteria**: PSG reachability analysis works correctly with consistent tombstone behavior
@@ -55,11 +89,20 @@ This approach aligns resource lifetimes with computation lifetimes, ensuring tha
 
 The FCS enhancement extends existing correlation systems to identify async boundaries, resource scopes, and effect boundaries within the F# source code. F# async blocks map to continuation delimiter metadata in PSG nodes, while use bindings and try-with constructs establish resource and exception boundaries that align with continuation completion points.
 
-During FCS processing, identify contextual requirements following the coeffects notion of "what code needs from its environment":
+During FCS processing, identify contextual requirements and computation patterns:
 
 - Pure computations require no special handling
 - Async boundaries require continuation machinery
 - Resource access requires cleanup tracking
+- Lazy sequences and async enumerables indicate demand-driven patterns
+
+```fsharp
+let analyzeComputationPattern (expr: FSharpExpr) =
+    match expr with
+    | AsyncSeq _ | LazySeq _ -> DemandDriven
+    | ListComprehension _ | ArrayInit _ -> DataDriven
+    | _ -> DataDriven  // Default to eager
+```
 
 The processing preserves delimited continuation semantic information through the existing PSG.Types structure, ensuring that resource cleanup operations integrate naturally with continuation termination sequences. Validation occurs through the HelloWorldDirect example to confirm that continuation boundary detection functions correctly with realistic async patterns.
 
@@ -80,6 +123,10 @@ module PSGZipper =
     let moveRight: PSGZipper -> PSGZipper option                    // Navigate to next sibling
     let moveToRoot: PSGZipper -> PSGZipper                          // Navigate to root
     let moveToNode: NodeId -> PSGZipper -> PSGZipper option         // Direct navigation to specific node
+    
+    // Support both producer-driven and consumer-driven traversal
+    let followDataFlow: PSGZipper -> PSGZipper option               // Forward flow
+    let followDemandFlow: PSGZipper -> PSGZipper option             // Backward flow
 ```
 
 ### Context-Aware Transformations
@@ -88,9 +135,7 @@ module PSGZipper =
 - [ ] Add capability to transform focused node while maintaining graph invariants
 - [ ] Support bulk transformations across zipper paths
 - [ ] Integrate with existing `ChildrenStateHelpers` for consistent state management
-- [ ] Test zipper operations with simple async code transformations
-- [ ] Track coeffect propagation during zipper traversal
-
+- [ ] Track coeffect propagation during zipper traversal:
   ```fsharp
   type ZipperContext = {
       CurrentNode: PSGNode
@@ -108,6 +153,7 @@ module PSGZipper =
           Some { z with AccumulatedCoeffects = updatedCoeffects }
       | None -> None
   ```
+- [ ] Test zipper operations with simple async code transformations
 
 **Success Criteria**: Bidirectional zipper enables complex PSG transformations while preserving context and graph integrity
 
@@ -148,12 +194,23 @@ let extractDefinitions:     PSGNode -> VariableDefinition list
 let extractUses:           PSGNode -> VariableUse list
 let computeLiveVariables:  ProgramSemanticGraph -> LivenessInfo
 
+// Track both push and pull data flow patterns
+type DataFlowEdge =
+    | ProducerConsumer of source: NodeId * sink: NodeId      // Traditional data flow
+    | ConsumerProducer of sink: NodeId * source: NodeId      // Demand-driven flow
+
 // Enhanced with structural coeffects for per-variable tracking
 type VariableUse = {
     Variable: string
     Location: range
     Context: VariableContext
+    FlowPattern: DataFlowPattern
 }
+
+type DataFlowPattern =
+    | Eager             // Computed immediately
+    | Lazy              // Computed on first access
+    | Streaming         // Computed on each demand
 
 type VariableContext =
     | PureContext          // Variable used in pure computation
@@ -199,21 +256,24 @@ Effect dependencies are stored in memory-based graph structures that align with 
 
 The MLIR dialect mapping transforms PSG nodes with continuation boundary metadata into appropriate MLIR DCont operations. Async boundaries map to `dcont.reset` and `dcont.shift` operations, while resource boundaries integrate cleanup operations with continuation completion sequences. Resource cleanup operations execute as part of continuation termination rather than as separate scope-based operations.
 
-The compilation strategy selection leverages context requirements identified in earlier phases:
+The compilation strategy selection leverages context requirements and computation patterns identified in earlier phases:
 
 ```fsharp
 let selectCompilationStrategy (node: PSGNode) =
-    match node.ContextRequirement with
-    | Some Pure -> 
-        // Pure computations can be optimized aggressively
+    match node.ContextRequirement, node.ComputationPattern with
+    | Some Pure, DataDriven -> 
+        // Pure eager computations compile to tight loops
         CompileDirect
-    | Some AsyncBoundary -> 
-        // Async boundaries require continuation preservation
+    | Some AsyncBoundary, _ -> 
+        // Async boundaries always need continuation machinery
         CompileToDCont
-    | Some ResourceAccess ->
-        // Resources need cleanup at continuation completion
+    | Some ResourceAccess, DemandDriven ->
+        // Lazy resources benefit from continuation-based cleanup
         CompileToDContWithCleanup
-    | None -> 
+    | _, DemandDriven ->
+        // Demand-driven patterns naturally fit continuations
+        CompileToDCont
+    | _ -> 
         CompileDirect  // Default to direct compilation
 ```
 
@@ -247,29 +307,32 @@ let compileEffectfulNode:     PSGNode -> TypeMapping -> MLIRBlock -> MLIROperati
 
 The implementation leverages existing MLIR infrastructure through opt_mlir for optimization and lowering, operating on the MLIR generated by the Phase 4 compilation pipeline. This approach delegates complex transformation work to proven MLIR optimization framework while maintaining oversight through telemetry and monitoring.
 
-Pass selection considers the context requirements identified through coeffect-style analysis:
+Pass selection considers the context requirements and computation patterns identified through analysis:
 
 ```fsharp
 let configurePasses (module: MLIRModule) =
     let basePassses = ["canonicalize"; "cse"]
     
-    // Coeffect-guided optimization selection
+    // Context and pattern guided optimization selection
     let contextPasses = 
-        module.CoeffectRegions
+        module.AnalysisRegions
         |> List.collect (fun region ->
-            match region.DominantCoeffect with
-            | Pure -> 
-                // Pure regions get aggressive optimization
+            match region.Context, region.Pattern with
+            | Pure, DataDriven -> 
+                // Eager pure regions get aggressive optimization
                 ["inline"; "loop-invariant-code-motion"; "vectorize"; "mem2reg"]
-            | AsyncSuspension _ ->
+            | AsyncSuspension _, _ ->
                 // Async regions need continuation preservation
                 ["dcont-to-wasm-suspender"; "async-runtime-lowering"]
-            | ResourceBounded _ ->
+            | _, DemandDriven ->
+                // Demand-driven patterns benefit from lazy evaluation passes
+                ["lazy-code-motion"; "dead-store-elimination"]
+            | ResourceBounded _, _ ->
                 // Resource regions need cleanup instrumentation
                 ["resource-lifetime-analysis"; "cleanup-insertion"]
-            | Combined coeffects ->
+            | Combined contexts ->
                 // Mixed regions get conservative treatment
-                selectConservativePasses coeffects
+                selectConservativePasses contexts
         )
         |> List.distinct
     
@@ -349,6 +412,17 @@ The PSG tombstone behavior functions correctly with consistent reachability anal
 
 Property list generation provides actionable compilation information stored in efficient in-memory data structures. MLIR integration produces valid DCont dialect operations from F# async constructs with preserved semantic information. The compilation pipeline processes the HelloWorldDirect example without errors through all transformation stages.
 
+Curried functions and partial applications are naturally recognized as demand-driven patterns:
+
+```fsharp
+// Curried function creates suspension points
+let add x y = x + y
+let add5 = add 5  // Partial application = demand-driven
+
+// Pipeline recognizes this as DemandDriven pattern
+// May preserve as continuation for flexibility
+```
+
 ### Target Success Indicators
 
 WAMI WebAssembly successfully executes the HelloWorldDirect program with continuation semantics preserved throughout the compilation pipeline. The generated WebAssembly binary runs correctly at the command line and produces expected output. Debug tooling provides clear visibility into continuation flow from F# source through to WebAssembly execution.
@@ -358,7 +432,6 @@ WAMI WebAssembly successfully executes the HelloWorldDirect program with continu
 This roadmap preserves the existing `ProgramSemanticGraph` foundation while extending it with continuation-aware analysis capabilities. The approach builds incrementally on proven FCS integration patterns while adding the sophisticated analysis capabilities needed for modern functional language compilation.
 
 The coeffect-based analysis differs fundamentally from traditional effect systems: rather than tracking what code *does* to its environment (effects), we track what code *needs* from its environment (coeffects). This perspective shift is crucial for continuation compilation:
-
 - Effects flow outward (what the code produces)
 - Coeffects flow inward (what the code requires)
 - Compilation decisions depend on requirements, not products
