@@ -8,6 +8,16 @@ This roadmap transforms the current FCS-based `ProgramSemanticGraph` into a cont
 
 The compilation pipeline implements deterministic resource management through continuation completion semantics. Resource cleanup occurs when continuations terminate, fail, or complete rather than at arbitrary textual boundaries. When a continuation suspends, resources remain accessible for resumption. When a continuation completes, associated resources receive automatic cleanup as part of the continuation termination sequence.
 
+This approach aligns with the coeffects notion of resource tracking - resources are a form of context dependency that must be tracked through the computation. The coeffect system ensures that resource lifetimes are properly bounded:
+
+```fsharp
+type ResourceCoeffect =
+    | NoResources                        // Pure computation
+    | StackBounded of size: int          // Stack-allocated, auto-cleanup
+    | ContinuationBounded of resources: Set<Resource>  // Cleanup at continuation completion
+    | ExternalResources of handles: Set<Handle>        // Requires explicit management
+```
+
 This approach aligns resource lifetimes with computation lifetimes, ensuring that cleanup operations execute at natural completion points determined by the continuation control flow structure. Stack-allocated resources map to continuation frames that release automatically when continuations terminate, while system resources such as file handles trigger cleanup operations as part of continuation completion sequences.
 
 ## Phase 0: PSG Foundation Cleanup
@@ -21,6 +31,19 @@ This approach aligns resource lifetimes with computation lifetimes, ensuring tha
 - [ ] Finalize `ReachabilityHelpers.markReachable` and `ReachabilityHelpers.markUnreachable` functions
 - [ ] Ensure `IsReachable`, `EliminationPass`, and `EliminationReason` fields work correctly
 - [ ] Validate reachability analysis produces consistent results before adding continuation layers
+- [ ] Add minimal context tracking to PSG nodes
+
+  ```fsharp
+  type PSGNode = {
+      // Existing fields...
+      ContextRequirement: ContextRequirement option
+  }
+  
+  type ContextRequirement =
+      | Pure              // No external dependencies (coeffect: none)
+      | AsyncBoundary     // Suspension point (coeffect: async)
+      | ResourceAccess    // File/network access (coeffect: resource)
+  ```
 
 **Success Criteria**: PSG reachability analysis works correctly with consistent tombstone behavior
 
@@ -31,6 +54,12 @@ This approach aligns resource lifetimes with computation lifetimes, ensuring tha
 ### Enhanced FCS Processing
 
 The FCS enhancement extends existing correlation systems to identify async boundaries, resource scopes, and effect boundaries within the F# source code. F# async blocks map to continuation delimiter metadata in PSG nodes, while use bindings and try-with constructs establish resource and exception boundaries that align with continuation completion points.
+
+During FCS processing, identify contextual requirements following the coeffects notion of "what code needs from its environment":
+
+- Pure computations require no special handling
+- Async boundaries require continuation machinery
+- Resource access requires cleanup tracking
 
 The processing preserves delimited continuation semantic information through the existing PSG.Types structure, ensuring that resource cleanup operations integrate naturally with continuation termination sequences. Validation occurs through the HelloWorldDirect example to confirm that continuation boundary detection functions correctly with realistic async patterns.
 
@@ -60,6 +89,25 @@ module PSGZipper =
 - [ ] Support bulk transformations across zipper paths
 - [ ] Integrate with existing `ChildrenStateHelpers` for consistent state management
 - [ ] Test zipper operations with simple async code transformations
+- [ ] Track coeffect propagation during zipper traversal
+
+  ```fsharp
+  type ZipperContext = {
+      CurrentNode: PSGNode
+      Path: NodeId list
+      AccumulatedCoeffects: ContextRequirement list  // Track context along path
+  }
+  
+  // Coeffect-aware zipper movement
+  let moveWithCoeffects (direction: Direction) (zipper: PSGZipper) =
+      let newZipper = move direction zipper
+      match newZipper with
+      | Some z -> 
+          // Propagate coeffects based on node relationships
+          let updatedCoeffects = propagateCoeffects z.CurrentNode z.AccumulatedCoeffects
+          Some { z with AccumulatedCoeffects = updatedCoeffects }
+      | None -> None
+  ```
 
 **Success Criteria**: Bidirectional zipper enables complex PSG transformations while preserving context and graph integrity
 
@@ -75,6 +123,20 @@ let analyzeControlFlow: ProgramSemanticGraph -> NodeId -> ControlFlowProperties
 let findEntryPoints:    ProgramSemanticGraph -> NodeId list
 let findExitPoints:     ProgramSemanticGraph -> NodeId list  
 let findSuspendPoints:  ProgramSemanticGraph -> SuspendPoint list
+
+// Coeffect-enhanced control flow analysis
+type ControlFlowProperties = {
+    EntryPoints: NodeId list
+    ExitPoints: NodeId list
+    SuspendPoints: SuspendPoint list
+    ControlCoeffects: ControlFlowCoeffect list
+}
+
+type ControlFlowCoeffect =
+    | PureSequential           // No suspension points, direct compilation possible
+    | AsyncSuspension of points: NodeId list  // Must preserve continuation
+    | ResourceBounded of acquire: NodeId * release: NodeId list  // RAII pattern
+    | EffectfulRegion of effects: EffectType list  // External effects requiring preservation
 ```
 
 ### Data Flow Property Generation
@@ -85,6 +147,18 @@ let analyzeDataFlow:        ProgramSemanticGraph -> DataFlowProperties
 let extractDefinitions:     PSGNode -> VariableDefinition list
 let extractUses:           PSGNode -> VariableUse list
 let computeLiveVariables:  ProgramSemanticGraph -> LivenessInfo
+
+// Enhanced with structural coeffects for per-variable tracking
+type VariableUse = {
+    Variable: string
+    Location: range
+    Context: VariableContext
+}
+
+type VariableContext =
+    | PureContext          // Variable used in pure computation
+    | AsyncContext         // Variable crosses async boundary
+    | ResourceContext      // Variable lifetime tied to resource
 ```
 
 ### In-Memory Property Storage
@@ -95,7 +169,25 @@ let computeLiveVariables:  ProgramSemanticGraph -> LivenessInfo
 
 ### Effect Flow Properties
 
-The effect flow analysis tracks async effects, resource acquisition and cleanup, and exception boundaries within the continuation structure. Effect dependencies are stored in memory-based graph structures that align with continuation completion points rather than arbitrary scope boundaries. This approach generates effect flow property lists that integrate naturally with MLIR effect dialect operations.
+The effect flow analysis tracks async effects, resource acquisition and cleanup, and exception boundaries within the continuation structure. This directly implements the coeffects paper's notion of tracking "what code needs from its environment":
+
+```fsharp
+type EffectCoeffect =
+    | Pure                              // No effects (can optimize aggressively)
+    | Async of SuspensionPattern        // Requires continuation machinery
+    | IO of IOPattern                   // External world interaction
+    | ResourceEffect of ResourcePattern // Resource acquisition/release
+    | Combined of EffectCoeffect list   // Multiple effects in region
+
+let analyzeEffectFlow (graph: ProgramSemanticGraph) =
+    // Track effect coeffects through the graph
+    let effectMap = computeEffectCoeffects graph
+    // Identify effect boundaries for compilation decisions
+    let boundaries = findEffectBoundaries effectMap
+    { Effects = effectMap; Boundaries = boundaries }
+```
+
+Effect dependencies are stored in memory-based graph structures that align with continuation completion points rather than arbitrary scope boundaries. This approach generates effect flow property lists that integrate naturally with MLIR effect dialect operations.
 
 **Success Criteria**: Complete flow analysis generates actionable property lists stored in memory with fast lookup and JSON debugging capability
 
@@ -106,6 +198,24 @@ The effect flow analysis tracks async effects, resource acquisition and cleanup,
 ### MLIR Dialect Mapping Strategy
 
 The MLIR dialect mapping transforms PSG nodes with continuation boundary metadata into appropriate MLIR DCont operations. Async boundaries map to `dcont.reset` and `dcont.shift` operations, while resource boundaries integrate cleanup operations with continuation completion sequences. Resource cleanup operations execute as part of continuation termination rather than as separate scope-based operations.
+
+The compilation strategy selection leverages context requirements identified in earlier phases:
+
+```fsharp
+let selectCompilationStrategy (node: PSGNode) =
+    match node.ContextRequirement with
+    | Some Pure -> 
+        // Pure computations can be optimized aggressively
+        CompileDirect
+    | Some AsyncBoundary -> 
+        // Async boundaries require continuation preservation
+        CompileToDCont
+    | Some ResourceAccess ->
+        // Resources need cleanup at continuation completion
+        CompileToDContWithCleanup
+    | None -> 
+        CompileDirect  // Default to direct compilation
+```
 
 The mapping preserves F# type information through the MLIR type system while ensuring that resource management aligns with continuation control flow. Validation occurs through HelloWorldDirect async patterns to confirm that resource management integrates correctly with continuation semantics.
 
@@ -136,6 +246,35 @@ let compileEffectfulNode:     PSGNode -> TypeMapping -> MLIRBlock -> MLIROperati
 ### MLIR Pass Pipeline Configuration
 
 The implementation leverages existing MLIR infrastructure through opt_mlir for optimization and lowering, operating on the MLIR generated by the Phase 4 compilation pipeline. This approach delegates complex transformation work to proven MLIR optimization framework while maintaining oversight through telemetry and monitoring.
+
+Pass selection considers the context requirements identified through coeffect-style analysis:
+
+```fsharp
+let configurePasses (module: MLIRModule) =
+    let basePassses = ["canonicalize"; "cse"]
+    
+    // Coeffect-guided optimization selection
+    let contextPasses = 
+        module.CoeffectRegions
+        |> List.collect (fun region ->
+            match region.DominantCoeffect with
+            | Pure -> 
+                // Pure regions get aggressive optimization
+                ["inline"; "loop-invariant-code-motion"; "vectorize"; "mem2reg"]
+            | AsyncSuspension _ ->
+                // Async regions need continuation preservation
+                ["dcont-to-wasm-suspender"; "async-runtime-lowering"]
+            | ResourceBounded _ ->
+                // Resource regions need cleanup instrumentation
+                ["resource-lifetime-analysis"; "cleanup-insertion"]
+            | Combined coeffects ->
+                // Mixed regions get conservative treatment
+                selectConservativePasses coeffects
+        )
+        |> List.distinct
+    
+    basePasses @ contextPasses
+```
 
 The opt_mlir process receives the DCont dialect operations from Phase 4 and applies appropriate pass pipelines to lower them to WebAssembly with stack switching capabilities. The configuration specifies the necessary passes for DCont to WAMI transformation without requiring custom implementation of these complex optimization sequences.
 
@@ -191,6 +330,13 @@ The in-memory processing approach eliminates external dependencies during the pr
 
 Each phase builds meaningful value that can be validated independently, reducing cumulative risk while progressing toward the compilation pipeline goals. The HelloWorldDirect example provides a concrete validation target that exercises core language features while remaining simple enough for manual verification.
 
+Coeffect tracking validation ensures compilation decisions are based on accurate context analysis:
+
+- Verify that async boundaries are correctly identified and annotated
+- Confirm resource coeffects align with actual resource usage patterns  
+- Validate that compilation strategies match coeffect requirements
+- Ensure coeffect propagation through the zipper maintains consistency
+
 Success metrics focus on demonstrable compilation results rather than performance considerations, ensuring that architectural decisions are validated before complexity increases. The CLI execution target provides immediate feedback on compilation correctness.
 
 ## Success Metrics and Validation
@@ -210,6 +356,12 @@ WAMI WebAssembly successfully executes the HelloWorldDirect program with continu
 ## Integration Philosophy
 
 This roadmap preserves the existing `ProgramSemanticGraph` foundation while extending it with continuation-aware analysis capabilities. The approach builds incrementally on proven FCS integration patterns while adding the sophisticated analysis capabilities needed for modern functional language compilation.
+
+The coeffect-based analysis differs fundamentally from traditional effect systems: rather than tracking what code *does* to its environment (effects), we track what code *needs* from its environment (coeffects). This perspective shift is crucial for continuation compilation:
+
+- Effects flow outward (what the code produces)
+- Coeffects flow inward (what the code requires)
+- Compilation decisions depend on requirements, not products
 
 The bidirectional zipper provides the navigation and transformation capabilities needed for sophisticated compiler passes, while the property list approach separates analysis concerns from the core PSG structure. This separation enables the compiler to maintain multiple analysis perspectives on the same program structure while keeping the core representation clean and focused.
 
