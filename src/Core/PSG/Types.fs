@@ -54,6 +54,17 @@ type SymbolRelation =
     | InheritsFrom of FSharpEntity
     | ReferencesSymbol of FSharpSymbol
 
+/// Context requirements for continuation compilation decisions
+type ContextRequirement =
+    | Pure              // No external dependencies
+    | AsyncBoundary     // Suspension point
+    | ResourceAccess    // File/network access
+
+/// Computation patterns for optimization decisions
+type ComputationPattern =
+    | DataDriven        // Push-based, eager evaluation
+    | DemandDriven      // Pull-based, lazy evaluation
+
 /// PSG node with soft-delete support added to existing structure
 type PSGNode = {
     // EXISTING FIELDS - DO NOT CHANGE
@@ -72,6 +83,10 @@ type PSGNode = {
     EliminationPass: int option
     EliminationReason: string option
     ReachabilityDistance: int option
+    
+    // NEW FIELDS - Context tracking for continuation compilation
+    ContextRequirement: ContextRequirement option
+    ComputationPattern: ComputationPattern option
 }
 
 /// Complete Program Semantic Graph
@@ -123,6 +138,10 @@ module ChildrenStateHelpers =
         EliminationPass = None
         EliminationReason = None
         ReachabilityDistance = None
+        
+        // Initialize context tracking fields
+        ContextRequirement = None
+        ComputationPattern = None
     }
     
     /// Add a child to a node's children state
@@ -166,3 +185,40 @@ module ReachabilityHelpers =
     
     /// Check if node is reachable
     let isReachable (node: PSGNode) = node.IsReachable
+    
+    /// Analyze context requirement from syntax kind and symbol
+    let analyzeContextRequirement (node: PSGNode) : ContextRequirement option =
+        match node.SyntaxKind, node.Symbol with
+        | sk, _ when sk.Contains("Async") || sk.Contains("async") -> Some AsyncBoundary
+        | sk, _ when sk.Contains("File") || sk.Contains("IO") || sk.Contains("Network") -> Some ResourceAccess
+        | _, Some symbol ->
+            match symbol with
+            | :? FSharpMemberOrFunctionOrValue as mfv ->
+                if mfv.FullName.Contains("Async") || mfv.FullName.Contains("async") then
+                    Some AsyncBoundary
+                elif mfv.FullName.Contains("File") || mfv.FullName.Contains("IO") then
+                    Some ResourceAccess
+                else
+                    Some Pure
+            | _ -> Some Pure
+        | _ -> None
+    
+    /// Analyze computation pattern from node structure
+    let analyzeComputationPattern (node: PSGNode) : ComputationPattern option =
+        match node.SyntaxKind with
+        | sk when sk.Contains("Seq") || sk.Contains("Lazy") || sk.Contains("seq") -> Some DemandDriven
+        | sk when sk.Contains("List") || sk.Contains("Array") -> Some DataDriven
+        | _ ->
+            match node.Symbol with
+            | Some symbol ->
+                if symbol.FullName.Contains("Seq") || symbol.FullName.Contains("Lazy") then
+                    Some DemandDriven
+                else
+                    Some DataDriven
+            | None -> None
+    
+    /// Update node with analyzed context
+    let updateNodeContext (node: PSGNode) =
+        { node with
+            ContextRequirement = node.ContextRequirement |> Option.orElse (analyzeContextRequirement node)
+            ComputationPattern = node.ComputationPattern |> Option.orElse (analyzeComputationPattern node) }

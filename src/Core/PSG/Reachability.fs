@@ -332,80 +332,158 @@ let computeReachableSymbols (entryPoints: FSharpSymbol list) (callGraph: Map<str
     
     reachable
 
-/// ENHANCED: Mark nodes as reachable/unreachable with comprehensive symbol matching
-let markReachabilityInPSG (psg: ProgramSemanticGraph) (reachableSymbols: Set<string>) : ProgramSemanticGraph =
-    printfn "[SOFT DELETE] === Enhanced Reachability Marking with Symbol Correlation ==="
-    printfn "[SOFT DELETE] Attempting to mark %d reachable symbols in %d PSG nodes" (Set.count reachableSymbols) (Map.count psg.Nodes)
+/// Deep traversal to mark all nodes reachable from entry points
+let markReachabilityInPSGDeep (psg: ProgramSemanticGraph) (entryPoints: FSharpSymbol list) : ProgramSemanticGraph =
+    printfn "[SOFT DELETE] === Deep Reachability Traversal ==="
+    printfn "[SOFT DELETE] Starting from %d entry points in %d PSG nodes" entryPoints.Length (Map.count psg.Nodes)
     
-    // Debug: Show what reachable symbols we're looking for
-    printfn "[SOFT DELETE] Target reachable symbols:"
-    reachableSymbols |> Set.iter (fun s -> printfn "  Target: %s" s)
+    let mutable reachableNodeIds = Set.empty<string>
+    let mutable processedNodeIds = Set.empty<string>
     
+    // Extract the actual functions called from call graph
+    let functionCalls = extractFunctionCalls psg
+    let callGraph = buildCallGraph functionCalls entryPoints
+    
+    // Get all functions that are called (including those under TopLevel)
+    let allCalledFunctions = 
+        callGraph
+        |> Map.toSeq
+        |> Seq.collect (fun (_, callees) -> callees)
+        |> Set.ofSeq
+    
+    // Combine with standard reachability
+    let reachableFromEntryPoints = computeReachableSymbols entryPoints callGraph (Set.empty)
+    let reachableSymbols = Set.union reachableFromEntryPoints allCalledFunctions
+    
+    printfn "[SOFT DELETE] Identified %d reachable symbols from call graph" (Set.count reachableSymbols)
+    if Set.count reachableSymbols < 50 then
+        printfn "[SOFT DELETE] Reachable symbols:"
+        reachableSymbols |> Set.iter (fun s -> printfn "  - %s" s)
+    
+    // Find all nodes for reachable symbols
+    let entryNodeIds = 
+        psg.Nodes
+        |> Map.toSeq
+        |> Seq.choose (fun (nodeId, node) ->
+            match node.Symbol with
+            | Some symbol when 
+                entryPoints |> List.exists (fun ep -> symbolMatches symbol ep.FullName) ||
+                reachableSymbols |> Set.exists (fun rs -> symbolMatches symbol rs) ->
+                Some nodeId
+            | _ -> None)
+        |> Set.ofSeq
+    
+    printfn "[SOFT DELETE] Found %d nodes to start traversal" (Set.count entryNodeIds)
+    
+    // Deep traversal function - selectively follow children
+    let rec traverseNode (nodeId: string) (distance: int) (followChildren: bool) =
+        if Set.contains nodeId processedNodeIds || distance > 50 then () // Prevent infinite recursion
+        else
+            processedNodeIds <- Set.add nodeId processedNodeIds
+            reachableNodeIds <- Set.add nodeId reachableNodeIds
+            
+            match Map.tryFind nodeId psg.Nodes with
+            | Some node ->
+                // Only follow children if this is a reachable function
+                let shouldFollowChildren = 
+                    distance = 0 ||  // Entry points
+                    (followChildren && distance < 10)  // Limit depth to prevent marking everything
+                
+                if shouldFollowChildren then
+                    match node.Children with
+                    | Parent children ->
+                        for childId in children do
+                            traverseNode childId.Value (distance + 1) shouldFollowChildren
+                    | _ -> ()
+                
+                // Follow edges to mark dependencies as reachable
+                let outgoingEdges = psg.Edges |> List.filter (fun e -> e.Source.Value = nodeId)
+                for edge in outgoingEdges do
+                    match edge.Kind with
+                    | FunctionCall | SymRef | SymbolUse | TypeOf | TypeInstantiation _ | DataDependency ->
+                        // These edges indicate dependencies that must be included for MLIR
+                        traverseNode edge.Target.Value (distance + 1) false  // Don't follow children of dependencies
+                    | _ -> ()
+                
+                // Follow incoming TypeOf edges to include type definitions
+                let incomingTypeEdges = psg.Edges |> List.filter (fun e -> 
+                    e.Target.Value = nodeId && e.Kind = TypeOf)
+                for edge in incomingTypeEdges do
+                    traverseNode edge.Source.Value (distance + 1) false
+                
+                // Don't follow symbol relationships blindly - this was causing everything to be marked
+                ()
+            | None -> ()
+    
+    // Start traversal from entry points
+    for entryId in entryNodeIds do
+        traverseNode entryId 0 true  // Follow children for entry points
+    
+    // Find nodes that are children of reachable nodes (for completeness)
+    let additionalReachable = 
+        reachableNodeIds
+        |> Set.toSeq
+        |> Seq.collect (fun nodeId ->
+            match Map.tryFind nodeId psg.Nodes with
+            | Some node ->
+                match node.Children with
+                | Parent children -> children |> List.map (fun c -> c.Value)
+                | _ -> []
+            | None -> [])
+        |> Set.ofSeq
+    
+    reachableNodeIds <- Set.union reachableNodeIds additionalReachable
+    
+    // Mark literals and constants in reachable functions as reachable
+    let literalNodes =
+        psg.Nodes
+        |> Map.toSeq
+        |> Seq.filter (fun (nodeId, node) ->
+            Set.contains nodeId reachableNodeIds ||
+            (node.SyntaxKind.StartsWith("Const:") && 
+             match node.ParentId with
+             | Some pid -> Set.contains pid.Value reachableNodeIds
+             | None -> false))
+        |> Seq.map fst
+        |> Set.ofSeq
+    
+    reachableNodeIds <- Set.union reachableNodeIds literalNodes
+    
+    printfn "[SOFT DELETE] Deep traversal found %d reachable nodes" (Set.count reachableNodeIds)
+    
+    // Update all nodes with reachability status
     let mutable reachableCount = 0
     let mutable unreachableCount = 0
-    let mutable symbolMismatches = []
     
     let updatedNodes = 
         psg.Nodes
         |> Map.map (fun nodeId node ->
-            match node.Symbol with
-            | Some symbol ->
-                // Enhanced symbol matching with multiple strategies
-                let isReachable = reachableSymbols |> Set.exists (symbolMatches symbol)
-                
-                if isReachable then
-                    reachableCount <- reachableCount + 1
-                    printfn "[SOFT DELETE] ✓ Marking reachable: %s (PSG: %s)" symbol.FullName nodeId
-                    ReachabilityHelpers.markReachable 0 node
-                else
-                    unreachableCount <- unreachableCount + 1
-                    // Track symbol mismatches for debugging
-                    symbolMismatches <- (symbol.FullName, symbol.DisplayName) :: symbolMismatches
-                    ReachabilityHelpers.markUnreachable 1 "Unreachable from entry points" node
-            | None ->
-                // Nodes without symbols - check if parent is reachable
-                let isParentReachable = 
-                    match node.ParentId with
-                    | Some parentId ->
-                        match Map.tryFind parentId.Value psg.Nodes with
-                        | Some parentNode -> 
-                            parentNode.Symbol 
-                            |> Option.map (fun s -> reachableSymbols |> Set.exists (symbolMatches s))
-                            |> Option.defaultValue false
-                        | None -> false
-                    | None -> false
-                
-                if isParentReachable then
-                    reachableCount <- reachableCount + 1
-                    ReachabilityHelpers.markReachable 1 node
-                else
-                    unreachableCount <- unreachableCount + 1
-                    ReachabilityHelpers.markUnreachable 1 "Node without symbol or unreachable parent" node)
+            if Set.contains nodeId reachableNodeIds then
+                reachableCount <- reachableCount + 1
+                let distance = 
+                    if Set.contains nodeId entryNodeIds then 0
+                    else 1  // Simplified distance calculation
+                ReachabilityHelpers.markReachable distance node
+            else
+                unreachableCount <- unreachableCount + 1
+                ReachabilityHelpers.markUnreachable 1 "Not reachable from entry points" node)
     
     printfn "[SOFT DELETE] Marking complete: %d reachable, %d unreachable" reachableCount unreachableCount
     
-    // Debug symbol mismatches if we have very few reachable nodes
-    if reachableCount < 5 then
-        printfn "[SOFT DELETE] WARNING: Very few nodes marked as reachable. Symbol correlation analysis:"
-        printfn "[SOFT DELETE] Sample PSG symbols that weren't matched:"
-        symbolMismatches 
-        |> List.take (min 10 (List.length symbolMismatches))
-        |> List.iter (fun (fullName, displayName) -> 
-            printfn "  PSG Symbol: %s (Display: %s)" fullName displayName)
-        
-        printfn "[SOFT DELETE] Checking if any PSG symbols partially match targets:"
-        reachableSymbols |> Set.iter (fun target ->
-            let partialMatches = 
-                symbolMismatches 
-                |> List.filter (fun (fullName, displayName) ->
-                    fullName.Contains(target) || target.Contains(fullName) ||
-                    displayName.Contains(target) || target.Contains(displayName))
-            
-            if not (List.isEmpty partialMatches) then
-                printfn "  Target '%s' has potential matches:" target
-                partialMatches |> List.take (min 3 (List.length partialMatches)) |> List.iter (fun (fn, dn) ->
-                    printfn "    - %s (%s)" fn dn)
-        )
+    // Report on what types of nodes are reachable
+    let reachableByKind = 
+        updatedNodes
+        |> Map.toSeq
+        |> Seq.filter (fun (_, node) -> node.IsReachable)
+        |> Seq.groupBy (fun (_, node) -> node.SyntaxKind.Split(':').[0])
+        |> Seq.map (fun (kind, nodes) -> kind, Seq.length nodes)
+        |> Seq.sortByDescending snd
+        |> Seq.truncate 10  // Use truncate instead of take to handle fewer elements
+        |> Seq.toList
+    
+    printfn "[SOFT DELETE] Top reachable node types:"
+    reachableByKind |> List.iter (fun (kind, count) ->
+        printfn "  %s: %d nodes" kind count)
     
     { psg with Nodes = updatedNodes }
 
@@ -439,8 +517,8 @@ let analyzeReachabilityWithBoundaries (psg: ProgramSemanticGraph) : LibraryAware
     let reachableSymbols = computeReachableSymbols entryPoints callGraph meaningfulSymbolNames
     let unreachableSymbols = Set.difference meaningfulSymbolNames reachableSymbols
     
-    // ENHANCED: Mark reachability with better symbol correlation
-    let markedPSG = markReachabilityInPSG psg reachableSymbols
+    // Use DEEP traversal for comprehensive reachability marking
+    let markedPSG = markReachabilityInPSGDeep psg entryPoints
     
     // Generate library classifications
     let libraryCategories = 

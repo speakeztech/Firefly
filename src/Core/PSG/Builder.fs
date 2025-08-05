@@ -774,11 +774,14 @@ let buildProgramSemanticGraph
     printfn "[BUILDER] Phase 2: Applying FCS constraint resolution"
     let typeEnhancedGraph = integrateTypesWithCheckResults structuralGraph checkResults
     
-    // Phase 3: Finalize nodes
-    printfn "[BUILDER] Phase 3: Finalizing PSG nodes"
+    // Phase 3: Finalize nodes and analyze context
+    printfn "[BUILDER] Phase 3: Finalizing PSG nodes and analyzing context"
     let finalNodes = 
         typeEnhancedGraph.Nodes
-        |> Map.map (fun _ node -> ChildrenStateHelpers.finalizeChildren node)
+        |> Map.map (fun _ node -> 
+            node
+            |> ChildrenStateHelpers.finalizeChildren
+            |> ReachabilityHelpers.updateNodeContext)
 
     let finalGraph = 
         { typeEnhancedGraph with 

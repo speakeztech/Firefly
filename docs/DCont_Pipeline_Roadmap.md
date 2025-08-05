@@ -57,12 +57,12 @@ This approach aligns resource lifetimes with computation lifetimes, ensuring tha
 
 ### PSG Reachability Infrastructure
 
-- [ ] Consolidate any remaining vestigial 'intermediate' graphs into one cohesive PSG
-- [ ] Complete tombstone behavior implementation for soft-delete reachability analysis
-- [ ] Finalize `ReachabilityHelpers.markReachable` and `ReachabilityHelpers.markUnreachable` functions
-- [ ] Ensure `IsReachable`, `EliminationPass`, and `EliminationReason` fields work correctly
-- [ ] Validate reachability analysis produces consistent results before adding continuation layers
-- [ ] Add minimal context tracking to PSG nodes:
+- [x] Consolidate any remaining vestigial 'intermediate' graphs into one cohesive PSG
+- [x] Complete tombstone behavior implementation for soft-delete reachability analysis
+- [x] Finalize `ReachabilityHelpers.markReachable` and `ReachabilityHelpers.markUnreachable` functions
+- [x] Ensure `IsReachable`, `EliminationPass`, and `EliminationReason` fields work correctly
+- [x] Validate reachability analysis produces consistent results before adding continuation layers
+- [x] Add minimal context tracking to PSG nodes:
   ```fsharp
   type PSGNode = {
       // Existing fields...
