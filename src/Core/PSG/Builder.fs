@@ -6,6 +6,7 @@ open FSharp.Compiler.Text
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Symbols
+open Core.CompilerConfig
 open Core.PSG.Types
 open Core.PSG.Correlation
 open Core.PSG.TypeIntegration
@@ -91,7 +92,8 @@ let private tryCorrelateSymbolWithContext (range: range) (fileName: string) (syn
     let key = (fileName, range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
     match Map.tryFind key context.PositionIndex with
     | Some symbolUse -> 
-        printfn "[CORRELATION] ✓ Exact match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+        if isCorrelationVerbose() then
+            printfn "[CORRELATION] ✓ Exact match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
         Some symbolUse.Symbol
     | None ->
         // Strategy 2: Enhanced correlation by syntax kind
@@ -130,10 +132,12 @@ let private tryCorrelateSymbolWithContext (range: range) (fileName: string) (syn
                     let rangeScore = abs(su.Range.StartLine - range.StartLine) + abs(su.Range.StartColumn - range.StartColumn)
                     nameScore * 100 + rangeScore) |> Array.tryHead with
                 | Some symbolUse -> 
-                    printfn "[CORRELATION] ✓ Enhanced method match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                    if isCorrelationVerbose() then
+                        printfn "[CORRELATION] ✓ Enhanced method match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
                     Some symbolUse.Symbol
                 | None -> 
-                    printfn "[CORRELATION] ✗ No enhanced method match for: %s (method: %s)" syntaxKind methodName
+                    if isCorrelationVerbose() then
+                        printfn "[CORRELATION] ✗ No enhanced method match for: %s (method: %s)" syntaxKind methodName
                     None
             
             // Generic type application correlation
@@ -157,10 +161,12 @@ let private tryCorrelateSymbolWithContext (range: range) (fileName: string) (syn
                     let rangeScore = abs(su.Range.StartLine - range.StartLine)
                     nameScore * 100 + rangeScore) |> Array.tryHead with
                 | Some symbolUse -> 
-                    printfn "[CORRELATION] ✓ Enhanced generic match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                    if isCorrelationVerbose() then
+                        printfn "[CORRELATION] ✓ Enhanced generic match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
                     Some symbolUse.Symbol
                 | None -> 
-                    printfn "[CORRELATION] ✗ No enhanced generic match for: %s" syntaxKind
+                    if isCorrelationVerbose() then
+                        printfn "[CORRELATION] ✗ No enhanced generic match for: %s" syntaxKind
                     None
             
             // Union case correlation
@@ -186,7 +192,8 @@ let private tryCorrelateSymbolWithContext (range: range) (fileName: string) (syn
                     
                     match unionCaseCandidates |> Array.tryHead with
                     | Some symbolUse -> 
-                        printfn "[CORRELATION] ✓ Union case match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                        if isCorrelationVerbose() then
+                            printfn "[CORRELATION] ✓ Union case match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
                         Some symbolUse.Symbol
                     | None -> None
                 else None
@@ -225,10 +232,12 @@ let private tryCorrelateSymbolWithContext (range: range) (fileName: string) (syn
                         let rangeScore = abs(su.Range.StartLine - range.StartLine) + abs(su.Range.StartColumn - range.StartColumn)
                         nameScore * 1000 + rangeScore) |> Array.tryHead with
                     | Some symbolUse -> 
-                        printfn "[CORRELATION] ✓ Enhanced function match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                        if isCorrelationVerbose() then
+                            printfn "[CORRELATION] ✓ Enhanced function match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
                         Some symbolUse.Symbol
                     | None -> 
-                        printfn "[CORRELATION] ✗ No enhanced function match for: %s (name: %s)" syntaxKind identName
+                        if isCorrelationVerbose() then
+                            printfn "[CORRELATION] ✗ No enhanced function match for: %s (name: %s)" syntaxKind identName
                         None
                 else None
             
@@ -246,7 +255,8 @@ let private tryCorrelateSymbolWithContext (range: range) (fileName: string) (syn
                 match closeMatch with
                 | Some symbolUse -> Some symbolUse.Symbol
                 | None -> 
-                    printfn "[CORRELATION] ✗ No match: %s at %s" syntaxKind (range.ToString())
+                    if isCorrelationVerbose() then
+                        printfn "[CORRELATION] ✗ No match: %s at %s" syntaxKind (range.ToString())
                     None
         | None -> None
 

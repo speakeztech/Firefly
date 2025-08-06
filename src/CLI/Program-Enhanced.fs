@@ -4,6 +4,7 @@ open System
 open System.IO
 open Argu
 open Core.XParsec.Foundation
+open Core.CompilerConfig
 open Alex.Pipeline.CompilationOrchestrator
 open Alex.Pipeline.CompilationTypes
 
@@ -140,6 +141,12 @@ let main (args: string[]) : int =
             let astOnly = results.Contains(AST_Only)
             let showStats = results.Contains(Show_Stats)
             let showEliminationStats = results.Contains(Show_Elimination_Stats)
+            
+            // Configure compiler verbosity
+            if verbose then
+                enableVerboseMode()
+            else
+                disableVerboseMode()
             
             // Validate input file
             if not (File.Exists(projectFile)) then

@@ -107,7 +107,7 @@ let parseProjectFile (projectPath: string) =
             ProjectReferences = projectReferences
         }
     with ex ->
-        printfn "[ProjectContext] Error parsing project file: %s" ex.Message
+        // Error parsing project file - returning None
         None
 
 /// Create a properly configured FSharpChecker for the platform
@@ -227,20 +227,12 @@ let loadProject (projectPath: string) (strategy: CacheStrategy) = async {
     | None ->
         return failwith $"Failed to parse project file: {projectPath}"
     | Some projData ->
-        printfn "[ProjectContext] Parsed project file:"
-        printfn "  OutputType: %A" projData.OutputType
-        printfn "  TargetFramework: %A" projData.TargetFramework
-        printfn "  NoStdLib: %b" projData.NoStdLib
-        printfn "  Source files: %d" projData.CompileItems.Length
+        // Project file parsed successfully
         
         let checker = createChecker strategy
         let projectOptions = buildProjectOptions projectPath projData
         
-        printfn "[ProjectContext] Project options created:"
-        printfn "  Source files: %d" projectOptions.SourceFiles.Length
-        printfn "  Compiler options: %d" projectOptions.OtherOptions.Length
-        for opt in projectOptions.OtherOptions do
-            printfn "    %s" opt
+        // Project options created successfully
         
         return {
             Checker = checker
@@ -264,10 +256,8 @@ let getProjectResults (ctx: ProjectContext) = async {
     
     // Report any errors
     if checkResults.HasCriticalErrors then
-        printfn "[ProjectContext] Critical errors detected:"
-        for error in checkResults.Diagnostics do
-            if error.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error then
-                printfn "  ERROR: %s" error.Message
+        // Critical errors detected in project - details available in diagnostics
+        ()
     
     // Get parsing options from project options
     let parsingOptions, _ = ctx.Checker.GetParsingOptionsFromProjectOptions(ctx.ProjectOptions)

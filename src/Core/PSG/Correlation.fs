@@ -5,6 +5,7 @@ open FSharp.Compiler.Symbols
 open FSharp.Compiler.Text
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.CodeAnalysis
+open Core.CompilerConfig
 open Core.PSG.Types
 
 /// Correlation context for PSG building
@@ -100,7 +101,8 @@ let tryCorrelateSymbolEnhanced (range: range) (fileName: string) (syntaxKind: st
     let key = (fileName, range.StartLine, range.StartColumn, range.EndLine, range.EndColumn)
     match Map.tryFind key context.PositionIndex with
     | Some symbolUse -> 
-        printfn "[CORRELATION] ✓ Exact match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+        if isCorrelationVerbose() then
+            printfn "[CORRELATION] ✓ Exact match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
         Some symbolUse.Symbol
     | None ->
         // Strategy 2: Enhanced range-based search with syntax-aware filtering
@@ -133,10 +135,12 @@ let tryCorrelateSymbolEnhanced (range: range) (fileName: string) (syntaxKind: st
                 match methodCandidates |> Array.sortBy (fun su -> 
                     abs(su.Range.StartLine - range.StartLine) + abs(su.Range.StartColumn - range.StartColumn)) |> Array.tryHead with
                 | Some symbolUse -> 
-                    printfn "[CORRELATION] ✓ Method match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                    if isCorrelationVerbose() then
+                        printfn "[CORRELATION] ✓ Method match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
                     Some symbolUse.Symbol
                 | None -> 
-                    printfn "[CORRELATION] ✗ No method match for: %s" syntaxKind
+                    if isCorrelationVerbose() then
+                        printfn "[CORRELATION] ✗ No method match for: %s" syntaxKind
                     None
             
             // Strategy 2b: Generic type application correlation
@@ -157,10 +161,12 @@ let tryCorrelateSymbolEnhanced (range: range) (fileName: string) (syntaxKind: st
                 
                 match genericCandidates |> Array.tryHead with
                 | Some symbolUse -> 
-                    printfn "[CORRELATION] ✓ Generic match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                    if isCorrelationVerbose() then
+                        printfn "[CORRELATION] ✓ Generic match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
                     Some symbolUse.Symbol
                 | None -> 
-                    printfn "[CORRELATION] ✗ No generic match for: %s" syntaxKind
+                    if isCorrelationVerbose() then
+                        printfn "[CORRELATION] ✗ No generic match for: %s" syntaxKind
                     None
             
             // Strategy 2c: Union case constructor correlation (Ok, Error, Some, None)
@@ -191,10 +197,12 @@ let tryCorrelateSymbolEnhanced (range: range) (fileName: string) (syntaxKind: st
                     
                     match unionCaseCandidates |> Array.tryHead with
                     | Some symbolUse -> 
-                        printfn "[CORRELATION] ✓ Union case match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                        if isCorrelationVerbose() then
+                            printfn "[CORRELATION] ✓ Union case match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
                         Some symbolUse.Symbol
                     | None -> 
-                        printfn "[CORRELATION] ✗ No union case match for: %s" syntaxKind
+                        if isCorrelationVerbose() then
+                            printfn "[CORRELATION] ✗ No union case match for: %s" syntaxKind
                         None
                 else None
             
@@ -225,10 +233,12 @@ let tryCorrelateSymbolEnhanced (range: range) (fileName: string) (syntaxKind: st
                         let rangeScore = abs(su.Range.StartLine - range.StartLine) + abs(su.Range.StartColumn - range.StartColumn)
                         nameScore * 100 + rangeScore) |> Array.tryHead with
                     | Some symbolUse -> 
-                        printfn "[CORRELATION] ✓ Function match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                        if isCorrelationVerbose() then
+                            printfn "[CORRELATION] ✓ Function match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
                         Some symbolUse.Symbol
                     | None -> 
-                        printfn "[CORRELATION] ✗ No function match for: %s (name: %s)" syntaxKind identName
+                        if isCorrelationVerbose() then
+                            printfn "[CORRELATION] ✗ No function match for: %s (name: %s)" syntaxKind identName
                         None
                 else None
             
@@ -243,7 +253,8 @@ let tryCorrelateSymbolEnhanced (range: range) (fileName: string) (syntaxKind: st
                 
                 match containmentMatch with
                 | Some symbolUse -> 
-                    printfn "[CORRELATION] ✓ Containment match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                    if isCorrelationVerbose() then
+                        printfn "[CORRELATION] ✓ Containment match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
                     Some symbolUse.Symbol
                 | None ->
                     let overlapMatch =
@@ -253,7 +264,8 @@ let tryCorrelateSymbolEnhanced (range: range) (fileName: string) (syntaxKind: st
                     
                     match overlapMatch with
                     | Some symbolUse -> 
-                        printfn "[CORRELATION] ✓ Overlap match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                        if isCorrelationVerbose() then
+                            printfn "[CORRELATION] ✓ Overlap match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
                         Some symbolUse.Symbol
                     | None ->
                         let closeMatch =
@@ -267,13 +279,16 @@ let tryCorrelateSymbolEnhanced (range: range) (fileName: string) (syntaxKind: st
                         
                         match closeMatch with
                         | Some symbolUse -> 
-                            printfn "[CORRELATION] ✓ Close match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
+                            if isCorrelationVerbose() then
+                                printfn "[CORRELATION] ✓ Close match: %s -> %s" syntaxKind symbolUse.Symbol.FullName
                             Some symbolUse.Symbol
                         | None -> 
-                            printfn "[CORRELATION] ✗ No match: %s at %s" syntaxKind (range.ToString())
+                            if isCorrelationVerbose() then
+                                printfn "[CORRELATION] ✗ No match: %s at %s" syntaxKind (range.ToString())
                             None
         | None -> 
-            printfn "[CORRELATION] ✗ No file index for: %s" fileName
+            if isCorrelationVerbose() then
+                printfn "[CORRELATION] ✗ No file index for: %s" fileName
             None
 
 /// Try to correlate a syntax node with its symbol using enhanced matching (ORIGINAL API)
@@ -291,7 +306,8 @@ let tryCorrelateSymbolWithContext (range: range) (fileName: string) (syntaxKind:
         // Fallback to original correlation for backward compatibility
         match tryCorrelateSymbol range fileName context with
         | Some symbol ->
-            printfn "[CORRELATION] ✓ Fallback correlation: %s -> %s" syntaxKind symbol.FullName
+            if isCorrelationVerbose() then
+                printfn "[CORRELATION] ✓ Fallback correlation: %s -> %s" syntaxKind symbol.FullName
             Some symbol
         | None -> None
 
@@ -380,16 +396,18 @@ let correlateFile
     
     match parsedInput with
     | ParsedInput.ImplFile(ParsedImplFileInput(fileName, _, _, _, _, modules, _, _, _)) ->
-        printfn "[Correlation] Processing file: %s with %d modules" 
-            (System.IO.Path.GetFileName fileName) modules.Length
+        if isCorrelationVerbose() then
+            printfn "[Correlation] Processing file: %s with %d modules" 
+                (System.IO.Path.GetFileName fileName) modules.Length
             
         let correlations = 
             modules
             |> List.map (fun m -> correlateModule m fileName context)
             |> Array.concat
             
-        printfn "[Correlation] Found %d correlations in %s" 
-            correlations.Length (System.IO.Path.GetFileName fileName)
+        if isCorrelationVerbose() then
+            printfn "[Correlation] Found %d correlations in %s" 
+                correlations.Length (System.IO.Path.GetFileName fileName)
             
         correlations
     | ParsedInput.SigFile _ ->

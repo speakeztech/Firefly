@@ -7,7 +7,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.4.160</Version>
+    <Version>0.4.164</Version>
     <Description>Firefly F# Compiler - Deep FCS Integration</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
@@ -21,6 +21,9 @@
       <!-- Core Utilities (kept from existing) -->
       <Compile Include="Core/Utilities/IntermediateWriter.fs" />
       <Compile Include="Core/Utilities/RemoveIntermediates.fs" />
+      
+      <!-- Compiler Configuration -->
+      <Compile Include="Core/CompilerConfig.fs" />
       
       <!-- Core Types (kept from existing) --> 
       <Compile Include="Core/Types/Dialects.fs" />
@@ -71,6 +74,10 @@
   </ItemGroup>
 
 </Project>
+
+
+
+
 
 
 
