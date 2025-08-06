@@ -296,9 +296,9 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                 printfn "[Pipeline] PSG construction complete: %d nodes, %d edges, %d entry points" 
                     psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length
                 
-                // Step 5: Generate PSG debug outputs
+                // Step 5: Generate initial PSG debug outputs (before reachability)
                 if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-                    printfn "[Pipeline] Writing PSG debug outputs..."
+                    printfn "[Pipeline] Writing initial PSG debug outputs..."
                     
                     let correlationContext = createContext projectResults.CheckResults
                     let correlations = 
@@ -306,7 +306,8 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                         |> Array.collect (fun pr -> correlateFile pr.ParseTree correlationContext)
                     let stats = generateStats correlationContext correlations
                     
-                    generateDebugOutputs psg correlations stats config.IntermediatesDir.Value
+                    // Generate correlations and initial summary
+                    generateCorrelationDebugOutput correlations config.IntermediatesDir.Value
                     writePSGSummary psg config.IntermediatesDir.Value
                 
                 // Step 6: Perform reachability analysis
@@ -322,8 +323,14 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                 if config.OutputIntermediates && config.IntermediatesDir.IsSome then
                     printfn "[Pipeline] Writing pruned PSG debug assets..."
                     
-                    let prunedSymbols = generatePrunedSymbolData psg reachabilityResult
-                    let comparisonData = generateComparisonData psg reachabilityResult
+                    // Use the marked PSG from reachability analysis
+                    let markedPSG = reachabilityResult.MarkedPSG
+                    
+                    // Generate debug outputs with the marked PSG
+                    generatePSGDebugOutput markedPSG config.IntermediatesDir.Value
+                    
+                    let prunedSymbols = generatePrunedSymbolData markedPSG reachabilityResult
+                    let comparisonData = generateComparisonData markedPSG reachabilityResult
                     let callGraphData = generateCallGraphData reachabilityResult
                     let libraryBoundaryData = generateLibraryBoundaryData reachabilityResult
                     
