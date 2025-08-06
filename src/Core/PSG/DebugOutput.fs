@@ -36,7 +36,9 @@ let private preparePSGNodeForJson (node: PSGNode) = {|
     SymbolDisplayName = node.Symbol |> Option.map (fun s -> s.DisplayName)
     SymbolTypeName = node.Symbol |> Option.map (fun s -> s.GetType().Name)
     SymbolHash = node.Symbol |> Option.map (fun s -> s.GetHashCode())
-    TypeName = node.Type |> Option.map (fun t -> t.Format(FSharpDisplayContext.Empty))
+    TypeName = node.Type |> Option.map (fun t -> 
+        try t.Format(FSharpDisplayContext.Empty)
+        with _ -> "unknown_type")
     Range = rangeToJson node.Range
     SourceFile = Path.GetFileName(node.SourceFile)
     ParentId = node.ParentId |> Option.map nodeIdToString
@@ -71,6 +73,18 @@ let private preparePSGNodeForJson (node: PSGNode) = {|
             | name when name.StartsWith("FSharp.Core.") || name.StartsWith("Microsoft.FSharp.") -> "FSharpCore"
             | name when name.StartsWith("Examples.") -> "UserCode"
             | _ -> "UserCode") |> Option.defaultValue "Unknown"
+    // Context tracking fields for Phase 1
+    ContextRequirement = 
+        node.ContextRequirement |> Option.map (fun cr ->
+            match cr with
+            | Pure -> "Pure"
+            | AsyncBoundary -> "AsyncBoundary"
+            | ResourceAccess -> "ResourceAccess")
+    ComputationPattern = 
+        node.ComputationPattern |> Option.map (fun cp ->
+            match cp with
+            | DataDriven -> "DataDriven"
+            | DemandDriven -> "DemandDriven")
 |}
 
 /// Enhanced PSGEdge serialization
@@ -308,13 +322,13 @@ let generateCorrelationDebugOutput (correlations: (range * FSharpSymbol)[]) (out
                 TypeName = 
                     match symbol with
                     | :? FSharpMemberOrFunctionOrValue as mfv -> 
-                        Some (mfv.FullType.Format(FSharpDisplayContext.Empty))
+                        Some (try mfv.FullType.Format(FSharpDisplayContext.Empty) with _ -> "unknown_type")
                     | :? FSharpEntity as entity -> 
                         if entity.IsFSharpRecord || entity.IsFSharpUnion || entity.IsClass then
-                            Some (entity.AsType().Format(FSharpDisplayContext.Empty))
+                            Some (try entity.AsType().Format(FSharpDisplayContext.Empty) with _ -> "unknown_type")
                         else None
                     | :? FSharpField as field -> 
-                        Some (field.FieldType.Format(FSharpDisplayContext.Empty))
+                        Some (try field.FieldType.Format(FSharpDisplayContext.Empty) with _ -> "unknown_type")
                     | _ -> None
             |})
         

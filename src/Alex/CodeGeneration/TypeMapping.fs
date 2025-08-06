@@ -28,7 +28,16 @@ let private basicTypeMap =
 
 /// Get string representation of FSharpType for caching
 let private getTypeKey (fsType: FSharpType) =
-    fsType.Format(FSharpDisplayContext.Empty)
+    try
+        fsType.Format(FSharpDisplayContext.Empty)
+    with _ ->
+        // For primitive types that don't have a qualified name, use a simple representation
+        if fsType.HasTypeDefinition then
+            match fsType.TypeDefinition.TryFullName with
+            | Some name -> name
+            | None -> "primitive_type"
+        else
+            "unknown_type"
 
 /// Map a struct type to MLIR
 let rec private mapStructType (ctx: TypeContext) (fsType: FSharpType) : MLIRType * TypeContext =
@@ -100,24 +109,23 @@ and mapType (ctx: TypeContext) (fsType: FSharpType) : MLIRType * TypeContext =
                 (MLIRTypes.i64, ctx)
             elif fsType.HasTypeDefinition then
                 // Check if it's an array type by name
-                if fsType.TypeDefinition.FullName.StartsWith("Microsoft.FSharp.Core.array") ||
-                   fsType.TypeDefinition.FullName.StartsWith("System.Array") then
+                match fsType.TypeDefinition.TryFullName with
+                | Some fullName when fullName.StartsWith("Microsoft.FSharp.Core.array") ||
+                                     fullName.StartsWith("System.Array") ->
                     match fsType.GenericArguments |> Seq.tryHead with
                     | Some elemType ->
                         let (mlirElem, ctx') = mapType ctx elemType
                         (MLIRTypes.memref mlirElem, ctx')
                     | None ->
                         (MLIRTypes.memref MLIRTypes.i8, ctx)
-                else
-                    match fsType.TypeDefinition.TryFullName with
-                    | Some fullName when Map.containsKey fullName basicTypeMap ->
-                        (Map.find fullName basicTypeMap, ctx)
-                    | _ when fsType.TypeDefinition.IsValueType ->
-                        mapStructType ctx fsType
-                    | _ when fsType.TypeDefinition.IsFSharpUnion ->
-                        mapUnionType ctx fsType.TypeDefinition
-                    | _ ->
-                        (MLIRTypes.memref MLIRTypes.i8, ctx)  // Reference types default to pointers
+                | Some fullName when Map.containsKey fullName basicTypeMap ->
+                    (Map.find fullName basicTypeMap, ctx)
+                | _ when fsType.TypeDefinition.IsValueType ->
+                    mapStructType ctx fsType
+                | _ when fsType.TypeDefinition.IsFSharpUnion ->
+                    mapUnionType ctx fsType.TypeDefinition
+                | _ ->
+                    (MLIRTypes.memref MLIRTypes.i8, ctx)  // Reference types default to pointers
             else
                 (MLIRTypes.i32, ctx)  // Default fallback
         

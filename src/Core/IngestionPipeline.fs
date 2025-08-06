@@ -311,7 +311,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                 
                 // Step 6: Perform reachability analysis
                 printfn "[Pipeline] Performing PSG-based reachability analysis..."
-                let reachabilityResult = analyzeReachabilityWithBoundaries psg
+                let reachabilityResult = performReachabilityAnalysis psg
                 
                 printfn "[Pipeline] Reachability analysis complete: %d/%d symbols reachable (%.1f%% eliminated)" 
                     reachabilityResult.PruningStatistics.ReachableSymbols

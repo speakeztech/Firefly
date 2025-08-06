@@ -188,37 +188,137 @@ module ReachabilityHelpers =
     
     /// Analyze context requirement from syntax kind and symbol
     let analyzeContextRequirement (node: PSGNode) : ContextRequirement option =
-        match node.SyntaxKind, node.Symbol with
-        | sk, _ when sk.Contains("Async") || sk.Contains("async") -> Some AsyncBoundary
-        | sk, _ when sk.Contains("File") || sk.Contains("IO") || sk.Contains("Network") -> Some ResourceAccess
-        | _, Some symbol ->
-            match symbol with
-            | :? FSharpMemberOrFunctionOrValue as mfv ->
-                if mfv.FullName.Contains("Async") || mfv.FullName.Contains("async") then
-                    Some AsyncBoundary
-                elif mfv.FullName.Contains("File") || mfv.FullName.Contains("IO") then
+        // First check for resource management patterns in syntax
+        match node.SyntaxKind with
+        | "LetOrUse:Use" | "Binding:Use" -> Some ResourceAccess
+        | "TryWith" | "TryFinally" -> Some ResourceAccess
+        | sk when sk.Contains("Console.") -> Some ResourceAccess  // Any Console operation is IO
+        | _ ->
+            // Then check symbol information for async/IO patterns
+            match node.Symbol with
+            | Some symbol ->
+                let fullName = symbol.FullName
+                // Check if this is any Console-related symbol
+                if fullName.StartsWith("Alloy.Console.") || 
+                   fullName = "Console" ||
+                   fullName.Contains(".Write") ||
+                   fullName.Contains(".Read") ||
+                   fullName.Contains(".WriteLine") ||
+                   fullName.Contains(".ReadLine") then
                     Some ResourceAccess
                 else
-                    Some Pure
-            | _ -> Some Pure
-        | _ -> None
+                    match symbol with
+                    | :? FSharpMemberOrFunctionOrValue as mfv ->
+                        try
+                            // Check for async computation expressions
+                            let returnType = 
+                                try mfv.ReturnParameter.Type
+                                with _ -> failwith "Failed to get ReturnParameter.Type"
+                            if returnType.HasTypeDefinition then
+                                match returnType.TypeDefinition.TryFullName with
+                                | Some fullName when fullName.StartsWith("Microsoft.FSharp.Control.FSharpAsync") ->
+                                    Some AsyncBoundary
+                                | _ ->
+                                    // Check for known IO operations
+                                    if mfv.FullName.StartsWith("Alloy.Console.") ||
+                                       mfv.FullName.Contains("File.") ||
+                                       mfv.FullName.Contains("Stream") ||
+                                       mfv.FullName.Contains("Reader") ||
+                                       mfv.FullName.Contains("Writer") ||
+                                       mfv.DisplayName = "Write" ||
+                                       mfv.DisplayName = "WriteLine" ||
+                                       mfv.DisplayName = "Read" ||
+                                       mfv.DisplayName = "ReadLine" then
+                                        Some ResourceAccess
+                                    // Check for buffer/memory operations that need cleanup
+                                    elif mfv.FullName.Contains("stackBuffer") ||
+                                         mfv.FullName.Contains("Buffer") ||
+                                         mfv.FullName.Contains("Span") then
+                                        Some ResourceAccess
+                                    else
+                                        Some Pure
+                            else
+                                // No type definition - check by name patterns
+                                if mfv.FullName.StartsWith("Alloy.Console.") ||
+                                   mfv.FullName.Contains("File.") ||
+                                   mfv.FullName.Contains("Stream") ||
+                                   mfv.FullName.Contains("Reader") ||
+                                   mfv.FullName.Contains("Writer") ||
+                                   mfv.DisplayName = "Write" ||
+                                   mfv.DisplayName = "WriteLine" ||
+                                   mfv.DisplayName = "Read" ||
+                                   mfv.DisplayName = "ReadLine" then
+                                    Some ResourceAccess
+                                elif mfv.FullName.Contains("stackBuffer") ||
+                                     mfv.FullName.Contains("Buffer") ||
+                                     mfv.FullName.Contains("Span") then
+                                    Some ResourceAccess
+                                else
+                                    Some Pure
+                        with _ -> Some Pure
+                    | :? FSharpEntity as entity ->
+                        // Check if this is a Console module
+                        if entity.FullName = "Alloy.Console" || entity.DisplayName = "Console" then
+                            Some ResourceAccess
+                        else
+                            Some Pure
+                    | _ -> Some Pure
+            | None -> 
+                // Fallback to syntax kind analysis
+                match node.SyntaxKind with
+                | sk when sk.StartsWith("Const:") -> Some Pure
+                | sk when sk.Contains("Sequential") -> None  // Inherit from children
+                | _ -> None
     
     /// Analyze computation pattern from node structure
     let analyzeComputationPattern (node: PSGNode) : ComputationPattern option =
-        match node.SyntaxKind with
-        | sk when sk.Contains("Seq") || sk.Contains("Lazy") || sk.Contains("seq") -> Some DemandDriven
-        | sk when sk.Contains("List") || sk.Contains("Array") -> Some DataDriven
-        | _ ->
-            match node.Symbol with
-            | Some symbol ->
-                if symbol.FullName.Contains("Seq") || symbol.FullName.Contains("Lazy") then
-                    Some DemandDriven
-                else
-                    Some DataDriven
-            | None -> None
+        match node.Symbol with
+        | Some symbol ->
+            match symbol with
+            | :? FSharpMemberOrFunctionOrValue as mfv ->
+                try
+                    let returnType = mfv.ReturnParameter.Type
+                    // Check for lazy/seq types in return type
+                    if returnType.HasTypeDefinition then
+                        match returnType.TypeDefinition.TryFullName with
+                        | Some typeDef ->
+                            if typeDef.Contains("IEnumerable") || 
+                               typeDef.Contains("Lazy") ||
+                               typeDef.Contains("seq") ||
+                               typeDef.Contains("AsyncSeq") then
+                                Some DemandDriven
+                            elif typeDef.Contains("FSharpList") ||
+                                 typeDef.Contains("Array") ||
+                                 typeDef.Contains("ResizeArray") then
+                                Some DataDriven
+                            else
+                                // Check if function is curried (partial application = demand-driven)
+                                if mfv.CurriedParameterGroups.Count > 1 then
+                                    Some DemandDriven
+                                else
+                                    Some DataDriven
+                        | None ->
+                            // No qualified name (primitive type), default to data-driven
+                            Some DataDriven
+                    else
+                        // No type definition, default to data-driven
+                        Some DataDriven
+                with _ -> Some DataDriven
+            | _ -> Some DataDriven
+        | None ->
+            // Fallback to syntax kind patterns
+            match node.SyntaxKind with
+            | sk when sk.Contains("Sequential") -> Some DataDriven
+            | sk when sk.Contains("Match") -> Some DataDriven
+            | sk when sk.Contains("Lambda") -> Some DemandDriven
+            | _ -> None
     
     /// Update node with analyzed context
     let updateNodeContext (node: PSGNode) =
-        { node with
-            ContextRequirement = node.ContextRequirement |> Option.orElse (analyzeContextRequirement node)
-            ComputationPattern = node.ComputationPattern |> Option.orElse (analyzeComputationPattern node) }
+        try
+            { node with
+                ContextRequirement = node.ContextRequirement |> Option.orElse (analyzeContextRequirement node)
+                ComputationPattern = node.ComputationPattern |> Option.orElse (analyzeComputationPattern node) }
+        with ex ->
+            printfn "[CONTEXT] Error analyzing node %s (kind: %s): %s" node.Id.Value node.SyntaxKind ex.Message
+            node

@@ -256,11 +256,12 @@ let private isFunction (symbol: FSharpSymbol) : bool =
     | :? FSharpMemberOrFunctionOrValue as mfv -> mfv.IsFunction || mfv.IsMember
     | _ -> false
 
-/// ENHANCED binding processing with EntryPoint attribute detection (FCS 43.9.300 compatible)
-let rec private processBinding binding parentId fileName context graph =
+/// Process binding with explicit use flag
+let rec private processBindingWithUseFlag binding parentId fileName context graph isUse =
     match binding with
     | SynBinding(accessibility, kind, isInline, isMutable, attributes, xmlDoc, valData, pat, returnInfo, expr, range, seqPoint, trivia) ->
-        let symbol = tryCorrelateSymbolWithContext range fileName "Binding" context.CorrelationContext
+        let bindingKind = if isUse then "Binding:Use" else "Binding"
+        let symbol = tryCorrelateSymbolWithContext range fileName bindingKind context.CorrelationContext
         
         // Check for EntryPoint attribute
         let hasEntryPointAttr = 
@@ -286,7 +287,8 @@ let rec private processBinding binding parentId fileName context graph =
         // Create binding node with enhanced detection
         let syntaxKind = 
             if hasEntryPointAttr then "Binding:EntryPoint"
-            elif isMainFunc then "Binding:Main" 
+            elif isMainFunc then "Binding:Main"
+            elif isUse then "Binding:Use"
             else "Binding"
             
         let bindingNode = createNode syntaxKind range fileName symbol parentId
@@ -316,6 +318,10 @@ let rec private processBinding binding parentId fileName context graph =
         
         let graph'''' = processPattern pat (Some bindingNode.Id) fileName context graph'''
         processExpression expr (Some bindingNode.Id) fileName context graph''''
+
+/// Regular binding processing (for non-LetOrUse contexts)
+and private processBinding binding parentId fileName context graph =
+    processBindingWithUseFlag binding parentId fileName context graph false
 
 /// ENHANCED pattern processing (FCS 43.9.300 compatible)
 and private processPattern pat parentId fileName context graph =
@@ -570,9 +576,10 @@ and private processExpression (expr: SynExpr) (parentId: NodeId option) (fileNam
         
         graph'''
 
-    | SynExpr.LetOrUse(_, _, bindings, body, range, _) ->
-        let symbol = tryCorrelateSymbolWithContext range fileName "LetOrUse" context.CorrelationContext
-        let letNode = createNode "LetOrUse" range fileName symbol parentId
+    | SynExpr.LetOrUse(isUse, _, bindings, body, range, _) ->
+        let syntaxKind = if isUse then "LetOrUse:Use" else "LetOrUse:Let"
+        let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+        let letNode = createNode syntaxKind range fileName symbol parentId
         
         let graph' = { graph with Nodes = Map.add letNode.Id.Value letNode graph.Nodes }
         let graph'' = addChildToParent letNode.Id parentId graph'
@@ -586,7 +593,7 @@ and private processExpression (expr: SynExpr) (parentId: NodeId option) (fileNam
         let graph'''' = 
             bindings
             |> List.fold (fun acc binding -> 
-                processBinding binding (Some letNode.Id) fileName context acc) graph'''
+                processBindingWithUseFlag binding (Some letNode.Id) fileName context acc isUse) graph'''
         
         processExpression body (Some letNode.Id) fileName context graph''''
 
@@ -598,6 +605,36 @@ and private processExpression (expr: SynExpr) (parentId: NodeId option) (fileNam
         let constNode = createNode (sprintf "Const:%A" constant) range fileName None parentId
         let graph' = { graph with Nodes = Map.add constNode.Id.Value constNode graph.Nodes }
         addChildToParent constNode.Id parentId graph'
+
+    | SynExpr.TryWith(tryExpr, withCases, range, _, _, trivia) ->
+        let tryWithNode = createNode "TryWith" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add tryWithNode.Id.Value tryWithNode graph.Nodes }
+        let graph'' = addChildToParent tryWithNode.Id parentId graph'
+        
+        // Process try block
+        let graph''' = processExpression tryExpr (Some tryWithNode.Id) fileName context graph''
+        
+        // Process with clauses
+        withCases
+        |> List.fold (fun acc clause ->
+            let (SynMatchClause(pat, whenExpr, resultExpr, _, _, _)) = clause
+            let clauseNode = createNode "WithClause" pat.Range fileName None (Some tryWithNode.Id)
+            let graphAcc' = { acc with Nodes = Map.add clauseNode.Id.Value clauseNode acc.Nodes }
+            let graphAcc'' = addChildToParent clauseNode.Id (Some tryWithNode.Id) graphAcc'
+            let graphAcc''' = processPattern pat (Some clauseNode.Id) fileName context graphAcc''
+            processExpression resultExpr (Some clauseNode.Id) fileName context graphAcc'''
+        ) graph'''
+
+    | SynExpr.TryFinally(tryExpr, finallyExpr, range, _, _, trivia) ->
+        let tryFinallyNode = createNode "TryFinally" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add tryFinallyNode.Id.Value tryFinallyNode graph.Nodes }
+        let graph'' = addChildToParent tryFinallyNode.Id parentId graph'
+        
+        // Process try block
+        let graph''' = processExpression tryExpr (Some tryFinallyNode.Id) fileName context graph''
+        
+        // Process finally block
+        processExpression finallyExpr (Some tryFinallyNode.Id) fileName context graph'''
 
     // Add other common expression cases as needed...
     | _ -> 

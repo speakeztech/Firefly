@@ -180,7 +180,7 @@ let buildResolvedTypeIndex (checkResults: FSharpCheckProjectResults) : ResolvedT
         printfn "[TYPE INTEGRATION] Warning: Resolved type index construction encountered error: %s" ex.Message
     
     printfn "[TYPE INTEGRATION] CANONICAL resolved type index built: %d range mappings, %d symbol mappings" 
-        rangeToTypeInfo.Count symbolToTypeInfo.Count
+        (Map.count rangeToTypeInfo) (Map.count symbolToTypeInfo)
     
     {
         RangeToTypeInfo = rangeToTypeInfo
@@ -227,7 +227,7 @@ let integrateTypesWithCheckResults (psg: ProgramSemanticGraph) (checkResults: FS
     
     let resolvedIndex = buildResolvedTypeIndex checkResults
     
-    printfn "[TYPE INTEGRATION] Correlating RESOLVED type information with %d PSG nodes" psg.Nodes.Count
+    printfn "[TYPE INTEGRATION] Correlating RESOLVED type information with %d PSG nodes" (Map.count psg.Nodes)
     
     let mutable typeCorrelationCount = 0
     let mutable constraintCorrelationCount = 0
