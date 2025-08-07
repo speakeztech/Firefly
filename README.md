@@ -35,7 +35,7 @@ Type-checked AST + Symbol Information
 Program Semantic Graph (PSG)
     ↓ (Type-aware reachability analysis & pruning)
 Memory-Layout Analyzed PSG
-    ↓ (Dabbit transforms to MLIR operations)
+    ↓ (Alex transforms to MLIR operations)
 MLIR High-Level Dialects
     ↓ (Progressive lowering through dialects)
 Target-specific Dialects
