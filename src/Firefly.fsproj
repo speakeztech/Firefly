@@ -61,8 +61,14 @@
       <Compile Include="Alex/Pipeline/CompilationTypes.fs" />           
       <Compile Include="Alex/Pipeline/CompilationOrchestrator.fs" />    
       
-      <!-- CLI - Firefly Entry Point (existing) -->
-      <Compile Include="CLI/Program-Enhanced.fs" />                       
+      <!-- Simplified LLVM Dialect Pipeline (new) -->
+      <Compile Include="Alex/Lite/TimeEmitter.fs" />
+      <Compile Include="Alex/Lite/SimpleLLVMEmitter.fs" />
+      <Compile Include="Alex/Lite/LitePipeline.fs" />
+      
+      <!-- CLI - Firefly Entry Points -->
+      <Compile Include="CLI/Program-Enhanced.fs" />
+      <Compile Include="CLI/Program-Lite.fs" />                       
   </ItemGroup>
 
   <ItemGroup>

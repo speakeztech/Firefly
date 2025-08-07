@@ -9,7 +9,7 @@
   </tr>
 </table>
 
-Firefly is a novel F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies or heap allocations. Built as an orchestrating .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly leverages [F# Compiler Services](https://fsharp.github.io/fsharp-compiler-docs/fcs/) for parsing and type checking, custom transformations using [XParsec](https://github.com/roboz0r/XParsec) to generate MLIR, and [LLVM.NET](https://github.com/UbiquityDotNET/Llvm.NET) for intelligent static library analysis and linking. The orchestration pipeline progressively lowers F# through MLIR dialects to LLVM IR, producing efficient native executables while guaranteeing zero heap allocations and compile-time resolution of all operations.
+Firefly is a novel F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies or heap allocations. Built as an orchestrating .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly leverages [F# Compiler Services](https://fsharp.github.io/fsharp-compiler-docs/fcs/) for parsing and type checking, custom transformations using [XParsec](https://github.com/roboz0r/XParsec) to generate MLIR, and LLVM along with other compiler "backend" options for intelligent static library analysis and linking. The orchestration pipeline progressively lowers F# through MLIR dialects, producing efficient transforms to native executables while guaranteeing zero heap allocations and compile-time resolution of all operations.
 
 ## 🎯 Vision
 
@@ -17,13 +17,11 @@ Firefly transforms F# from a managed runtime language into a true systems progra
 
 Central to Firefly's approach is the Program Semantic Graph (PSG) - a unified representation that combines syntactic structure with rich type information and MLIR mapping metadata. This representation enables comprehensive static analysis and allows library authors to hint at optimal MLIR translations through structured XML documentation.
 
-Combined with intelligent static library handling through LLVM.NET, Firefly delivers both the safety of functional programming and the efficiency of hand-tuned systems code.
-
 **Key Innovations:** 
 - **Program Semantic Graph (PSG)** unifying syntax, types, and MLIR metadata
 - **Zero-allocation guarantee** through compile-time memory management
 - **Type-preserving compilation** maintaining F#'s rich type system throughout the pipeline
-- **Intelligent static linking** via LLVM.NET archive analysis and selective object extraction
+- **Intelligent static linking** via PSG graph analysis and selective object extraction
 - **Hybrid library binding** architecture allowing per-library static/dynamic decisions
 - **Progressive lowering** through MLIR dialects with continuous verification
 
@@ -40,10 +38,10 @@ Memory-Layout Analyzed PSG
     ↓ (Dabbit transforms to MLIR operations)
 MLIR High-Level Dialects
     ↓ (Progressive lowering through dialects)
-MLIR LLVM Dialect
-    ↓ (Translation to LLVM IR)
-LLVM IR + Binding Metadata
-    ↓ (LLVM.NET analyzes archives & links selectively)
+Target-specific Dialects
+    ↓ (Translation to target IR)
+Static Linking + Binding Metadata
+    ↓ (analyze archives & links selectively where applicable)
 Optimized Native Code
 ```
 
@@ -55,9 +53,9 @@ Firefly operates as an intelligent compilation orchestrator that:
 2. **Constructs PSG** - Merges syntax tree, type information, and MLIR metadata into a unified graph
 3. **Preserves types** - Rich type information flows through the entire pipeline
 4. **Computes layouts** - Memory layouts for all types determined at compile time
-5. **Transforms progressively** - PSG → MLIR dialects → LLVM IR
+5. **Transforms progressively** - PSG → MLIR dialects → Target IR
 6. **Analyzes statically** - All allocations and calls resolved at compile time
-7. **Links selectively** - LLVM.NET examines archives and extracts only needed objects
+7. **Links selectively** - For LLVM, examine targeted library and extract only needed objects
 8. **Optimizes aggressively** - LTO across F# and native library boundaries
 9. **Verifies continuously** - Zero allocations, bounded stack, no dynamic dispatch
 
@@ -198,36 +196,12 @@ The Firefly compilation process leverages multiple tools in concert:
 ```bash
 # Standard build invocation
 firefly build --release --target thumbv7em-none-eabihf
-
-# What happens internally:
-# 1. F# Compiler Services → Type-checked AST + Symbol Information
-# 2. PSG Construction → Unified program representation
-# 3. Memory Layout Analysis → Compute precise memory layouts
-# 4. Reachability Analysis → Eliminate unreachable code
-# 5. MLIR Generation → Translate PSG to MLIR operations
-# 6. MLIR passes → Progressive lowering
-# 7. LLVM.NET → Archive analysis & selective linking
-# 8. LLVM → Optimized native code
-```
-
-### Static Linking Intelligence
-
-When Firefly encounters a static library dependency, LLVM.NET will provide deep introspection:
-
-```
-Analyzing libcrypto.a:
-  Total archive size: 892KB (47 object files)
-  Tracing symbols from F# code...
-  Required: crypto_init, crypto_process, crypto_free
-  Found in: init.o (2KB), process.o (5KB), util.o (1KB)
-  Linking 3 of 47 objects (8KB vs 892KB)
-  Applying LTO across F#/C boundaries...
-  Final contribution: 4KB after optimization
 ```
 
 ## 🎯 Memory & Execution Guarantees
 
 ### ✅ Enforced at Compile Time
+
 - **Zero heap allocations** - Everything on stack or in static data
 - **Fixed-size types** - All types have compile-time known sizes
 - **Static dispatch** - All function calls resolved at compile time
@@ -303,7 +277,7 @@ Apache 2.0 License - see [LICENSE](LICENSE) for details.
 
 - **Don Syme and F# Language Contributors**: For creating an elegant and capable functional language
 - **Chris Lattner and MLIR Contributors**: For pioneering multi-level IR compilation
-- **LLVM Community**: For robust code generation infrastructure
+- **LLVM Community**: For robust code generation infrastructure in TableGen
 - **Rust Community**: For demonstrating zero-cost abstractions in systems programming
 - **Fable Project**: For clearly showing how F# can target alternative environments
 - **Ada/SPARK Community**: For inspiration on proven memory-safe systems programming
