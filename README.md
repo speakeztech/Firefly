@@ -56,7 +56,7 @@ Firefly operates as an intelligent compilation orchestrator that:
 5. **Transforms progressively** - PSG → MLIR dialects → Target IR
 6. **Analyzes statically** - All allocations and calls resolved at compile time
 7. **Links selectively** - For LLVM, examine targeted library and extract only needed objects
-8. **Optimizes aggressively** - LTO across F# and native library boundaries
+8. **Optimizes aggressively** - LTO as needed across F# and native library boundaries
 9. **Verifies continuously** - Zero allocations, bounded stack, no dynamic dispatch
 
 ## Hello World (Stack-Only)
