@@ -43,7 +43,17 @@
       <Compile Include="Core/PSG/TypeIntegration.fs" />
       <Compile Include="Core/PSG/Correlation.fs" />
       <Compile Include="Core/PSG/SymbolAnalysis.fs" />
+
+      <!-- PSG Builder (refactored into sub-modules) -->
+      <Compile Include="Core/PSG/Builder/Types.fs" />
+      <Compile Include="Core/PSG/Builder/SymbolCorrelation.fs" />
+      <Compile Include="Core/PSG/Builder/PatternProcessing.fs" />
+      <Compile Include="Core/PSG/Builder/ExpressionProcessing.fs" />
+      <Compile Include="Core/PSG/Builder/BindingProcessing.fs" />
+      <Compile Include="Core/PSG/Builder/DeclarationProcessing.fs" />
+      <Compile Include="Core/PSG/Builder/Main.fs" />
       <Compile Include="Core/PSG/Builder.fs" />
+
       <Compile Include="Core/PSG/DebugOutput.fs" />
       
       <!-- Metadata Processing (new) -->

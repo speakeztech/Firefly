@@ -346,10 +346,17 @@ let loadAndCheckProject (filePath: string) = async {
         printfn "[FidprojLoader] Parsing and type-checking..."
         let! checkResults = checker.ParseAndCheckProject(projectOptions)
 
-        // Report any errors
-        if checkResults.Diagnostics.Length > 0 then
+        // Report any errors (filter out native pointer warnings - expected for native compilation)
+        let suppressedWarnings = set [ 9; 51 ] // FS0009: unverifiable IL, FS0051: native pointers
+        let relevantDiagnostics =
+            checkResults.Diagnostics
+            |> Array.filter (fun d ->
+                d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error ||
+                not (suppressedWarnings.Contains(d.ErrorNumber)))
+
+        if relevantDiagnostics.Length > 0 then
             printfn "[FidprojLoader] Diagnostics:"
-            for diag in checkResults.Diagnostics do
+            for diag in relevantDiagnostics do
                 let severity =
                     match diag.Severity with
                     | FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error -> "ERROR"
