@@ -6,6 +6,8 @@ open FSharp.Compiler.CodeAnalysis
 open Core.XParsec.Foundation
 open CLI.Configurations.ProjectConfig
 
+open Core.Types.MLIRTypes
+
 /// Resolved dependency with its source files
 type ResolvedDependency = {
     Name: string
@@ -25,6 +27,7 @@ type ResolvedFidproj = {
     MemoryModel: string
     MaxStackSize: int option
     OutputName: string
+    OutputKind: OutputKind
 }
 
 /// Parse dependency table from TOML content
@@ -159,6 +162,11 @@ let loadFidproj (filePath: string) : Result<ResolvedFidproj, string> =
                 | Some (TOMLValue.String t) -> Some t
                 | _ -> None
 
+            // Output kind determines binary structure and linking
+            let outputKind =
+                let kindStr = getString tomlMap "build.output_kind" "console"
+                OutputKind.parse kindStr
+
             // Parse project sources
             let projectSources =
                 parseSources content
@@ -211,6 +219,7 @@ let loadFidproj (filePath: string) : Result<ResolvedFidproj, string> =
                 MemoryModel = memoryModel
                 MaxStackSize = maxStackSize
                 OutputName = outputName
+                OutputKind = outputKind
             }
     with ex ->
         Error (sprintf "Error loading project file: %s" ex.Message)

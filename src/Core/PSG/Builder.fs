@@ -658,15 +658,51 @@ and private processExpression (expr: SynExpr) (parentId: NodeId option) (fileNam
         let tryFinallyNode = createNode "TryFinally" range fileName None parentId
         let graph' = { graph with Nodes = Map.add tryFinallyNode.Id.Value tryFinallyNode graph.Nodes }
         let graph'' = addChildToParent tryFinallyNode.Id parentId graph'
-        
+
         // Process try block
         let graph''' = processExpression tryExpr (Some tryFinallyNode.Id) fileName context graph''
-        
+
         // Process finally block
         processExpression finallyExpr (Some tryFinallyNode.Id) fileName context graph'''
 
+    // CRITICAL: Parenthesized expressions - must process inner expression with same parent
+    // This ensures (bytesRead - 1) is captured as a child of its parent App node
+    | SynExpr.Paren(innerExpr, _, _, range) ->
+        // Paren is transparent - process inner expression with the same parent
+        // The parentheses don't create a separate node, they just group
+        processExpression innerExpr parentId fileName context graph
+
+    // Tuple expressions
+    | SynExpr.Tuple(_, exprs, _, range) ->
+        let tupleNode = createNode "Tuple" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add tupleNode.Id.Value tupleNode graph.Nodes }
+        let graph'' = addChildToParent tupleNode.Id parentId graph'
+        exprs |> List.fold (fun g expr ->
+            processExpression expr (Some tupleNode.Id) fileName context g) graph''
+
+    // Lambda expressions
+    // FCS 43.9: Lambda(fromMethod, inLambdaSeq, args, body, parsedData, range, trivia)
+    | SynExpr.Lambda(_, _, _, body, _, range, _) ->
+        let lambdaNode = createNode "Lambda" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add lambdaNode.Id.Value lambdaNode graph.Nodes }
+        let graph'' = addChildToParent lambdaNode.Id parentId graph'
+        processExpression body (Some lambdaNode.Id) fileName context graph''
+
+    // If-then-else expressions
+    // FCS 43.9: IfThenElse(ifExpr, thenExpr, elseExpr, spIfToThen, isFromErrorRecovery, range, trivia)
+    | SynExpr.IfThenElse(condExpr, thenExpr, elseExprOpt, _, _, range, _) ->
+        let ifNode = createNode "IfThenElse" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add ifNode.Id.Value ifNode graph.Nodes }
+        let graph'' = addChildToParent ifNode.Id parentId graph'
+
+        let graph''' = processExpression condExpr (Some ifNode.Id) fileName context graph''
+        let graph'''' = processExpression thenExpr (Some ifNode.Id) fileName context graph'''
+        match elseExprOpt with
+        | Some elseExpr -> processExpression elseExpr (Some ifNode.Id) fileName context graph''''
+        | None -> graph''''
+
     // Add other common expression cases as needed...
-    | _ -> 
+    | _ ->
         // Default case for unhandled expressions
         graph
 

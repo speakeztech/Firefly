@@ -74,19 +74,22 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
             match node.SyntaxKind with
             | sk when sk.StartsWith("Binding") || sk.StartsWith("Member") ->
                 match node.Symbol with
-                | Some sym -> 
+                | Some sym ->
                     // This node defines a function - mark all its descendants
+                    // Use visited set to prevent infinite recursion on cyclic references
+                    let visited = System.Collections.Generic.HashSet<string>()
                     let rec markDescendants nId funcName =
-                        result <- Map.add nId funcName result
-                        match Map.tryFind nId psg.Nodes with
-                        | Some n ->
-                            match n.Children with
-                            | Parent children ->
-                                for child in children do
-                                    markDescendants child.Value funcName
-                            | _ -> ()
-                        | None -> ()
-                    
+                        if visited.Add(nId) then  // Only process if not already visited
+                            result <- Map.add nId funcName result
+                            match Map.tryFind nId psg.Nodes with
+                            | Some n ->
+                                match n.Children with
+                                | Parent children ->
+                                    for child in children do
+                                        markDescendants child.Value funcName
+                                | _ -> ()
+                            | None -> ()
+
                     markDescendants nodeId sym.FullName
                 | None -> ()
             | _ -> ()

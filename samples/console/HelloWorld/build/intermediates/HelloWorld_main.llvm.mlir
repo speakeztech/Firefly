@@ -1,0 +1,50 @@
+module {
+  llvm.func @main(%arg0: i32) -> i32 {
+    %0 = llvm.mlir.constant(64 : i64) : i64
+    %1 = llvm.alloca %0 x i8 : (i64) -> !llvm.ptr
+    %2 = llvm.mlir.addressof @str0 : !llvm.ptr
+    %3 = llvm.mlir.constant(19 : i64) : i64
+    %4 = llvm.mlir.constant(1 : i64) : i64
+    %5 = llvm.mlir.constant(1 : i64) : i64
+    %6 = llvm.inline_asm has_side_effects "syscall", "=r,{rax},{rdi},{rsi},{rdx}" %5, %4, %2, %3 : (i64, i64, !llvm.ptr, i64) -> i64
+    %7 = llvm.mlir.constant(64 : i64) : i64
+    %8 = llvm.mlir.constant(0 : i64) : i64
+    %9 = llvm.mlir.constant(0 : i64) : i64
+    %10 = llvm.inline_asm has_side_effects "syscall", "=r,{rax},{rdi},{rsi},{rdx}" %9, %8, %1, %7 : (i64, i64, !llvm.ptr, i64) -> i64
+    %11 = llvm.trunc %10 : i64 to i32
+    %12 = llvm.mlir.addressof @str1 : !llvm.ptr
+    %13 = llvm.mlir.constant(7 : i64) : i64
+    %14 = llvm.mlir.constant(1 : i64) : i64
+    %15 = llvm.mlir.constant(1 : i64) : i64
+    %16 = llvm.inline_asm has_side_effects "syscall", "=r,{rax},{rdi},{rsi},{rdx}" %15, %14, %12, %13 : (i64, i64, !llvm.ptr, i64) -> i64
+    %17 = llvm.mlir.constant(1 : i32) : i32
+    %18 = llvm.sub %11, %17 : i32
+    %19 = llvm.sext %18 : i32 to i64
+    %20 = llvm.mlir.constant(1 : i64) : i64
+    %21 = llvm.mlir.constant(1 : i64) : i64
+    %22 = llvm.inline_asm has_side_effects "syscall", "=r,{rax},{rdi},{rsi},{rdx}" %21, %20, %1, %19 : (i64, i64, !llvm.ptr, i64) -> i64
+    %23 = llvm.mlir.addressof @str2 : !llvm.ptr
+    %24 = llvm.mlir.constant(2 : i64) : i64
+    %25 = llvm.mlir.constant(1 : i64) : i64
+    %26 = llvm.mlir.constant(1 : i64) : i64
+    %27 = llvm.inline_asm has_side_effects "syscall", "=r,{rax},{rdi},{rsi},{rdx}" %26, %25, %23, %24 : (i64, i64, !llvm.ptr, i64) -> i64
+    %28 = llvm.mlir.constant(0 : i32) : i32
+    llvm.return %28 : i32
+  }
+  llvm.func @_start() attributes {llvm.emit_c_interface} {
+    %0 = llvm.mlir.constant(0 : i32) : i32
+    %1 = llvm.call @main(%0) : (i32) -> i32
+    %2 = llvm.sext %1 : i32 to i64
+    %3 = llvm.mlir.constant(60 : i64) : i64
+    %4 = llvm.inline_asm has_side_effects "syscall", "=r,{rax},{rdi}" %3, %2 : (i64, i64) -> i64
+    llvm.return
+  }
+  llvm.func @_mlir_ciface__start() attributes {llvm.emit_c_interface} {
+    llvm.call @_start() : () -> ()
+    llvm.return
+  }
+  llvm.mlir.global private constant @str0("What is your name? \00") {addr_space = 0 : i32}
+  llvm.mlir.global private constant @str1("Hello, \00") {addr_space = 0 : i32}
+  llvm.mlir.global private constant @str2("!\0A\00") {addr_space = 0 : i32}
+}
+

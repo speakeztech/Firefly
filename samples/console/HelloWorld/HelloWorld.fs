@@ -1,23 +1,31 @@
-/// HelloWorld - Interactive Firefly Sample
+/// HelloWorld - Saturated Call Pattern
 /// Demonstrates native F# console I/O compiled to machine code
+/// Pattern: 02_HelloWorldSaturated - All function calls are saturated (not curried)
 module HelloWorld
 
-open FSharp.NativeInterop
 open Alloy
+open Alloy.Console
+open Alloy.Memory
 
 /// Entry point for the application
 [<EntryPoint>]
 let main argv =
-    // Write prompt to stdout
-    Console.writeLine "What is your name?"
+    // Stack-allocated buffer for input (no heap allocation)
+    use buffer = stackBuffer<byte> 64
 
-    // Read user input (stack-allocated buffer, no heap)
-    let mutable buffer = NativePtr.stackalloc<byte> 64
-    let bytesRead = Console.readLine buffer 64
+    // Write prompt - saturated call (all args provided at once)
+    Prompt "What is your name? "
 
-    // Write greeting
-    Console.write "Hello, "
-    // TODO: Write the actual name from buffer
-    Console.writeLine "!"
+    // Read user input into stack buffer
+    // readInto uses SRTP to accept any type with Pointer and Length members
+    let name =
+        match readInto buffer with
+        | Ok length -> "User"  // TODO: Convert buffer to string when Text module available
+        | Error _ -> "Unknown"
+
+    // Write greeting - saturated calls
+    Write "Hello, "
+    Write name
+    WriteLine "!"
 
     0

@@ -30,6 +30,9 @@ module SSAContext =
     let lookupLocal ctx name =
         Map.tryFind name ctx.Locals
 
+    let registerLocal ctx fsharpName ssaName =
+        ctx.Locals <- Map.add fsharpName ssaName ctx.Locals
+
     let addStringLiteral ctx content =
         match ctx.StringLiterals |> List.tryFind (fun (c, _) -> c = content) with
         | Some (_, name) -> name
@@ -109,7 +112,8 @@ let rec fsharpTypeToMLIR (ftype: FSharpType) : string =
                         fsharpTypeToMLIR ftype.GenericArguments.[0]
                     else "i32"
                 sprintf "memref<?x%s>" elemType
-            | Some name -> sprintf "!opaque<%s>" (name.Replace(".", "_"))
+            // Use i32 as fallback for unknown types - proper type mapping will be added later
+            | Some name -> "i32"
             | None -> "i32"
         else "i32"
     with _ -> "i32"
@@ -141,7 +145,8 @@ let emitSyscallWrite (builder: MLIRBuilder) (ctx: SSAContext) (fd: string) (bufP
 
     MLIRBuilder.line builder (sprintf "%s = arith.constant %s : i64" fdVal fd)
     MLIRBuilder.line builder (sprintf "%s = arith.constant %s : i64" sysNum sysWrite)
-    MLIRBuilder.line builder (sprintf "%s = llvm.inline_asm \"syscall\", \"=r,{rax},{rdi},{rsi},{rdx}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
+    // has_side_effects prevents LLVM from optimizing away the syscall
+    MLIRBuilder.line builder (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"=r,{rax},{rdi},{rsi},{rdx}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
         result sysNum fdVal bufPtr len)
     result
 
@@ -154,7 +159,8 @@ let emitSyscallRead (builder: MLIRBuilder) (ctx: SSAContext) (fd: string) (bufPt
 
     MLIRBuilder.line builder (sprintf "%s = arith.constant %s : i64" fdVal fd)
     MLIRBuilder.line builder (sprintf "%s = arith.constant %s : i64" sysNum sysRead)
-    MLIRBuilder.line builder (sprintf "%s = llvm.inline_asm \"syscall\", \"=r,{rax},{rdi},{rsi},{rdx}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
+    // has_side_effects prevents LLVM from optimizing away the syscall
+    MLIRBuilder.line builder (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"=r,{rax},{rdi},{rsi},{rdx}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
         result sysNum fdVal bufPtr len)
     result
 
@@ -191,6 +197,38 @@ let isConsoleOperation (node: PSGNode) : (string * string option) option =
         else None
     | None -> None
 
+/// Check if a PSG node represents NativePtr.stackalloc
+let isStackAllocOperation (node: PSGNode) : (string * int) option =
+    // Look for TypeApp:byte or similar with stackalloc symbol
+    match node.Symbol with
+    | Some symbol ->
+        let fullName = symbol.FullName
+        if fullName.Contains("NativePtr.stackalloc") || fullName.Contains("stackalloc") then
+            // Extract element type from SyntaxKind like "TypeApp:byte"
+            let elemType =
+                if node.SyntaxKind.StartsWith("TypeApp:") then
+                    node.SyntaxKind.Substring(8)  // "byte", "int", etc.
+                else "i8"  // Default to byte
+            Some (elemType, 0)  // Size will be extracted from argument
+        else None
+    | None ->
+        // Also check SyntaxKind for TypeApp nodes that might not have symbol yet
+        if node.SyntaxKind.StartsWith("TypeApp:") then
+            // Could be stackalloc - check children
+            None
+        else None
+
+/// Get element size in bytes for a type name
+let getElementSize (typeName: string) : int =
+    match typeName.ToLowerInvariant() with
+    | "byte" | "sbyte" | "int8" | "uint8" | "i8" -> 1
+    | "int16" | "uint16" | "i16" -> 2
+    | "int" | "int32" | "uint32" | "i32" -> 4
+    | "int64" | "uint64" | "i64" | "nativeint" | "unativeint" -> 8
+    | "float32" | "single" | "f32" -> 4
+    | "float" | "float64" | "double" | "f64" -> 8
+    | _ -> 1  // Default to 1 byte
+
 /// Check if node is an application (function call)
 let isApplicationNode (node: PSGNode) : bool =
     node.SyntaxKind.StartsWith("App") || node.SyntaxKind = "Application"
@@ -215,10 +253,13 @@ let getConstValue (node: PSGNode) : string option =
     else None
 
 /// Walk children of a node
+/// Note: Children are stored in reverse order (prepended during construction),
+/// so we reverse them to get source order
 let getChildren (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode list =
     match node.Children with
     | Parent childIds ->
         childIds
+        |> List.rev  // Reverse to get source order
         |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
     | _ -> []
 
@@ -321,16 +362,33 @@ let rec emitExpression (builder: MLIRBuilder) (ctx: SSAContext) (psg: ProgramSem
         lastResult
 
     | sk when sk.StartsWith("App") || sk = "Application" ->
-        // Function application - look for Console operations in the call target
+        // Function application - check for special operations first
         let children = getChildren psg node
 
-        // Try to find what function is being called
+        // Try to find what function is being called (TypeApp or LongIdent)
         let callTarget =
             children
             |> List.tryFind (fun c ->
+                c.SyntaxKind.StartsWith("TypeApp:") ||
                 c.SyntaxKind.StartsWith("LongIdent") ||
                 c.SyntaxKind.StartsWith("Ident") ||
                 c.SyntaxKind.StartsWith("App"))  // Nested app for curried calls
+
+        // Check if this is NativePtr.stackalloc or Alloy.Memory.stackBuffer
+        let isStackAlloc =
+            match callTarget with
+            | Some target ->
+                match target.Symbol with
+                | Some sym ->
+                    let fullName = sym.FullName
+                    fullName.Contains("NativePtr.stackalloc") ||
+                    fullName.Contains("stackalloc") ||
+                    fullName.Contains("stackBuffer") ||
+                    sym.DisplayName = "stackBuffer"
+                | None ->
+                    target.SyntaxKind.StartsWith("TypeApp:") ||  // TypeApp with no symbol could be stackalloc
+                    target.SyntaxKind.Contains("stackBuffer")
+            | None -> false
 
         // Check if this is a Console operation
         let isConsole =
@@ -344,7 +402,73 @@ let rec emitExpression (builder: MLIRBuilder) (ctx: SSAContext) (psg: ProgramSem
                     target.SyntaxKind.Contains("Console")
             | None -> false
 
-        if isConsole then
+        // Check if this is an arithmetic operator
+        // Check both Symbol.DisplayName and SyntaxKind for operator detection
+        let arithmeticOp =
+            match callTarget with
+            | Some target ->
+                // First try Symbol if available
+                let fromSymbol =
+                    match target.Symbol with
+                    | Some sym ->
+                        match sym.DisplayName with
+                        | "op_Subtraction" -> Some "subi"
+                        | "op_Addition" -> Some "addi"
+                        | "op_Multiply" -> Some "muli"
+                        | "op_Division" -> Some "divsi"
+                        | "op_Modulus" -> Some "remsi"
+                        | _ -> None
+                    | None -> None
+
+                // Fallback: check SyntaxKind for operator names
+                match fromSymbol with
+                | Some op -> Some op
+                | None ->
+                    if target.SyntaxKind.Contains("op_Subtraction") then Some "subi"
+                    elif target.SyntaxKind.Contains("op_Addition") then Some "addi"
+                    elif target.SyntaxKind.Contains("op_Multiply") then Some "muli"
+                    elif target.SyntaxKind.Contains("op_Division") then Some "divsi"
+                    elif target.SyntaxKind.Contains("op_Modulus") then Some "remsi"
+                    else None
+            | None -> None
+
+        if isStackAlloc then
+            // NativePtr.stackalloc<T> size -> llvm.alloca
+            // Extract element type from TypeApp:byte
+            let elemType =
+                match callTarget with
+                | Some target when target.SyntaxKind.StartsWith("TypeApp:") ->
+                    target.SyntaxKind.Substring(8)  // "byte", "int", etc.
+                | _ -> "byte"
+
+            // Find size argument (should be a Const node)
+            let sizeArg = children |> List.tryFind (fun c -> c.SyntaxKind.StartsWith("Const:Int"))
+            let size =
+                match sizeArg with
+                | Some arg ->
+                    match getConstValue arg with
+                    | Some s -> int s
+                    | None -> 64  // Default
+                | None -> 64
+
+            // Map F# type to LLVM type
+            let llvmElemType =
+                match elemType.ToLowerInvariant() with
+                | "byte" | "sbyte" -> "i8"
+                | "int16" | "uint16" -> "i16"
+                | "int" | "int32" | "uint32" -> "i32"
+                | "int64" | "uint64" -> "i64"
+                | _ -> "i8"
+
+            // Emit stack allocation
+            // llvm.alloca requires SSA value for count, not inline literal
+            let sizeVal = SSAContext.nextValue ctx
+            MLIRBuilder.line builder (sprintf "%s = llvm.mlir.constant(%d : i64) : i64" sizeVal size)
+            let ptr = SSAContext.nextValue ctx
+            MLIRBuilder.line builder (sprintf "%s = llvm.alloca %s x %s : (i64) -> !llvm.ptr" ptr sizeVal llvmElemType)
+            Some ptr
+
+        elif isConsole then
             // Identify which Console operation
             let opName =
                 match callTarget with
@@ -391,6 +515,75 @@ let rec emitExpression (builder: MLIRBuilder) (ctx: SSAContext) (psg: ProgramSem
                 else None
 
             match opName with
+            // === FidelityHelloWorld Console patterns ===
+            | "WriteLine" ->
+                // FidelityHelloWorld: Console.WriteLine message
+                match strArg with
+                | Some strNode ->
+                    match extractStringContent strNode.SyntaxKind with
+                    | Some content ->
+                        emitConsoleWriteLine builder ctx content
+                    | None ->
+                        MLIRBuilder.line builder (sprintf "// Console.WriteLine - could not extract: %s" strNode.SyntaxKind)
+                | None ->
+                    MLIRBuilder.line builder "// Console.WriteLine with non-literal arg"
+                None
+            | "Write" | "Prompt" ->
+                // FidelityHelloWorld: Console.Write / Prompt message
+                match strArg with
+                | Some strNode ->
+                    match extractStringContent strNode.SyntaxKind with
+                    | Some content ->
+                        emitConsoleWrite builder ctx content
+                    | None ->
+                        MLIRBuilder.line builder (sprintf "// Console.Write - could not extract: %s" strNode.SyntaxKind)
+                | None ->
+                    MLIRBuilder.line builder "// Console.Write with non-literal arg"
+                None
+            | "writeBytes" ->
+                // FidelityHelloWorld primitive: writeBytes fd buffer count
+                // This is the actual syscall - emit inline assembly
+                MLIRBuilder.line builder "// writeBytes: Firefly primitive syscall"
+                // For now, emit placeholder - full implementation needs fd, buffer, count args
+                None
+            | "readBytes" ->
+                // FidelityHelloWorld primitive: readBytes fd buffer maxCount
+                MLIRBuilder.line builder "// readBytes: Firefly primitive syscall"
+                None
+            | "readInto" ->
+                // FidelityHelloWorld: readInto buffer (SRTP-based)
+                // Finds buffer arg and emits read syscall
+                let bufferArg = children |> List.tryFind (fun c ->
+                    c.SyntaxKind.StartsWith("Ident") &&
+                    not (c.SyntaxKind.Contains("readInto")))
+                match bufferArg with
+                | Some buf ->
+                    match buf.Symbol with
+                    | Some sym ->
+                        match SSAContext.lookupLocal ctx sym.DisplayName with
+                        | Some bufPtr ->
+                            // Emit read syscall for stdin (fd=0)
+                            let size = SSAContext.nextValue ctx
+                            MLIRBuilder.line builder (sprintf "%s = arith.constant 64 : i64" size)
+                            let fd = SSAContext.nextValue ctx
+                            MLIRBuilder.line builder (sprintf "%s = arith.constant 0 : i64" fd)
+                            let sysRead = SSAContext.nextValue ctx
+                            MLIRBuilder.line builder (sprintf "%s = arith.constant 0 : i64" sysRead)
+                            let result = SSAContext.nextValue ctx
+                            MLIRBuilder.line builder (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"=r,{rax},{rdi},{rsi},{rdx}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64" result sysRead fd bufPtr size)
+                            let truncResult = SSAContext.nextValue ctx
+                            MLIRBuilder.line builder (sprintf "%s = arith.trunci %s : i64 to i32" truncResult result)
+                            Some truncResult
+                        | None ->
+                            MLIRBuilder.line builder (sprintf "// readInto: buffer '%s' not found" sym.DisplayName)
+                            None
+                    | None ->
+                        MLIRBuilder.line builder "// readInto: buffer has no symbol"
+                        None
+                | None ->
+                    MLIRBuilder.line builder "// readInto: no buffer argument found"
+                    None
+            // === Legacy Alloy Console patterns ===
             | "writeLine" ->
                 match strArg with
                 | Some strNode ->
@@ -398,9 +591,9 @@ let rec emitExpression (builder: MLIRBuilder) (ctx: SSAContext) (psg: ProgramSem
                     | Some content ->
                         emitConsoleWriteLine builder ctx content
                     | None ->
-                        MLIRBuilder.line builder (sprintf "; Console.writeLine - could not extract: %s" strNode.SyntaxKind)
+                        MLIRBuilder.line builder (sprintf "// Console.writeLine - could not extract: %s" strNode.SyntaxKind)
                 | None ->
-                    MLIRBuilder.line builder "; Console.writeLine with non-literal arg"
+                    MLIRBuilder.line builder "// Console.writeLine with non-literal arg"
                 None
             | "write" ->
                 match strArg with
@@ -409,66 +602,368 @@ let rec emitExpression (builder: MLIRBuilder) (ctx: SSAContext) (psg: ProgramSem
                     | Some content ->
                         emitConsoleWrite builder ctx content
                     | None ->
-                        MLIRBuilder.line builder (sprintf "; Console.write - could not extract: %s" strNode.SyntaxKind)
+                        MLIRBuilder.line builder (sprintf "// Console.write - could not extract: %s" strNode.SyntaxKind)
                 | None ->
-                    MLIRBuilder.line builder "; Console.write with non-literal arg"
+                    MLIRBuilder.line builder "// Console.write with non-literal arg"
                 None
-            | "readLine" ->
-                let result = SSAContext.nextValue ctx
-                MLIRBuilder.line builder "; TODO: Console.readLine needs buffer handling"
-                MLIRBuilder.line builder (sprintf "%s = arith.constant 0 : i32" result)
-                Some result
-            | _ ->
-                MLIRBuilder.line builder (sprintf "; Unknown Console operation: %s" opName)
-                None
-        else
-            // Generic function call
-            match node.Symbol with
-            | Some sym ->
-                let funcName = sym.DisplayName.Replace(".", "_")
-                let result = SSAContext.nextValue ctx
-                MLIRBuilder.line builder (sprintf "%s = func.call @%s() : () -> i32" result funcName)
-                Some result
-            | None ->
-                // Try to get function name from call target
-                match callTarget with
-                | Some target ->
-                    match target.Symbol with
+            | "writeBuffer" ->
+                // Console.writeBuffer buffer length -> write syscall to stdout
+                // This is handled specially because F# curried calls create nested Apps.
+                // When we detect writeBuffer at the inner App level, we only have the buffer arg.
+                // The length arg is at the outer App level.
+                // We return a "partial" indicator and let the outer App complete the call.
+
+                // Debug: show all children
+                let childDescs = children |> List.map (fun c ->
+                    let symName = match c.Symbol with | Some s -> s.DisplayName | None -> "?"
+                    sprintf "%s:%s" c.SyntaxKind symName)
+                MLIRBuilder.line builder (sprintf "// writeBuffer children: %s" (String.concat ", " childDescs))
+
+                // Debug: show parent chain
+                let rec showParents n depth =
+                    if depth > 5 then ()
+                    else
+                        match n.ParentId with
+                        | Some pid ->
+                            match Map.tryFind pid.Value psg.Nodes with
+                            | Some parent ->
+                                let parentChildren = getChildren psg parent
+                                let pChildDescs = parentChildren |> List.map (fun c -> c.SyntaxKind) |> String.concat ", "
+                                MLIRBuilder.line builder (sprintf "// Parent[%d]: %s children=[%s]" depth parent.SyntaxKind pChildDescs)
+                                showParents parent (depth + 1)
+                            | None -> ()
+                        | None -> ()
+                showParents node 0
+
+                // Find buffer argument - must be an Ident that is NOT the writeBuffer function itself
+                let bufferArg = children |> List.tryFind (fun c ->
+                    // Must be an Ident (not LongIdent, which would be Console.writeBuffer)
+                    c.SyntaxKind.StartsWith("Ident") &&
+                    not (c.SyntaxKind.Contains("writeBuffer")) &&
+                    match c.Symbol with
                     | Some sym ->
-                        let funcName = sym.DisplayName.Replace(".", "_")
-                        let result = SSAContext.nextValue ctx
-                        MLIRBuilder.line builder (sprintf "%s = func.call @%s() : () -> i32" result funcName)
-                        Some result
+                        // Exclude the writeBuffer function reference
+                        not (sym.DisplayName = "writeBuffer") &&
+                        not (sym.FullName.Contains("Console"))
+                    | None -> true)
+
+                // Filter args to exclude the function reference
+                let args = children |> List.filter (fun c ->
+                    match c.Symbol with
+                    | Some sym ->
+                        not (sym.FullName.Contains("Console.writeBuffer") ||
+                             sym.FullName.Contains("Console"))
+                    | None -> not (c.SyntaxKind.Contains("writeBuffer") || c.SyntaxKind.Contains("Console")))
+
+                MLIRBuilder.line builder (sprintf "// writeBuffer args after filter: %s"
+                    (args |> List.map (fun c -> c.SyntaxKind) |> String.concat ", "))
+
+                match bufferArg with
+                | Some arg ->
+                    match arg.Symbol with
+                    | Some sym ->
+                        MLIRBuilder.line builder (sprintf "// writeBuffer buffer arg symbol: %s" sym.DisplayName)
+                        match SSAContext.lookupLocal ctx sym.DisplayName with
+                        | Some ssaName ->
+                            // Store the buffer pointer for the outer App to use
+                            SSAContext.registerLocal ctx "__writeBuffer_ptr" ssaName
+                            // Return a marker that this is a partial writeBuffer
+                            Some "__writeBuffer_partial"
+                        | None ->
+                            MLIRBuilder.line builder (sprintf "// Warning: buffer '%s' not found in locals" sym.DisplayName)
+                            None
                     | None ->
-                        MLIRBuilder.line builder (sprintf "; Unresolved function call: %s" target.SyntaxKind)
+                        MLIRBuilder.line builder "// Warning: buffer arg has no symbol"
                         None
                 | None ->
-                    MLIRBuilder.line builder "; Unresolved function call"
+                    MLIRBuilder.line builder "// Warning: no buffer argument found"
                     None
 
-    | "Ident" ->
-        // Variable reference
-        match node.Symbol with
-        | Some sym ->
-            match SSAContext.lookupLocal ctx sym.DisplayName with
+            | "readLine" ->
+                // Console.readLine buffer size -> read syscall from stdin
+                // Arguments: buffer (pointer), size (int)
+
+                // Filter out the call target from children to get just the arguments
+                let args = children |> List.filter (fun c ->
+                    match c.Symbol with
+                    | Some sym ->
+                        // Skip the function itself and module references
+                        let fn = sym.FullName
+                        not (fn.Contains("Console.readLine") || fn.Contains("Console"))
+                    | None ->
+                        // Keep nodes without symbols that might be arguments
+                        not (c.SyntaxKind.Contains("readLine") || c.SyntaxKind.Contains("Console")))
+
+                // Find buffer argument (should be an Ident referencing a local variable)
+                let bufferArg = args |> List.tryFind (fun c ->
+                    c.SyntaxKind.StartsWith("Ident") ||
+                    c.SyntaxKind.StartsWith("LongIdent"))
+
+                // Find size argument (should be a Const node)
+                let sizeArg = args |> List.tryFind (fun c -> c.SyntaxKind.StartsWith("Const:Int"))
+
+                // Get buffer pointer from local variable lookup
+                let bufPtr =
+                    match bufferArg with
+                    | Some arg ->
+                        match arg.Symbol with
+                        | Some sym ->
+                            match SSAContext.lookupLocal ctx sym.DisplayName with
+                            | Some ssaName -> ssaName
+                            | None ->
+                                // Buffer not found - this is an error, but continue with dummy
+                                MLIRBuilder.line builder (sprintf "// Warning: buffer '%s' not found in locals" sym.DisplayName)
+                                let ptr = SSAContext.nextValue ctx
+                                MLIRBuilder.line builder (sprintf "%s = llvm.alloca i8 x 64 : (i64) -> !llvm.ptr" ptr)
+                                ptr
+                        | None ->
+                            let ptr = SSAContext.nextValue ctx
+                            MLIRBuilder.line builder "// Warning: buffer argument has no symbol"
+                            MLIRBuilder.line builder (sprintf "%s = llvm.alloca i8 x 64 : (i64) -> !llvm.ptr" ptr)
+                            ptr
+                    | None ->
+                        let ptr = SSAContext.nextValue ctx
+                        MLIRBuilder.line builder "// Warning: no buffer argument found"
+                        MLIRBuilder.line builder (sprintf "%s = llvm.alloca i8 x 64 : (i64) -> !llvm.ptr" ptr)
+                        ptr
+
+                // Get size value
+                let size =
+                    match sizeArg with
+                    | Some arg ->
+                        match getConstValue arg with
+                        | Some s -> int s
+                        | None -> 64
+                    | None -> 64
+
+                // Emit size constant
+                let bufSize = SSAContext.nextValue ctx
+                MLIRBuilder.line builder (sprintf "%s = arith.constant %d : i64" bufSize size)
+
+                // Emit read syscall: read(fd=0, buf, count)
+                let bytesRead = emitSyscallRead builder ctx "0" bufPtr bufSize
+
+                // Return bytes read (truncated to i32)
+                let result = SSAContext.nextValue ctx
+                MLIRBuilder.line builder (sprintf "%s = arith.trunci %s : i64 to i32" result bytesRead)
+                Some result
+            | _ ->
+                MLIRBuilder.line builder (sprintf "// Unknown Console operation: %s" opName)
+                None
+
+        elif arithmeticOp.IsSome then
+            // Arithmetic operation: op_Subtraction, op_Addition, etc.
+            let op = arithmeticOp.Value
+
+            // Get operands - filter out the operator itself (check both Symbol AND SyntaxKind)
+            let operands = children |> List.filter (fun c ->
+                let isOperatorBySymbol =
+                    match c.Symbol with
+                    | Some sym -> sym.DisplayName.StartsWith("op_")
+                    | None -> false
+                let isOperatorBySyntax = c.SyntaxKind.Contains("op_")
+                // Filter out if EITHER indicates it's an operator
+                not (isOperatorBySymbol || isOperatorBySyntax))
+
+            // Debug
+            let operandDescs = operands |> List.map (fun c -> c.SyntaxKind) |> String.concat ", "
+            MLIRBuilder.line builder (sprintf "// Arithmetic operands: [%s]" operandDescs)
+
+            // Emit both operands
+            let operandValues = operands |> List.choose (fun operand ->
+                emitExpression builder ctx psg operand)
+
+            MLIRBuilder.line builder (sprintf "// Arithmetic operand values: %d" operandValues.Length)
+
+            match operandValues with
+            | [lhs; rhs] ->
+                let result = SSAContext.nextValue ctx
+                MLIRBuilder.line builder (sprintf "%s = arith.%s %s, %s : i32" result op lhs rhs)
+                Some result
+            | [single] ->
+                // Might be a unary operation or partially applied - return it for outer App
+                // This handles curried arithmetic like (bytesRead - 1) where inner App has just bytesRead
+                Some single
+            | _ ->
+                MLIRBuilder.line builder (sprintf "// Arithmetic op %s with unexpected operand count: %d" op operandValues.Length)
+                None
+
+        else
+            // Check if this is the outer App completing a partial writeBuffer call
+            // F# curried calls: Console.writeBuffer buffer length becomes App(App(writeBuffer, buffer), length)
+            // The inner App returns "__writeBuffer_partial", and we complete the syscall here with the length arg
+
+            // First, try emitting the first child (which may be the inner App with writeBuffer)
+            let firstChildResult =
+                match children |> List.tryHead with
+                | Some firstChild -> emitExpression builder ctx psg firstChild
+                | None -> None
+
+            // Debug: show what we have
+            let childDescs = children |> List.map (fun c -> c.SyntaxKind) |> String.concat ", "
+            MLIRBuilder.line builder (sprintf "// Outer App children (%d): [%s]" children.Length childDescs)
+            MLIRBuilder.line builder (sprintf "// firstChildResult = %A" firstChildResult)
+
+            // Check if the first child returned the partial writeBuffer marker
+            if firstChildResult = Some "__writeBuffer_partial" then
+                // This is the outer App - complete the writeBuffer syscall
+                // Get the stored buffer pointer
+                match SSAContext.lookupLocal ctx "__writeBuffer_ptr" with
+                | Some bufPtr ->
+                    // Get the second child (the length expression)
+                    let lengthArg = children |> List.tryItem 1
+                    match lengthArg with
+                    | Some lengthNode ->
+                        // Emit the length expression (could be arithmetic like bytesRead - 1)
+                        let lengthResult = emitExpression builder ctx psg lengthNode
+                        match lengthResult with
+                        | Some lengthVal ->
+                            // Extend length to i64 for syscall
+                            let len64 = SSAContext.nextValue ctx
+                            MLIRBuilder.line builder (sprintf "%s = arith.extsi %s : i32 to i64" len64 lengthVal)
+
+                            // Emit write syscall: write(fd=1, buf, len)
+                            let fd = SSAContext.nextValue ctx
+                            MLIRBuilder.line builder (sprintf "%s = arith.constant 1 : i64" fd)
+                            let sysWrite = SSAContext.nextValue ctx
+                            MLIRBuilder.line builder (sprintf "%s = arith.constant 1 : i64" sysWrite)
+                            let result = SSAContext.nextValue ctx
+                            MLIRBuilder.line builder (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"=r,{rax},{rdi},{rsi},{rdx}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64" result sysWrite fd bufPtr len64)
+                            Some result
+                        | None ->
+                            MLIRBuilder.line builder "// writeBuffer: failed to emit length expression"
+                            None
+                    | None ->
+                        MLIRBuilder.line builder "// writeBuffer: no length argument found"
+                        None
+                | None ->
+                    MLIRBuilder.line builder "// writeBuffer: buffer pointer not found in context"
+                    None
+            else
+                // Not a partial writeBuffer - continue with generic App handling
+                // Generic function call - but skip module/type references
+                let isModuleOrType =
+                    match callTarget with
+                    | Some target ->
+                        match target.Symbol with
+                        | Some sym ->
+                            match sym with
+                            | :? FSharpEntity as entity -> entity.IsFSharpModule
+                            | _ -> false
+                        | None -> false
+                    | None -> false
+
+                if isModuleOrType then
+                    // Skip module references - just emit children
+                    let children = getChildren psg node
+                    let mutable lastResult = None
+                    for child in children do
+                        if not (child.SyntaxKind.StartsWith("LongIdent") || child.SyntaxKind.StartsWith("Ident")) then
+                            lastResult <- emitExpression builder ctx psg child
+                    lastResult
+                else
+                    match node.Symbol with
+                    | Some sym ->
+                        match sym with
+                        | :? FSharpEntity as entity when entity.IsFSharpModule ->
+                            // Skip module references
+                            None
+                        | :? FSharpMemberOrFunctionOrValue as mfv ->
+                            let funcName = sym.DisplayName.Replace(".", "_")
+                            let result = SSAContext.nextValue ctx
+                            MLIRBuilder.line builder (sprintf "%s = func.call @%s() : () -> i32" result funcName)
+                            Some result
+                        | _ ->
+                            MLIRBuilder.line builder (sprintf "// Skipping non-function symbol: %s" sym.DisplayName)
+                            None
+                    | None ->
+                        // Try to get function name from call target
+                        match callTarget with
+                        | Some target ->
+                            match target.Symbol with
+                            | Some sym ->
+                                match sym with
+                                | :? FSharpMemberOrFunctionOrValue ->
+                                    let funcName = sym.DisplayName.Replace(".", "_")
+                                    let result = SSAContext.nextValue ctx
+                                    MLIRBuilder.line builder (sprintf "%s = func.call @%s() : () -> i32" result funcName)
+                                    Some result
+                                | _ ->
+                                    MLIRBuilder.line builder (sprintf "// Skipping non-function: %s" sym.DisplayName)
+                                    None
+                            | None ->
+                                MLIRBuilder.line builder (sprintf "// Unresolved function call: %s" target.SyntaxKind)
+                                None
+                        | None ->
+                            MLIRBuilder.line builder "// Unresolved function call"
+                            None
+
+    | sk when sk.StartsWith("Ident") ->
+        // Variable reference - SyntaxKind may be "Ident" or "Ident:varname"
+        let varName =
+            match node.Symbol with
+            | Some sym -> Some sym.DisplayName
+            | None ->
+                // Extract from SyntaxKind like "Ident:bytesRead"
+                if sk.StartsWith("Ident:") then Some (sk.Substring(6))
+                else None
+
+        match varName with
+        | Some name ->
+            match SSAContext.lookupLocal ctx name with
             | Some ssaName -> Some ssaName
             | None ->
-                // Might be a function reference
+                // Might be a function reference - emit as function call
                 let result = SSAContext.nextValue ctx
-                MLIRBuilder.line builder (sprintf "; Reference to: %s" sym.FullName)
+                MLIRBuilder.line builder (sprintf "%s = func.call @%s() : () -> i32" result name)
                 Some result
-        | None -> None
+        | None ->
+            MLIRBuilder.line builder (sprintf "// Ident with no name: %s" sk)
+            None
 
-    | "LetOrUse" | "Binding" ->
-        // Let binding - emit the bound expression
+    | sk when sk = "LetOrUse" || sk = "Binding" || sk.StartsWith("Binding:") ->
+        // Let binding - extract variable name, emit expression, register SSA name
         let children = getChildren psg node
-        match children with
-        | [] -> None
-        | [single] -> emitExpression builder ctx psg single
-        | _ ->
-            // Multiple children - pattern + expression
-            // For now, just emit the last (the bound expression)
-            emitExpression builder ctx psg (List.last children)
+
+        // Find pattern node (variable name) and expression
+        let patternNode = children |> List.tryFind (fun c -> c.SyntaxKind.StartsWith("Pattern:"))
+        let exprNode = children |> List.tryFind (fun c ->
+            not (c.SyntaxKind.StartsWith("Pattern:")) &&
+            not (c.SyntaxKind.StartsWith("Attribute")))
+
+        // Get variable name from pattern
+        let varName =
+            match patternNode with
+            | Some pat ->
+                match pat.Symbol with
+                | Some sym -> Some sym.DisplayName
+                | None ->
+                    // Try to extract from SyntaxKind like "Pattern:Named:buffer"
+                    if pat.SyntaxKind.StartsWith("Pattern:Named:") then
+                        Some (pat.SyntaxKind.Substring(14))
+                    else None
+            | None -> None
+
+        // Emit the expression
+        match exprNode with
+        | Some expr ->
+            let result = emitExpression builder ctx psg expr
+            // Register the SSA name if we have a variable name
+            match varName, result with
+            | Some name, Some ssaName ->
+                MLIRBuilder.line builder (sprintf "// Registering local: %s = %s" name ssaName)
+                SSAContext.registerLocal ctx name ssaName
+            | Some name, None ->
+                MLIRBuilder.line builder (sprintf "// Warning: no SSA result for local: %s" name)
+            | None, _ ->
+                MLIRBuilder.line builder (sprintf "// Warning: no var name for binding")
+            result
+        | None ->
+            // Fall back to emitting all children
+            let mutable lastResult = None
+            for child in children do
+                lastResult <- emitExpression builder ctx psg child
+            lastResult
 
     | "LongIdentSet" | "Set" ->
         // Mutable variable assignment
@@ -486,7 +981,7 @@ let rec emitExpression (builder: MLIRBuilder) (ctx: SSAContext) (psg: ProgramSem
                 lastResult <- emitExpression builder ctx psg child
             lastResult
         else
-            MLIRBuilder.line builder (sprintf "; Unhandled node: %s" node.SyntaxKind)
+            MLIRBuilder.line builder (sprintf "// Unhandled node: %s" node.SyntaxKind)
             None
 
 /// Emit a function definition
@@ -581,15 +1076,39 @@ let emitStringGlobals (builder: MLIRBuilder) (ctx: SSAContext) =
         MLIRBuilder.line builder (sprintf "llvm.mlir.global private constant %s(\"%s\\00\") : !llvm.array<%d x i8>"
             name escaped (content.Length + 1))
 
+/// Emit _start wrapper for freestanding binaries
+/// This calls main and then invokes the exit syscall with the return value
+/// We use func dialect so the --convert-to-llvm pass converts everything together
+let emitStartWrapper (builder: MLIRBuilder) =
+    MLIRBuilder.line builder ""
+    MLIRBuilder.line builder "// Entry point wrapper for freestanding binary"
+    MLIRBuilder.line builder "func.func @_start() attributes {llvm.emit_c_interface} {"
+    MLIRBuilder.push builder
+    // Call main with argc=0
+    MLIRBuilder.line builder "%argc = arith.constant 0 : i32"
+    MLIRBuilder.line builder "%retval = func.call @main(%argc) : (i32) -> i32"
+    // Extend return value to i64 for syscall
+    MLIRBuilder.line builder "%retval64 = arith.extsi %retval : i32 to i64"
+    // exit syscall (60 on x86_64 Linux) - {rax} is syscall number, {rdi} is exit code
+    // Mark as has_side_effects to prevent optimization
+    MLIRBuilder.line builder "%sys_exit = arith.constant 60 : i64"
+    MLIRBuilder.line builder "%unused = llvm.inline_asm has_side_effects \"syscall\", \"=r,{rax},{rdi}\" %sys_exit, %retval64 : (i64, i64) -> i64"
+    // Use cf.br to self as infinite loop after exit - exit should never return
+    // Actually just return - the exit syscall will terminate the process
+    MLIRBuilder.line builder "return"
+    MLIRBuilder.pop builder
+    MLIRBuilder.line builder "}"
+
 /// Main entry point: generate MLIR from PSG
-let generateMLIR (psg: ProgramSemanticGraph) (projectName: string) (targetTriple: string) : string =
+let generateMLIR (psg: ProgramSemanticGraph) (projectName: string) (targetTriple: string) (outputKind: OutputKind) : string =
     let builder = MLIRBuilder.create()
     let ctx = SSAContext.create()
 
-    // Header comments
-    MLIRBuilder.lineNoIndent builder (sprintf "; Firefly-generated MLIR for %s" projectName)
-    MLIRBuilder.lineNoIndent builder (sprintf "; Target: %s" targetTriple)
-    MLIRBuilder.lineNoIndent builder (sprintf "; PSG: %d nodes, %d edges, %d entry points"
+    // Header comments - MLIR uses // for comments
+    MLIRBuilder.lineNoIndent builder (sprintf "// Firefly-generated MLIR for %s" projectName)
+    MLIRBuilder.lineNoIndent builder (sprintf "// Target: %s" targetTriple)
+    MLIRBuilder.lineNoIndent builder (sprintf "// Output: %s" (OutputKind.toString outputKind))
+    MLIRBuilder.lineNoIndent builder (sprintf "// PSG: %d nodes, %d edges, %d entry points"
         psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length)
     MLIRBuilder.lineNoIndent builder ""
 
@@ -616,7 +1135,7 @@ let generateMLIR (psg: ProgramSemanticGraph) (projectName: string) (targetTriple
     // If no entry points, generate default main
     if entryPoints.IsEmpty && functions.IsEmpty then
         MLIRBuilder.line builder ""
-        MLIRBuilder.line builder "; No entry point found - generating default"
+        MLIRBuilder.line builder "// No entry point found - generating default"
         MLIRBuilder.line builder "func.func @main() -> i32 {"
         MLIRBuilder.push builder
         MLIRBuilder.line builder "%0 = arith.constant 0 : i32"
@@ -624,10 +1143,17 @@ let generateMLIR (psg: ProgramSemanticGraph) (projectName: string) (targetTriple
         MLIRBuilder.pop builder
         MLIRBuilder.line builder "}"
 
+    // For freestanding binaries, emit _start wrapper
+    match outputKind with
+    | Freestanding | Embedded ->
+        emitStartWrapper builder
+    | Console | Library ->
+        ()  // No wrapper needed - libc provides _start (console) or no entry (library)
+
     // Emit string globals at the end
     if not ctx.StringLiterals.IsEmpty then
         MLIRBuilder.line builder ""
-        MLIRBuilder.line builder "; String constants"
+        MLIRBuilder.line builder "// String constants"
         emitStringGlobals builder ctx
 
     MLIRBuilder.pop builder

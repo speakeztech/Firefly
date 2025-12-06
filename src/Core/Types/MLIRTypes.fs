@@ -2,6 +2,28 @@ module Core.Types.MLIRTypes
 
 open Dialects
 
+/// Output kind determines how the binary is structured
+type OutputKind =
+    | Console       // Standard console app - uses libc, main is entry point
+    | Freestanding  // No libc - generates _start wrapper, exit syscall
+    | Embedded      // Microcontroller target - no OS, custom startup
+    | Library       // Shared/static library - no entry point
+
+module OutputKind =
+    let parse (s: string) =
+        match s.ToLowerInvariant() with
+        | "console" -> Console
+        | "freestanding" | "bare" | "nostdlib" -> Freestanding
+        | "embedded" | "firmware" | "mcu" -> Embedded
+        | "library" | "lib" -> Library
+        | _ -> Console  // Default to console app
+
+    let toString = function
+        | Console -> "console"
+        | Freestanding -> "freestanding"
+        | Embedded -> "embedded"
+        | Library -> "library"
+
 /// Dialect-specific operation registry
 type DialectOperation = {
     Dialect: MLIRDialect

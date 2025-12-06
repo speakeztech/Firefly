@@ -26,7 +26,9 @@ inline_threshold = 100
 eliminate_closures = true
 
 [dependencies]
-alloy = { path = "~/repos/Alloy/src" }
+# Use FidelityHelloWorld's self-contained Alloy library
+# This is specifically designed for Firefly native compilation
+alloy = { path = "/home/hhh/repos/FidelityHelloWorld/lib/Alloy" }
 
 [build]
 # Source files in compilation order
@@ -36,3 +38,10 @@ sources = [
 
 # Output binary name
 output = "hello"
+
+# Output kind: console, freestanding, embedded, library
+# console: Uses libc, main is entry point (default)
+# freestanding: No libc, generates _start wrapper with exit syscall
+# embedded: MCU target, custom startup, no OS
+# library: No entry point
+output_kind = "freestanding"

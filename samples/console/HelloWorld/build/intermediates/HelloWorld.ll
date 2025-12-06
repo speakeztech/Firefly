@@ -1,5 +1,5 @@
 ; Firefly-generated LLVM IR for HelloWorld
-; PSG Nodes: 865
+; PSG Nodes: 1540
 
 target triple = "x86_64-unknown-linux-gnu"
 

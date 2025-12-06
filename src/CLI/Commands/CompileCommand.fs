@@ -68,8 +68,8 @@ let private findEntryPointFunctionName (psg: Core.PSG.Types.ProgramSemanticGraph
         | None -> "main"
 
 /// Generate MLIR from PSG using the real emitter
-let private generateMLIRFromPSG (psg: Core.PSG.Types.ProgramSemanticGraph) (projectName: string) (targetTriple: string) : string =
-    generateMLIR psg projectName targetTriple
+let private generateMLIRFromPSG (psg: Core.PSG.Types.ProgramSemanticGraph) (projectName: string) (targetTriple: string) (outputKind: Core.Types.MLIRTypes.OutputKind) : string =
+    generateMLIR psg projectName targetTriple outputKind
 
 /// Generate LLVM IR from PSG (simplified)
 let private generateLLVMFromPSG (psg: Core.PSG.Types.ProgramSemanticGraph) (projectName: string) (targetTriple: string) : string =
@@ -206,7 +206,7 @@ let execute (args: ParseResults<CompileArgs>) =
 
         report verbose "MLIR" "Generating MLIR..."
 
-        let mlirOutput = generateMLIRFromPSG reachabilityResult.MarkedPSG resolved.Name targetTriple
+        let mlirOutput = generateMLIRFromPSG reachabilityResult.MarkedPSG resolved.Name targetTriple resolved.OutputKind
 
         match intermediatesDir with
         | Some dir ->
