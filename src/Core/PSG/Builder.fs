@@ -266,12 +266,31 @@ let private isFunction (symbol: FSharpSymbol) : bool =
     | :? FSharpMemberOrFunctionOrValue as mfv -> mfv.IsFunction || mfv.IsMember
     | _ -> false
 
+/// Extract symbol from pattern - this is the correct way to get a binding's symbol
+let rec private extractSymbolFromPattern (pat: SynPat) (fileName: string) (context: CorrelationContext) : FSharpSymbol option =
+    match pat with
+    | SynPat.Named(synIdent, _, _, range) ->
+        let (SynIdent(ident, _)) = synIdent
+        let syntaxKind = sprintf "Pattern:Named:%s" ident.idText
+        tryCorrelateSymbolWithContext range fileName syntaxKind context
+    | SynPat.LongIdent(longIdent, _, _, _, _, range) ->
+        let (SynLongIdent(idents, _, _)) = longIdent
+        let identText = idents |> List.map (fun id -> id.idText) |> String.concat "."
+        let syntaxKind = sprintf "Pattern:LongIdent:%s" identText
+        tryCorrelateSymbolWithContext range fileName syntaxKind context
+    | SynPat.Paren(innerPat, _) ->
+        extractSymbolFromPattern innerPat fileName context
+    | SynPat.Typed(innerPat, _, _) ->
+        extractSymbolFromPattern innerPat fileName context
+    | _ -> None
+
 /// Process binding with explicit use flag
 let rec private processBindingWithUseFlag binding parentId fileName context graph isUse =
     match binding with
     | SynBinding(accessibility, kind, isInline, isMutable, attributes, xmlDoc, valData, pat, returnInfo, expr, range, seqPoint, trivia) ->
-        let bindingKind = if isUse then "Binding:Use" else "Binding"
-        let symbol = tryCorrelateSymbolWithContext range fileName bindingKind context.CorrelationContext
+        // Get symbol from the PATTERN, not from loose range matching on the binding
+        // This is critical - bindings define symbols through their patterns
+        let symbol = extractSymbolFromPattern pat fileName context.CorrelationContext
         
         // Check for EntryPoint attribute
         let hasEntryPointAttr = 

@@ -1,0 +1,33 @@
+# HelloWorldInteractive - Firefly Sample Project
+# Demonstrates stack-based memory management and user input
+
+[package]
+name = "HelloWorldInteractive"
+version = "0.1.0"
+description = "Interactive console app with stack-allocated buffers"
+authors = ["SpeakEZ LLC"]
+license = "MIT"
+
+[compilation]
+# Stack-only memory model - all allocations on stack
+memory_model = "stack_only"
+
+# Target triple (native = host platform)
+target = "native"
+
+# Stack size - enough for our 256-byte buffer plus overhead
+max_stack_size = 8192
+
+[optimization]
+level = 2
+inline_threshold = 100
+eliminate_closures = true
+
+[dependencies]
+alloy = { path = "../../../lib/Alloy" }
+
+[build]
+sources = [
+    "HelloWorldInteractive.fs"
+]
+output = "hello-interactive"

@@ -1,0 +1,46 @@
+# TimeLoop - Firefly Sample Project
+# Demonstrates platform-specific time operations
+
+[package]
+name = "TimeLoop"
+version = "0.1.0"
+description = "Time operations with high-resolution timing and sleep"
+authors = ["SpeakEZ LLC"]
+license = "MIT"
+
+[compilation]
+# Stack-only for simple timing operations
+memory_model = "stack_only"
+
+# Target triple (native = host platform)
+target = "native"
+
+# Moderate stack for this application
+max_stack_size = 4096
+
+[optimization]
+level = 2
+inline_threshold = 100
+eliminate_closures = true
+
+[dependencies]
+alloy = { path = "../../../lib/Alloy" }
+
+[build]
+sources = [
+    "TimeLoop.fs"
+]
+output = "timeloop"
+
+# Platform-specific settings
+[platform.windows]
+# Windows uses QueryPerformanceCounter
+time_implementation = "windows"
+
+[platform.linux]
+# Linux uses clock_gettime
+time_implementation = "linux"
+
+[platform.macos]
+# macOS uses mach_absolute_time
+time_implementation = "macos"

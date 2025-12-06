@@ -1,0 +1,125 @@
+# STM32L5 Platform Template
+# For STM32L5 series ARM Cortex-M33 microcontrollers
+
+[platform]
+name = "stm32l5"
+version = "1.0.0"
+description = "STM32L5 series Cortex-M33 microcontroller"
+family = "STM32"
+architecture = "ARMv8-M"
+core = "Cortex-M33"
+
+# Memory regions
+[[memory.regions]]
+name = "FLASH"
+base_address = "0x08000000"
+size = 524288            # 512KB
+access = "rx"
+attributes = ["persistent", "secure"]
+
+[[memory.regions]]
+name = "SRAM1"
+base_address = "0x20000000"
+size = 196608            # 192KB
+access = "rwx"
+attributes = ["fast", "cached"]
+
+[[memory.regions]]
+name = "SRAM2"
+base_address = "0x20030000"
+size = 65536             # 64KB
+access = "rwx"
+attributes = ["backup", "secure"]
+
+# Memory model
+[memory]
+default_model = "static_pools"
+
+[memory.stack]
+default_size = 8192      # 8KB
+max_size = 32768         # 32KB max
+alignment = 8            # 8-byte alignment for ARM
+region = "SRAM1"
+
+[memory.heap]
+default_size = 0         # No heap by default
+region = "SRAM1"
+
+# Capabilities
+[capabilities]
+trustzone = true
+crypto_acceleration = true
+dma_channels = 16
+adc_channels = 16
+timers = 17
+uart_ports = 5
+spi_ports = 3
+i2c_ports = 4
+
+# Compilation settings
+[compilation]
+target = "thumbv8m.main-none-eabihf"
+
+[compilation.optimization]
+level = 3                # Full optimization for embedded
+inline_threshold = 200   # Aggressive inlining
+eliminate_closures = true
+lto = true               # Always use LTO for embedded
+
+[compilation.features]
+fpu = "fpv5-sp-d16"      # Single-precision FPU
+dsp = true               # DSP extensions
+mve = false              # No MVE on L5
+
+# Code generation
+[codegen]
+# Place vector table at start of flash
+vector_table_address = "0x08000000"
+
+# Default linker script
+linker_script = "stm32l552.ld"
+
+# Startup code
+startup = "CortexM33.fs"
+
+# Output formats
+[output]
+formats = ["elf", "hex", "bin"]
+
+# Flash configuration
+[flash]
+tool = "openocd"
+interface = "stlink"
+target = "stm32l5x"
+
+# Clock configuration
+[clock]
+# HSE crystal frequency (if used)
+hse_frequency = 8000000   # 8 MHz
+# Maximum system clock
+max_sysclk = 110000000    # 110 MHz
+# Default configuration
+default_sysclk = 80000000 # 80 MHz
+
+# Power configuration
+[power]
+# Voltage range
+vdd_min = 1.71
+vdd_max = 3.60
+# Low-power modes
+modes = ["Sleep", "Stop0", "Stop1", "Stop2", "Standby", "Shutdown"]
+
+# Interrupt configuration
+[interrupts]
+# Number of external interrupts
+external_irqs = 109
+# Priority bits
+priority_bits = 4
+
+# Debug configuration
+[debug]
+# Debug interface
+interfaces = ["SWD", "JTAG"]
+# Trace capability
+trace = true
+itm_ports = 32

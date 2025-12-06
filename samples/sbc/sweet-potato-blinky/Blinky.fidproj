@@ -1,0 +1,88 @@
+# Sweet Potato Blinky - Firefly ARM64 SBC Sample
+# Bare-metal LED blink demo for Allwinner H6-based board
+
+[package]
+name = "SweetPotato-Blinky"
+version = "0.1.0"
+description = "LED blink demo for Libre Sweet Potato (Allwinner H6)"
+authors = ["SpeakEZ LLC"]
+license = "MIT"
+
+[compilation]
+# Static pools for bare-metal
+memory_model = "static_pools"
+
+# ARM64 (AArch64) target
+target = "aarch64-unknown-none"
+
+# Generous stack for ARM64
+max_stack_size = 65536
+
+# No heap for this simple demo
+heap_size = 0
+
+[optimization]
+# Full optimization
+level = 3
+
+# Aggressive inlining for register access
+inline_threshold = 200
+
+# Eliminate all closures
+eliminate_closures = true
+
+# Link-time optimization
+lto = true
+
+[platform]
+# Platform template
+template = "allwinner-h6"
+
+# Board-specific variant
+variant = "libre-sweet-potato"
+
+# CPU cores (H6 has 4x Cortex-A53)
+cores = 4
+
+# Assume U-Boot has set up clocks
+system_clock = 1800_000_000  # 1.8 GHz
+
+# DDR size
+ddr_size = 2048  # MB
+
+[build]
+# Source files in compilation order
+sources = [
+    "../common/startup/CortexA53.fs",
+    "AllwinnerH6.fs",
+    "Main.fs"
+]
+
+# Linker script
+linker_script = "../../embedded/common/linker/allwinner-h6.ld"
+
+# Output binary name
+output = "blinky"
+
+# Generate additional output formats
+[build.output_formats]
+# Raw binary for U-Boot
+bin = true
+# ELF with debug symbols
+elf = true
+
+[boot]
+# U-Boot configuration
+# Load address in DDR
+load_address = "0x40000000"
+
+# U-Boot command to run:
+# fatload mmc 0:1 0x40000000 blinky.bin
+# go 0x40000000
+
+[debug]
+# JTAG/SWD debug configuration
+tool = "openocd"
+interface = "ftdi"
+# Or use built-in USB debug if available
+# interface = "sunxi-fel"

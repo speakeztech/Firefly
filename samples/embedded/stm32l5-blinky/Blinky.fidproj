@@ -1,0 +1,91 @@
+# STM32L5 Blinky - Firefly Embedded Sample
+# First embedded proof-of-concept for ARM Cortex-M33
+
+[package]
+name = "STM32L5-Blinky"
+version = "0.1.0"
+description = "LED blink demo for NUCLEO-L552ZE-Q board"
+authors = ["SpeakEZ LLC"]
+license = "MIT"
+
+[compilation]
+# Static pools for embedded - no dynamic allocation
+memory_model = "static_pools"
+
+# ARM Cortex-M33 with hardware FPU
+target = "thumbv8m.main-none-eabihf"
+
+# Stack size (8KB should be plenty for this demo)
+max_stack_size = 8192
+
+# No heap for this simple demo
+heap_size = 0
+
+[optimization]
+# Full optimization for embedded
+level = 3
+
+# Aggressive inlining for register access
+inline_threshold = 200
+
+# Eliminate all closures
+eliminate_closures = true
+
+# Link-time optimization
+lto = true
+
+[platform]
+# Platform template
+template = "stm32l5"
+
+# Specific variant
+variant = "STM32L552ZET6Q"
+
+# Clock configuration (affects timing)
+system_clock = 110_000_000  # 110 MHz
+
+# Flash and RAM sizes
+flash_size = 512  # KB
+ram_size = 256    # KB (SRAM1 + SRAM2)
+
+[build]
+# Source files in compilation order
+sources = [
+    "../common/startup/CortexM33.fs",
+    "STM32L5.fs",
+    "Main.fs"
+]
+
+# Linker script
+linker_script = "../common/linker/stm32l552.ld"
+
+# Output binary name
+output = "blinky"
+
+# Generate additional output formats
+[build.output_formats]
+# Intel HEX for flashing
+hex = true
+# Raw binary
+bin = true
+# ELF with debug symbols
+elf = true
+
+[flash]
+# ST-Link configuration for flashing
+tool = "openocd"
+interface = "stlink"
+target = "stm32l5x"
+
+# Or use STM32CubeProgrammer
+# tool = "stm32cubeprog"
+# connection = "swd"
+
+[debug]
+# Debug configuration
+tool = "openocd"
+gdb_port = 3333
+telnet_port = 4444
+
+# Semihosting for printf debugging (optional)
+semihosting = false

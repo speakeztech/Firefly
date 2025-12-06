@@ -1,0 +1,55 @@
+# STM32L5 UART Echo - Firefly Embedded Sample
+# Serial communication demo for NUCLEO-L552ZE-Q
+
+[package]
+name = "STM32L5-UART-Echo"
+version = "0.1.0"
+description = "UART echo demo for NUCLEO-L552ZE-Q"
+authors = ["SpeakEZ LLC"]
+license = "MIT"
+
+[compilation]
+memory_model = "static_pools"
+target = "thumbv8m.main-none-eabihf"
+max_stack_size = 8192
+heap_size = 0
+
+[optimization]
+level = 3
+inline_threshold = 200
+eliminate_closures = true
+lto = true
+
+[platform]
+template = "stm32l5"
+variant = "STM32L552ZET6Q"
+system_clock = 80_000_000  # 80 MHz (default after reset)
+
+[build]
+sources = [
+    "../common/startup/CortexM33.fs",
+    "../stm32l5-blinky/STM32L5.fs",
+    "STM32L5.UART.fs",
+    "Main.fs"
+]
+linker_script = "../common/linker/stm32l552.ld"
+output = "uart-echo"
+
+[build.output_formats]
+hex = true
+bin = true
+elf = true
+
+[flash]
+tool = "openocd"
+interface = "stlink"
+target = "stm32l5x"
+
+[serial]
+# Serial port settings for terminal connection
+port = "/dev/ttyACM0"  # Linux
+# port = "COM3"        # Windows
+baudrate = 115200
+databits = 8
+parity = "none"
+stopbits = 1

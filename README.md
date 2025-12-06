@@ -200,6 +200,24 @@ firefly analyze --show-memory-layout
 - **Explicit when needed** - Some patterns require explicit memory strategy choices
 - **Platform-aware** - Different targets may use different memory implementations
 
+## 📁 Samples
+
+The `samples/` directory contains working examples demonstrating Firefly's capabilities:
+
+### Console Applications
+- **HelloWorld** - Simplest native F# application
+- **HelloWorldInteractive** - Stack-based memory and user input
+- **TimeLoop** - Platform-specific time operations
+
+### Embedded Targets (ARM Cortex-M)
+- **STM32L5-Blinky** - LED blink on NUCLEO-L552ZE-Q
+- **STM32L5-UART** - Serial communication demo
+
+### Single-Board Computers (ARM64)
+- **SweetPotato-Blinky** - LED blink on Libre Sweet Potato (Allwinner H6)
+
+See [samples/README.md](samples/README.md) for detailed build instructions and hardware requirements.
+
 ## 📋 Roadmap
 
 ### Phase 1: Foundation (Current)

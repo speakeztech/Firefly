@@ -1,0 +1,154 @@
+# NUCLEO-L552ZE-Q Board Template
+# Specific configuration for the ST NUCLEO-L552ZE-Q development board
+# Extends stm32l5 platform template
+
+[board]
+name = "NUCLEO-L552ZE-Q"
+version = "1.0.0"
+description = "STMicroelectronics NUCLEO-L552ZE-Q development board"
+manufacturer = "STMicroelectronics"
+platform = "stm32l5"
+mcu = "STM32L552ZET6Q"
+
+# Board-specific memory (same as STM32L552)
+[memory]
+flash_size = 524288      # 512KB
+sram1_size = 196608      # 192KB
+sram2_size = 65536       # 64KB
+
+# Onboard peripherals
+[onboard]
+# ST-Link V3 debugger
+debugger = "ST-Link V3"
+debugger_vcp = true      # Virtual COM port
+
+# User LEDs
+[[onboard.leds]]
+name = "LD1"
+color = "green"
+port = "C"
+pin = 7
+
+[[onboard.leds]]
+name = "LD2"
+color = "blue"
+port = "B"
+pin = 7
+
+[[onboard.leds]]
+name = "LD3"
+color = "red"
+port = "A"
+pin = 9
+
+# User button
+[[onboard.buttons]]
+name = "B1"
+label = "USER"
+port = "C"
+pin = 13
+active = "low"
+
+# Reset button (directly connected to NRST)
+[[onboard.buttons]]
+name = "B2"
+label = "RESET"
+type = "reset"
+
+# Arduino-compatible headers
+[headers.arduino]
+enabled = true
+# Digital pins
+D0 = { port = "G", pin = 8 }   # USART3_RX
+D1 = { port = "G", pin = 7 }   # USART3_TX
+D2 = { port = "F", pin = 15 }
+D3 = { port = "E", pin = 13 }  # TIM1_CH3
+D4 = { port = "F", pin = 14 }
+D5 = { port = "E", pin = 11 }  # TIM1_CH2
+D6 = { port = "E", pin = 9 }   # TIM1_CH1
+D7 = { port = "F", pin = 13 }
+D8 = { port = "F", pin = 12 }
+D9 = { port = "D", pin = 15 }  # TIM4_CH4
+D10 = { port = "D", pin = 14 } # SPI1_NSS
+D11 = { port = "A", pin = 7 }  # SPI1_MOSI
+D12 = { port = "A", pin = 6 }  # SPI1_MISO
+D13 = { port = "A", pin = 5 }  # SPI1_SCK
+D14 = { port = "B", pin = 9 }  # I2C1_SDA
+D15 = { port = "B", pin = 8 }  # I2C1_SCL
+
+# Analog pins
+A0 = { port = "A", pin = 3, adc = "ADC1_IN8" }
+A1 = { port = "A", pin = 2, adc = "ADC1_IN7" }
+A2 = { port = "C", pin = 3, adc = "ADC1_IN4" }
+A3 = { port = "B", pin = 0, adc = "ADC1_IN15" }
+A4 = { port = "C", pin = 1, adc = "ADC1_IN2" }
+A5 = { port = "C", pin = 0, adc = "ADC1_IN1" }
+
+# Morpho headers (extended pins)
+[headers.morpho]
+enabled = true
+# Many additional pins available
+
+# USB configuration
+[usb]
+# USB OTG FS
+[[usb.ports]]
+name = "USB_OTG_FS"
+connector = "Micro-B"
+mode = "device"
+port = { dm = { port = "A", pin = 11 }, dp = { port = "A", pin = 12 } }
+
+# USB from ST-Link (VCP)
+[[usb.ports]]
+name = "ST-Link VCP"
+connector = "USB Type-B"
+mode = "vcp"
+uart = "LPUART1"
+
+# Clock configuration defaults
+[clock]
+# External oscillators
+hse_frequency = 8000000      # 8 MHz from ST-Link MCO
+lse_frequency = 32768        # 32.768 kHz crystal
+
+# Default system clock configuration
+default_sysclk = 110000000   # 110 MHz
+default_hclk = 110000000     # 110 MHz
+default_pclk1 = 110000000    # 110 MHz
+default_pclk2 = 110000000    # 110 MHz
+
+# Debug/programming interface
+[debug]
+interface = "ST-Link V3"
+connection = "SWD"
+
+# OpenOCD configuration
+[debug.openocd]
+interface = "stlink"
+target = "stm32l5x"
+transport = "hla_swd"
+
+# STM32CubeProgrammer configuration
+[debug.cubeprogrammer]
+connection = "swd"
+frequency = 4000             # 4 MHz
+
+# Flash algorithm
+[flash]
+tool = "openocd"
+
+[flash.openocd]
+commands = [
+    "reset halt",
+    "flash write_image erase ${binary}",
+    "reset run"
+]
+
+# Power supply
+[power]
+# Board can be powered via:
+# - USB ST-Link (5V)
+# - External 7-12V on VIN
+# - 3.3V directly on E5V
+voltage_options = ["USB", "VIN", "E5V"]
+default = "USB"

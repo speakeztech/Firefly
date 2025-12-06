@@ -1,0 +1,139 @@
+{
+  "$schema": "./samples-schema.json",
+  "version": "1.0.0",
+  "description": "Firefly sample projects catalog",
+  "samples": {
+    "console": {
+      "description": "Desktop console applications",
+      "projects": [
+        {
+          "name": "HelloWorld",
+          "path": "console/HelloWorld",
+          "description": "Simplest possible native F# application",
+          "difficulty": "beginner",
+          "demonstrates": ["console-output", "entry-point"],
+          "target": "native"
+        },
+        {
+          "name": "HelloWorldInteractive",
+          "path": "console/HelloWorldInteractive",
+          "description": "Stack-based memory and user input",
+          "difficulty": "beginner",
+          "demonstrates": ["stack-allocation", "result-handling", "user-input"],
+          "target": "native"
+        },
+        {
+          "name": "TimeLoop",
+          "path": "console/TimeLoop",
+          "description": "Platform-specific time operations",
+          "difficulty": "intermediate",
+          "demonstrates": ["platform-time", "high-resolution-timing", "loops"],
+          "target": "native"
+        }
+      ]
+    },
+    "embedded": {
+      "description": "ARM microcontroller targets",
+      "projects": [
+        {
+          "name": "STM32L5-Blinky",
+          "path": "embedded/stm32l5-blinky",
+          "description": "LED blink on NUCLEO-L552ZE-Q",
+          "difficulty": "intermediate",
+          "demonstrates": ["gpio", "memory-mapped-io", "bare-metal"],
+          "target": "thumbv8m.main-none-eabihf",
+          "hardware": {
+            "board": "NUCLEO-L552ZE-Q",
+            "mcu": "STM32L552ZET6Q",
+            "architecture": "ARM Cortex-M33"
+          }
+        },
+        {
+          "name": "STM32L5-UART",
+          "path": "embedded/stm32l5-uart",
+          "description": "Serial communication on NUCLEO-L552ZE-Q",
+          "difficulty": "intermediate",
+          "demonstrates": ["uart", "serial-io", "peripheral-drivers"],
+          "target": "thumbv8m.main-none-eabihf",
+          "hardware": {
+            "board": "NUCLEO-L552ZE-Q",
+            "mcu": "STM32L552ZET6Q",
+            "architecture": "ARM Cortex-M33"
+          }
+        }
+      ],
+      "common": {
+        "startup": "common/startup",
+        "linker": "common/linker"
+      }
+    },
+    "sbc": {
+      "description": "Single-board computer targets",
+      "projects": [
+        {
+          "name": "SweetPotato-Blinky",
+          "path": "sbc/sweet-potato-blinky",
+          "description": "LED blink on Libre Sweet Potato",
+          "difficulty": "intermediate",
+          "demonstrates": ["gpio", "arm64", "bare-metal"],
+          "target": "aarch64-unknown-none",
+          "hardware": {
+            "board": "Libre Sweet Potato",
+            "soc": "Allwinner H6",
+            "architecture": "ARM Cortex-A53"
+          }
+        }
+      ]
+    }
+  },
+  "templates": {
+    "description": "Platform configuration templates",
+    "files": [
+      {
+        "name": "desktop-x64",
+        "path": "templates/desktop-x64.toml",
+        "description": "x86-64 desktop platforms"
+      },
+      {
+        "name": "stm32l5",
+        "path": "templates/stm32l5.toml",
+        "description": "STM32L5 series microcontrollers"
+      },
+      {
+        "name": "allwinner-h6",
+        "path": "templates/allwinner-h6.toml",
+        "description": "Allwinner H6 SoC"
+      },
+      {
+        "name": "nucleo-l552ze-q",
+        "path": "templates/nucleo-l552ze-q.toml",
+        "description": "NUCLEO-L552ZE-Q board specifics"
+      }
+    ]
+  },
+  "roadmap": {
+    "planned": [
+      {
+        "name": "QuantumCredential",
+        "path": "embedded/quantum-credential",
+        "description": "Hardware security token POC",
+        "demonstrates": ["usb-cdc", "crypto-acceleration", "trustzone"],
+        "target": "thumbv8m.main-none-eabihf"
+      },
+      {
+        "name": "KeyStation",
+        "path": "sbc/keystation",
+        "description": "Air-gapped key management console POC",
+        "demonstrates": ["framebuffer", "touch-input", "ui-widgets"],
+        "target": "aarch64-unknown-none"
+      },
+      {
+        "name": "SweetPotato-Framebuffer",
+        "path": "sbc/sweet-potato-fb",
+        "description": "Display output on Sweet Potato",
+        "demonstrates": ["framebuffer", "display-engine", "graphics"],
+        "target": "aarch64-unknown-none"
+      }
+    ]
+  }
+}

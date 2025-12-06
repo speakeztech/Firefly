@@ -1,0 +1,141 @@
+# Allwinner H6 Platform Template
+# For H6-based ARM64 SBCs like Libre Sweet Potato
+
+[platform]
+name = "allwinner-h6"
+version = "1.0.0"
+description = "Allwinner H6 ARM64 SoC for single-board computers"
+family = "Allwinner"
+architecture = "ARM64"
+core = "Cortex-A53"
+
+# CPU configuration
+[cpu]
+cores = 4
+clusters = 1
+max_frequency = 1800000000  # 1.8 GHz
+
+# Memory regions (bare-metal, before Linux)
+[[memory.regions]]
+name = "SRAM_A1"
+base_address = "0x00020000"
+size = 32768             # 32KB
+access = "rwx"
+attributes = ["fast", "always-on"]
+
+[[memory.regions]]
+name = "SRAM_A2"
+base_address = "0x00028000"
+size = 32768             # 32KB
+access = "rwx"
+attributes = ["fast"]
+
+[[memory.regions]]
+name = "SRAM_C"
+base_address = "0x00040000"
+size = 131072            # 128KB
+access = "rwx"
+attributes = ["general"]
+
+[[memory.regions]]
+name = "DDR"
+base_address = "0x40000000"
+size = 2147483648        # 2GB (typical, varies by board)
+access = "rwx"
+attributes = ["main", "cacheable"]
+
+# Memory model
+[memory]
+default_model = "static_pools"
+
+[memory.stack]
+default_size = 65536     # 64KB
+max_size = 1048576       # 1MB
+alignment = 16           # 16-byte for AArch64
+region = "DDR"
+
+[memory.heap]
+default_size = 0
+region = "DDR"
+
+# Capabilities
+[capabilities]
+gpu = "Mali-T720 MP2"
+video_decode = ["H.265", "H.264", "VP9"]
+video_encode = ["H.264"]
+crypto_engine = true
+display_engine = "DE2"
+hdmi = "2.0a"
+usb3 = true
+pcie = true
+dma_channels = 8
+
+# Peripheral base addresses
+[peripherals]
+pio_base = "0x0300B000"
+r_pio_base = "0x07022000"
+ccu_base = "0x03001000"
+uart0_base = "0x05000000"
+uart1_base = "0x05000400"
+twi0_base = "0x05002000"
+spi0_base = "0x05010000"
+de_base = "0x01000000"
+
+# Compilation settings
+[compilation]
+target = "aarch64-unknown-none"
+
+[compilation.optimization]
+level = 3
+inline_threshold = 200
+eliminate_closures = true
+lto = true
+
+[compilation.features]
+neon = true              # SIMD
+crypto = true            # AES/SHA extensions
+crc = true               # CRC32 instructions
+
+# Code generation
+[codegen]
+# Exception vector alignment
+vector_alignment = 2048
+
+# Default linker script
+linker_script = "allwinner-h6.ld"
+
+# Startup code
+startup = "CortexA53.fs"
+
+# Output formats
+[output]
+formats = ["elf", "bin"]
+
+# Boot configuration
+[boot]
+# Assumes U-Boot
+loader = "u-boot"
+load_address = "0x40000000"
+
+# U-Boot commands for loading
+[boot.commands]
+mmc = "fatload mmc 0:1 0x40000000 ${binary}; go 0x40000000"
+tftp = "tftp 0x40000000 ${binary}; go 0x40000000"
+
+# Display configuration (for KeyStation)
+[display]
+engine = "DE2"
+max_resolution = "4096x2160"
+interfaces = ["HDMI", "DP"]
+layers = 4
+
+# Touch configuration (for KeyStation)
+[touch]
+controller = "capacitive"
+interfaces = ["I2C", "SPI"]
+
+# Debug configuration
+[debug]
+interfaces = ["JTAG", "UART"]
+uart_debug = "UART0"
+uart_baudrate = 115200

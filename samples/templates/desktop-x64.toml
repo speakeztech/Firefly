@@ -1,0 +1,66 @@
+# Desktop x86-64 Platform Template
+# For native desktop applications on Linux, Windows, macOS
+
+[platform]
+name = "desktop-x64"
+version = "1.0.0"
+description = "Desktop x86-64 platform configuration"
+family = "x86"
+architecture = "x86-64"
+
+[memory]
+# Memory model options: stack_only, arena, mixed, dynamic
+default_model = "stack_only"
+
+# Stack configuration
+[memory.stack]
+default_size = 8192      # 8KB default
+max_size = 1048576       # 1MB max
+alignment = 16           # 16-byte alignment for SSE
+
+# Heap configuration (when using dynamic allocation)
+[memory.heap]
+default_size = 0         # No heap by default
+arena_size = 1048576     # 1MB arenas when used
+
+[compilation]
+# Target triples
+[compilation.targets]
+linux = "x86_64-unknown-linux-gnu"
+windows = "x86_64-pc-windows-msvc"
+macos = "x86_64-apple-darwin"
+
+# Default optimization settings
+[compilation.optimization]
+level = 2
+inline_threshold = 100
+eliminate_closures = true
+lto = false              # LTO optional for desktop
+
+# CPU features
+[compilation.features]
+sse = true
+sse2 = true
+sse3 = true
+ssse3 = true
+sse4_1 = true
+sse4_2 = true
+avx = false              # AVX optional, not guaranteed
+avx2 = false
+
+[runtime]
+# Platform-specific runtime implementations
+[runtime.time]
+windows = "QueryPerformanceCounter"
+linux = "clock_gettime"
+macos = "mach_absolute_time"
+
+[runtime.console]
+windows = "WriteConsole"
+linux = "write"
+macos = "write"
+
+[runtime.memory]
+windows = "VirtualAlloc"
+linux = "mmap"
+macos = "mmap"

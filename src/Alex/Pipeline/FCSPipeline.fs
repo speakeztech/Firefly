@@ -3,7 +3,7 @@ module Alex.Pipeline.FCSPipeline
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Symbols
-open Core.Types.TypeSystem 
+open Core.Types.MLIRTypes 
 open Alex.CodeGeneration.TypeMapping
 open Alex.Bindings.SymbolRegistry
 open Alex.Bindings.PatternLibrary

@@ -1,0 +1,38 @@
+# HelloWorld - Firefly Sample Project
+# Demonstrates the simplest possible native F# application
+
+[package]
+name = "HelloWorld"
+version = "0.1.0"
+description = "Minimal sample for Firefly pipeline validation"
+authors = ["SpeakEZ LLC"]
+license = "MIT"
+
+[compilation]
+# Memory model for this application
+# stack_only: All allocations on stack, no heap, no GC
+memory_model = "stack_only"
+
+# Target triple for compilation
+# Default to host platform; override with --target flag
+target = "native"
+
+# Maximum stack size in bytes
+max_stack_size = 4096
+
+[optimization]
+level = 2
+inline_threshold = 100
+eliminate_closures = true
+
+[dependencies]
+alloy = { path = "~/repos/Alloy/src" }
+
+[build]
+# Source files in compilation order
+sources = [
+    "HelloWorld.fs"
+]
+
+# Output binary name
+output = "hello"

@@ -25,10 +25,10 @@
       <!-- Compiler Configuration -->
       <Compile Include="Core/CompilerConfig.fs" />
       
-      <!-- Core Types (kept from existing) --> 
+      <!-- Core Types -->
       <Compile Include="Core/Types/Dialects.fs" />
-      <Compile Include="Core/Types/MLIRTypes.fs" />   
-      
+      <Compile Include="Core/Types/MLIRTypes.fs" />
+
       <!-- Parser Foundation (kept from existing) -->
       <Compile Include="Core/XParsec/Foundation.fs" />  
       
@@ -56,19 +56,25 @@
       
       <!-- FCS Ingestion Pipeline (new) -->
       <Compile Include="Core/IngestionPipeline.fs" />
-      
-      <!-- Dabbit Pipeline - MLIR Generation (existing) -->
-      <Compile Include="Alex/Pipeline/CompilationTypes.fs" />           
-      <Compile Include="Alex/Pipeline/CompilationOrchestrator.fs" />    
-      
-      <!-- Simplified LLVM Dialect Pipeline (new) -->
-      <Compile Include="Alex/Lite/TimeEmitter.fs" />
-      <Compile Include="Alex/Lite/SimpleLLVMEmitter.fs" />
-      <Compile Include="Alex/Lite/LitePipeline.fs" />
-      
-      <!-- CLI - Firefly Entry Points -->
-      <Compile Include="CLI/Program-Enhanced.fs" />
-      <Compile Include="CLI/Program-Lite.fs" />                       
+
+      <!-- MLIR Generation -->
+      <Compile Include="Core/MLIR/Emitter.fs" />
+
+      <!-- Alex Pipeline - Minimal for current architecture -->
+      <Compile Include="Alex/Pipeline/CompilationTypes.fs" />
+      <Compile Include="Alex/Pipeline/CompilationOrchestrator.fs" />
+
+      <!-- CLI Infrastructure -->
+      <Compile Include="CLI/Configurations/ProjectConfig.fs" />
+      <Compile Include="CLI/Configurations/FidprojLoader.fs" />
+      <Compile Include="CLI/Diagnostics/EnvironmentInfo.fs" />
+      <Compile Include="CLI/Diagnostics/ToolChainVerification.fs" />
+      <Compile Include="CLI/Commands/CompileCommand.fs" />
+      <Compile Include="CLI/Commands/VerifyCommand.fs" />
+      <Compile Include="CLI/Commands/DoctorCommand.fs" />
+
+      <!-- CLI - Firefly Entry Point -->
+      <Compile Include="CLI/Program.fs" />                       
   </ItemGroup>
 
   <ItemGroup>
