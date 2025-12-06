@@ -72,40 +72,89 @@ let private generateMLIRFromPSG (psg: Core.PSG.Types.ProgramSemanticGraph) (proj
     // Use Alex.Pipeline.CompilationOrchestrator.generateMLIRViaAlex
     generateMLIRViaAlex psg projectName targetTriple
 
-/// Generate LLVM IR from PSG (simplified)
-let private generateLLVMFromPSG (psg: Core.PSG.Types.ProgramSemanticGraph) (projectName: string) (targetTriple: string) : string =
-    let sb = System.Text.StringBuilder()
+/// Lower MLIR to LLVM IR using mlir-opt and mlir-translate
+/// This is MLIR's job - PSG is done at this point
+let private lowerMLIRToLLVM (mlirPath: string) (llvmPath: string) : Result<unit, string> =
+    try
+        // Step 1: mlir-opt to convert to LLVM dialect
+        let mlirOptArgs = sprintf "%s --convert-func-to-llvm --convert-arith-to-llvm --reconcile-unrealized-casts" mlirPath
+        let mlirOptProcess = new System.Diagnostics.Process()
+        mlirOptProcess.StartInfo.FileName <- "mlir-opt"
+        mlirOptProcess.StartInfo.Arguments <- mlirOptArgs
+        mlirOptProcess.StartInfo.UseShellExecute <- false
+        mlirOptProcess.StartInfo.RedirectStandardOutput <- true
+        mlirOptProcess.StartInfo.RedirectStandardError <- true
+        mlirOptProcess.Start() |> ignore
+        let mlirOptOutput = mlirOptProcess.StandardOutput.ReadToEnd()
+        let mlirOptError = mlirOptProcess.StandardError.ReadToEnd()
+        mlirOptProcess.WaitForExit()
 
-    sb.AppendLine(sprintf "; Firefly-generated LLVM IR for %s" projectName) |> ignore
-    sb.AppendLine(sprintf "; PSG Nodes: %d" psg.Nodes.Count) |> ignore
-    sb.AppendLine() |> ignore
-    sb.AppendLine(sprintf "target triple = \"%s\"" targetTriple) |> ignore
-    sb.AppendLine() |> ignore
+        if mlirOptProcess.ExitCode <> 0 then
+            Error (sprintf "mlir-opt failed: %s" mlirOptError)
+        else
+            // Step 2: mlir-translate to convert LLVM dialect to LLVM IR
+            let mlirTranslateProcess = new System.Diagnostics.Process()
+            mlirTranslateProcess.StartInfo.FileName <- "mlir-translate"
+            mlirTranslateProcess.StartInfo.Arguments <- "--mlir-to-llvmir"
+            mlirTranslateProcess.StartInfo.UseShellExecute <- false
+            mlirTranslateProcess.StartInfo.RedirectStandardInput <- true
+            mlirTranslateProcess.StartInfo.RedirectStandardOutput <- true
+            mlirTranslateProcess.StartInfo.RedirectStandardError <- true
+            mlirTranslateProcess.Start() |> ignore
+            mlirTranslateProcess.StandardInput.Write(mlirOptOutput)
+            mlirTranslateProcess.StandardInput.Close()
+            let llvmOutput = mlirTranslateProcess.StandardOutput.ReadToEnd()
+            let translateError = mlirTranslateProcess.StandardError.ReadToEnd()
+            mlirTranslateProcess.WaitForExit()
 
-    // Generate function for each entry point
-    for entryPointId in psg.EntryPoints do
-        match Map.tryFind entryPointId.Value psg.Nodes with
-        | Some node ->
-            let funcName =
-                match node.Symbol with
-                | Some sym -> sym.DisplayName
-                | None -> "main"
+            if mlirTranslateProcess.ExitCode <> 0 then
+                Error (sprintf "mlir-translate failed: %s" translateError)
+            else
+                File.WriteAllText(llvmPath, llvmOutput)
+                Ok ()
+    with ex ->
+        Error (sprintf "MLIR lowering failed: %s" ex.Message)
 
-            sb.AppendLine(sprintf "define i32 @%s() {" funcName) |> ignore
-            sb.AppendLine("entry:") |> ignore
-            sb.AppendLine("  ret i32 0") |> ignore
-            sb.AppendLine("}") |> ignore
-            sb.AppendLine() |> ignore
-        | None -> ()
+/// Compile LLVM IR to native binary using llc and clang
+/// This is LLVM's job
+let private compileLLVMToNative (llvmPath: string) (outputPath: string) (targetTriple: string) : Result<unit, string> =
+    try
+        let objPath = Path.ChangeExtension(llvmPath, ".o")
 
-    // Default main if no entry points
-    if psg.EntryPoints.IsEmpty then
-        sb.AppendLine("define i32 @main() {") |> ignore
-        sb.AppendLine("entry:") |> ignore
-        sb.AppendLine("  ret i32 0") |> ignore
-        sb.AppendLine("}") |> ignore
+        // Step 1: llc to compile LLVM IR to object file
+        let llcArgs = sprintf "-filetype=obj %s -o %s" llvmPath objPath
+        let llcProcess = new System.Diagnostics.Process()
+        llcProcess.StartInfo.FileName <- "llc"
+        llcProcess.StartInfo.Arguments <- llcArgs
+        llcProcess.StartInfo.UseShellExecute <- false
+        llcProcess.StartInfo.RedirectStandardError <- true
+        llcProcess.Start() |> ignore
+        let llcError = llcProcess.StandardError.ReadToEnd()
+        llcProcess.WaitForExit()
 
-    sb.ToString()
+        if llcProcess.ExitCode <> 0 then
+            Error (sprintf "llc failed: %s" llcError)
+        else
+            // Step 2: clang to link into executable (freestanding, no stdlib)
+            let clangArgs = sprintf "%s -o %s -nostdlib -static -ffreestanding -Wl,-e,main" objPath outputPath
+            let clangProcess = new System.Diagnostics.Process()
+            clangProcess.StartInfo.FileName <- "clang"
+            clangProcess.StartInfo.Arguments <- clangArgs
+            clangProcess.StartInfo.UseShellExecute <- false
+            clangProcess.StartInfo.RedirectStandardError <- true
+            clangProcess.Start() |> ignore
+            let clangError = clangProcess.StandardError.ReadToEnd()
+            clangProcess.WaitForExit()
+
+            if clangProcess.ExitCode <> 0 then
+                Error (sprintf "clang failed: %s" clangError)
+            else
+                // Clean up object file
+                if File.Exists(objPath) then
+                    File.Delete(objPath)
+                Ok ()
+    with ex ->
+        Error (sprintf "Native compilation failed: %s" ex.Message)
 
 /// Main entry point for compile command
 let execute (args: ParseResults<CompileArgs>) =
@@ -325,37 +374,41 @@ let execute (args: ParseResults<CompileArgs>) =
                 0
             else
                 // =========================================================================
-                // PHASE 5: LLVM IR Generation
+                // PHASE 5: LLVM IR Generation (MLIR's job)
                 // =========================================================================
 
-                report verbose "LLVM" "Lowering to LLVM IR..."
+                report verbose "LLVM" "Lowering MLIR to LLVM IR..."
 
-                let llvmOutput = generateLLVMFromPSG reachabilityResult.MarkedPSG resolved.Name targetTriple
-
+                let mlirPath = Path.Combine(dir, resolved.Name + ".mlir")
                 let llPath = Path.Combine(dir, resolved.Name + ".ll")
-                File.WriteAllText(llPath, llvmOutput)
-                printfn "[LLVM] Wrote: %s" llPath
 
-                if emitLLVM then
-                    printfn ""
-                    printfn "Stopped after LLVM IR generation (--emit-llvm)"
-                    0
-                else
-                    // =========================================================================
-                    // PHASE 6: Native Code Generation
-                    // =========================================================================
+                match lowerMLIRToLLVM mlirPath llPath with
+                | Error msg ->
+                    printfn "[LLVM] Error: %s" msg
+                    1
+                | Ok () ->
+                    printfn "[LLVM] Wrote: %s" llPath
 
-                    report verbose "LINK" "Compiling to native executable..."
+                    if emitLLVM then
+                        printfn ""
+                        printfn "Stopped after LLVM IR generation (--emit-llvm)"
+                        0
+                    else
+                        // =========================================================================
+                        // PHASE 6: Native Code Generation (LLVM's job)
+                        // =========================================================================
 
-                    printfn ""
-                    printfn "NOTE: Full native code generation not yet implemented."
-                    printfn "The MLIR and LLVM IR files have been generated in:"
-                    printfn "  %s" dir
-                    printfn ""
-                    printfn "To manually compile (on Linux):"
-                    printfn "  llc -filetype=obj %s -o %s.o" llPath (Path.GetFileNameWithoutExtension(llPath))
-                    printfn "  clang %s.o -o %s" (Path.GetFileNameWithoutExtension(llPath)) outputPath
-                    0
+                        report verbose "LINK" "Compiling to native executable..."
+
+                        match compileLLVMToNative llPath outputPath targetTriple with
+                        | Error msg ->
+                            printfn "[LINK] Error: %s" msg
+                            1
+                        | Ok () ->
+                            printfn "[LINK] Wrote: %s" outputPath
+                            printfn ""
+                            printfn "Compilation successful!"
+                            0
 
         | None ->
             // No intermediates requested, but we still did the analysis

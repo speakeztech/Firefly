@@ -73,6 +73,7 @@
 
       <!-- Alex Traversal -->
       <Compile Include="Alex/Traversal/PSGZipper.fs" />
+      <Compile Include="Alex/Traversal/PSGXParsec.fs" />
 
       <!-- Alex Patterns -->
       <Compile Include="Alex/Patterns/PSGPatterns.fs" />

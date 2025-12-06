@@ -1,6 +1,3 @@
-# HelloWorldDirect - FidelityHelloWorld Sample 01
-# Pattern: Direct module calls (Console.Write, Console.readInto)
-
 [package]
 name = "HelloWorldDirect"
 version = "0.1.0"
@@ -16,8 +13,6 @@ target = "native"
 alloy = { path = "/home/hhh/repos/Alloy/src" }
 
 [build]
-sources = [
-    "01_HelloWorldDirect.fs"
-]
+sources = ["01_HelloWorldDirect.fs"]
 output = "hello_direct"
 output_kind = "freestanding"

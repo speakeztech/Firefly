@@ -1,8 +1,13 @@
-/// ExpressionEmitter - Zipper-based expression emission
+/// ExpressionEmitter - Classifier-driven expression emission
 ///
-/// Uses PSGZipper for traversal and EmissionMonad for output.
-/// The emission operates on the current zipper focus, using navigation
-/// operations to traverse children.
+/// Uses PSGPatterns predicates/extractors and AlloyPatterns classifiers
+/// for pattern matching, with EmissionMonad's tryEmissions for dispatch.
+///
+/// ARCHITECTURE:
+/// 1. Classifiers (PSGPatterns, AlloyPatterns) extract typed data from PSG nodes
+/// 2. Each tryEmit* function is self-contained: classify then handle, returning Option
+/// 3. tryEmissions dispatches to the first matching handler
+/// 4. EmissionMonad threads state and builds MLIR output
 module Alex.Emission.ExpressionEmitter
 
 open Core.PSG.Types
@@ -10,10 +15,12 @@ open Alex.CodeGeneration.EmissionContext
 open Alex.CodeGeneration.TypeMapping
 open Alex.CodeGeneration.EmissionMonad
 open Alex.Traversal.PSGZipper
+open Alex.Patterns.PSGPatterns
+open Alex.Patterns.AlloyPatterns
 
-// ═══════════════════════════════════════════════════════════════════
+// ===================================================================
 // Expression Emission Result
-// ═══════════════════════════════════════════════════════════════════
+// ===================================================================
 
 /// Result of emitting an expression
 type ExprResult =
@@ -21,79 +28,12 @@ type ExprResult =
     | Void
     | Error of message: string
 
-// ═══════════════════════════════════════════════════════════════════
-// Pattern Recognition (operates on current zipper focus)
-// ═══════════════════════════════════════════════════════════════════
+// ===================================================================
+// Constant Extraction (from SyntaxKind metadata)
+// ===================================================================
 
-/// Check if current focus is a Console operation
-let recognizeConsoleOp : Emit<string option> =
-    getFocus |>> fun node ->
-        match node.Symbol with
-        | Some symbol ->
-            let fullName = symbol.FullName
-            let displayName = symbol.DisplayName
-            if fullName.Contains("Console.WriteLine") || fullName.EndsWith(".WriteLine") ||
-               displayName = "WriteLine" then
-                Some "writeLine"
-            elif fullName.Contains("Console.Write") || fullName.EndsWith(".Write") ||
-                 displayName = "Write" then
-                Some "write"
-            elif fullName.Contains("Console.Prompt") || fullName.EndsWith(".Prompt") ||
-                 displayName = "Prompt" then
-                Some "prompt"
-            else None
-        | None -> None
-
-/// Check if current focus is a Time operation
-let recognizeTimeOp : Emit<string option> =
-    getFocus |>> fun node ->
-        match node.Symbol with
-        | Some symbol ->
-            let fullName = symbol.FullName
-            if fullName.Contains("currentTicks") then Some "currentTicks"
-            elif fullName.Contains("currentUnixTimestamp") then Some "currentUnixTimestamp"
-            elif fullName.Contains("currentDateTimeString") then Some "currentDateTimeString"
-            elif fullName.Contains("currentDateTime") then Some "currentDateTime"
-            elif fullName.Contains("sleep") then Some "sleep"
-            else None
-        | None -> None
-
-/// Check if current focus is an arithmetic operator
-let recognizeArithOp : Emit<string option> =
-    getFocus |>> fun node ->
-        match node.Symbol with
-        | Some symbol ->
-            match symbol.DisplayName with
-            | "op_Addition" | "(+)" | "Add" -> Some "addi"
-            | "op_Subtraction" | "(-)" | "Subtract" -> Some "subi"
-            | "op_Multiply" | "(*)" | "Multiply" -> Some "muli"
-            | "op_Division" | "(/)" | "Divide" -> Some "divsi"
-            | "op_Modulus" | "(%)" | "Modulo" -> Some "remsi"
-            | _ -> None
-        | None -> None
-
-/// Check if current focus is a comparison operator
-let recognizeCompareOp : Emit<string option> =
-    getFocus |>> fun node ->
-        match node.Symbol with
-        | Some symbol ->
-            match symbol.DisplayName with
-            | "op_LessThan" | "(<)" -> Some "slt"
-            | "op_GreaterThan" | "(>)" -> Some "sgt"
-            | "op_LessThanOrEqual" | "(<=)" -> Some "sle"
-            | "op_GreaterThanOrEqual" | "(>=)" -> Some "sge"
-            | "op_Equality" | "(=)" -> Some "eq"
-            | "op_Inequality" | "(<>)" -> Some "ne"
-            | _ -> None
-        | None -> None
-
-// ═══════════════════════════════════════════════════════════════════
-// Extraction Helpers
-// ═══════════════════════════════════════════════════════════════════
-
-/// Extract string constant from syntax kind
-let extractStringConst (kind: string) : string option =
-    // Format: Const:String ("content", Regular, (line,col--line,col))
+/// Extract string content from Const:String syntax kind
+let private extractStringFromKind (kind: string) : string option =
     if kind.StartsWith("Const:String") then
         let start = kind.IndexOf("(\"")
         if start >= 0 then
@@ -105,9 +45,8 @@ let extractStringConst (kind: string) : string option =
         else None
     else None
 
-/// Extract int32 constant from syntax kind
-let extractIntConst (kind: string) : int option =
-    // Format: Const:Int32 64 or Const:Int32 64 : type
+/// Extract int32 from Const:Int32 syntax kind
+let private extractInt32FromKind (kind: string) : int option =
     if kind.StartsWith("Const:Int32 ") then
         let afterPrefix = kind.Substring("Const:Int32 ".Length)
         let valueStr =
@@ -119,8 +58,8 @@ let extractIntConst (kind: string) : int option =
         | false, _ -> None
     else None
 
-/// Extract int64 constant from syntax kind
-let extractInt64Const (kind: string) : int64 option =
+/// Extract int64 from Const:Int64 syntax kind
+let private extractInt64FromKind (kind: string) : int64 option =
     if kind.StartsWith("Const:Int64:") then
         let valueStr = kind.Substring("Const:Int64:".Length).TrimEnd('L')
         match System.Int64.TryParse(valueStr) with
@@ -133,90 +72,237 @@ let extractInt64Const (kind: string) : int64 option =
         | false, _ -> None
     else None
 
-// ═══════════════════════════════════════════════════════════════════
-// Console Emission (write syscall for Console only)
-// TODO: Move to Alex.Bindings.Console.Linux
-// ═══════════════════════════════════════════════════════════════════
+// ===================================================================
+// Forward declaration for mutual recursion
+// ===================================================================
 
-/// Emit write syscall (for Console)
-let emitWriteSyscall (fd: string) (buf: string) (len: string) : Emit<string> =
+// emitExpr will be defined at the end after all handlers
+// Handlers reference it via mutable cell for mutual recursion
+let mutable private emitExprImpl : Emit<ExprResult> =
+    fun _env state -> (state, Error "emitExpr not initialized")
+
+/// Call emitExpr (used by handlers before emitExpr is defined)
+let private callEmitExpr : Emit<ExprResult> =
+    fun env state -> emitExprImpl env state
+
+// ===================================================================
+// Console Emission Handlers
+// ===================================================================
+
+/// Emit write syscall (Linux x86-64: syscall 1 = write)
+let private emitWriteSyscall (fd: string) (buf: string) (len: string) : Emit<string> =
     emitI64 1L >>= fun sysnumReg ->
     freshSSAWithType "i64" >>= fun result ->
     line (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"=r,{rax},{rdi},{rsi},{rdx}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
         result sysnumReg fd buf len) >>.
     emit result
 
-/// Emit Console.writeLine with string content
-let emitConsoleWriteLineString (content: string) : Emit<ExprResult> =
-    let contentWithNewline = content + "\n"
-    registerStringLiteral contentWithNewline >>= fun globalName ->
+/// Emit Console.Write with string content
+let private emitWriteString (content: string) : Emit<ExprResult> =
+    registerStringLiteral content >>= fun globalName ->
     emitAddressOf globalName >>= fun ptr ->
-    emitI64 (int64 contentWithNewline.Length) >>= fun len ->
+    emitI64 (int64 content.Length) >>= fun len ->
     emitI64 1L >>= fun fd ->
     emitWriteSyscall fd ptr len >>= fun _ ->
     emit Void
 
-// ═══════════════════════════════════════════════════════════════════
-// Time Emission - Delegates to Alex.Bindings.Time.Linux
-// ═══════════════════════════════════════════════════════════════════
+/// Emit Console.WriteLine with string content (adds newline)
+let private emitWriteLineString (content: string) : Emit<ExprResult> =
+    emitWriteString (content + "\n")
+
+/// Handler for Console operations
+let private handleConsole (op: ConsoleOp) : Emit<ExprResult> =
+    getZipper >>= fun z ->
+    let children = PSGZipper.childNodes z
+    match op with
+    | Write ->
+        match children with
+        | _ :: argNode :: _ ->
+            match extractStringFromKind argNode.SyntaxKind with
+            | Some content -> emitWriteString content
+            | None ->
+                atNode argNode callEmitExpr >>= fun argResult ->
+                match argResult with
+                | Value(ssa, _) ->
+                    line (sprintf "// Console.Write with dynamic content: %s" ssa) >>.
+                    emit Void
+                | _ -> emit Void
+        | _ ->
+            emit (Error "Console.Write: missing argument")
+    | WriteLine ->
+        match children with
+        | _ :: argNode :: _ ->
+            match extractStringFromKind argNode.SyntaxKind with
+            | Some content -> emitWriteLineString content
+            | None ->
+                atNode argNode callEmitExpr >>= fun argResult ->
+                match argResult with
+                | Value(ssa, _) ->
+                    line (sprintf "// Console.WriteLine with dynamic content: %s" ssa) >>.
+                    emit Void
+                | _ -> emit Void
+        | _ ->
+            emit (Error "Console.WriteLine: missing argument")
+    | ReadLine ->
+        line "// Console.ReadLine - not yet implemented" >>.
+        emit Void
+    | Read ->
+        line "// Console.Read - not yet implemented" >>.
+        emit Void
+
+/// Try to emit as Console operation
+let private tryEmitConsole : Emit<ExprResult option> =
+    getZipper >>= fun z ->
+    match extractConsoleOp z.Graph z.Focus with
+    | Some op -> handleConsole op |>> Some
+    | None -> emit None
+
+// ===================================================================
+// Time Emission Handlers
+// ===================================================================
 
 open Alex.Bindings.Time.Linux
 
-/// Emit Time.currentTicks via Bindings layer
-let emitTimeCurrentTicks : Emit<ExprResult> =
-    invokeBinding (fun builder ctx ->
-        let ticks = emitClockGettime builder ctx ClockId.REALTIME
-        // Add Unix epoch offset
-        let epochOffset = SSAContext.nextValue ctx
-        let result = SSAContext.nextValue ctx
-        MLIRBuilder.line builder (sprintf "%s = arith.constant 621355968000000000 : i64" epochOffset)
-        MLIRBuilder.line builder (sprintf "%s = arith.addi %s, %s : i64" result ticks epochOffset)
-        Value(result, "i64")
-    )
+/// Handler for Time operations
+let private handleTime (op: TimeOp) : Emit<ExprResult> =
+    match op with
+    | CurrentTicks ->
+        invokeBinding (fun builder ctx ->
+            let ticks = emitClockGettime builder ctx ClockId.REALTIME
+            let epochOffset = SSAContext.nextValue ctx
+            let result = SSAContext.nextValue ctx
+            MLIRBuilder.line builder (sprintf "%s = arith.constant 621355968000000000 : i64" epochOffset)
+            MLIRBuilder.line builder (sprintf "%s = arith.addi %s, %s : i64" result ticks epochOffset)
+            Value(result, "i64")
+        )
+    | CurrentUnixTimestamp ->
+        invokeBinding (fun builder ctx ->
+            let ticks = emitClockGettime builder ctx ClockId.REALTIME
+            let ticksPerSec = SSAContext.nextValue ctx
+            let result = SSAContext.nextValue ctx
+            MLIRBuilder.line builder (sprintf "%s = arith.constant 10000000 : i64" ticksPerSec)
+            MLIRBuilder.line builder (sprintf "%s = arith.divui %s, %s : i64" result ticks ticksPerSec)
+            Value(result, "i64")
+        )
+    | CurrentDateTimeString ->
+        invokeBinding (fun builder ctx ->
+            let buf = emitCurrentDateTimeString builder ctx
+            Value(buf, "!llvm.ptr")
+        )
+    | Sleep ->
+        getZipper >>= fun z ->
+        let children = PSGZipper.childNodes z
+        match children with
+        | _ :: argNode :: _ ->
+            match extractInt32FromKind argNode.SyntaxKind with
+            | Some ms ->
+                emitI32 ms >>= fun msReg ->
+                invokeBinding (fun builder ctx ->
+                    emitNanosleep builder ctx msReg
+                    Void
+                )
+            | None ->
+                atNode argNode callEmitExpr >>= fun argResult ->
+                match argResult with
+                | Value(msReg, _) ->
+                    invokeBinding (fun builder ctx ->
+                        emitNanosleep builder ctx msReg
+                        Void
+                    )
+                | _ -> emit (Error "Time.sleep: argument must produce value")
+        | _ ->
+            emit (Error "Time.sleep: missing argument")
+    | _ ->
+        line (sprintf "// Time.%A - not yet implemented" op) >>.
+        emit Void
 
-/// Emit Time.currentUnixTimestamp via Bindings layer
-let emitTimeCurrentUnixTimestamp : Emit<ExprResult> =
-    invokeBinding (fun builder ctx ->
-        let ticks = emitClockGettime builder ctx ClockId.REALTIME
-        let ticksPerSec = SSAContext.nextValue ctx
-        let result = SSAContext.nextValue ctx
-        MLIRBuilder.line builder (sprintf "%s = arith.constant 10000000 : i64" ticksPerSec)
-        MLIRBuilder.line builder (sprintf "%s = arith.divui %s, %s : i64" result ticks ticksPerSec)
-        Value(result, "i64")
-    )
+/// Try to emit as Time operation
+let private tryEmitTime : Emit<ExprResult option> =
+    getZipper >>= fun z ->
+    match extractTimeOp z.Graph z.Focus with
+    | Some op -> handleTime op |>> Some
+    | None -> emit None
 
-/// Emit Time.currentDateTimeString via Bindings layer
-let emitTimeCurrentDateTimeString : Emit<ExprResult> =
-    invokeBinding (fun builder ctx ->
-        let buf = emitCurrentDateTimeString builder ctx
-        Value(buf, "!llvm.ptr")
-    )
+// ===================================================================
+// Arithmetic and Comparison Handlers
+// ===================================================================
 
-/// Emit Time.sleep via Bindings layer
-let emitTimeSleep (milliseconds: string) : Emit<ExprResult> =
-    invokeBinding (fun builder ctx ->
-        emitNanosleep builder ctx milliseconds
-        Void
-    )
+/// Handler for arithmetic operations
+let private handleArith (op: ArithOp) : Emit<ExprResult> =
+    getZipper >>= fun z ->
+    let children = PSGZipper.childNodes z
+    match children with
+    | _ :: leftNode :: rightNode :: _ ->
+        atNode leftNode callEmitExpr >>= fun leftResult ->
+        match leftResult with
+        | Value(leftReg, leftType) ->
+            atNode rightNode callEmitExpr >>= fun rightResult ->
+            match rightResult with
+            | Value(rightReg, _) ->
+                let mlirOp = arithOpToMLIR op
+                freshSSAWithType leftType >>= fun result ->
+                line (sprintf "%s = %s %s, %s : %s" result mlirOp leftReg rightReg leftType) >>.
+                emit (Value(result, leftType))
+            | Error msg -> emit (Error msg)
+            | Void -> emit (Error "Right operand must produce value")
+        | Error msg -> emit (Error msg)
+        | Void -> emit (Error "Left operand must produce value")
+    | _ ->
+        emit (Error "Arithmetic operation requires 2 operands")
 
-// ═══════════════════════════════════════════════════════════════════
-// Core Expression Emission (Zipper-based)
-// ═══════════════════════════════════════════════════════════════════
+/// Try to emit as arithmetic operation
+let private tryEmitArith : Emit<ExprResult option> =
+    getZipper >>= fun z ->
+    match extractArithOp z.Graph z.Focus with
+    | Some op -> handleArith op |>> Some
+    | None -> emit None
 
-/// Emit a constant from current zipper focus
-let emitConst : Emit<ExprResult> =
-    getFocus >>= fun node ->
-    let kind = node.SyntaxKind
+/// Handler for comparison operations
+let private handleCompare (op: CompareOp) : Emit<ExprResult> =
+    getZipper >>= fun z ->
+    let children = PSGZipper.childNodes z
+    match children with
+    | _ :: leftNode :: rightNode :: _ ->
+        atNode leftNode callEmitExpr >>= fun leftResult ->
+        match leftResult with
+        | Value(leftReg, leftType) ->
+            atNode rightNode callEmitExpr >>= fun rightResult ->
+            match rightResult with
+            | Value(rightReg, _) ->
+                let pred = compareOpToPredicate op
+                freshSSAWithType "i1" >>= fun result ->
+                line (sprintf "%s = arith.cmpi %s, %s, %s : %s" result pred leftReg rightReg leftType) >>.
+                emit (Value(result, "i1"))
+            | Error msg -> emit (Error msg)
+            | Void -> emit (Error "Right operand must produce value")
+        | Error msg -> emit (Error msg)
+        | Void -> emit (Error "Left operand must produce value")
+    | _ ->
+        emit (Error "Comparison operation requires 2 operands")
+
+/// Try to emit as comparison operation
+let private tryEmitCompare : Emit<ExprResult option> =
+    getZipper >>= fun z ->
+    match extractCompareOp z.Graph z.Focus with
+    | Some op -> handleCompare op |>> Some
+    | None -> emit None
+
+// ===================================================================
+// Constant Emission Handler
+// ===================================================================
+
+/// Handler for constant values
+let private handleConst (kind: string) : Emit<ExprResult> =
     if kind.StartsWith("Const:Int32") then
-        match extractIntConst kind with
+        match extractInt32FromKind kind with
         | Some v -> emitI32 v |>> fun ssa -> Value(ssa, "i32")
         | None -> emit (Error "Invalid i32 constant")
     elif kind.StartsWith("Const:Int64") then
-        match extractInt64Const kind with
+        match extractInt64FromKind kind with
         | Some v -> emitI64 v |>> fun ssa -> Value(ssa, "i64")
         | None -> emit (Error "Invalid i64 constant")
-    elif kind.StartsWith("Const:String:") then
-        match extractStringConst kind with
+    elif kind.StartsWith("Const:String") then
+        match extractStringFromKind kind with
         | Some content ->
             registerStringLiteral content >>= fun globalName ->
             emitAddressOf globalName |>> fun ptr ->
@@ -227,260 +313,89 @@ let emitConst : Emit<ExprResult> =
     else
         emit (Error (sprintf "Unknown constant: %s" kind))
 
-/// Emit a variable reference from current zipper focus
-let emitVarRef : Emit<ExprResult> =
+/// Try to emit as constant
+let private tryEmitConst : Emit<ExprResult option> =
     getFocus >>= fun node ->
-    match node.Symbol with
-    | Some symbol ->
-        let name = symbol.DisplayName
-        lookupLocal name >>= fun localOpt ->
-        match localOpt with
-        | Some ssaName ->
-            lookupLocalType name >>= fun typeOpt ->
-            emit (Value(ssaName, typeOpt |> Option.defaultValue "i32"))
-        | None ->
-            emit (Error (sprintf "Variable not found: %s" name))
-    | None ->
-        emit (Error "Variable reference without symbol")
-
-// ═══════════════════════════════════════════════════════════════════
-// Operator Recognition
-// ═══════════════════════════════════════════════════════════════════
-
-open FSharp.Compiler.Symbols
-
-/// Get the operator name from a symbol - uses CompiledName for operators
-/// which gives us the canonical .NET name (op_LessThan vs (<))
-let getOperatorName (symbol: FSharpSymbol) : string =
-    match symbol with
-    | :? FSharpMemberOrFunctionOrValue as mfv ->
-        // For operators, CompiledName gives us op_LessThan etc.
-        // DisplayName gives us (<) etc.
-        mfv.CompiledName
-    | _ -> symbol.DisplayName
-
-/// Check if name matches an arithmetic operator
-let isArithOp (name: string) : (string -> string -> string -> Emit<string>) option =
-    match name with
-    | "op_Addition" | "(+)" | "+" | "Add" -> Some emitAddi
-    | "op_Subtraction" | "(-)" | "-" | "Subtract" -> Some emitSubi
-    | "op_Multiply" | "(*)" | "*" | "Multiply" -> Some emitMuli
-    | "op_Division" | "(/)" | "/" | "Divide" -> Some emitDivui
-    | "op_Modulus" | "(%)" | "%" | "Modulo" -> Some emitRemui
-    | _ -> None
-
-/// Check if name matches a comparison operator
-let isCompareOp (name: string) : string option =
-    match name with
-    | "op_LessThan" | "(<)" | "<" -> Some "slt"
-    | "op_GreaterThan" | "(>)" | ">" -> Some "sgt"
-    | "op_LessThanOrEqual" | "(<=)" | "<=" -> Some "sle"
-    | "op_GreaterThanOrEqual" | "(>=)" | ">=" -> Some "sge"
-    | "op_Equality" | "(=)" | "=" -> Some "eq"
-    | "op_Inequality" | "(<>)" | "<>" -> Some "ne"
-    | _ -> None
-
-// ═══════════════════════════════════════════════════════════════════
-// Pattern-based Recognition (using PSGPatterns)
-// ═══════════════════════════════════════════════════════════════════
-
-// Note: We use module alias to avoid shadowing EmissionMonad operators
-module Patterns = Alex.Patterns.PSGPatterns
-
-// ═══════════════════════════════════════════════════════════════════
-// Expression Dispatcher (Zipper-based)
-// ═══════════════════════════════════════════════════════════════════
-
-/// Emit the expression at current zipper focus
-/// This is the main dispatch function - all expression emission goes through here
-let rec emitCurrentExpr : Emit<ExprResult> =
-    getFocus >>= fun node ->
-    let kind = node.SyntaxKind
-
-    // First check for Alloy operations via pattern recognition
-    recognizeConsoleOp >>= fun consoleOpOpt ->
-    match consoleOpOpt with
-    | Some "writeLine" -> emitConsoleWriteLine
-    | Some "write" -> emitConsoleWrite
-    | Some "prompt" -> emitConsolePrompt
-    | Some _ -> emit (Error "Console operation not yet implemented")
-    | None ->
-
-    recognizeTimeOp >>= fun timeOpOpt ->
-    match timeOpOpt with
-    | Some "currentTicks" -> emitTimeCurrentTicks
-    | Some "currentUnixTimestamp" -> emitTimeCurrentUnixTimestamp
-    | Some "currentDateTimeString" -> emitTimeCurrentDateTimeString
-    | Some "currentDateTime" -> emitTimeCurrentDateTimeString
-    | Some "sleep" -> emitSleepFromArgs
-    | Some op -> emit (Error (sprintf "Time.%s not yet implemented" op))
-    | None ->
-
-    // Regular expression dispatch based on SyntaxKind
-    if kind.StartsWith("Const:") then
-        emitConst
-    elif kind.StartsWith("Value:") || kind.StartsWith("Ident:") then
-        emitVarRef
-    elif kind.StartsWith("Sequential") then
-        emitSequential
-    elif kind.StartsWith("Let") || kind = "LetOrUse" || kind.StartsWith("Binding") then
-        emitLetBinding
-    elif kind.StartsWith("If") then
-        emitIfExpr
-    elif kind.StartsWith("While") then
-        emitWhileLoop
-    elif kind.StartsWith("App") then
-        emitApplication
-    elif kind.StartsWith("TypeApp") then
-        // TypeApp is generic instantiation (e.g., stackBuffer<byte>)
-        // Look through to the inner expression
-        emitTypeApp
-    elif kind.StartsWith("LongIdent:") then
-        // LongIdent is a qualified identifier reference
-        emitVarRef
-    elif kind.StartsWith("Pattern:") then
-        // Skip pattern nodes - they're structural
-        emit Void
-    elif kind.StartsWith("MutableSet:") then
-        emitMutableSet
-    elif kind.StartsWith("Match") then
-        emitMatchExpr
+    if isConst node then
+        handleConst node.SyntaxKind |>> Some
     else
-        // For unhandled nodes, try to emit children
-        emitChildrenSequentially emitCurrentExpr >>= fun resultOpt ->
-        match resultOpt with
-        | Some result -> emit result
-        | None -> emit Void
+        emit None
 
-/// Emit Console.writeLine by navigating to argument child
-and emitConsoleWriteLine : Emit<ExprResult> =
-    getZipper >>= fun z ->
-    let children = PSGZipper.childNodes z
-    match children with
-    | _ :: argNode :: _ ->
-        // Navigate to arg and extract string
-        match extractStringConst argNode.SyntaxKind with
-        | Some content -> emitConsoleWriteLineString content
+// ===================================================================
+// Variable Reference Handler
+// ===================================================================
+
+/// Handler for identifier/variable references
+let private handleIdent (name: string) : Emit<ExprResult> =
+    lookupLocal name >>= fun localOpt ->
+    match localOpt with
+    | Some ssaName ->
+        lookupLocalType name >>= fun typeOpt ->
+        emit (Value(ssaName, typeOpt |> Option.defaultValue "i32"))
+    | None ->
+        emit (Error (sprintf "Variable not found: %s" name))
+
+/// Try to emit as identifier
+let private tryEmitIdent : Emit<ExprResult option> =
+    getFocus >>= fun node ->
+    if isIdent node then
+        match node.Symbol with
+        | Some sym -> handleIdent sym.DisplayName |>> Some
         | None ->
-            // Try to emit the arg and print its result
-            atNode argNode emitCurrentExpr >>= fun argResult ->
-            match argResult with
-            | Value(ssa, _) ->
-                // For non-string, emit a placeholder
-                line (sprintf "// Console.writeLine with dynamic content: %s" ssa) >>.
-                emit Void
-            | _ -> emit Void
-    | _ ->
-        emit (Error "writeLine: missing argument")
+            let kind = node.SyntaxKind
+            let name =
+                if kind.StartsWith("Ident:") then kind.Substring("Ident:".Length)
+                elif kind.StartsWith("Value:") then kind.Substring("Value:".Length)
+                elif kind.StartsWith("LongIdent:") then kind.Substring("LongIdent:".Length)
+                else kind
+            handleIdent name |>> Some
+    else
+        emit None
 
-/// Emit Console.write (without newline)
-and emitConsoleWrite : Emit<ExprResult> =
-    getZipper >>= fun z ->
-    let children = PSGZipper.childNodes z
-    match children with
-    | _ :: argNode :: _ ->
-        match extractStringConst argNode.SyntaxKind with
-        | Some content ->
-            // Write string without newline
-            registerStringLiteral content >>= fun globalName ->
-            emitAddressOf globalName >>= fun ptr ->
-            emitI64 (int64 content.Length) >>= fun len ->
-            emitI64 1L >>= fun fd ->
-            emitWriteSyscall fd ptr len >>= fun _ ->
-            emit Void
-        | None ->
-            // Try to emit the arg as a variable reference
-            atNode argNode emitCurrentExpr >>= fun argResult ->
-            match argResult with
-            | Value(ssa, _) ->
-                line (sprintf "// Console.write with dynamic content: %s" ssa) >>.
-                emit Void
-            | _ -> emit Void
-    | _ ->
-        emit (Error "write: missing argument")
+// ===================================================================
+// Sequential Expression Handler
+// ===================================================================
 
-/// Emit Console.Prompt (same as write but for prompts)
-and emitConsolePrompt : Emit<ExprResult> =
-    // Prompt is just Write (outputs without newline)
-    emitConsoleWrite
-
-/// Emit Time.sleep by extracting milliseconds argument
-and emitSleepFromArgs : Emit<ExprResult> =
-    getZipper >>= fun z ->
-    let children = PSGZipper.childNodes z
-    match children with
-    | _ :: argNode :: _ ->
-        match extractIntConst argNode.SyntaxKind with
-        | Some v ->
-            emitI32 v >>= fun msReg ->
-            emitTimeSleep msReg
-        | None -> emit (Error "sleep requires integer argument")
-    | _ ->
-        emit (Error "sleep: missing argument")
-
-/// Emit sequential expression - emit all children, return last result
-and emitSequential : Emit<ExprResult> =
+/// Handler for sequential expressions - emit all children, return last
+let private handleSequential () : Emit<ExprResult> =
     getZipper >>= fun z ->
     let children = PSGZipper.childNodes z
     match children with
     | [] -> emit Void
-    | [single] -> atNode single emitCurrentExpr
+    | [single] -> atNode single callEmitExpr
     | _ ->
         let allButLast = children |> List.take (List.length children - 1)
         let lastNode = children |> List.last
-        // Emit all but last for side effects
         forEach (fun child ->
-            atNode child emitCurrentExpr >>= fun _ -> emit ()
+            atNode child callEmitExpr >>= fun _ -> emit ()
         ) allButLast >>.
-        // Emit last and return its result
-        atNode lastNode emitCurrentExpr
+        atNode lastNode callEmitExpr
 
-/// Emit let binding using zipper navigation
-///
-/// LetOrUse:Let nodes have a FLAT list of children:
-///   [Binding; Binding; ...; BodyExpr; BodyExpr; ...]
-///
-/// Each Binding node introduces a variable that must be in scope
-/// for all subsequent siblings. We process left-to-right, binding
-/// each variable before continuing.
-and emitLetBinding : Emit<ExprResult> =
-    getZipper >>= fun z ->
-    let children = PSGZipper.childNodes z
+/// Try to emit as sequential
+let private tryEmitSequential : Emit<ExprResult option> =
+    getFocus >>= fun node ->
+    if isSequential node then
+        handleSequential () |>> Some
+    else
+        emit None
 
-    // Process children sequentially, accumulating bindings into scope
-    let rec processChildren (nodes: PSGNode list) (lastResult: ExprResult) : Emit<ExprResult> =
-        match nodes with
-        | [] -> emit lastResult
-        | node :: rest ->
-            if node.SyntaxKind.StartsWith("Binding") then
-                emitBindingNode node >>= fun result ->
-                processChildren rest result
-            elif node.SyntaxKind.StartsWith("Pattern:") then
-                processChildren rest lastResult
-            else
-                atNode node emitCurrentExpr >>= fun result ->
-                processChildren rest result
+// ===================================================================
+// Let Binding Handler
+// ===================================================================
 
-    processChildren children Void
-
-/// Emit a single Binding node: evaluate value child and bind to scope
-and emitBindingNode (bindingNode: PSGNode) : Emit<ExprResult> =
-    // Binding structure: [Pattern, Value]
-    // Navigate to binding, get value child (index 1), emit it
+/// Emit a single Binding node
+let private emitBindingNode (bindingNode: PSGNode) : Emit<ExprResult> =
     atNode bindingNode (
         getZipper >>= fun bz ->
         let bindingChildren = PSGZipper.childNodes bz
         match bindingChildren with
         | _ :: valueNode :: _ ->
-            // Emit the value expression
-            atNode valueNode emitCurrentExpr
+            atNode valueNode callEmitExpr
         | [_patternOnly] ->
-            // Binding with no value (e.g., function parameter)
             emit Void
         | [] ->
             emit Void
     ) >>= fun valueResult ->
-    // Bind the result to scope using the binding's symbol
     match valueResult with
     | Value(ssa, typ) ->
         match bindingNode.Symbol with
@@ -491,97 +406,40 @@ and emitBindingNode (bindingNode: PSGNode) : Emit<ExprResult> =
             emit (Value(ssa, typ))
     | other -> emit other
 
-/// Emit mutable variable assignment
-and emitMutableSet : Emit<ExprResult> =
+/// Handler for let bindings
+let private handleLet () : Emit<ExprResult> =
+    getZipper >>= fun z ->
+    let children = PSGZipper.childNodes z
+
+    let rec processChildren (nodes: PSGNode list) (lastResult: ExprResult) : Emit<ExprResult> =
+        match nodes with
+        | [] -> emit lastResult
+        | node :: rest ->
+            if node.SyntaxKind.StartsWith("Binding") then
+                emitBindingNode node >>= fun result ->
+                processChildren rest result
+            elif node.SyntaxKind.StartsWith("Pattern:") then
+                processChildren rest lastResult
+            else
+                atNode node callEmitExpr >>= fun result ->
+                processChildren rest result
+
+    processChildren children Void
+
+/// Try to emit as let binding
+let private tryEmitLet : Emit<ExprResult option> =
     getFocus >>= fun node ->
-    let varName =
-        if node.SyntaxKind.StartsWith("MutableSet:") then
-            node.SyntaxKind.Substring("MutableSet:".Length)
-        else ""
+    if isLet node then
+        handleLet () |>> Some
+    else
+        emit None
 
-    getZipper >>= fun z ->
-    let children = PSGZipper.childNodes z
-    match children |> List.tryLast with
-    | Some valueNode ->
-        atNode valueNode emitCurrentExpr >>= fun valueResult ->
-        match valueResult with
-        | Value(ssa, typ) ->
-            // Update the local binding
-            bindLocal varName ssa typ >>.
-            emit Void
-        | _ -> emit Void
-    | None -> emit Void
+// ===================================================================
+// If Expression Handler
+// ===================================================================
 
-/// Emit TypeApp (generic instantiation like stackBuffer<byte>)
-/// TypeApp wraps an identifier with type arguments - we look through to the inner expr
-and emitTypeApp : Emit<ExprResult> =
-    getFocus >>= fun node ->
-    getZipper >>= fun z ->
-    let children = PSGZipper.childNodes z
-    match children with
-    | [innerNode] ->
-        // TypeApp has single child - the actual expression
-        atNode innerNode emitCurrentExpr
-    | [] ->
-        // No children - this TypeApp node itself may have the symbol
-        // Return a reference to the function (will be applied with args later)
-        match node.Symbol with
-        | Some symbol ->
-            let name = symbol.DisplayName
-            lookupLocal name >>= fun localOpt ->
-            match localOpt with
-            | Some ssaName ->
-                lookupLocalType name |>> fun typeOpt ->
-                Value(ssaName, typeOpt |> Option.defaultValue "i32")
-            | None ->
-                // This is a function reference, not a local
-                emit (Value(sprintf "@%s" name, "func"))
-        | None ->
-            emit (Error "TypeApp without symbol or children")
-    | _ ->
-        // Multiple children - emit first (should be the identifier)
-        atNode (List.head children) emitCurrentExpr
-
-/// Emit match expression
-/// Structure: Match[scrutinee, MatchClause, MatchClause, ...]
-and emitMatchExpr : Emit<ExprResult> =
-    getZipper >>= fun z ->
-    let children = PSGZipper.childNodes z
-
-    match children with
-    | scrutineeNode :: clauses when clauses.Length > 0 ->
-        // Emit the scrutinee (the value being matched)
-        atNode scrutineeNode emitCurrentExpr >>= fun scrutineeResult ->
-        match scrutineeResult with
-        | Value(scrutineeReg, scrutineeType) ->
-            // For now, emit a simplified version that handles Ok/Error Result types
-            // This is a placeholder - full pattern matching needs more work
-            line (sprintf "// Match on %s : %s" scrutineeReg scrutineeType) >>.
-            // For Result<T, E>, we check the discriminator
-            // For now, just emit the first clause's body as a placeholder
-            match clauses with
-            | firstClause :: _ ->
-                // Get the clause's body (skip the pattern)
-                let clauseChildren =
-                    match firstClause.Children with
-                    | ChildrenState.Parent ids ->
-                        ids |> List.rev |> List.choose (fun id -> Map.tryFind id.Value z.Graph.Nodes)
-                    | _ -> []
-                match clauseChildren |> List.filter (fun n -> not (n.SyntaxKind.StartsWith("Pattern:"))) with
-                | bodyNode :: _ ->
-                    atNode bodyNode emitCurrentExpr
-                | [] ->
-                    emit (Value(scrutineeReg, scrutineeType))
-            | [] ->
-                emit (Error "Match with no clauses")
-        | Error msg -> emit (Error msg)
-        | Void ->
-            emit (Error "Match scrutinee must produce a value")
-    | _ ->
-        emit (Error "Match: expected scrutinee and clauses")
-
-/// Emit if expression
-and emitIfExpr : Emit<ExprResult> =
+/// Handler for if expressions
+let private handleIf () : Emit<ExprResult> =
     getState >>= fun state ->
     let labelNum = state.SSACounter
     let thenLabel = sprintf "then_%d" labelNum
@@ -593,24 +451,24 @@ and emitIfExpr : Emit<ExprResult> =
     let children = PSGZipper.childNodes z
     match children with
     | condNode :: thenNode :: rest ->
-        atNode condNode emitCurrentExpr >>= fun condResult ->
+        atNode condNode callEmitExpr >>= fun condResult ->
         match condResult with
         | Value(condReg, _) ->
             match rest with
             | [elseNode] ->
                 emitCondBr condReg thenLabel elseLabel >>.
                 emitBlockLabel thenLabel >>.
-                atNode thenNode emitCurrentExpr >>= fun thenResult ->
+                atNode thenNode callEmitExpr >>= fun thenResult ->
                 emitBr mergeLabel >>.
                 emitBlockLabel elseLabel >>.
-                atNode elseNode emitCurrentExpr >>= fun _ ->
+                atNode elseNode callEmitExpr >>= fun _ ->
                 emitBr mergeLabel >>.
                 emitBlockLabel mergeLabel >>.
                 emit thenResult
             | [] ->
                 emitCondBr condReg thenLabel mergeLabel >>.
                 emitBlockLabel thenLabel >>.
-                atNode thenNode emitCurrentExpr >>= fun _ ->
+                atNode thenNode callEmitExpr >>= fun _ ->
                 emitBr mergeLabel >>.
                 emitBlockLabel mergeLabel >>.
                 emit Void
@@ -618,8 +476,20 @@ and emitIfExpr : Emit<ExprResult> =
         | _ -> emit (Error "If condition must produce value")
     | _ -> emit (Error "If: wrong number of children")
 
-/// Emit while loop
-and emitWhileLoop : Emit<ExprResult> =
+/// Try to emit as if expression
+let private tryEmitIf : Emit<ExprResult option> =
+    getFocus >>= fun node ->
+    if isIf node then
+        handleIf () |>> Some
+    else
+        emit None
+
+// ===================================================================
+// While Loop Handler
+// ===================================================================
+
+/// Handler for while loops
+let private handleWhile () : Emit<ExprResult> =
     getState >>= fun state ->
     let labelNum = state.SSACounter
     let condLabel = sprintf "while_cond_%d" labelNum
@@ -630,182 +500,199 @@ and emitWhileLoop : Emit<ExprResult> =
     getZipper >>= fun z ->
     let children = PSGZipper.childNodes z
 
-    // Debug: show what children we found
-    let childDesc = children |> List.map (fun c -> c.SyntaxKind) |> String.concat ", "
-    line (sprintf "// While loop children: [%s]" childDesc) >>.
-
     match children with
-    | condNode :: bodyNode :: _ when children.Length >= 2 ->
-        // More flexible matching - take first two non-pattern children
+    | condNode :: bodyNode :: _ ->
         emitBr condLabel >>.
         emitBlockLabel condLabel >>.
-        line (sprintf "// Condition node: %s" condNode.SyntaxKind) >>.
-        atNode condNode emitCurrentExpr >>= fun condResult ->
-        line (sprintf "// Condition result: %A" condResult) >>.
+        atNode condNode callEmitExpr >>= fun condResult ->
         match condResult with
         | Value(condReg, _) ->
             emitCondBr condReg bodyLabel exitLabel >>.
             emitBlockLabel bodyLabel >>.
-            atNode bodyNode emitCurrentExpr >>= fun _ ->
+            atNode bodyNode callEmitExpr >>= fun _ ->
             emitBr condLabel >>.
             emitBlockLabel exitLabel >>.
             emit Void
         | Void ->
-            // Condition returned void - might be an error in the condition emission
-            line "// ERROR: Condition returned Void, expected comparison result" >>.
+            line "// ERROR: While condition returned Void" >>.
             emit Void
         | Error msg ->
-            line (sprintf "// ERROR in condition: %s" msg) >>.
             emit (Error msg)
     | _ ->
-        line (sprintf "// While: expected 2+ children, got %d" children.Length) >>.
-        emit (Error "While: wrong number of children")
+        emit (Error "While: expected condition and body")
 
-/// Emit a binary arithmetic operation given the operand nodes
-/// Uses atNode to navigate to each operand and emit
-and emitBinaryArithWithNodes
-    (leftNode: PSGNode)
-    (rightNode: PSGNode)
-    (emitOp: string -> string -> string -> Emit<string>) : Emit<ExprResult> =
-    atNode leftNode emitCurrentExpr >>= fun leftResult ->
-    match leftResult with
-    | Value(leftReg, leftType) ->
-        atNode rightNode emitCurrentExpr >>= fun rightResult ->
-        match rightResult with
-        | Value(rightReg, _) ->
-            emitOp leftReg rightReg leftType |>> fun result ->
-            Value(result, leftType)
+/// Try to emit as while loop
+let private tryEmitWhile : Emit<ExprResult option> =
+    getFocus >>= fun node ->
+    if isWhile node then
+        handleWhile () |>> Some
+    else
+        emit None
+
+// ===================================================================
+// Match Expression Handler
+// ===================================================================
+
+/// Handler for match expressions (simplified - handles first clause only for now)
+let private handleMatch () : Emit<ExprResult> =
+    getZipper >>= fun z ->
+    let children = PSGZipper.childNodes z
+
+    match children with
+    | scrutineeNode :: clauses when clauses.Length > 0 ->
+        atNode scrutineeNode callEmitExpr >>= fun scrutineeResult ->
+        match scrutineeResult with
+        | Value(scrutineeReg, scrutineeType) ->
+            line (sprintf "// Match on %s : %s" scrutineeReg scrutineeType) >>.
+            match clauses with
+            | firstClause :: _ ->
+                let clauseChildren =
+                    match firstClause.Children with
+                    | ChildrenState.Parent ids ->
+                        ids |> List.rev |> List.choose (fun id -> Map.tryFind id.Value z.Graph.Nodes)
+                    | _ -> []
+                match clauseChildren |> List.filter (fun n -> not (n.SyntaxKind.StartsWith("Pattern:"))) with
+                | bodyNode :: _ ->
+                    atNode bodyNode callEmitExpr
+                | [] ->
+                    emit (Value(scrutineeReg, scrutineeType))
+            | [] ->
+                emit (Error "Match with no clauses")
         | Error msg -> emit (Error msg)
-        | Void -> emit (Error "Right operand must produce value")
-    | Error msg -> emit (Error msg)
-    | Void -> emit (Error "Left operand must produce value")
+        | Void ->
+            emit (Error "Match scrutinee must produce a value")
+    | _ ->
+        emit (Error "Match: expected scrutinee and clauses")
 
-/// Emit a comparison operation given the operand nodes
-and emitCompareWithNodes
-    (leftNode: PSGNode)
-    (rightNode: PSGNode)
-    (pred: string) : Emit<ExprResult> =
-    atNode leftNode emitCurrentExpr >>= fun leftResult ->
-    match leftResult with
-    | Value(leftReg, leftType) ->
-        atNode rightNode emitCurrentExpr >>= fun rightResult ->
-        match rightResult with
-        | Value(rightReg, _) ->
-            emitCmpi pred leftReg rightReg leftType |>> fun result ->
-            Value(result, "i1")
-        | Error msg -> emit (Error msg)
-        | Void -> emit (Error "Right operand must produce value")
-    | Error msg -> emit (Error msg)
-    | Void -> emit (Error "Left operand must produce value")
+/// Try to emit as match expression
+let private tryEmitMatch : Emit<ExprResult option> =
+    getFocus >>= fun node ->
+    if isMatch node then
+        handleMatch () |>> Some
+    else
+        emit None
 
-/// Emit function application - uses pattern-based curried operator recognition
-and emitApplication : Emit<ExprResult> =
-    // Try to recognize curried binary operator pattern using PSGPatterns
-    runPattern Patterns.isCurriedBinaryOp >>= fun curriedOpOpt ->
-    match curriedOpOpt with
-    | Some opInfo ->
-        // Pattern gives us: Operator, LeftOperand, RightOperand
-        let mfv = opInfo.Operator
-        let compiledName = mfv.CompiledName
+// ===================================================================
+// Mutable Set Handler
+// ===================================================================
 
-        // Check arithmetic operators
-        match Patterns.arithmeticOp mfv with
-        | Some mlirOp ->
-            line (sprintf "// Curried arith: %s" mfv.DisplayName) >>.
-            // Use the MLIR op to build the emission function
-            let emitOp leftReg rightReg typ =
-                freshSSAWithType typ >>= fun result ->
-                line (sprintf "%s = %s %s, %s : %s" result mlirOp leftReg rightReg typ) >>.
-                emit result
-            emitBinaryArithWithNodes opInfo.LeftOperand opInfo.RightOperand emitOp
-        | None ->
+/// Handler for mutable variable assignment
+let private handleMutableSet (varName: string) : Emit<ExprResult> =
+    getZipper >>= fun z ->
+    let children = PSGZipper.childNodes z
+    match children |> List.tryLast with
+    | Some valueNode ->
+        atNode valueNode callEmitExpr >>= fun valueResult ->
+        match valueResult with
+        | Value(ssa, typ) ->
+            bindLocal varName ssa typ >>.
+            emit Void
+        | _ -> emit Void
+    | None -> emit Void
 
-        // Check comparison operators
-        match Patterns.comparisonOp mfv with
-        | Some pred ->
-            line (sprintf "// Curried comparison: %s" mfv.DisplayName) >>.
-            emitCompareWithNodes opInfo.LeftOperand opInfo.RightOperand pred
-        | None ->
-            emit (Error (sprintf "Curried op not recognized: %s" compiledName))
+/// Try to emit as mutable set
+let private tryEmitMutableSet : Emit<ExprResult option> =
+    getFocus >>= fun node ->
+    match extractMutableSetName node with
+    | Some varName -> handleMutableSet varName |>> Some
+    | None -> emit None
 
-    | None ->
-        // Not a curried binary op - try direct operator application or function call
-        getZipper >>= fun z ->
-        let children = PSGZipper.childNodes z
-        match children with
-        | funcNode :: argNodes ->
-            match funcNode.Symbol with
-            | Some symbol ->
-                let compiledName = getOperatorName symbol
-                let displayName = symbol.DisplayName
+// ===================================================================
+// Type Application Handler
+// ===================================================================
 
-                // Check arithmetic with 2+ args already available
-                match isArithOp compiledName |> Option.orElse (isArithOp displayName) with
-                | Some op when argNodes.Length >= 2 ->
-                    emitBinaryOpViaZipper 1 2 op
-                | Some _ ->
-                    emit (Error (sprintf "Arith op needs 2 args: %s" displayName))
-                | None ->
-
-                // Check comparison with 2+ args available
-                match isCompareOp compiledName |> Option.orElse (isCompareOp displayName) with
-                | Some pred when argNodes.Length >= 2 ->
-                    emitCompareOpViaZipper 1 2 pred
-                | Some _ ->
-                    emit (Error (sprintf "Compare op needs 2 args: %s" displayName))
-                | None ->
-
-                // Check if func is another App (nested application)
-                if funcNode.SyntaxKind.StartsWith("App") then
-                    atNode funcNode emitCurrentExpr
-                else
-                    emit (Error (sprintf "Function not supported: %s" displayName))
+/// Handler for TypeApp (generic instantiation like stackBuffer<byte>)
+let private handleTypeApp () : Emit<ExprResult> =
+    getFocus >>= fun node ->
+    getZipper >>= fun z ->
+    let children = PSGZipper.childNodes z
+    match children with
+    | [innerNode] ->
+        atNode innerNode callEmitExpr
+    | [] ->
+        match node.Symbol with
+        | Some symbol ->
+            let name = symbol.DisplayName
+            lookupLocal name >>= fun localOpt ->
+            match localOpt with
+            | Some ssaName ->
+                lookupLocalType name |>> fun typeOpt ->
+                Value(ssaName, typeOpt |> Option.defaultValue "i32")
             | None ->
-                // No symbol - might be nested App
-                if funcNode.SyntaxKind.StartsWith("App") then
-                    atNode funcNode emitCurrentExpr
-                else
-                    emit (Error "Function without symbol")
-        | [] ->
-            emit (Error "Empty application")
+                emit (Value(sprintf "@%s" name, "func"))
+        | None ->
+            emit (Error "TypeApp without symbol or children")
+    | _ ->
+        atNode (List.head children) callEmitExpr
 
-/// Helper for binary arithmetic operations using zipper navigation by child index
-/// leftIdx and rightIdx are child indices in the current node
-and emitBinaryOpViaZipper (leftIdx: int) (rightIdx: int)
-    (op: string -> string -> string -> Emit<string>) : Emit<ExprResult> =
-    atNthChild leftIdx emitCurrentExpr >>= fun leftResult ->
-    match leftResult with
-    | Error msg -> emit (Error msg)
-    | Void -> emit (Error "Left operand must produce value")
-    | Value(leftReg, leftType) ->
-        atNthChild rightIdx emitCurrentExpr >>= fun rightResult ->
-        match rightResult with
-        | Error msg -> emit (Error msg)
-        | Void -> emit (Error "Right operand must produce value")
-        | Value(rightReg, _) ->
-            op leftReg rightReg leftType |>> fun result ->
-            Value(result, leftType)
+/// Try to emit as type application
+let private tryEmitTypeApp : Emit<ExprResult option> =
+    getFocus >>= fun node ->
+    if isTypeApp node then
+        handleTypeApp () |>> Some
+    else
+        emit None
 
-/// Helper for comparison operations using zipper navigation by child index
-and emitCompareOpViaZipper (leftIdx: int) (rightIdx: int) (pred: string) : Emit<ExprResult> =
-    atNthChild leftIdx emitCurrentExpr >>= fun leftResult ->
-    match leftResult with
-    | Error msg -> emit (Error msg)
-    | Void -> emit (Error "Left operand must produce value")
-    | Value(leftReg, leftType) ->
-        atNthChild rightIdx emitCurrentExpr >>= fun rightResult ->
-        match rightResult with
-        | Error msg -> emit (Error msg)
-        | Void -> emit (Error "Right operand must produce value")
-        | Value(rightReg, _) ->
-            emitCmpi pred leftReg rightReg leftType |>> fun result ->
-            Value(result, "i1")
+// ===================================================================
+// Pattern Node Handler
+// ===================================================================
 
-// ═══════════════════════════════════════════════════════════════════
-// Legacy Compatibility (for gradual migration)
-// ═══════════════════════════════════════════════════════════════════
+/// Try to emit as pattern (structural, returns Void)
+let private tryEmitPattern : Emit<ExprResult option> =
+    getFocus >>= fun node ->
+    if isPattern node then
+        emit (Some Void)
+    else
+        emit None
+
+// ===================================================================
+// Main Expression Dispatcher
+// ===================================================================
+
+/// Main expression emission using tryEmissions for dispatch
+let emitExpr : Emit<ExprResult> =
+    tryEmissions [
+        // Console operations (highest priority for Alloy calls)
+        tryEmitConsole
+
+        // Time operations
+        tryEmitTime
+
+        // Arithmetic operations
+        tryEmitArith
+
+        // Comparison operations
+        tryEmitCompare
+
+        // Structural patterns
+        tryEmitConst
+        tryEmitIdent
+        tryEmitSequential
+        tryEmitLet
+        tryEmitIf
+        tryEmitWhile
+        tryEmitMatch
+        tryEmitTypeApp
+        tryEmitMutableSet
+        tryEmitPattern
+    ] >>= fun resultOpt ->
+    match resultOpt with
+    | Some result -> emit result
+    | None ->
+        // No handler matched - this is a compiler error
+        getFocus >>= fun node ->
+        emit (Error (sprintf "Unhandled PSG node type: %s" node.SyntaxKind))
+
+// Initialize the mutable reference for recursive calls
+do emitExprImpl <- emitExpr
+
+// ===================================================================
+// Public API
+// ===================================================================
+
+/// Emit expression at current zipper focus (public alias)
+let emitCurrentExpr : Emit<ExprResult> = emitExpr
 
 /// Legacy emitExpr that takes explicit PSG and node
-/// Internally creates a zipper and uses the new zipper-based emission
-let emitExpr (psg: ProgramSemanticGraph) (node: PSGNode) : Emit<ExprResult> =
-    atNode node emitCurrentExpr
+let emitExprLegacy (psg: ProgramSemanticGraph) (node: PSGNode) : Emit<ExprResult> =
+    atNode node emitExpr

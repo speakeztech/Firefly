@@ -198,32 +198,70 @@ let emitChildrenSequentially (f: Emit<'T>) : Emit<'T option> =
 // Pattern Integration
 // ═══════════════════════════════════════════════════════════════════
 
-// Note: We don't "open" PSGPatterns here because it would shadow our operators
-// Instead we reference the Pattern type with full qualification
+// Patterns are now node classifiers: PSGNode -> 'T option or (PSG * PSGNode) -> 'T option
+// The zipper provides access to the graph and current focus node.
 
-/// Run a PSGPattern at the current zipper position
-/// Patterns are pure recognition - they don't emit, just extract data
-let runPattern (pattern: Alex.Patterns.PSGPatterns.Pattern<'T>) : Emit<'T option> =
-    getZipper |>> pattern
+/// Run a node classifier at the current focus
+/// Classifiers extract typed data from PSG nodes
+let runClassifier (classifier: Core.PSG.Types.PSGNode -> 'T option) : Emit<'T option> =
+    getFocus |>> classifier
 
-/// Run a pattern, and if it matches, run the emission continuation
-let whenPattern (pattern: Alex.Patterns.PSGPatterns.Pattern<'T>) (then': 'T -> Emit<'U>) : Emit<'U option> =
-    runPattern pattern >>= fun resultOpt ->
+/// Run a classifier that needs graph context
+let runGraphClassifier (classifier: Core.PSG.Types.ProgramSemanticGraph -> Core.PSG.Types.PSGNode -> 'T option) : Emit<'T option> =
+    getZipper >>= fun z ->
+    emit (classifier z.Graph z.Focus)
+
+/// Run a classifier and if it matches, run the emission continuation
+let whenClassifier (classifier: Core.PSG.Types.PSGNode -> 'T option) (then': 'T -> Emit<'U>) : Emit<'U option> =
+    runClassifier classifier >>= fun resultOpt ->
     match resultOpt with
     | Some value -> then' value |>> Some
     | None -> emit None
 
-/// Try multiple pattern/emission pairs in order, returning first match
-let tryPatterns (patterns: (Alex.Patterns.PSGPatterns.Pattern<'T> * ('T -> Emit<'U>)) list) : Emit<'U option> =
+/// Run a graph classifier and if it matches, run the emission continuation
+let whenGraphClassifier (classifier: Core.PSG.Types.ProgramSemanticGraph -> Core.PSG.Types.PSGNode -> 'T option) (then': 'T -> Emit<'U>) : Emit<'U option> =
+    runGraphClassifier classifier >>= fun resultOpt ->
+    match resultOpt with
+    | Some value -> then' value |>> Some
+    | None -> emit None
+
+/// Try multiple classifier/emission pairs in order, returning first match
+let tryClassifiers (classifiers: ((Core.PSG.Types.PSGNode -> 'T option) * ('T -> Emit<'U>)) list) : Emit<'U option> =
     let rec go remaining =
         match remaining with
         | [] -> emit None
-        | (pattern, handler) :: rest ->
-            whenPattern pattern handler >>= fun result ->
+        | (classifier, handler) :: rest ->
+            whenClassifier classifier handler >>= fun result ->
             match result with
             | Some value -> emit (Some value)
             | None -> go rest
-    go patterns
+    go classifiers
+
+/// Try multiple graph classifier/emission pairs in order
+let tryGraphClassifiers (classifiers: ((Core.PSG.Types.ProgramSemanticGraph -> Core.PSG.Types.PSGNode -> 'T option) * ('T -> Emit<'U>)) list) : Emit<'U option> =
+    getZipper >>= fun z ->
+    let rec go remaining =
+        match remaining with
+        | [] -> emit None
+        | (classifier, handler) :: rest ->
+            match classifier z.Graph z.Focus with
+            | Some value ->
+                handler value |>> Some
+            | None -> go rest
+    go classifiers
+
+/// Try multiple emission computations in order, returning first Some result
+/// Each computation returns Option - None means "doesn't apply", Some means "handled"
+let tryEmissions (emissions: Emit<'T option> list) : Emit<'T option> =
+    let rec go remaining =
+        match remaining with
+        | [] -> emit None
+        | e :: rest ->
+            e >>= fun result ->
+            match result with
+            | Some value -> emit (Some value)
+            | None -> go rest
+    go emissions
 
 // ═══════════════════════════════════════════════════════════════════
 // SSA Operations

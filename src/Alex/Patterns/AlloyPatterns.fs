@@ -1,16 +1,29 @@
-/// AlloyPatterns - Pattern matchers for Alloy library operations
+/// AlloyPatterns - Predicates and classifiers for Alloy library operations
 ///
-/// Provides composable patterns for recognizing Alloy library calls
-/// (Console, Time, Text.Format, etc.) in the PSG.
+/// DESIGN PRINCIPLE:
+/// XParsec (via PSGXParsec) is THE combinator infrastructure.
+/// This module provides only:
+/// - Predicates: PSGNode -> bool (for use with PSGXParsec.satisfyChild)
+/// - Classifiers: PSGNode -> 'T option (for extracting operation types)
+/// - Helper functions to identify Alloy library calls
+///
+/// NO custom combinators here. Use XParsec for composition.
+///
+/// ARCHITECTURE NOTE:
+/// Function calls in the PSG have this structure:
+///   App:FunctionCall [ModuleName]
+///   +-- LongIdent:Module.Function [FunctionName]  <- The actual function symbol
+///   +-- Arg1, Arg2, ...                           <- Arguments
+///
+/// So classifiers must look at the node's children or symbol to identify operations.
 module Alex.Patterns.AlloyPatterns
 
 open Core.PSG.Types
-open Alex.Traversal.PSGZipper
-open Alex.Patterns.PSGPatterns
+open FSharp.Compiler.Symbols
 
-// ═══════════════════════════════════════════════════════════════════
-// Console Module Patterns
-// ═══════════════════════════════════════════════════════════════════
+// ===================================================================
+// Type Definitions
+// ===================================================================
 
 /// Console operation types
 type ConsoleOp =
@@ -18,44 +31,6 @@ type ConsoleOp =
     | WriteLine
     | ReadLine
     | Read
-
-/// Match any Console.* operation
-let isConsoleOp : Pattern<ConsoleOp> =
-    fun z ->
-        match z.Focus.Symbol with
-        | Some symbol ->
-            let fullName = symbol.FullName
-            let displayName = symbol.DisplayName
-            if fullName.Contains("Console.write") || fullName.EndsWith(".write") then
-                if fullName.Contains("writeLine") || displayName = "writeLine" then
-                    Some WriteLine
-                else
-                    Some Write
-            elif fullName.Contains("Console.readLine") || displayName = "readLine" then
-                Some ReadLine
-            elif fullName.Contains("Console.read") || displayName = "read" then
-                Some Read
-            else None
-        | None -> None
-
-/// Match Console.write
-let isConsoleWrite : Pattern<unit> =
-    isConsoleOp >>= fun op ->
-        if op = Write then succeed () else fail
-
-/// Match Console.writeLine
-let isConsoleWriteLine : Pattern<unit> =
-    isConsoleOp >>= fun op ->
-        if op = WriteLine then succeed () else fail
-
-/// Match Console.readLine
-let isConsoleReadLine : Pattern<unit> =
-    isConsoleOp >>= fun op ->
-        if op = ReadLine then succeed () else fail
-
-// ═══════════════════════════════════════════════════════════════════
-// Time Module Patterns
-// ═══════════════════════════════════════════════════════════════════
 
 /// Time operation types
 type TimeOp =
@@ -67,49 +42,6 @@ type TimeOp =
     | CurrentTimestamp
     | CurrentDateTimeString
 
-/// Match any Time.* operation
-let isTimeOp : Pattern<TimeOp> =
-    fun z ->
-        match z.Focus.Symbol with
-        | Some symbol ->
-            let fullName = symbol.FullName
-            let displayName = symbol.DisplayName
-            if fullName.Contains("currentTicks") || displayName = "currentTicks" then
-                Some CurrentTicks
-            elif fullName.Contains("highResolutionTicks") || displayName = "highResolutionTicks" then
-                Some HighResolutionTicks
-            elif fullName.Contains("tickFrequency") || displayName = "tickFrequency" then
-                Some TickFrequency
-            elif fullName.Contains("sleep") || displayName = "sleep" then
-                Some Sleep
-            elif fullName.Contains("currentUnixTimestamp") || displayName = "currentUnixTimestamp" then
-                Some CurrentUnixTimestamp
-            elif fullName.Contains("currentTimestamp") || displayName = "currentTimestamp" then
-                Some CurrentTimestamp
-            elif fullName.Contains("currentDateTimeString") || displayName = "currentDateTimeString" then
-                Some CurrentDateTimeString
-            else None
-        | None -> None
-
-/// Match Time.currentTicks
-let isCurrentTicks : Pattern<unit> =
-    isTimeOp >>= fun op ->
-        if op = CurrentTicks then succeed () else fail
-
-/// Match Time.sleep
-let isSleep : Pattern<unit> =
-    isTimeOp >>= fun op ->
-        if op = Sleep then succeed () else fail
-
-/// Match Time.currentUnixTimestamp
-let isCurrentUnixTimestamp : Pattern<unit> =
-    isTimeOp >>= fun op ->
-        if op = CurrentUnixTimestamp then succeed () else fail
-
-// ═══════════════════════════════════════════════════════════════════
-// Text.Format Module Patterns
-// ═══════════════════════════════════════════════════════════════════
-
 /// Text.Format operation types
 type TextFormatOp =
     | IntToString
@@ -117,114 +49,11 @@ type TextFormatOp =
     | FloatToString
     | BoolToString
 
-/// Match any Text.Format.* operation
-let isTextFormatOp : Pattern<TextFormatOp> =
-    fun z ->
-        match z.Focus.Symbol with
-        | Some symbol ->
-            let fullName = symbol.FullName
-            let displayName = symbol.DisplayName
-            if fullName.Contains("intToString") || displayName = "intToString" then
-                Some IntToString
-            elif fullName.Contains("int64ToString") || displayName = "int64ToString" then
-                Some Int64ToString
-            elif fullName.Contains("floatToString") || displayName = "floatToString" then
-                Some FloatToString
-            elif fullName.Contains("boolToString") || displayName = "boolToString" then
-                Some BoolToString
-            else None
-        | None -> None
-
-// ═══════════════════════════════════════════════════════════════════
-// Combined Alloy Operation Pattern
-// ═══════════════════════════════════════════════════════════════════
-
 /// All recognized Alloy operations
 type AlloyOp =
     | Console of ConsoleOp
     | Time of TimeOp
     | TextFormat of TextFormatOp
-
-/// Match any Alloy operation
-let isAlloyOp : Pattern<AlloyOp> =
-    choice [
-        isConsoleOp |>> Console
-        isTimeOp |>> Time
-        isTextFormatOp |>> TextFormat
-    ]
-
-/// Check if a node is an Alloy operation (quick check)
-let isAlloyCall : Pattern<unit> =
-    fun z ->
-        match z.Focus.Symbol with
-        | Some symbol ->
-            let fullName = symbol.FullName
-            if fullName.StartsWith("Alloy.") ||
-               fullName.Contains(".Console.") ||
-               fullName.Contains(".Time.") ||
-               fullName.Contains(".Text.Format.") then
-                Some ()
-            else None
-        | None -> None
-
-// ═══════════════════════════════════════════════════════════════════
-// Application Pattern Extractors
-// ═══════════════════════════════════════════════════════════════════
-
-/// Extract Console.writeLine with its string argument
-let extractWriteLineArg : Pattern<string option> =
-    isConsoleWriteLine >>. fun z ->
-        // Look for a string constant child
-        let kids = PSGZipper.childNodes z
-        kids |> List.tryPick (fun node ->
-            let childZ = PSGZipper.create z.Graph node
-            isStringConst { childZ with State = z.State })
-        |> Some
-
-/// Extract Time.sleep with its milliseconds argument
-let extractSleepArg : Pattern<PSGNode option> =
-    isSleep >>. fun z ->
-        let kids = PSGZipper.childNodes z
-        match kids with
-        | [_; arg] -> Some (Some arg)  // Function + 1 arg
-        | [arg] -> Some (Some arg)     // Just the arg
-        | _ -> Some None
-
-/// Pattern that matches a function call and extracts info
-type FunctionCallInfo = {
-    FunctionName: string
-    Arguments: PSGNode list
-    ReturnType: string option
-}
-
-/// Extract function call information
-let extractFunctionCall : Pattern<FunctionCallInfo> =
-    fun z ->
-        if z.Focus.SyntaxKind.StartsWith("App") ||
-           z.Focus.SyntaxKind.StartsWith("Call") then
-            let kids = PSGZipper.childNodes z
-            match kids with
-            | func :: args ->
-                let funcName =
-                    match func.Symbol with
-                    | Some s -> s.FullName
-                    | None -> func.SyntaxKind
-                let retType =
-                    z.Focus.Type |> Option.bind (fun t ->
-                        if t.HasTypeDefinition then
-                            t.TypeDefinition.TryFullName
-                        else None)
-                Some {
-                    FunctionName = funcName
-                    Arguments = args
-                    ReturnType = retType
-                }
-            | _ -> None
-        else None
-
-// ═══════════════════════════════════════════════════════════════════
-// Arithmetic Pattern Helpers
-// ═══════════════════════════════════════════════════════════════════
 
 /// Arithmetic operation types
 type ArithOp =
@@ -233,42 +62,283 @@ type ArithOp =
     | ShiftLeft | ShiftRight
     | Negate | Not
 
-/// Match arithmetic operators
-let isArithOp : Pattern<ArithOp> =
-    fun z ->
-        match z.Focus.Symbol with
-        | Some symbol ->
-            match symbol.DisplayName with
-            | "op_Addition" | "+" -> Some Add
-            | "op_Subtraction" | "-" -> Some Sub
-            | "op_Multiply" | "*" -> Some Mul
-            | "op_Division" | "/" -> Some Div
-            | "op_Modulus" | "%" -> Some Mod
-            | "op_BitwiseAnd" | "&&&" -> Some BitwiseAnd
-            | "op_BitwiseOr" | "|||" -> Some BitwiseOr
-            | "op_ExclusiveOr" | "^^^" -> Some BitwiseXor
-            | "op_LeftShift" | "<<<" -> Some ShiftLeft
-            | "op_RightShift" | ">>>" -> Some ShiftRight
-            | "op_UnaryNegation" | "~-" -> Some Negate
-            | "not" -> Some Not
-            | _ -> None
-        | None -> None
-
 /// Comparison operation types
 type CompareOp =
     | Eq | Neq | Lt | Gt | Lte | Gte
 
-/// Match comparison operators
-let isCompareOp : Pattern<CompareOp> =
-    fun z ->
-        match z.Focus.Symbol with
-        | Some symbol ->
-            match symbol.DisplayName with
-            | "op_Equality" | "=" -> Some Eq
-            | "op_Inequality" | "<>" -> Some Neq
-            | "op_LessThan" | "<" -> Some Lt
-            | "op_GreaterThan" | ">" -> Some Gt
-            | "op_LessThanOrEqual" | "<=" -> Some Lte
-            | "op_GreaterThanOrEqual" | ">=" -> Some Gte
-            | _ -> None
-        | None -> None
+/// Information about a function call
+type FunctionCallInfo = {
+    FunctionSymbol: FSharpSymbol
+    FunctionName: string
+    Arguments: PSGNode list
+}
+
+// ===================================================================
+// Helper: Get children of a PSG node
+// ===================================================================
+
+/// Get child nodes from a PSGNode using its Children state
+let private getChildNodes (graph: ProgramSemanticGraph) (node: PSGNode) : PSGNode list =
+    match node.Children with
+    | ChildrenState.Parent ids ->
+        ids |> List.rev |> List.choose (fun id -> Map.tryFind id.Value graph.Nodes)
+    | _ -> []
+
+/// Get the function symbol from an App node's first child
+let private getFunctionSymbolFromChildren (children: PSGNode list) : FSharpSymbol option =
+    match children with
+    | funcChild :: _ -> funcChild.Symbol
+    | [] -> None
+
+// ===================================================================
+// Symbol Classification Helpers
+// ===================================================================
+
+/// Classify a Console operation from a symbol
+let classifyConsoleOp (symbol: FSharpSymbol) : ConsoleOp option =
+    let fullName = symbol.FullName
+    let displayName = symbol.DisplayName
+
+    // Check for WriteLine (must check before Write since Write is substring)
+    if displayName = "WriteLine" ||
+       fullName.EndsWith(".WriteLine") ||
+       fullName.Contains("Console.WriteLine") then
+        Some WriteLine
+    // Check for Write
+    elif displayName = "Write" ||
+         fullName.EndsWith(".Write") ||
+         fullName.Contains("Console.Write") then
+        Some Write
+    // Check for Prompt (same as Write semantically)
+    elif displayName = "Prompt" ||
+         fullName.EndsWith(".Prompt") ||
+         fullName.Contains("Console.Prompt") then
+        Some Write  // Prompt behaves like Write
+    // Check for ReadLine
+    elif displayName = "ReadLine" ||
+         displayName = "readLine" ||
+         fullName.Contains("Console.ReadLine") ||
+         fullName.Contains("Console.readLine") then
+        Some ReadLine
+    // Check for readInto
+    elif displayName = "readInto" ||
+         fullName.Contains("Console.readInto") then
+        Some Read
+    else
+        None
+
+/// Classify a Time operation from a symbol
+let classifyTimeOp (symbol: FSharpSymbol) : TimeOp option =
+    let fullName = symbol.FullName
+    let displayName = symbol.DisplayName
+
+    if displayName = "currentTicks" || fullName.Contains("currentTicks") then
+        Some CurrentTicks
+    elif displayName = "highResolutionTicks" || fullName.Contains("highResolutionTicks") then
+        Some HighResolutionTicks
+    elif displayName = "tickFrequency" || fullName.Contains("tickFrequency") then
+        Some TickFrequency
+    elif displayName = "sleep" || displayName = "Sleep" || fullName.Contains("sleep") then
+        Some Sleep
+    elif displayName = "currentUnixTimestamp" || fullName.Contains("currentUnixTimestamp") then
+        Some CurrentUnixTimestamp
+    elif displayName = "currentTimestamp" || fullName.Contains("currentTimestamp") then
+        Some CurrentTimestamp
+    elif displayName = "currentDateTimeString" || fullName.Contains("currentDateTimeString") then
+        Some CurrentDateTimeString
+    else
+        None
+
+/// Classify a Text.Format operation from a symbol
+let classifyTextFormatOp (symbol: FSharpSymbol) : TextFormatOp option =
+    let fullName = symbol.FullName
+    let displayName = symbol.DisplayName
+
+    if displayName = "intToString" || fullName.Contains("intToString") then
+        Some IntToString
+    elif displayName = "int64ToString" || fullName.Contains("int64ToString") then
+        Some Int64ToString
+    elif displayName = "floatToString" || fullName.Contains("floatToString") then
+        Some FloatToString
+    elif displayName = "boolToString" || fullName.Contains("boolToString") then
+        Some BoolToString
+    else
+        None
+
+/// Classify an arithmetic operator from an MFV
+let classifyArithOp (mfv: FSharpMemberOrFunctionOrValue) : ArithOp option =
+    match mfv.CompiledName with
+    | "op_Addition" -> Some Add
+    | "op_Subtraction" -> Some Sub
+    | "op_Multiply" -> Some Mul
+    | "op_Division" -> Some Div
+    | "op_Modulus" -> Some Mod
+    | "op_BitwiseAnd" -> Some BitwiseAnd
+    | "op_BitwiseOr" -> Some BitwiseOr
+    | "op_ExclusiveOr" -> Some BitwiseXor
+    | "op_LeftShift" -> Some ShiftLeft
+    | "op_RightShift" -> Some ShiftRight
+    | "op_UnaryNegation" -> Some Negate
+    | _ when mfv.DisplayName = "not" -> Some Not
+    | _ -> None
+
+/// Classify a comparison operator from an MFV
+let classifyCompareOp (mfv: FSharpMemberOrFunctionOrValue) : CompareOp option =
+    match mfv.CompiledName with
+    | "op_Equality" -> Some Eq
+    | "op_Inequality" -> Some Neq
+    | "op_LessThan" -> Some Lt
+    | "op_GreaterThan" -> Some Gt
+    | "op_LessThanOrEqual" -> Some Lte
+    | "op_GreaterThanOrEqual" -> Some Gte
+    | _ -> None
+
+// ===================================================================
+// Node Classifiers - Extract operation type from PSGNode
+// ===================================================================
+
+/// Extract Console operation from a node (checks first child for function symbol)
+let extractConsoleOp (graph: ProgramSemanticGraph) (node: PSGNode) : ConsoleOp option =
+    if not (node.SyntaxKind.StartsWith("App")) then None
+    else
+        let children = getChildNodes graph node
+        match getFunctionSymbolFromChildren children with
+        | Some symbol -> classifyConsoleOp symbol
+        | None ->
+            // Also check the node's own symbol
+            match node.Symbol with
+            | Some s -> classifyConsoleOp s
+            | None -> None
+
+/// Extract Time operation from a node
+let extractTimeOp (graph: ProgramSemanticGraph) (node: PSGNode) : TimeOp option =
+    if not (node.SyntaxKind.StartsWith("App")) then None
+    else
+        let children = getChildNodes graph node
+        match getFunctionSymbolFromChildren children with
+        | Some symbol -> classifyTimeOp symbol
+        | None ->
+            match node.Symbol with
+            | Some s -> classifyTimeOp s
+            | None -> None
+
+/// Extract TextFormat operation from a node
+let extractTextFormatOp (graph: ProgramSemanticGraph) (node: PSGNode) : TextFormatOp option =
+    if not (node.SyntaxKind.StartsWith("App")) then None
+    else
+        let children = getChildNodes graph node
+        match getFunctionSymbolFromChildren children with
+        | Some symbol -> classifyTextFormatOp symbol
+        | None ->
+            match node.Symbol with
+            | Some s -> classifyTextFormatOp s
+            | None -> None
+
+/// Extract any Alloy operation from a node
+let extractAlloyOp (graph: ProgramSemanticGraph) (node: PSGNode) : AlloyOp option =
+    match extractConsoleOp graph node with
+    | Some op -> Some (Console op)
+    | None ->
+    match extractTimeOp graph node with
+    | Some op -> Some (Time op)
+    | None ->
+    match extractTextFormatOp graph node with
+    | Some op -> Some (TextFormat op)
+    | None -> None
+
+/// Extract arithmetic operation from an App node
+let extractArithOp (graph: ProgramSemanticGraph) (node: PSGNode) : ArithOp option =
+    if not (node.SyntaxKind.StartsWith("App")) then None
+    else
+        let children = getChildNodes graph node
+        match getFunctionSymbolFromChildren children with
+        | Some (:? FSharpMemberOrFunctionOrValue as mfv) -> classifyArithOp mfv
+        | _ -> None
+
+/// Extract comparison operation from an App node
+let extractCompareOp (graph: ProgramSemanticGraph) (node: PSGNode) : CompareOp option =
+    if not (node.SyntaxKind.StartsWith("App")) then None
+    else
+        let children = getChildNodes graph node
+        match getFunctionSymbolFromChildren children with
+        | Some (:? FSharpMemberOrFunctionOrValue as mfv) -> classifyCompareOp mfv
+        | _ -> None
+
+// ===================================================================
+// Node Predicates - Boolean checks for PSGNode
+// ===================================================================
+
+/// Check if node is a Console operation
+let isConsoleCall (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
+    extractConsoleOp graph node |> Option.isSome
+
+/// Check if node is a Time operation
+let isTimeCall (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
+    extractTimeOp graph node |> Option.isSome
+
+/// Check if node is a TextFormat operation
+let isTextFormatCall (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
+    extractTextFormatOp graph node |> Option.isSome
+
+/// Check if node is any Alloy operation
+let isAlloyCall (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
+    extractAlloyOp graph node |> Option.isSome
+
+/// Check if node is an arithmetic operation
+let isArithCall (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
+    extractArithOp graph node |> Option.isSome
+
+/// Check if node is a comparison operation
+let isCompareCall (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
+    extractCompareOp graph node |> Option.isSome
+
+// ===================================================================
+// Function Call Info Extraction
+// ===================================================================
+
+/// Extract function call information from an App node
+let extractFunctionCall (graph: ProgramSemanticGraph) (node: PSGNode) : FunctionCallInfo option =
+    if not (node.SyntaxKind.StartsWith("App")) then None
+    else
+        let children = getChildNodes graph node
+        match children with
+        | funcNode :: args ->
+            match funcNode.Symbol with
+            | Some sym ->
+                Some {
+                    FunctionSymbol = sym
+                    FunctionName = sym.FullName
+                    Arguments = args
+                }
+            | None -> None
+        | [] -> None
+
+// ===================================================================
+// MLIR Operation Names for Operators
+// ===================================================================
+
+/// Get MLIR operation name for arithmetic op
+let arithOpToMLIR (op: ArithOp) : string =
+    match op with
+    | Add -> "arith.addi"
+    | Sub -> "arith.subi"
+    | Mul -> "arith.muli"
+    | Div -> "arith.divsi"
+    | Mod -> "arith.remsi"
+    | BitwiseAnd -> "arith.andi"
+    | BitwiseOr -> "arith.ori"
+    | BitwiseXor -> "arith.xori"
+    | ShiftLeft -> "arith.shli"
+    | ShiftRight -> "arith.shrsi"
+    | Negate -> "arith.subi" // Will need special handling (0 - x)
+    | Not -> "arith.xori"    // Will need special handling (xor with -1)
+
+/// Get MLIR predicate for comparison op
+let compareOpToPredicate (op: CompareOp) : string =
+    match op with
+    | Eq -> "eq"
+    | Neq -> "ne"
+    | Lt -> "slt"
+    | Gt -> "sgt"
+    | Lte -> "sle"
+    | Gte -> "sge"
