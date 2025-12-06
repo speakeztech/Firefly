@@ -105,7 +105,10 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
     | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
         let funcName = if isEntryPoint then "main" else mfv.DisplayName.Replace(".", "_")
         let returnType = if isEntryPoint then "i32" else getFunctionReturnType mfv
-        let paramTypes = getFunctionParamTypes mfv
+        // Filter out unit parameters - they don't exist at runtime
+        let paramTypes =
+            getFunctionParamTypes mfv
+            |> List.filter (fun (_, typ) -> typ <> "()")
 
         // Build parameter list
         let paramStr =
@@ -144,16 +147,29 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
             // Emit exit syscall (syscall 60 on Linux x86-64)
             emitI64 60L >>= fun syscallNum ->
             freshSSAWithType "i64" >>= fun result ->
-            line (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"=r,{rax},{rdi}\" %s, %s : (i64, i64) -> i64"
+            line (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},~{rcx},~{r11},~{memory}\" %s, %s : (i64, i64) -> i64"
                 result syscallNum exitCode64) >>.
             emitReturn exitCode "i32"
         else
+            // Non-entry-point function - match return type
             match result with
             | Value(ssa, typ) -> emitReturn ssa typ
-            | Void -> emitReturnVoid
+            | Void ->
+                // Function body returned Void - check declared return type
+                if returnType = "()" then
+                    emitReturnVoid
+                else
+                    // Need to return a default value of the declared type
+                    emitDefaultValue returnType >>= fun defaultVal ->
+                    emitReturn defaultVal returnType
             | Error msg ->
                 line (sprintf "// ERROR: %s" msg) >>.
-                emitReturnVoid) >>.
+                // Still need valid return for MLIR
+                if returnType = "()" then
+                    emitReturnVoid
+                else
+                    emitDefaultValue returnType >>= fun defaultVal ->
+                    emitReturn defaultVal returnType) >>.
 
         popIndent >>.
         line "}"
@@ -177,7 +193,7 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
         emitExtsi exitCode "i32" "i64" >>= fun exitCode64 ->
         emitI64 60L >>= fun syscallNum ->
         freshSSAWithType "i64" >>= fun res ->
-        line (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"=r,{rax},{rdi}\" %s, %s : (i64, i64) -> i64"
+        line (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},~{rcx},~{r11},~{memory}\" %s, %s : (i64, i64) -> i64"
             res syscallNum exitCode64) >>.
         emitReturn exitCode "i32" >>.
 

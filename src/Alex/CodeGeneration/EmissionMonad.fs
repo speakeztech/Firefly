@@ -507,6 +507,27 @@ let emitReturn (value: string) (typ: string) : Emit<unit> =
 let emitReturnVoid : Emit<unit> =
     line "func.return"
 
+/// Emit a default value for a given MLIR type
+let emitDefaultValue (mlirType: string) : Emit<string> =
+    match mlirType with
+    | "i1" -> emitI32 0 // Will need truncation but this works
+    | "i8" | "i16" | "i32" -> emitI32 0
+    | "i64" -> emitI64 0L
+    | "f32" | "f64" ->
+        freshSSAWithType mlirType >>= fun ssa ->
+        line (sprintf "%s = arith.constant 0.0 : %s" ssa mlirType) >>.
+        emit ssa
+    | "!llvm.ptr" ->
+        freshSSAWithType "!llvm.ptr" >>= fun ssa ->
+        line (sprintf "%s = llvm.mlir.zero : !llvm.ptr" ssa) >>.
+        emit ssa
+    | "()" ->
+        // Unit type - return empty string, caller should use emitReturnVoid
+        emit ""
+    | _ ->
+        // Unknown type - try i32 default
+        emitI32 0
+
 /// Emit cf.br (unconditional branch)
 let emitBr (label: string) : Emit<unit> =
     line (sprintf "cf.br ^%s" label)

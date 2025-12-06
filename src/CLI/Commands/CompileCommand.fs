@@ -305,28 +305,35 @@ let execute (args: ParseResults<CompileArgs>) =
                     |> List.choose (fun id -> Map.tryFind id.Value markedPsg.Nodes)
                 | _ -> []
 
-            // Recursive tree printer
-            let rec printTree (node: Core.PSG.Types.PSGNode) (indent: string) (isLast: bool) =
-                let prefix = if isLast then "└── " else "├── "
-                let symbolInfo =
-                    node.Symbol
-                    |> Option.map (fun s -> sprintf " [%s]" s.DisplayName)
-                    |> Option.defaultValue ""
-                let typeInfo =
-                    node.Type
-                    |> Option.map (fun t ->
-                        try sprintf " : %s" (t.Format(FSharp.Compiler.Symbols.FSharpDisplayContext.Empty))
-                        with _ -> "")
-                    |> Option.defaultValue ""
-                let reachMark = if node.IsReachable then "" else " (UNREACHABLE)"
-                psgInfo.AppendLine(sprintf "%s%s%s%s%s%s" indent prefix node.SyntaxKind symbolInfo typeInfo reachMark) |> ignore
+            // Recursive tree printer with cycle detection
+            let rec printTree (node: Core.PSG.Types.PSGNode) (indent: string) (isLast: bool) (visited: Set<string>) =
+                let nodeId = node.Id.Value
+                if Set.contains nodeId visited then
+                    // Cycle detected - don't recurse
+                    let prefix = if isLast then "└── " else "├── "
+                    psgInfo.AppendLine(sprintf "%s%s(CYCLE: %s)" indent prefix node.SyntaxKind) |> ignore
+                else
+                    let prefix = if isLast then "└── " else "├── "
+                    let symbolInfo =
+                        node.Symbol
+                        |> Option.map (fun s -> sprintf " [%s]" s.DisplayName)
+                        |> Option.defaultValue ""
+                    let typeInfo =
+                        node.Type
+                        |> Option.map (fun t ->
+                            try sprintf " : %s" (t.Format(FSharp.Compiler.Symbols.FSharpDisplayContext.Empty))
+                            with _ -> "")
+                        |> Option.defaultValue ""
+                    let reachMark = if node.IsReachable then "" else " (UNREACHABLE)"
+                    psgInfo.AppendLine(sprintf "%s%s%s%s%s%s" indent prefix node.SyntaxKind symbolInfo typeInfo reachMark) |> ignore
 
-                let children = getChildren node
-                let childIndent = indent + (if isLast then "    " else "│   ")
-                children |> List.iteri (fun i child ->
-                    let isLastChild = (i = children.Length - 1)
-                    printTree child childIndent isLastChild
-                )
+                    let children = getChildren node
+                    let childIndent = indent + (if isLast then "    " else "│   ")
+                    let newVisited = Set.add nodeId visited
+                    children |> List.iteri (fun i child ->
+                        let isLastChild = (i = children.Length - 1)
+                        printTree child childIndent isLastChild newVisited
+                    )
 
             // Print tree for each entry point and reachable function
             for ep in markedPsg.EntryPoints do
@@ -335,7 +342,7 @@ let execute (args: ParseResults<CompileArgs>) =
                     psgInfo.AppendLine() |> ignore
                     let name = node.Symbol |> Option.map (fun s -> s.FullName) |> Option.defaultValue ep.Value
                     psgInfo.AppendLine(sprintf "ENTRY: %s" name) |> ignore
-                    printTree node "" true
+                    printTree node "" true Set.empty
                 | None -> ()
 
             // Also print other reachable functions (not entry points)
@@ -357,7 +364,7 @@ let execute (args: ParseResults<CompileArgs>) =
                 psgInfo.AppendLine() |> ignore
                 let name = funcNode.Symbol |> Option.map (fun s -> s.FullName) |> Option.defaultValue "(function)"
                 psgInfo.AppendLine(sprintf "FUNCTION: %s" name) |> ignore
-                printTree funcNode "" true
+                printTree funcNode "" true Set.empty
 
             psgInfo.AppendLine() |> ignore
             psgInfo.AppendLine("═══════════════════════════════════════════════════════════════════") |> ignore

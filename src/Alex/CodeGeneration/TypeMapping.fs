@@ -11,7 +11,10 @@ open FSharp.Compiler.Symbols
 /// Convert an F# type to its MLIR representation
 let rec fsharpTypeToMLIR (ftype: FSharpType) : string =
     try
-        if ftype.IsAbbreviation then
+        // Check for unit first, before other patterns
+        if ftype.HasTypeDefinition && ftype.TypeDefinition.DisplayName = "unit" then
+            "()"
+        elif ftype.IsAbbreviation then
             fsharpTypeToMLIR ftype.AbbreviatedType
         elif ftype.IsFunctionType then
             let args = ftype.GenericArguments
@@ -85,13 +88,28 @@ let rec fsharpTypeToMLIR (ftype: FSharpType) : string =
 /// Get the MLIR return type for a function/method
 let getFunctionReturnType (mfv: FSharpMemberOrFunctionOrValue) : string =
     try
-        fsharpTypeToMLIR mfv.ReturnParameter.Type
+        // For functions, the actual return type is the last type in the function type
+        // e.g., for `unit -> unit`, return type is unit
+        let fullType = mfv.FullType
+        if fullType.IsFunctionType then
+            // Walk through function type to get final return
+            let rec getReturnType (t: FSharpType) =
+                if t.IsFunctionType && t.GenericArguments.Count >= 2 then
+                    getReturnType t.GenericArguments.[1]
+                else
+                    t
+            fsharpTypeToMLIR (getReturnType fullType)
+        else
+            fsharpTypeToMLIR mfv.ReturnParameter.Type
     with _ -> "i32"
 
 /// Get MLIR parameter types for a function/method
 /// Returns list of (paramName, mlirType) pairs
+/// Note: Unit parameters should be filtered out by the caller
 let getFunctionParamTypes (mfv: FSharpMemberOrFunctionOrValue) : (string * string) list =
     try
+        // For unit -> T functions, CurriedParameterGroups may be empty or have a unit param
+        // We handle this at the call site by filtering out "()" types
         mfv.CurriedParameterGroups
         |> Seq.collect id
         |> Seq.map (fun p ->

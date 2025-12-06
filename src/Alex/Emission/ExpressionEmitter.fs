@@ -93,7 +93,7 @@ let private callEmitExpr : Emit<ExprResult> =
 let private emitWriteSyscall (fd: string) (buf: string) (len: string) : Emit<string> =
     emitI64 1L >>= fun sysnumReg ->
     freshSSAWithType "i64" >>= fun result ->
-    line (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"=r,{rax},{rdi},{rsi},{rdx}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
+    line (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
         result sysnumReg fd buf len) >>.
     emit result
 
@@ -110,6 +110,34 @@ let private emitWriteString (content: string) : Emit<ExprResult> =
 let private emitWriteLineString (content: string) : Emit<ExprResult> =
     emitWriteString (content + "\n")
 
+/// Emit write syscall for a dynamic string (NativeStr struct: {ptr, len})
+/// Extracts the pointer and length from the struct and calls write syscall
+let private emitWriteDynamicString (strStruct: string) (strType: string) : Emit<ExprResult> =
+    // Check if this is a NativeStr struct or a plain pointer
+    if strType = "!llvm.struct<(ptr, i64)>" then
+        // Extract pointer and length from the struct
+        freshSSAWithType "!llvm.ptr" >>= fun ptr ->
+        line (sprintf "%s = llvm.extractvalue %s[0] : !llvm.struct<(ptr, i64)>" ptr strStruct) >>.
+        freshSSAWithType "i64" >>= fun len ->
+        line (sprintf "%s = llvm.extractvalue %s[1] : !llvm.struct<(ptr, i64)>" len strStruct) >>.
+
+        // Write syscall with the actual length
+        emitI64 1L >>= fun sysWrite ->
+        emitI64 1L >>= fun fdStdout ->
+        freshSSAWithType "i64" >>= fun result ->
+        line (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
+            result sysWrite fdStdout ptr len) >>.
+        emit Void
+    else
+        // Fallback for plain pointer (shouldn't happen with proper typing)
+        emitI64 1L >>= fun sysWrite ->
+        emitI64 1L >>= fun fdStdout ->
+        emitI64 256L >>= fun maxLen ->  // Write up to 256 bytes
+        freshSSAWithType "i64" >>= fun result ->
+        line (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
+            result sysWrite fdStdout strStruct maxLen) >>.
+        emit Void
+
 /// Handler for Console operations
 let private handleConsole (op: ConsoleOp) : Emit<ExprResult> =
     getZipper >>= fun z ->
@@ -123,9 +151,8 @@ let private handleConsole (op: ConsoleOp) : Emit<ExprResult> =
             | None ->
                 atNode argNode callEmitExpr >>= fun argResult ->
                 match argResult with
-                | Value(ssa, _) ->
-                    line (sprintf "// Console.Write with dynamic content: %s" ssa) >>.
-                    emit Void
+                | Value(ssa, mlirType) ->
+                    emitWriteDynamicString ssa mlirType
                 | _ -> emit Void
         | _ ->
             emit (Error "Console.Write: missing argument")
@@ -137,16 +164,45 @@ let private handleConsole (op: ConsoleOp) : Emit<ExprResult> =
             | None ->
                 atNode argNode callEmitExpr >>= fun argResult ->
                 match argResult with
-                | Value(ssa, _) ->
-                    line (sprintf "// Console.WriteLine with dynamic content: %s" ssa) >>.
-                    emit Void
+                | Value(ssa, mlirType) ->
+                    emitWriteDynamicString ssa mlirType >>= fun _ ->
+                    emitWriteString "\n"
                 | _ -> emit Void
         | _ ->
             emit (Error "Console.WriteLine: missing argument")
     | ReadLine ->
-        line "// Console.ReadLine - not yet implemented" >>.
-        emit Void
+        // Allocate a 1024-byte buffer on the stack
+        emitI64 1024L >>= fun bufSize ->
+        emitAlloca "i8" bufSize >>= fun buffer ->
+
+        // Read from stdin (fd 0) into buffer
+        // syscall 0 = read(fd, buf, count)
+        emitI64 0L >>= fun sysRead ->
+        emitI64 0L >>= fun fdStdin ->
+        emitI64 1023L >>= fun maxRead ->  // Leave room for null terminator
+        freshSSAWithType "i64" >>= fun bytesRead ->
+        line (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
+            bytesRead sysRead fdStdin buffer maxRead) >>.
+
+        // Subtract 1 from bytesRead to exclude the trailing newline
+        // (read() includes the newline in the count)
+        emitI64 1L >>= fun one ->
+        freshSSAWithType "i64" >>= fun strLen ->
+        line (sprintf "%s = arith.subi %s, %s : i64" strLen bytesRead one) >>.
+
+        // Build a NativeStr struct: { ptr: !llvm.ptr, len: i64 }
+        // This is Firefly's native string representation
+        freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun strStruct ->
+        line (sprintf "%s = llvm.mlir.undef : !llvm.struct<(ptr, i64)>" strStruct) >>.
+        freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun strStruct1 ->
+        line (sprintf "%s = llvm.insertvalue %s, %s[0] : !llvm.struct<(ptr, i64)>" strStruct1 buffer strStruct) >>.
+        freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun strStruct2 ->
+        line (sprintf "%s = llvm.insertvalue %s, %s[1] : !llvm.struct<(ptr, i64)>" strStruct2 strLen strStruct1) >>.
+
+        emit (Value(strStruct2, "!llvm.struct<(ptr, i64)>"))
+
     | Read ->
+        // Similar to ReadLine but for readInto pattern
         line "// Console.Read - not yet implemented" >>.
         emit Void
 
@@ -221,6 +277,69 @@ let private tryEmitTime : Emit<ExprResult option> =
     getZipper >>= fun z ->
     match extractTimeOp z.Graph z.Focus with
     | Some op -> handleTime op |>> Some
+    | None -> emit None
+
+// ===================================================================
+// Memory Emission Handlers
+// ===================================================================
+
+/// Handler for Memory operations
+let private handleMemory (op: MemoryOp) : Emit<ExprResult> =
+    getZipper >>= fun z ->
+    let children = PSGZipper.childNodes z
+    match op with
+    | StackBuffer _ ->
+        // stackBuffer<T>(size) - allocate stack memory
+        // Children: TypeApp:byte [stackBuffer], Const:Int32 256
+        match children with
+        | _ :: sizeNode :: _ ->
+            // Get size from constant
+            match extractInt32FromKind sizeNode.SyntaxKind with
+            | Some size ->
+                // Emit stack allocation: %ptr = llvm.alloca %size x i8 : (i64) -> !llvm.ptr
+                emitI64 (int64 size) >>= fun sizeReg ->
+                emitAlloca "i8" sizeReg >>= fun ptr ->
+                emit (Value(ptr, "!llvm.ptr"))
+            | None ->
+                // Dynamic size - evaluate the size expression
+                atNode sizeNode callEmitExpr >>= fun sizeResult ->
+                match sizeResult with
+                | Value(sizeReg, "i32") ->
+                    // Convert i32 to i64 for alloca
+                    emitExtsi sizeReg "i32" "i64" >>= fun sizeReg64 ->
+                    emitAlloca "i8" sizeReg64 >>= fun ptr ->
+                    emit (Value(ptr, "!llvm.ptr"))
+                | Value(sizeReg, "i64") ->
+                    emitAlloca "i8" sizeReg >>= fun ptr ->
+                    emit (Value(ptr, "!llvm.ptr"))
+                | _ -> emit (Error "stackBuffer size must be an integer")
+        | _ -> emit (Error "stackBuffer requires size argument")
+
+    | SpanToString ->
+        // spanToString(span) - convert bytes to string (for now, just return pointer)
+        match children with
+        | _ :: spanNode :: _ ->
+            atNode spanNode callEmitExpr >>= fun spanResult ->
+            match spanResult with
+            | Value(ptr, _) -> emit (Value(ptr, "!llvm.ptr"))
+            | _ -> emit (Error "spanToString requires span argument")
+        | _ -> emit (Error "spanToString requires span argument")
+
+    | AsReadOnlySpan ->
+        // buffer.AsReadOnlySpan(start, length) - get span from buffer
+        match children with
+        | bufferNode :: _ ->
+            atNode bufferNode callEmitExpr >>= fun bufferResult ->
+            match bufferResult with
+            | Value(ptr, _) -> emit (Value(ptr, "!llvm.ptr"))
+            | _ -> emit (Error "AsReadOnlySpan requires buffer")
+        | _ -> emit (Error "AsReadOnlySpan requires buffer")
+
+/// Try to emit as Memory operation
+let private tryEmitMemory : Emit<ExprResult option> =
+    getZipper >>= fun z ->
+    match extractMemoryOp z.Graph z.Focus with
+    | Some op -> handleMemory op |>> Some
     | None -> emit None
 
 // ===================================================================
@@ -598,6 +717,92 @@ let private tryEmitMutableSet : Emit<ExprResult option> =
     | None -> emit None
 
 // ===================================================================
+// Function Call Handler
+// ===================================================================
+
+/// Handler for user-defined function calls (not Alloy, not operators)
+let private handleFunctionCall (info: FunctionCallInfo) : Emit<ExprResult> =
+    // Get the function's MLIR name - use DisplayName and sanitize
+    let funcName =
+        info.FunctionName
+            .Split('.')
+            |> Array.last
+            |> fun s -> s.Replace(" ", "_")
+
+    // Get the function's return type
+    let returnType =
+        match info.FunctionSymbol with
+        | :? FSharp.Compiler.Symbols.FSharpMemberOrFunctionOrValue as mfv ->
+            getFunctionReturnType mfv
+        | _ -> "i32"
+
+    // Emit arguments
+    let args = info.Arguments
+
+    // For unit argument, emit no actual arguments
+    let emitArgs : Emit<(string * string) list> =
+        args
+        |> List.filter (fun arg -> not (arg.SyntaxKind.StartsWith("Const:Unit") || arg.SyntaxKind = "Const:()"))
+        |> traverse (fun argNode ->
+            atNode argNode callEmitExpr >>= fun result ->
+            match result with
+            | Value(ssa, typ) -> emit (ssa, typ)
+            | Void -> emit ("", "()")  // Unit value
+            | Error msg -> emit ("", msg)  // Will be filtered out
+        )
+        |>> List.filter (fun (ssa, _) -> ssa <> "")
+
+    emitArgs >>= fun argPairs ->
+
+    // Build the function call
+    if returnType = "()" then
+        // Void return - no result SSA
+        let argStr = argPairs |> List.map fst |> String.concat ", "
+        let argTypeStr = argPairs |> List.map snd |> String.concat ", "
+        if argPairs.IsEmpty then
+            line (sprintf "func.call @%s() : () -> ()" funcName) >>.
+            emit Void
+        else
+            line (sprintf "func.call @%s(%s) : (%s) -> ()" funcName argStr argTypeStr) >>.
+            emit Void
+    else
+        // Has return value
+        freshSSAWithType returnType >>= fun result ->
+        let argStr = argPairs |> List.map fst |> String.concat ", "
+        let argTypeStr = argPairs |> List.map snd |> String.concat ", "
+        if argPairs.IsEmpty then
+            line (sprintf "%s = func.call @%s() : () -> %s" result funcName returnType) >>.
+            emit (Value(result, returnType))
+        else
+            line (sprintf "%s = func.call @%s(%s) : (%s) -> %s" result funcName argStr argTypeStr returnType) >>.
+            emit (Value(result, returnType))
+
+/// Try to emit as function call (for user-defined functions, not Alloy ops or operators)
+let private tryEmitFunctionCall : Emit<ExprResult option> =
+    getZipper >>= fun z ->
+    let node = z.Focus
+
+    // Only handle App nodes that aren't handled by other classifiers
+    if not (node.SyntaxKind.StartsWith("App")) then
+        emit None
+    else
+        // Check if this is an Alloy operation - if so, let the Alloy handler deal with it
+        match extractAlloyOp z.Graph node with
+        | Some _ -> emit None  // Let Alloy handler deal with it
+        | None ->
+            // Check if this is an arithmetic or comparison operator
+            match extractArithOp z.Graph node with
+            | Some _ -> emit None  // Let arith handler deal with it
+            | None ->
+                match extractCompareOp z.Graph node with
+                | Some _ -> emit None  // Let compare handler deal with it
+                | None ->
+                    // This is a user-defined function call
+                    match extractFunctionCall z.Graph node with
+                    | Some info -> handleFunctionCall info |>> Some
+                    | None -> emit None
+
+// ===================================================================
 // Type Application Handler
 // ===================================================================
 
@@ -658,11 +863,17 @@ let emitExpr : Emit<ExprResult> =
         // Time operations
         tryEmitTime
 
+        // Memory operations (stackBuffer, spanToString, etc.)
+        tryEmitMemory
+
         // Arithmetic operations
         tryEmitArith
 
         // Comparison operations
         tryEmitCompare
+
+        // User-defined function calls (after Alloy and operators)
+        tryEmitFunctionCall
 
         // Structural patterns
         tryEmitConst

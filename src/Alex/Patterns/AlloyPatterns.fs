@@ -49,11 +49,18 @@ type TextFormatOp =
     | FloatToString
     | BoolToString
 
+/// Memory operation types
+type MemoryOp =
+    | StackBuffer of elementType: string option  // stackBuffer<T>
+    | SpanToString  // Convert Span<byte> to string
+    | AsReadOnlySpan  // Get read-only span from buffer
+
 /// All recognized Alloy operations
 type AlloyOp =
     | Console of ConsoleOp
     | Time of TimeOp
     | TextFormat of TextFormatOp
+    | Memory of MemoryOp
 
 /// Arithmetic operation types
 type ArithOp =
@@ -165,6 +172,20 @@ let classifyTextFormatOp (symbol: FSharpSymbol) : TextFormatOp option =
     else
         None
 
+/// Classify a Memory operation from a symbol
+let classifyMemoryOp (symbol: FSharpSymbol) : MemoryOp option =
+    let fullName = symbol.FullName
+    let displayName = symbol.DisplayName
+
+    if displayName = "stackBuffer" || fullName.Contains("Memory.stackBuffer") then
+        Some (StackBuffer None)  // Type parameter extracted separately if needed
+    elif displayName = "spanToString" || fullName.Contains("spanToString") then
+        Some SpanToString
+    elif displayName = "AsReadOnlySpan" || fullName.Contains("AsReadOnlySpan") then
+        Some AsReadOnlySpan
+    else
+        None
+
 /// Classify an arithmetic operator from an MFV
 let classifyArithOp (mfv: FSharpMemberOrFunctionOrValue) : ArithOp option =
     match mfv.CompiledName with
@@ -234,6 +255,18 @@ let extractTextFormatOp (graph: ProgramSemanticGraph) (node: PSGNode) : TextForm
             | Some s -> classifyTextFormatOp s
             | None -> None
 
+/// Extract Memory operation from a node
+let extractMemoryOp (graph: ProgramSemanticGraph) (node: PSGNode) : MemoryOp option =
+    if not (node.SyntaxKind.StartsWith("App")) then None
+    else
+        let children = getChildNodes graph node
+        match getFunctionSymbolFromChildren children with
+        | Some symbol -> classifyMemoryOp symbol
+        | None ->
+            match node.Symbol with
+            | Some s -> classifyMemoryOp s
+            | None -> None
+
 /// Extract any Alloy operation from a node
 let extractAlloyOp (graph: ProgramSemanticGraph) (node: PSGNode) : AlloyOp option =
     match extractConsoleOp graph node with
@@ -244,6 +277,9 @@ let extractAlloyOp (graph: ProgramSemanticGraph) (node: PSGNode) : AlloyOp optio
     | None ->
     match extractTextFormatOp graph node with
     | Some op -> Some (TextFormat op)
+    | None ->
+    match extractMemoryOp graph node with
+    | Some op -> Some (Memory op)
     | None -> None
 
 /// Extract arithmetic operation from an App node
@@ -279,6 +315,10 @@ let isTimeCall (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
 /// Check if node is a TextFormat operation
 let isTextFormatCall (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
     extractTextFormatOp graph node |> Option.isSome
+
+/// Check if node is a Memory operation
+let isMemoryCall (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
+    extractMemoryOp graph node |> Option.isSome
 
 /// Check if node is any Alloy operation
 let isAlloyCall (graph: ProgramSemanticGraph) (node: PSGNode) : bool =

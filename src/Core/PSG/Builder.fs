@@ -402,11 +402,83 @@ and private processPattern pat parentId fileName context graph =
                     Edges = unionCaseEdge :: graph''.Edges }
             else
                 { graph'' with SymbolTable = updatedSymbolTable }
-        | None -> 
+        | None ->
             printfn "[BUILDER] Warning: Pattern '%s' at %s has no symbol correlation" identText (range.ToString())
             graph''
-        
-    | _ -> graph
+
+    // Parenthesized patterns - transparent, process inner
+    | SynPat.Paren(innerPat, range) ->
+        processPattern innerPat parentId fileName context graph
+
+    // Typed patterns (pat : type) - process inner pattern
+    | SynPat.Typed(innerPat, typeSig, range) ->
+        processPattern innerPat parentId fileName context graph
+
+    // Tuple patterns ((a, b, c))
+    | SynPat.Tuple(isStruct, pats, commaRanges, range) ->
+        let tupleNode = createNode "Pattern:Tuple" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add tupleNode.Id.Value tupleNode graph.Nodes }
+        let graph'' = addChildToParent tupleNode.Id parentId graph'
+        pats |> List.fold (fun g pat ->
+            processPattern pat (Some tupleNode.Id) fileName context g
+        ) graph''
+
+    // Wildcard pattern (_)
+    | SynPat.Wild(range) ->
+        let wildNode = createNode "Pattern:Wildcard" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add wildNode.Id.Value wildNode graph.Nodes }
+        addChildToParent wildNode.Id parentId graph'
+
+    // Constant patterns (match with 0 | 1 | ...)
+    | SynPat.Const(constant, range) ->
+        let constNode = createNode "Pattern:Const" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add constNode.Id.Value constNode graph.Nodes }
+        addChildToParent constNode.Id parentId graph'
+
+    // Array or list patterns ([], [a; b], [||], [|a; b|])
+    | SynPat.ArrayOrList(isArray, pats, range) ->
+        let kind = if isArray then "Pattern:Array" else "Pattern:List"
+        let arrNode = createNode kind range fileName None parentId
+        let graph' = { graph with Nodes = Map.add arrNode.Id.Value arrNode graph.Nodes }
+        let graph'' = addChildToParent arrNode.Id parentId graph'
+        pats |> List.fold (fun g pat ->
+            processPattern pat (Some arrNode.Id) fileName context g
+        ) graph''
+
+    // List cons pattern (head :: tail)
+    | SynPat.ListCons(headPat, tailPat, range, trivia) ->
+        let consNode = createNode "Pattern:ListCons" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add consNode.Id.Value consNode graph.Nodes }
+        let graph'' = addChildToParent consNode.Id parentId graph'
+        let graph''' = processPattern headPat (Some consNode.Id) fileName context graph''
+        processPattern tailPat (Some consNode.Id) fileName context graph'''
+
+    // As pattern (pat as name)
+    | SynPat.As(lhsPat, rhsPat, range) ->
+        let asNode = createNode "Pattern:As" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add asNode.Id.Value asNode graph.Nodes }
+        let graph'' = addChildToParent asNode.Id parentId graph'
+        let graph''' = processPattern lhsPat (Some asNode.Id) fileName context graph''
+        processPattern rhsPat (Some asNode.Id) fileName context graph'''
+
+    // Type test pattern (:? type)
+    | SynPat.IsInst(typeSig, range) ->
+        let isInstNode = createNode "Pattern:IsInst" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add isInstNode.Id.Value isInstNode graph.Nodes }
+        addChildToParent isInstNode.Id parentId graph'
+
+    // Null pattern
+    | SynPat.Null(range) ->
+        let nullNode = createNode "Pattern:Null" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add nullNode.Id.Value nullNode graph.Nodes }
+        addChildToParent nullNode.Id parentId graph'
+
+    // Hard stop on unhandled patterns
+    | other ->
+        let patTypeName = other.GetType().Name
+        let range = other.Range
+        failwithf "[BUILDER] ERROR: Unhandled pattern type '%s' at %s in file %s. PSG construction cannot continue with unknown AST nodes."
+            patTypeName (range.ToString()) fileName
 
 /// ENHANCED expression processing (FCS 43.9.300 compatible)
 and private processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: string) 
@@ -740,10 +812,130 @@ and private processExpression (expr: SynExpr) (parentId: NodeId option) (fileNam
         let graph'''' = processExpression enumExpr (Some forEachNode.Id) fileName context graph'''
         processExpression bodyExpr (Some forEachNode.Id) fileName context graph''''
 
-    // Add other common expression cases as needed...
-    | _ ->
-        // Default case for unhandled expressions
-        graph
+    // Type-annotated expressions (expr : type)
+    | SynExpr.Typed(innerExpr, typeSig, range) ->
+        // The type annotation is metadata - process the inner expression with same parent
+        processExpression innerExpr parentId fileName context graph
+
+    // SRTP trait calls (statically resolved type parameters)
+    | SynExpr.TraitCall(typeArgs, memberSig, argExpr, range) ->
+        let traitNode = createNode "TraitCall" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add traitNode.Id.Value traitNode graph.Nodes }
+        let graph'' = addChildToParent traitNode.Id parentId graph'
+        processExpression argExpr (Some traitNode.Id) fileName context graph''
+
+    // Computed arrays/lists ([| for ... |], [ for ... ])
+    | SynExpr.ArrayOrListComputed(isArray, innerExpr, range) ->
+        let kind = if isArray then "ArrayComputed" else "ListComputed"
+        let arrNode = createNode kind range fileName None parentId
+        let graph' = { graph with Nodes = Map.add arrNode.Id.Value arrNode graph.Nodes }
+        let graph'' = addChildToParent arrNode.Id parentId graph'
+        processExpression innerExpr (Some arrNode.Id) fileName context graph''
+
+    // Literal arrays/lists ([a; b], [|a; b|])
+    | SynExpr.ArrayOrList(isArray, exprs, range) ->
+        let kind = if isArray then "Array" else "List"
+        let arrNode = createNode kind range fileName None parentId
+        let graph' = { graph with Nodes = Map.add arrNode.Id.Value arrNode graph.Nodes }
+        let graph'' = addChildToParent arrNode.Id parentId graph'
+        exprs |> List.fold (fun g expr ->
+            processExpression expr (Some arrNode.Id) fileName context g
+        ) graph''
+
+    // Address-of operator (&expr or &&expr)
+    | SynExpr.AddressOf(isByRef, innerExpr, refRange, range) ->
+        let addrNode = createNode "AddressOf" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add addrNode.Id.Value addrNode graph.Nodes }
+        let graph'' = addChildToParent addrNode.Id parentId graph'
+        processExpression innerExpr (Some addrNode.Id) fileName context graph''
+
+    // Object construction (new Type(...))
+    | SynExpr.New(isProtected, typeName, argExpr, range) ->
+        let newNode = createNode "New" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add newNode.Id.Value newNode graph.Nodes }
+        let graph'' = addChildToParent newNode.Id parentId graph'
+        processExpression argExpr (Some newNode.Id) fileName context graph''
+
+    // Null literal
+    | SynExpr.Null(range) ->
+        let nullNode = createNode "Const:Null" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add nullNode.Id.Value nullNode graph.Nodes }
+        addChildToParent nullNode.Id parentId graph'
+
+    // Simple mutable variable set (x <- expr)
+    | SynExpr.Set(targetExpr, rhsExpr, range) ->
+        let setNode = createNode "MutableSet" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add setNode.Id.Value setNode graph.Nodes }
+        let graph'' = addChildToParent setNode.Id parentId graph'
+        let graph''' = processExpression targetExpr (Some setNode.Id) fileName context graph''
+        processExpression rhsExpr (Some setNode.Id) fileName context graph'''
+
+    // Match lambda (function | pat -> expr | ...)
+    | SynExpr.MatchLambda(isExnMatch, keywordRange, clauses, spBind, range) ->
+        let matchLambdaNode = createNode "MatchLambda" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add matchLambdaNode.Id.Value matchLambdaNode graph.Nodes }
+        let graph'' = addChildToParent matchLambdaNode.Id parentId graph'
+
+        clauses |> List.fold (fun graphAcc clause ->
+            let (SynMatchClause(pat, whenExpr, resultExpr, clauseRange, _, _)) = clause
+            let clauseNode = createNode "MatchClause" clauseRange fileName None (Some matchLambdaNode.Id)
+            let graphAcc' = { graphAcc with Nodes = Map.add clauseNode.Id.Value clauseNode graphAcc.Nodes }
+            let graphAcc'' = addChildToParent clauseNode.Id (Some matchLambdaNode.Id) graphAcc'
+            let graphAcc''' = processPattern pat (Some clauseNode.Id) fileName context graphAcc''
+            let graphAcc'''' =
+                match whenExpr with
+                | Some whenE -> processExpression whenE (Some clauseNode.Id) fileName context graphAcc'''
+                | None -> graphAcc'''
+            processExpression resultExpr (Some clauseNode.Id) fileName context graphAcc''''
+        ) graph''
+
+    // Hard stop on unhandled expressions - compiler must be explicit about what it handles
+    | other ->
+        let exprTypeName = other.GetType().Name
+        let range = other.Range
+        failwithf "[BUILDER] ERROR: Unhandled expression type '%s' at %s in file %s. PSG construction cannot continue with unknown AST nodes."
+            exprTypeName (range.ToString()) fileName
+
+/// Process a type definition (type Foo = ...)
+and private processTypeDefn (typeDefn: SynTypeDefn) parentId fileName context graph =
+    let (SynTypeDefn(componentInfo, typeRepr, members, implicitCtor, range, trivia)) = typeDefn
+    let (SynComponentInfo(attributes, typeParams, constraints, longId, xmlDoc, preferPostfix, accessibility, range2)) = componentInfo
+
+    let typeName = longId |> List.map (fun id -> id.idText) |> String.concat "."
+    let syntaxKind = sprintf "TypeDefn:%s" typeName
+    let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+    let typeNode = createNode syntaxKind range fileName symbol parentId
+
+    let graph' = { graph with Nodes = Map.add typeNode.Id.Value typeNode graph.Nodes }
+    let graph'' = addChildToParent typeNode.Id parentId graph'
+
+    let graph''' =
+        match symbol with
+        | Some sym -> { graph'' with SymbolTable = Map.add sym.DisplayName sym graph''.SymbolTable }
+        | None -> graph''
+
+    // Process members (methods, properties, etc.)
+    members |> List.fold (fun g memberDefn ->
+        processMemberDefn memberDefn (Some typeNode.Id) fileName context g
+    ) graph'''
+
+/// Process a member definition (member this.Foo = ...)
+and private processMemberDefn (memberDefn: SynMemberDefn) parentId fileName context graph =
+    match memberDefn with
+    | SynMemberDefn.Member(binding, range) ->
+        processBinding binding parentId fileName context graph
+
+    | SynMemberDefn.LetBindings(bindings, _, _, range) ->
+        bindings |> List.fold (fun g binding ->
+            processBinding binding parentId fileName context g
+        ) graph
+
+    // For now, skip other member types (abstract, interface, etc.) with a node marker
+    | other ->
+        let memberTypeName = other.GetType().Name
+        let markerNode = createNode (sprintf "MemberDefn:%s" memberTypeName) other.Range fileName None parentId
+        let graph' = { graph with Nodes = Map.add markerNode.Id.Value markerNode graph.Nodes }
+        addChildToParent markerNode.Id parentId graph'
 
 /// Process a module declaration (preserved from original)
 and private processModuleDecl decl parentId fileName context graph =
@@ -782,8 +974,22 @@ and private processModuleDecl decl parentId fileName context graph =
         decls |> List.fold (fun g decl ->
             processModuleDecl decl (Some nestedModuleNode.Id) fileName context g
         ) graph'''
-        
-    | _ -> graph
+
+    // Type declarations (type Foo = ..., type Bar = { ... }, etc.)
+    | SynModuleDecl.Types(typeDefns, range) ->
+        let typesNode = createNode "TypeDeclarations" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add typesNode.Id.Value typesNode graph.Nodes }
+        let graph'' = addChildToParent typesNode.Id parentId graph'
+
+        typeDefns |> List.fold (fun g typeDefn ->
+            processTypeDefn typeDefn (Some typesNode.Id) fileName context g
+        ) graph''
+
+    // Hard stop on unhandled module declarations
+    | other ->
+        let declTypeName = other.GetType().Name
+        failwithf "[BUILDER] ERROR: Unhandled module declaration type '%s' in file %s. PSG construction cannot continue with unknown AST nodes."
+            declTypeName fileName
 
 /// Process implementation file (preserved from original)
 let rec private processImplFile (implFile: SynModuleOrNamespace) context graph =
