@@ -7,7 +7,9 @@ open FSharp.Compiler.Text
 open Core.IngestionPipeline
 open Core.FCS.ProjectContext
 open Core.Utilities.IntermediateWriter
+open Core.PSG.Types
 open Alex.Pipeline.CompilationTypes
+open Alex.Emission.FunctionEmitter
 
 // ===================================================================
 // Pipeline Integration Types
@@ -115,6 +117,22 @@ let generateStatistics (pipelineResult: PipelineResult) (startTime: DateTime) : 
         EliminatedSymbols = eliminatedSymbols
         CompilationTimeMs = float duration.TotalMilliseconds
     }
+
+// ===================================================================
+// MLIR Generation via Alex
+// ===================================================================
+
+/// Generate MLIR from PSG using the Alex emission infrastructure
+let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targetTriple: string) : string =
+    // Use Alex FunctionEmitter to generate MLIR
+    let mlirContent = emitProgram psg
+
+    // Wrap with module header comments
+    let header =
+        sprintf "// Firefly-generated MLIR for %s (via Alex)\n// Target: %s\n// PSG: %d nodes, %d edges, %d entry points\n\n"
+            projectName targetTriple psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length
+
+    header + mlirContent
 
 // ===================================================================
 // Intermediate File Management

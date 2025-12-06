@@ -1,15 +1,145 @@
 PSG Summary for HelloWorld
-Nodes: 1540
-Edges: 1712
+Nodes: 1723
+Edges: 1933
 Entry Points: 1
-Symbols: 249
+Symbols: 254
+Reachable Nodes: 356 (20.7%)
 
 Entry Points:
   - HelloWorld.main (Binding:EntryPoint)
 
-Symbol Table:
+═══════════════════════════════════════════════════════════════════
+Reachable Node Tree (for emission debugging)
+═══════════════════════════════════════════════════════════════════
+
+ENTRY: HelloWorld.main
+└── Binding:EntryPoint [main] : Microsoft.FSharp.Core.string Microsoft.FSharp.Core.array -> Microsoft.FSharp.Core.int
+    ├── Pattern:LongIdent:main [main] : Microsoft.FSharp.Core.string Microsoft.FSharp.Core.array -> Microsoft.FSharp.Core.int
+    └── LetOrUse:Let [main] : Microsoft.FSharp.Core.string Microsoft.FSharp.Core.array -> Microsoft.FSharp.Core.int
+        ├── Binding [buffer] : Alloy.Memory.StackBuffer<Microsoft.FSharp.Core.byte>
+        │   ├── Pattern:Named:buffer [buffer] : Alloy.Memory.StackBuffer<Microsoft.FSharp.Core.byte>
+        │   └── App:FunctionCall [stackBuffer] : Microsoft.FSharp.Core.int -> Alloy.Memory.StackBuffer<'T>
+        │       ├── TypeApp:byte [stackBuffer] : Microsoft.FSharp.Core.int -> Alloy.Memory.StackBuffer<'T>
+        │       │   └── Ident:stackBuffer [stackBuffer] : Microsoft.FSharp.Core.int -> Alloy.Memory.StackBuffer<'T>
+        │       └── Const:Int32 64 : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.EntryPointAttribute (UNREACHABLE)
+        ├── App:FunctionCall [Prompt] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+        │   ├── Ident:Prompt [Prompt] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+        │   └── Const:String ("What is your name? ", Regular, (17,11--17,32)) : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.EntryPointAttribute (UNREACHABLE)
+        └── LetOrUse:Let [name] : Microsoft.FSharp.Core.string
+            ├── Binding [name] : Microsoft.FSharp.Core.string
+            │   ├── Pattern:Named:name [name] : Microsoft.FSharp.Core.string
+            │   └── Match : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.EntryPointAttribute (UNREACHABLE)
+            │       ├── App:FunctionCall [readInto] : ^T -> Alloy.Core.Result<Microsoft.FSharp.Core.int,Microsoft.FSharp.Core.string>
+            │       │   ├── Ident:readInto [readInto] : ^T -> Alloy.Core.Result<Microsoft.FSharp.Core.int,Microsoft.FSharp.Core.string>
+            │       │   └── Ident:buffer [buffer] : Alloy.Memory.StackBuffer<Microsoft.FSharp.Core.byte>
+            │       ├── MatchClause : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.EntryPointAttribute (UNREACHABLE)
+            │       │   ├── Pattern:UnionCase:Ok [Ok] : 'T -> Alloy.Core.Result<'T,'Error>
+            │       │   └── Const:String ("User", Regular, (23,23--23,29)) : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.EntryPointAttribute (UNREACHABLE)
+            │       └── MatchClause : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.EntryPointAttribute (UNREACHABLE)
+            │           ├── Pattern:UnionCase:Error [Error] : 'Error -> Alloy.Core.Result<'T,'Error>
+            │           └── Const:String ("Unknown", Regular, (24,21--24,30)) : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.EntryPointAttribute (UNREACHABLE)
+            ├── App:FunctionCall [Write] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+            │   ├── Ident:Write [Write] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+            │   └── Const:String ("Hello, ", Regular, (27,10--27,19)) : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.EntryPointAttribute (UNREACHABLE)
+            ├── App:FunctionCall [Write] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+            │   ├── Ident:Write [Write] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+            │   └── Ident:name [name] : Microsoft.FSharp.Core.string
+            ├── App:FunctionCall [WriteLine] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+            │   ├── Ident:WriteLine [WriteLine] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+            │   └── Const:String ("!", Regular, (29,14--29,17)) : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.EntryPointAttribute (UNREACHABLE)
+            └── Const:Int32 0 : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.EntryPointAttribute (UNREACHABLE)
+
+FUNCTION: Alloy.Console.readInto
+└── Binding [readInto] : ^T -> Alloy.Core.Result<Microsoft.FSharp.Core.int,Microsoft.FSharp.Core.string>
+    └── Pattern:LongIdent:readInto [readInto] : ^T -> Alloy.Core.Result<Microsoft.FSharp.Core.int,Microsoft.FSharp.Core.string>
+
+FUNCTION: Alloy.Console.Format.formatInt
+└── Binding [formatInt] : Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+    └── Pattern:LongIdent:formatInt [formatInt] : Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+
+FUNCTION: Alloy.Console.writeBytes
+└── Binding [writeBytes] : Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+    └── Pattern:LongIdent:writeBytes [writeBytes] : Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+
+FUNCTION: Alloy.Console.Prompt
+└── Binding [Prompt] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+    ├── Pattern:LongIdent:Prompt [Prompt] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+    └── App:FunctionCall [Write] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+        ├── Ident:Write [Write] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+        └── Ident:message [message] : Microsoft.FSharp.Core.string
+
+FUNCTION: Alloy.Console.writeNewLine
+└── Binding [writeNewLine] : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int
+    └── Pattern:LongIdent:writeNewLine [writeNewLine] : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int
+
+FUNCTION: Alloy.Console.Write
+└── Binding [Write] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+    ├── Pattern:LongIdent:Write [Write] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+    └── LetOrUse:Let [Write] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+        ├── Binding [buffer] : Alloy.Memory.StackBuffer<Microsoft.FSharp.Core.byte>
+        │   ├── Pattern:Named:buffer [buffer] : Alloy.Memory.StackBuffer<Microsoft.FSharp.Core.byte>
+        │   └── App:FunctionCall [NativePtr] : Microsoft.FSharp.NativeInterop.NativePtr
+        │       ├── TypeApp:byte [stackalloc] : Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.nativeptr<'T>
+        │       │   └── LongIdent:NativePtr.stackalloc [stackalloc] : Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.nativeptr<'T>
+        │       └── Const:Int32 4096 : 'T1 -> ('T1 -> 'U) -> 'U (UNREACHABLE)
+        └── LetOrUse:Let [writeBytes] : Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+            ├── Binding [len] : 'T Microsoft.FSharp.Core.array -> Microsoft.FSharp.Core.int
+            │   ├── Pattern:Named:len [len] : 'T Microsoft.FSharp.Core.array -> Microsoft.FSharp.Core.int
+            │   └── App:FunctionCall [stringToBytes] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+            │       ├── App:FunctionCall [stringToBytes] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+            │       │   ├── App:FunctionCall [stringToBytes] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+            │       │   │   ├── Ident:stringToBytes [stringToBytes] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+            │       │   │   └── Ident:message [message] : Microsoft.FSharp.Core.string
+            │       │   └── Ident:buffer [buffer] : Alloy.Memory.StackBuffer<Microsoft.FSharp.Core.byte>
+            │       └── Const:Int32 4096 : 'T1 -> ('T1 -> 'U) -> 'U (UNREACHABLE)
+            └── App:FunctionCall [writeBytes] : Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+                ├── App:FunctionCall [writeBytes] : Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+                │   ├── LongIdent:op_PipeRight [(|>)] : 'T1 -> ('T1 -> 'U) -> 'U
+                │   └── App:FunctionCall [writeBytes] : Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+                │       ├── App:FunctionCall [writeBytes] : Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+                │       │   ├── App:FunctionCall [writeBytes] : Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+                │       │   │   ├── Ident:writeBytes [writeBytes] : Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+                │       │   │   └── Ident:STDOUT_FILENO [STDOUT_FILENO] : Microsoft.FSharp.Core.int
+                │       │   └── Ident:buffer [buffer] : Alloy.Memory.StackBuffer<Microsoft.FSharp.Core.byte>
+                │       └── Ident:len [len] : 'T Microsoft.FSharp.Core.array -> Microsoft.FSharp.Core.int
+                └── Ident:ignore [ignore] : 'T -> Microsoft.FSharp.Core.unit
+
+FUNCTION: Alloy.Console.WriteLine
+└── Binding [WriteLine] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+    ├── Pattern:LongIdent:WriteLine [WriteLine] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+    ├── App:FunctionCall [Write] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+    │   ├── Ident:Write [Write] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.unit
+    │   └── Ident:message [message] : Microsoft.FSharp.Core.string
+    └── App:FunctionCall [writeNewLine] : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int
+        ├── App:FunctionCall [writeNewLine] : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int
+        │   ├── LongIdent:op_PipeRight [(|>)] : 'T1 -> ('T1 -> 'U) -> 'U
+        │   └── App:FunctionCall [writeNewLine] : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int
+        │       ├── Ident:writeNewLine [writeNewLine] : Microsoft.FSharp.Core.unit -> Microsoft.FSharp.Core.int
+        │       └── Const:Unit : 'T1 -> ('T1 -> 'U) -> 'U (UNREACHABLE)
+        └── Ident:ignore [ignore] : 'T -> Microsoft.FSharp.Core.unit
+
+FUNCTION: Alloy.Memory.stackBuffer
+└── Binding [stackBuffer] : Microsoft.FSharp.Core.int -> Alloy.Memory.StackBuffer<'T>
+    └── Pattern:LongIdent:stackBuffer [stackBuffer] : Microsoft.FSharp.Core.int -> Alloy.Memory.StackBuffer<'T>
+
+FUNCTION: Alloy.Text.String.replace
+└── Binding [replace] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.string
+    └── Pattern:LongIdent:replace [replace] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.string
+
+FUNCTION: Alloy.Text.UTF8.stringToBytes
+└── Binding [stringToBytes] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+    └── Pattern:LongIdent:stringToBytes [stringToBytes] : Microsoft.FSharp.Core.string -> Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.int
+
+FUNCTION: Alloy.Text.UTF8.bytesToString
+└── Binding [bytesToString] : Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.string
+    └── Pattern:LongIdent:bytesToString [bytesToString] : Microsoft.FSharp.Core.nativeptr<Microsoft.FSharp.Core.byte> -> Microsoft.FSharp.Core.int -> Microsoft.FSharp.Core.string
+
+═══════════════════════════════════════════════════════════════════
+Symbol Table
+═══════════════════════════════════════════════════════════════════
   (%): Microsoft.FSharp.Core.Operators.(%)
   (&&&): Microsoft.FSharp.Core.Operators.(&&&)
+  (&&): Microsoft.FSharp.Core.LanguagePrimitives.IntrinsicOperators.(&&)
   (*): Microsoft.FSharp.Core.Operators.(*)
   (+): Microsoft.FSharp.Core.Operators.(+)
   (-): Microsoft.FSharp.Core.Operators.(-)
@@ -99,6 +229,7 @@ Symbol Table:
   ceilingf: Alloy.Math.NativeMath.ceilingf
   choice: Alloy.Core.Result.choice
   choose: Alloy.Core.choose
+  chooser: chooser
   concat: Alloy.Text.String.concat
   condition: condition
   contains: Alloy.Core.Result.contains
@@ -130,6 +261,7 @@ Symbol Table:
   floor: Alloy.Math.NativeMath.floor
   floorf: Alloy.Math.NativeMath.floorf
   fold: Microsoft.FSharp.Collections.List.fold
+  folder: folder
   format: format
   formatInt: Alloy.Console.Format.formatInt
   formatted: formatted
@@ -190,6 +322,7 @@ Symbol Table:
   pointer: pointer
   pos: pos
   power: Alloy.Math.Functions.power
+  predicate: predicate
   print: Alloy.Core.print
   printf: Alloy.Console.printf
   printfn: Alloy.Console.printfn
@@ -215,6 +348,7 @@ Symbol Table:
   sliceReadOnlySpan: Alloy.Memory.ReadOnlySpan.sliceReadOnlySpan
   sliceSpan: Alloy.Memory.Span.sliceSpan
   some: Alloy.Core.some
+  source: source
   span: span
   spanToString: Alloy.Text.UTF8.spanToString
   sprintf: Alloy.Console.sprintf

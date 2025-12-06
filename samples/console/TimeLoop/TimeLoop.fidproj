@@ -24,13 +24,14 @@ inline_threshold = 100
 eliminate_closures = true
 
 [dependencies]
-alloy = { path = "../../../lib/Alloy" }
+alloy = { path = "/home/hhh/repos/Alloy/src" }
 
 [build]
 sources = [
     "TimeLoop.fs"
 ]
 output = "timeloop"
+output_kind = "freestanding"
 
 # Platform-specific settings
 [platform.windows]

@@ -26,9 +26,8 @@ inline_threshold = 100
 eliminate_closures = true
 
 [dependencies]
-# Use FidelityHelloWorld's self-contained Alloy library
-# This is specifically designed for Firefly native compilation
-alloy = { path = "/home/hhh/repos/FidelityHelloWorld/lib/Alloy" }
+# Use formal Alloy library for Firefly native compilation
+alloy = { path = "/home/hhh/repos/Alloy/src" }
 
 [build]
 # Source files in compilation order

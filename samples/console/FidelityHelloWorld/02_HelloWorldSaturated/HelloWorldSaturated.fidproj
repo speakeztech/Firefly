@@ -1,0 +1,23 @@
+# HelloWorldSaturated - FidelityHelloWorld Sample 02
+# Pattern: Saturated function calls (all args provided at once)
+
+[package]
+name = "HelloWorldSaturated"
+version = "0.1.0"
+description = "HelloWorld with saturated function calls"
+authors = ["SpeakEZ LLC"]
+license = "MIT"
+
+[compilation]
+memory_model = "stack_only"
+target = "native"
+
+[dependencies]
+alloy = { path = "/home/hhh/repos/Alloy/src" }
+
+[build]
+sources = [
+    "02_HelloWorldSaturated.fs"
+]
+output = "hello_saturated"
+output_kind = "freestanding"

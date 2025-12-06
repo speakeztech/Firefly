@@ -7,7 +7,7 @@ open Argu
 open CLI.Configurations.FidprojLoader
 open Core.PSG.Builder
 open Core.PSG.Reachability
-open Core.MLIR.Emitter
+open Alex.Pipeline.CompilationOrchestrator
 
 /// Command line arguments for compile command
 type CompileArgs =
@@ -67,9 +67,10 @@ let private findEntryPointFunctionName (psg: Core.PSG.Types.ProgramSemanticGraph
                 sym.DisplayName
         | None -> "main"
 
-/// Generate MLIR from PSG using the real emitter
-let private generateMLIRFromPSG (psg: Core.PSG.Types.ProgramSemanticGraph) (projectName: string) (targetTriple: string) (outputKind: Core.Types.MLIRTypes.OutputKind) : string =
-    generateMLIR psg projectName targetTriple outputKind
+/// Generate MLIR from PSG using Alex emission pipeline
+let private generateMLIRFromPSG (psg: Core.PSG.Types.ProgramSemanticGraph) (projectName: string) (targetTriple: string) (_outputKind: Core.Types.MLIRTypes.OutputKind) : string =
+    // Use Alex.Pipeline.CompilationOrchestrator.generateMLIRViaAlex
+    generateMLIRViaAlex psg projectName targetTriple
 
 /// Generate LLVM IR from PSG (simplified)
 let private generateLLVMFromPSG (psg: Core.PSG.Types.ProgramSemanticGraph) (projectName: string) (targetTriple: string) : string =
@@ -214,25 +215,106 @@ let execute (args: ParseResults<CompileArgs>) =
             File.WriteAllText(mlirPath, mlirOutput)
             printfn "[MLIR] Wrote: %s" mlirPath
 
-            // Write PSG debug info
+            // Write PSG debug info with tree structure for reachable nodes
+            // Use the marked PSG (after reachability analysis) for accurate IsReachable flags
+            let markedPsg = reachabilityResult.MarkedPSG
             let psgInfoPath = Path.Combine(dir, resolved.Name + ".psg.txt")
             let psgInfo = System.Text.StringBuilder()
             psgInfo.AppendLine(sprintf "PSG Summary for %s" resolved.Name) |> ignore
-            psgInfo.AppendLine(sprintf "Nodes: %d" psg.Nodes.Count) |> ignore
-            psgInfo.AppendLine(sprintf "Edges: %d" psg.Edges.Length) |> ignore
-            psgInfo.AppendLine(sprintf "Entry Points: %d" psg.EntryPoints.Length) |> ignore
-            psgInfo.AppendLine(sprintf "Symbols: %d" psg.SymbolTable.Count) |> ignore
+            psgInfo.AppendLine(sprintf "Nodes: %d" markedPsg.Nodes.Count) |> ignore
+            psgInfo.AppendLine(sprintf "Edges: %d" markedPsg.Edges.Length) |> ignore
+            psgInfo.AppendLine(sprintf "Entry Points: %d" markedPsg.EntryPoints.Length) |> ignore
+            psgInfo.AppendLine(sprintf "Symbols: %d" markedPsg.SymbolTable.Count) |> ignore
+
+            // Count reachable nodes
+            let reachableCount = markedPsg.Nodes |> Map.filter (fun _ n -> n.IsReachable) |> Map.count
+            psgInfo.AppendLine(sprintf "Reachable Nodes: %d (%.1f%%)" reachableCount (100.0 * float reachableCount / float markedPsg.Nodes.Count)) |> ignore
             psgInfo.AppendLine() |> ignore
+
+            // Entry Points section
             psgInfo.AppendLine("Entry Points:") |> ignore
-            for ep in psg.EntryPoints do
-                match Map.tryFind ep.Value psg.Nodes with
+            for ep in markedPsg.EntryPoints do
+                match Map.tryFind ep.Value markedPsg.Nodes with
                 | Some node ->
                     let name = node.Symbol |> Option.map (fun s -> s.FullName) |> Option.defaultValue "(unknown)"
                     psgInfo.AppendLine(sprintf "  - %s (%s)" name node.SyntaxKind) |> ignore
                 | None -> ()
             psgInfo.AppendLine() |> ignore
-            psgInfo.AppendLine("Symbol Table:") |> ignore
-            for kvp in psg.SymbolTable do
+
+            // Tree view of reachable nodes (DuckDB-ready format)
+            // This structure aligns with PGQ graph traversal
+            psgInfo.AppendLine("═══════════════════════════════════════════════════════════════════") |> ignore
+            psgInfo.AppendLine("Reachable Node Tree (for emission debugging)") |> ignore
+            psgInfo.AppendLine("═══════════════════════════════════════════════════════════════════") |> ignore
+
+            // Helper to get children in source order
+            let getChildren (node: Core.PSG.Types.PSGNode) =
+                match node.Children with
+                | Core.PSG.Types.ChildrenState.Parent childIds ->
+                    childIds
+                    |> List.rev  // Children stored in reverse order
+                    |> List.choose (fun id -> Map.tryFind id.Value markedPsg.Nodes)
+                | _ -> []
+
+            // Recursive tree printer
+            let rec printTree (node: Core.PSG.Types.PSGNode) (indent: string) (isLast: bool) =
+                let prefix = if isLast then "└── " else "├── "
+                let symbolInfo =
+                    node.Symbol
+                    |> Option.map (fun s -> sprintf " [%s]" s.DisplayName)
+                    |> Option.defaultValue ""
+                let typeInfo =
+                    node.Type
+                    |> Option.map (fun t ->
+                        try sprintf " : %s" (t.Format(FSharp.Compiler.Symbols.FSharpDisplayContext.Empty))
+                        with _ -> "")
+                    |> Option.defaultValue ""
+                let reachMark = if node.IsReachable then "" else " (UNREACHABLE)"
+                psgInfo.AppendLine(sprintf "%s%s%s%s%s%s" indent prefix node.SyntaxKind symbolInfo typeInfo reachMark) |> ignore
+
+                let children = getChildren node
+                let childIndent = indent + (if isLast then "    " else "│   ")
+                children |> List.iteri (fun i child ->
+                    let isLastChild = (i = children.Length - 1)
+                    printTree child childIndent isLastChild
+                )
+
+            // Print tree for each entry point and reachable function
+            for ep in markedPsg.EntryPoints do
+                match Map.tryFind ep.Value markedPsg.Nodes with
+                | Some node ->
+                    psgInfo.AppendLine() |> ignore
+                    let name = node.Symbol |> Option.map (fun s -> s.FullName) |> Option.defaultValue ep.Value
+                    psgInfo.AppendLine(sprintf "ENTRY: %s" name) |> ignore
+                    printTree node "" true
+                | None -> ()
+
+            // Also print other reachable functions (not entry points)
+            let entryIds = markedPsg.EntryPoints |> List.map (fun e -> e.Value) |> Set.ofList
+            let reachableFunctions =
+                markedPsg.Nodes
+                |> Map.toList
+                |> List.filter (fun (id, node) ->
+                    node.IsReachable &&
+                    not (Set.contains id entryIds) &&
+                    (node.SyntaxKind = "Binding" || node.SyntaxKind.StartsWith("LetBinding")))
+                |> List.filter (fun (_, node) ->
+                    match node.Symbol with
+                    | Some (:? FSharp.Compiler.Symbols.FSharpMemberOrFunctionOrValue as mfv) ->
+                        mfv.IsFunction || mfv.IsMember
+                    | _ -> false)
+
+            for (_, funcNode) in reachableFunctions do
+                psgInfo.AppendLine() |> ignore
+                let name = funcNode.Symbol |> Option.map (fun s -> s.FullName) |> Option.defaultValue "(function)"
+                psgInfo.AppendLine(sprintf "FUNCTION: %s" name) |> ignore
+                printTree funcNode "" true
+
+            psgInfo.AppendLine() |> ignore
+            psgInfo.AppendLine("═══════════════════════════════════════════════════════════════════") |> ignore
+            psgInfo.AppendLine("Symbol Table") |> ignore
+            psgInfo.AppendLine("═══════════════════════════════════════════════════════════════════") |> ignore
+            for kvp in markedPsg.SymbolTable do
                 psgInfo.AppendLine(sprintf "  %s: %s" kvp.Key kvp.Value.FullName) |> ignore
             File.WriteAllText(psgInfoPath, psgInfo.ToString())
             printfn "[PSG] Wrote debug info: %s" psgInfoPath

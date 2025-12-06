@@ -701,6 +701,45 @@ and private processExpression (expr: SynExpr) (parentId: NodeId option) (fileNam
         | Some elseExpr -> processExpression elseExpr (Some ifNode.Id) fileName context graph''''
         | None -> graph''''
 
+    // While loops
+    | SynExpr.While(_, condExpr, bodyExpr, range) ->
+        let whileNode = createNode "WhileLoop" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add whileNode.Id.Value whileNode graph.Nodes }
+        let graph'' = addChildToParent whileNode.Id parentId graph'
+
+        // Process condition
+        let graph''' = processExpression condExpr (Some whileNode.Id) fileName context graph''
+        // Process body
+        processExpression bodyExpr (Some whileNode.Id) fileName context graph'''
+
+    // Mutable variable assignment (counter <- counter + 1)
+    | SynExpr.LongIdentSet(longDotId, rhsExpr, range) ->
+        let varName = longDotId.LongIdent |> List.map (fun id -> id.idText) |> String.concat "."
+        let syntaxKind = sprintf "MutableSet:%s" varName
+        let setNode = createNode syntaxKind range fileName None parentId
+        let graph' = { graph with Nodes = Map.add setNode.Id.Value setNode graph.Nodes }
+        let graph'' = addChildToParent setNode.Id parentId graph'
+        processExpression rhsExpr (Some setNode.Id) fileName context graph''
+
+    // For loops (for i = start to end do ...)
+    | SynExpr.For(_, _, ident, _, startExpr, _, endExpr, bodyExpr, range) ->
+        let syntaxKind = sprintf "ForLoop:%s" ident.idText
+        let forNode = createNode syntaxKind range fileName None parentId
+        let graph' = { graph with Nodes = Map.add forNode.Id.Value forNode graph.Nodes }
+        let graph'' = addChildToParent forNode.Id parentId graph'
+        let graph''' = processExpression startExpr (Some forNode.Id) fileName context graph''
+        let graph'''' = processExpression endExpr (Some forNode.Id) fileName context graph'''
+        processExpression bodyExpr (Some forNode.Id) fileName context graph''''
+
+    // ForEach loops (for item in collection do ...)
+    | SynExpr.ForEach(_, _, _, _, pat, enumExpr, bodyExpr, range) ->
+        let forEachNode = createNode "ForEachLoop" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add forEachNode.Id.Value forEachNode graph.Nodes }
+        let graph'' = addChildToParent forEachNode.Id parentId graph'
+        let graph''' = processPattern pat (Some forEachNode.Id) fileName context graph''
+        let graph'''' = processExpression enumExpr (Some forEachNode.Id) fileName context graph'''
+        processExpression bodyExpr (Some forEachNode.Id) fileName context graph''''
+
     // Add other common expression cases as needed...
     | _ ->
         // Default case for unhandled expressions

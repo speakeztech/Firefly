@@ -659,7 +659,24 @@ This architecture provides a clear path from F# source code to efficient native 
 
 ## References
 
-- mlir-hs: [GitHub Repository](https://github.com/google/mlir-hs) - Functional bindings and TableGen patterns
-- triton-cpu: [GitHub Repository](https://github.com/triton-lang/triton/tree/main/third_party/cpu) - Systematic lowering and dialect design
-- MLIR Documentation: [mlir.llvm.org](https://mlir.llvm.org) - Dialect specifications and lowering patterns
-- XParsec: Local repository - Combinator patterns for transformation composition
+### External Projects
+- **mlir-hs**: [GitHub Repository](https://github.com/google/mlir-hs) - Functional bindings and TableGen patterns (local copy: `~/repos/mlir-hs`)
+- **triton-cpu**: [GitHub Repository](https://github.com/triton-lang/triton/tree/main/third_party/cpu) - Systematic lowering and dialect design
+- **MLIR Documentation**: [mlir.llvm.org](https://mlir.llvm.org) - Dialect specifications and lowering patterns
+- **XParsec**: Local repository (`~/repos/XParsec`) - Combinator patterns for transformation composition
+
+### SpeakEZ Blog: Architectural Vision
+- **Hyping Hypergraphs** (`~/repos/SpeakEZ/hugo/content/blog/Hyping Hypergraphs.md`): Temporal PHG, bidirectional zippers, recursion schemes, graph coloring
+- **Why F# Is A Natural Fit for MLIR** (`~/repos/SpeakEZ/hugo/content/blog/Why FSHarp Is A Natural Fit for MLIR.md`): SSA ≡ functional programming, delimited continuations
+- **Building Firefly With Alloy** (`~/repos/SpeakEZ/hugo/content/blog/Building Firefly With Alloy.md`): Alloy library design principles
+- **Coeffects And Codata In Firefly** (`~/repos/SpeakEZ/hugo/content/blog/Coeffects And Codata In Firefly.md`): Coeffect-based optimization hints
+- **Context Aware Compilation** (`~/repos/SpeakEZ/hugo/content/blog/Context Aware Compilation.md`): Context preservation through compilation
+- **Speed And Safety With Graph Coloring** (`~/repos/SpeakEZ/hugo/content/blog/Speed And Safety With Graph Coloring.md`): Graph coloring for register allocation and parallelization
+
+### Zipper Implementation References
+- **Tomas Petricek's Tree Zipper Query**: https://tomasp.net/blog/tree-zipper-query.aspx/ - F# zipper with Path context
+- **Polymorphic Maybe with Zipper**: https://fssnip.net/aX/title/Polymorphic-Maybe-monad-with-default-value - Zipper with fallback monad
+
+### See Also
+- **Alex_Architecture_Overview.md**: Directory structure and integration points
+- **Emitter.fs Technical Debt**: Current spaghetti implementation to be refactored into principled Alex components

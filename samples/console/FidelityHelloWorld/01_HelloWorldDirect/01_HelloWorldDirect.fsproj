@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <NoStdLib>true</NoStdLib>
+    <NoWarn>FS0025;FS0051;FS0988;FS0009</NoWarn>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <OtherFlags>--warnaserror+</OtherFlags>
+    <DefineConstants>BCL_COMPAT</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Include Alloy source files directly (order matters!) -->
+    <Compile Include="lib\Alloy\Core.fs" />
+    <Compile Include="lib\Alloy\Math.fs" />
+    <Compile Include="lib\Alloy\Memory.fs" />
+    <Compile Include="lib\Alloy\Text.fs" />
+    <Compile Include="lib\Alloy\Console.fs" />
+
+    <!-- Then your main program -->
+    <Compile Include="01_HelloWorldDirect.fs" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <DisableImplicitSystemValueTupleReference>true</DisableImplicitSystemValueTupleReference>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" Version="8.0.300" />
+  </ItemGroup>
+</Project>

@@ -60,6 +60,31 @@
       <!-- MLIR Generation -->
       <Compile Include="Core/MLIR/Emitter.fs" />
 
+      <!-- Alex CodeGeneration -->
+      <Compile Include="Alex/CodeGeneration/EmissionContext.fs" />
+      <Compile Include="Alex/CodeGeneration/TypeMapping.fs" />
+
+      <!-- Alex Bindings -->
+      <Compile Include="Alex/Bindings/BindingTypes.fs" />
+      <Compile Include="Alex/Bindings/Time/Linux.fs" />
+      <Compile Include="Alex/Bindings/Time/MacOS.fs" />
+      <Compile Include="Alex/Bindings/Time/Windows.fs" />
+      <Compile Include="Alex/Bindings/Time/TimeBindings.fs" />
+
+      <!-- Alex Traversal -->
+      <Compile Include="Alex/Traversal/PSGZipper.fs" />
+
+      <!-- Alex Patterns -->
+      <Compile Include="Alex/Patterns/PSGPatterns.fs" />
+      <Compile Include="Alex/Patterns/AlloyPatterns.fs" />
+
+      <!-- Alex CodeGeneration (depends on Traversal) -->
+      <Compile Include="Alex/CodeGeneration/EmissionMonad.fs" />
+
+      <!-- Alex Emission -->
+      <Compile Include="Alex/Emission/ExpressionEmitter.fs" />
+      <Compile Include="Alex/Emission/FunctionEmitter.fs" />
+
       <!-- Alex Pipeline - Minimal for current architecture -->
       <Compile Include="Alex/Pipeline/CompilationTypes.fs" />
       <Compile Include="Alex/Pipeline/CompilationOrchestrator.fs" />

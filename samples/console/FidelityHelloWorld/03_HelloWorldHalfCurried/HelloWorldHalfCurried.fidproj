@@ -1,0 +1,23 @@
+# HelloWorldHalfCurried - FidelityHelloWorld Sample 03
+# Pattern: Pipe operator (|>), String.format, partial application
+
+[package]
+name = "HelloWorldHalfCurried"
+version = "0.1.0"
+description = "HelloWorld with pipe operators and partial application"
+authors = ["SpeakEZ LLC"]
+license = "MIT"
+
+[compilation]
+memory_model = "stack_only"
+target = "native"
+
+[dependencies]
+alloy = { path = "/home/hhh/repos/Alloy/src" }
+
+[build]
+sources = [
+    "03_HelloWorldHalfCurried.fs"
+]
+output = "hello_halfcurried"
+output_kind = "freestanding"
