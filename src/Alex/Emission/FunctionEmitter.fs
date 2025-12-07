@@ -219,7 +219,7 @@ let emitFunctionBody (psg: ProgramSemanticGraph) : Emit<FuncEmitResult> =
 let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: bool) : Emit<unit> =
     // Extract function name from symbol
     // Use FullName to avoid collisions between modules with same-named functions
-    // Sanitize for MLIR: remove F# backtick escaping, replace dots with underscores
+    // Sanitize for MLIR: F# identifiers allow characters that MLIR symbols don't
     let funcName =
         if isEntryPoint then "main"
         else
@@ -234,9 +234,13 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
                         sprintf "%s_%s" segments.[segments.Length - 2] segments.[segments.Length - 1]
                     else
                         segments.[segments.Length - 1]
+                // Sanitize F# identifier to valid MLIR symbol
+                // F# allows: ' (prime), `` (backtick escaping), operators like |>
+                // MLIR symbols: alphanumeric + underscore only
                 shortName
                     .Replace(".", "_")
-                    .Replace("``", "")  // Remove F# double-backtick escaping
+                    .Replace("``", "")   // Remove F# double-backtick escaping
+                    .Replace("'", "_p")  // F# prime becomes _p (e.g., prompt' -> prompt_p)
             | None -> "unknown_func"
 
     // Get type info from PSG node's Type field - the canonical source
@@ -272,16 +276,14 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
         clearFunctionScope >>.
 
         // Build parameter list (using actual names where available, falling back to argN)
-        let paramStr =
+        let parameters =
             paramTypes
             |> List.mapi (fun i typ ->
-                let _name = if i < List.length paramNames then paramNames.[i] else sprintf "arg%d" i
-                sprintf "%%arg%d: %s" i typ)  // MLIR uses argN but we track the source name
-            |> String.concat ", "
+                (sprintf "%%arg%d" i, typ))  // MLIR uses argN
 
         // Emit function header
         line "" >>.
-        line (sprintf "func.func @%s(%s) -> %s {" funcName paramStr returnType) >>.
+        emitFuncHeader funcName parameters returnType >>.
         pushIndent >>.
 
         // Register function parameters in NodeSSA
@@ -330,9 +332,7 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
             emitExtsi exitCode "i32" "i64" >>= fun exitCode64 ->
             // Emit exit syscall (syscall 60 on Linux x86-64)
             emitI64 60L >>= fun syscallNum ->
-            freshSSAWithType "i64" >>= fun resultSSA ->
-            line (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},~{rcx},~{r11},~{memory}\" %s, %s : (i64, i64) -> i64"
-                resultSSA syscallNum exitCode64) >>.
+            emitSyscallAsm syscallNum exitCode64 >>= fun _resultSSA ->
             emitReturn exitCode "i32"
         else
             // Non-entry-point function - match return type
@@ -352,7 +352,7 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
                     emitDefaultValue returnType >>= fun defaultVal ->
                     emitReturn defaultVal returnType
             | EmitError msg ->
-                line (sprintf "// ERROR: %s" msg) >>.
+                emitErrorComment msg >>.
                 // Still need valid return for MLIR
                 if returnType = "()" then
                     emitReturnVoid
@@ -364,28 +364,19 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
         line "}"
 
     | None ->
-        line (sprintf "// Skipping node without symbol: %s" funcNode.SyntaxKind)
+        emitComment (sprintf "Skipping node without symbol: %s" funcNode.SyntaxKind)
 
 // ═══════════════════════════════════════════════════════════════════
 // String Literal Emission
 // ═══════════════════════════════════════════════════════════════════
 
-/// Escape a string for MLIR string literal syntax
-let private escapeForMLIR (s: string) : string =
-    s.Replace("\\", "\\\\")
-     .Replace("\"", "\\\"")
-     .Replace("\n", "\\0A")
-     .Replace("\r", "\\0D")
-     .Replace("\t", "\\09")
-
 /// Emit all string literals from the PSG as global constants
 /// The PSG.StringLiterals map (hash -> content) is populated during PSG construction
+/// Uses emitStringGlobal combinator from EmissionMonad
 let emitStringLiterals (psg: ProgramSemanticGraph) : Emit<unit> =
     let literals = psg.StringLiterals |> Map.toList
     forEach (fun (hash: uint32, content: string) ->
-        let escaped = escapeForMLIR content
-        // MLIR syntax: llvm.mlir.global constant @str_HASH("content") : !llvm.array<N x i8>
-        line (sprintf "llvm.mlir.global private constant @str_%u(\"%s\") : !llvm.array<%d x i8>" hash escaped content.Length)
+        emitStringGlobal hash content
     ) literals
 
 /// Emit a module with its functions

@@ -585,6 +585,51 @@ let emitBlockLabel (label: string) : Emit<unit> =
     lineNoIndent (sprintf "^%s:" label)
 
 // ═══════════════════════════════════════════════════════════════════
+// Function-Level MLIR Constructs
+// ═══════════════════════════════════════════════════════════════════
+
+/// Emit func.func declaration header
+/// Note: parameters is list of (ssa_name, mlir_type) pairs like ("%arg0", "i32")
+let emitFuncHeader (name: string) (parameters: (string * string) list) (returnTy: string) : Emit<unit> =
+    let paramStr =
+        parameters
+        |> List.map (fun (n, t) -> sprintf "%s: %s" n t)
+        |> String.concat ", "
+    line (sprintf "func.func @%s(%s) -> %s {" name paramStr returnTy)
+
+/// Emit closing brace for function
+let emitFuncEnd : Emit<unit> =
+    line "}"
+
+/// Emit llvm.inline_asm for syscall
+let emitSyscallAsm (syscallNum: string) (arg: string) : Emit<string> =
+    freshSSAWithType "i64" >>= fun result ->
+    line (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},~{rcx},~{r11},~{memory}\" %s, %s : (i64, i64) -> i64"
+        result syscallNum arg) >>.
+    emit result
+
+/// Emit an MLIR comment
+let emitComment (text: string) : Emit<unit> =
+    line (sprintf "// %s" text)
+
+/// Emit an error comment
+let emitErrorComment (msg: string) : Emit<unit> =
+    line (sprintf "// ERROR: %s" msg)
+
+/// Escape a string for MLIR string literal syntax
+let private escapeForMLIR (s: string) : string =
+    s.Replace("\\", "\\\\")
+     .Replace("\"", "\\\"")
+     .Replace("\n", "\\0A")
+     .Replace("\r", "\\0D")
+     .Replace("\t", "\\09")
+
+/// Emit llvm.mlir.global for a string literal
+let emitStringGlobal (hash: uint32) (content: string) : Emit<unit> =
+    let escaped = escapeForMLIR content
+    line (sprintf "llvm.mlir.global private constant @str_%u(\"%s\") : !llvm.array<%d x i8>" hash escaped content.Length)
+
+// ═══════════════════════════════════════════════════════════════════
 // Running the Monad
 // ═══════════════════════════════════════════════════════════════════
 

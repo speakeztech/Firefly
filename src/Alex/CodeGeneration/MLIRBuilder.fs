@@ -378,6 +378,43 @@ module func =
         do! emitLine "func.return"
     }
 
+    /// func.func declaration header (opens function body)
+    /// Parameters are (name, type) pairs
+    let funcHeader (name: string) (parameters: (string * Ty) list) (returnTy: Ty) : MLIR<unit> = mlir {
+        let paramStr =
+            parameters
+            |> List.map (fun (n, t) -> sprintf "%s: %s" n (Serialize.ty t))
+            |> String.concat ", "
+        do! emitLine (sprintf "func.func @%s(%s) -> %s {" name paramStr (Serialize.ty returnTy))
+    }
+
+    /// Close function body
+    let funcEnd : MLIR<unit> = mlir {
+        do! emitLine "}"
+    }
+
+// ═══════════════════════════════════════════════════════════════════
+// Module-level Declarations
+// ═══════════════════════════════════════════════════════════════════
+
+/// Emit an MLIR comment
+let comment (text: string) : MLIR<unit> = mlir {
+    do! emitLine (sprintf "// %s" text)
+}
+
+/// Emit an error comment
+let errorComment (msg: string) : MLIR<unit> = mlir {
+    do! emitLine (sprintf "// ERROR: %s" msg)
+}
+
+/// Emit a string global constant
+/// Used by FunctionEmitter to emit PSG.StringLiterals
+let emitStringGlobal (hash: uint32) (content: string) : MLIR<unit> = mlir {
+    let escaped = Serialize.escape content
+    do! emitLine (sprintf "llvm.mlir.global private constant @str_%u(\"%s\") : !llvm.array<%d x i8>"
+        hash escaped content.Length)
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // NativeStr Helper (ptr + i64 struct)
 // ═══════════════════════════════════════════════════════════════════
