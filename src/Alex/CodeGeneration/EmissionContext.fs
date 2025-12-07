@@ -77,6 +77,13 @@ module SSAContext =
     let registerSSAType (ctx: SSAContext) (ssaName: string) (mlirType: string) : unit =
         ctx.SSATypes <- Map.add ssaName mlirType ctx.SSATypes
 
+    /// Clear local variable mappings for a new function scope
+    /// Preserves the SSA counter and string literals (which are global)
+    let clearLocals (ctx: SSAContext) : unit =
+        ctx.Locals <- Map.empty
+        ctx.LocalTypes <- Map.empty
+        ctx.SSATypes <- Map.empty
+
     /// Add or lookup a string literal, returning its global name
     let addStringLiteral (ctx: SSAContext) (content: string) : string =
         match ctx.StringLiterals |> List.tryFind (fun (c, _) -> c = content) with

@@ -13,6 +13,14 @@ open Core.PSG.Types
 open FSharp.Compiler.Symbols
 
 // ═══════════════════════════════════════════════════════════════════
+// Safe Symbol Helpers
+// ═══════════════════════════════════════════════════════════════════
+
+/// Safely get a symbol's FullName, handling types like 'unit' that throw exceptions
+let private tryGetFullName (sym: FSharpSymbol) : string option =
+    try Some sym.FullName with _ -> None
+
+// ═══════════════════════════════════════════════════════════════════
 // Node Predicates - For use with PSGXParsec.satisfyChild
 // ═══════════════════════════════════════════════════════════════════
 
@@ -27,19 +35,28 @@ let hasSyntaxKindPrefix (prefix: string) (node: PSGNode) : bool =
 /// Check symbol full name
 let hasSymbolName (name: string) (node: PSGNode) : bool =
     match node.Symbol with
-    | Some s -> s.FullName = name || s.DisplayName = name
+    | Some s ->
+        match tryGetFullName s with
+        | Some fullName -> fullName = name || s.DisplayName = name
+        | None -> s.DisplayName = name
     | None -> false
 
 /// Check symbol contains substring
 let symbolContains (substring: string) (node: PSGNode) : bool =
     match node.Symbol with
-    | Some s -> s.FullName.Contains(substring) || s.DisplayName.Contains(substring)
+    | Some s ->
+        match tryGetFullName s with
+        | Some fullName -> fullName.Contains(substring) || s.DisplayName.Contains(substring)
+        | None -> s.DisplayName.Contains(substring)
     | None -> false
 
 /// Check symbol ends with suffix
 let symbolEndsWith (suffix: string) (node: PSGNode) : bool =
     match node.Symbol with
-    | Some s -> s.FullName.EndsWith(suffix) || s.DisplayName.EndsWith(suffix)
+    | Some s ->
+        match tryGetFullName s with
+        | Some fullName -> fullName.EndsWith(suffix) || s.DisplayName.EndsWith(suffix)
+        | None -> s.DisplayName.EndsWith(suffix)
     | None -> false
 
 /// Is an App node
@@ -84,6 +101,10 @@ let isFor (node: PSGNode) : bool =
 let isIf (node: PSGNode) : bool =
     node.SyntaxKind.StartsWith("If")
 
+/// Is an AddressOf expression (&&var or &var)
+let isAddressOf (node: PSGNode) : bool =
+    node.SyntaxKind = "AddressOf"
+
 /// Is a Pattern node (structural, typically skipped)
 let isPattern (node: PSGNode) : bool =
     node.SyntaxKind.StartsWith("Pattern:")
@@ -95,6 +116,17 @@ let isTypeApp (node: PSGNode) : bool =
 /// Is a MutableSet node
 let isMutableSet (node: PSGNode) : bool =
     node.SyntaxKind.StartsWith("MutableSet:")
+
+/// Is a PropertyAccess node (like receiver.Length)
+let isPropertyAccess (node: PSGNode) : bool =
+    node.SyntaxKind.StartsWith("PropertyAccess:")
+
+/// Extract property name from a PropertyAccess node
+let extractPropertyName (node: PSGNode) : string option =
+    if node.SyntaxKind.StartsWith("PropertyAccess:") then
+        Some (node.SyntaxKind.Substring("PropertyAccess:".Length))
+    else
+        None
 
 // ═══════════════════════════════════════════════════════════════════
 // Node Extractors - Extract typed data from nodes

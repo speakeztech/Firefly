@@ -169,7 +169,7 @@ let emitCurrentDateTimeString (builder: MLIRBuilder) (ctx: SSAContext) : string 
 let matchesTimePattern (node: PSGNode) : string option =
     match node.Symbol with
     | Some sym ->
-        let fullName = sym.FullName
+        let fullName = try sym.FullName with _ -> ""
         // Match various Time module patterns
         if fullName.Contains("Time.currentTicks") || fullName.Contains("TimeApi.currentTicks") then
             Some "currentTicks"

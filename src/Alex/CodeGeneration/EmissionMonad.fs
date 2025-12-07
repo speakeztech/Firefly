@@ -285,6 +285,13 @@ let freshSSAWithType (mlirType: string) : Emit<string> =
         }
         (state', name)
 
+/// Generate a fresh block label
+let freshLabel : Emit<string> =
+    fun _env state ->
+        let name = sprintf "bb%d" state.LabelCounter
+        let state' = { state with LabelCounter = state.LabelCounter + 1 }
+        (state', name)
+
 /// Look up a local variable
 let lookupLocal (name: string) : Emit<string option> =
     getState |>> fun s -> Map.tryFind name s.Locals
@@ -301,6 +308,43 @@ let bindLocal (fsharpName: string) (ssaName: string) (mlirType: string) : Emit<u
             LocalTypes = Map.add fsharpName mlirType s.LocalTypes
             SSATypes = Map.add ssaName mlirType s.SSATypes
     })
+
+/// Clear all local variable mappings for a new function scope
+/// Preserves SSA counter and string literals (which are module-level)
+let clearLocals : Emit<unit> =
+    modifyState (fun s -> {
+        s with
+            Locals = Map.empty
+            LocalTypes = Map.empty
+            SSATypes = Map.empty
+            MutableSlots = Map.empty
+            SymbolSSA = SymbolSSAContext.empty
+    })
+
+// ═══════════════════════════════════════════════════════════════════
+// Symbol-Based SSA Lookup (preferred over string-based)
+// ═══════════════════════════════════════════════════════════════════
+
+open FSharp.Compiler.Symbols
+
+/// Bind a symbol to an SSA value at a node
+/// Use this when emitting Binding nodes
+let bindSymbolSSA (sym: FSharpSymbol) (nodeId: NodeId) (ssaValue: string) (mlirType: string) : Emit<unit> =
+    modifyState (EmissionState.bindSymbolSSA sym nodeId ssaValue mlirType)
+
+/// Look up SSA info for a symbol (for Ident nodes)
+let lookupSymbolSSA (sym: FSharpSymbol) : Emit<SSAInfo option> =
+    getState |>> EmissionState.lookupSymbolSSA sym
+
+/// Register a mutable variable's stack slot
+let registerMutableSlot (fsharpName: string) (slotPtr: string) (elemType: string) : Emit<unit> =
+    modifyState (fun s -> {
+        s with MutableSlots = Map.add fsharpName (slotPtr, elemType) s.MutableSlots
+    })
+
+/// Look up a mutable variable's stack slot
+let lookupMutableSlot (name: string) : Emit<(string * string) option> =
+    getState |>> fun s -> Map.tryFind name s.MutableSlots
 
 /// Register a string literal
 let registerStringLiteral (content: string) : Emit<string> =
@@ -401,6 +445,15 @@ let emitConstant (value: string) (mlirType: string) : Emit<string> =
     line (sprintf "%s = arith.constant %s : %s" name value mlirType) >>.
     emit name
 
+/// Emit an i1 (boolean) constant
+let emitI1 (value: bool) : Emit<string> =
+    let intVal = if value then 1 else 0
+    emitConstant (string intVal) "i1"
+
+/// Emit an i8 (byte) constant
+let emitI8 (value: byte) : Emit<string> =
+    emitConstant (string (int value)) "i8"
+
 /// Emit an i32 constant
 let emitI32 (value: int) : Emit<string> =
     emitConstant (string value) "i32"
@@ -408,6 +461,18 @@ let emitI32 (value: int) : Emit<string> =
 /// Emit an i64 constant
 let emitI64 (value: int64) : Emit<string> =
     emitConstant (string value) "i64"
+
+/// Emit a zero constant of the specified type
+let emitZero (typ: string) : Emit<string> =
+    match typ with
+    | "i1" -> emitConstant "0" "i1"
+    | "i8" -> emitConstant "0" "i8"
+    | "i16" -> emitConstant "0" "i16"
+    | "i32" -> emitConstant "0" "i32"
+    | "i64" -> emitConstant "0" "i64"
+    | "f32" -> emitConstant "0.0" "f32"
+    | "f64" -> emitConstant "0.0" "f64"
+    | _ -> emitConstant "0" "i32"  // Default fallback
 
 /// Emit an f32 constant
 let emitF32 (value: float32) : Emit<string> =

@@ -93,7 +93,7 @@ let emitSleep (builder: MLIRBuilder) (ctx: SSAContext) (milliseconds: string) : 
 let matchesTimePattern (node: PSGNode) : string option =
     match node.Symbol with
     | Some sym ->
-        let fullName = sym.FullName
+        let fullName = try sym.FullName with _ -> ""
         if fullName.Contains("Time.currentTicks") || fullName.Contains("TimeApi.currentTicks") then
             Some "currentTicks"
         elif fullName.Contains("Time.highResolutionTicks") || fullName.Contains("TimeApi.highResolutionTicks") then

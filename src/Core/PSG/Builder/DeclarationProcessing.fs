@@ -98,6 +98,10 @@ and processModuleDecl decl parentId fileName (context: BuildContext) graph =
             processTypeDefn typeDefn (Some typesNode.Id) fileName context g
         ) graph''
 
+    // Hash directives (#nowarn, #light, etc.) - just skip these
+    | SynModuleDecl.HashDirective(_, _) ->
+        graph
+
     // Hard stop on unhandled module declarations
     | other ->
         let declTypeName = other.GetType().Name

@@ -152,10 +152,13 @@ module ChildrenStateHelpers =
         | NoChildren -> { node with Children = Parent [childId] }
     
     /// Finalize a node's children state
+    /// IMPORTANT: Children are prepended during construction for O(1) insertion,
+    /// so we reverse here to restore logical source order (func before args, etc.)
     let finalizeChildren node =
         match node.Children with
         | NotProcessed -> { node with Children = NoChildren }
-        | other -> node
+        | Parent children -> { node with Children = Parent (List.rev children) }
+        | NoChildren -> node
     
     /// Get children as list for compatibility with DebugOutput.fs
     let getChildrenList node =

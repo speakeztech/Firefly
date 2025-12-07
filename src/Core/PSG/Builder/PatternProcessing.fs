@@ -45,7 +45,7 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
             { graph'' with SymbolTable = Map.add sym.DisplayName sym graph''.SymbolTable }
         | None -> graph''
 
-    | SynPat.LongIdent(longIdent, _, _, _, _, range) ->
+    | SynPat.LongIdent(longIdent, _, _, argPats, _, range) ->
         let (SynLongIdent(idents, _, _)) = longIdent
         let identText = idents |> List.map (fun id -> id.idText) |> String.concat "."
 
@@ -62,9 +62,22 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
         let graph' = { graph with Nodes = Map.add patNode.Id.Value patNode graph.Nodes }
         let graph'' = addChildToParent patNode.Id parentId graph'
 
+        // Process argument patterns (e.g., "length" in "Ok length")
+        let graph''' =
+            match argPats with
+            | SynArgPats.Pats pats ->
+                pats |> List.fold (fun g pat ->
+                    processPattern pat (Some patNode.Id) fileName context g
+                ) graph''
+            | SynArgPats.NamePatPairs(pairs, _, _) ->
+                pairs |> List.fold (fun g (pair: (Ident * range option * SynPat)) ->
+                    let (_, _, pat) = pair
+                    processPattern pat (Some patNode.Id) fileName context g
+                ) graph''
+
         match symbol with
         | Some sym ->
-            let updatedSymbolTable = Map.add sym.DisplayName sym graph''.SymbolTable
+            let updatedSymbolTable = Map.add sym.DisplayName sym graph'''.SymbolTable
 
             // Create union case reference edge for Ok/Error patterns
             if identText = "Ok" || identText = "Error" then
@@ -73,14 +86,14 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
                     Target = patNode.Id
                     Kind = SymbolUse
                 }
-                { graph'' with
+                { graph''' with
                     SymbolTable = updatedSymbolTable
-                    Edges = unionCaseEdge :: graph''.Edges }
+                    Edges = unionCaseEdge :: graph'''.Edges }
             else
-                { graph'' with SymbolTable = updatedSymbolTable }
+                { graph''' with SymbolTable = updatedSymbolTable }
         | None ->
             printfn "[BUILDER] Warning: Pattern '%s' at %s has no symbol correlation" identText (range.ToString())
-            graph''
+            graph'''
 
     // Parenthesized patterns - transparent, process inner
     | SynPat.Paren(innerPat, range) ->

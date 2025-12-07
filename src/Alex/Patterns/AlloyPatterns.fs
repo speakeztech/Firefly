@@ -22,6 +22,20 @@ open Core.PSG.Types
 open FSharp.Compiler.Symbols
 
 // ===================================================================
+// Safe Symbol Helpers
+// ===================================================================
+
+/// Safely get a symbol's FullName, handling types like 'unit' that throw exceptions
+let private tryGetFullName (sym: FSharpSymbol) : string option =
+    try Some sym.FullName with _ -> None
+
+/// Get a symbol's FullName or a fallback value
+let private getFullNameOrDefault (sym: FSharpSymbol) (fallback: string) : string =
+    match tryGetFullName sym with
+    | Some name -> name
+    | None -> fallback
+
+// ===================================================================
 // Type Definitions
 // ===================================================================
 
@@ -55,12 +69,35 @@ type MemoryOp =
     | SpanToString  // Convert Span<byte> to string
     | AsReadOnlySpan  // Get read-only span from buffer
 
+/// Result DU constructor types
+type ResultOp =
+    | OkCtor    // Ok value - constructs Result with tag 0
+    | ErrorCtor // Error value - constructs Result with tag 1
+
+/// NativePtr operation types (from FSharp.NativeInterop or Alloy.NativeTypes)
+type NativePtrOp =
+    | PtrGet    // NativePtr.get ptr index -> value
+    | PtrSet    // NativePtr.set ptr index value -> unit
+    | PtrRead   // NativePtr.read ptr -> value
+    | PtrWrite  // NativePtr.write ptr value -> unit
+    | PtrAdd    // NativePtr.add ptr offset -> ptr
+    | PtrToInt  // NativePtr.toNativeInt ptr -> nativeint
+    | PtrNull   // NativePtr.nullPtr<T> -> null pointer
+    | PtrToVoid // NativePtr.toVoidPtr ptr -> voidptr (just a cast to ptr)
+    | PtrOfVoid // NativePtr.ofVoidPtr ptr -> nativeptr (just a cast from voidptr)
+
+/// Core operation types (from Alloy.Core)
+type CoreOp =
+    | Ignore  // ignore value -> unit (discards value, returns unit)
+
 /// All recognized Alloy operations
 type AlloyOp =
     | Console of ConsoleOp
     | Time of TimeOp
     | TextFormat of TextFormatOp
     | Memory of MemoryOp
+    | Result of ResultOp
+    | Core of CoreOp
 
 /// Arithmetic operation types
 type ArithOp =
@@ -69,15 +106,36 @@ type ArithOp =
     | ShiftLeft | ShiftRight
     | Negate | Not
 
+/// Type conversion operation types (F# core operators)
+type ConversionOp =
+    | ToByte    // byte x - truncate to i8
+    | ToSByte   // sbyte x - truncate to i8 (signed)
+    | ToInt16   // int16 x - extend/truncate to i16
+    | ToUInt16  // uint16 x - extend/truncate to i16
+    | ToInt32   // int x / int32 x - extend/truncate to i32
+    | ToUInt32  // uint32 x - extend/truncate to i32
+    | ToInt64   // int64 x - extend to i64
+    | ToUInt64  // uint64 x - extend to i64
+    | ToFloat   // float32 x - convert to f32
+    | ToDouble  // float x - convert to f64
+
 /// Comparison operation types
 type CompareOp =
     | Eq | Neq | Lt | Gt | Lte | Gte
 
 /// Information about a function call
+/// Uses PSG node for type information - no FCS lookups after PSG construction
 type FunctionCallInfo = {
-    FunctionSymbol: FSharpSymbol
-    FunctionName: string
-    Arguments: PSGNode list
+    AppNode: PSGNode             // The App node (has result Type field)
+    FunctionNode: PSGNode        // The function identifier node
+    FunctionName: string         // Display name for MLIR emission
+    Arguments: PSGNode list      // Argument nodes
+}
+
+/// Information about a pipe expression (value |> func)
+type PipeInfo = {
+    Value: PSGNode       // The left side of the pipe (the value being piped)
+    Function: PSGNode    // The right side of the pipe (the function to apply)
 }
 
 // ===================================================================
@@ -85,10 +143,11 @@ type FunctionCallInfo = {
 // ===================================================================
 
 /// Get child nodes from a PSGNode using its Children state
+/// Note: Children are in correct source order after PSG finalization
 let private getChildNodes (graph: ProgramSemanticGraph) (node: PSGNode) : PSGNode list =
     match node.Children with
     | ChildrenState.Parent ids ->
-        ids |> List.rev |> List.choose (fun id -> Map.tryFind id.Value graph.Nodes)
+        ids |> List.choose (fun id -> Map.tryFind id.Value graph.Nodes)
     | _ -> []
 
 /// Get the function symbol from an App node's first child
@@ -103,7 +162,7 @@ let private getFunctionSymbolFromChildren (children: PSGNode list) : FSharpSymbo
 
 /// Classify a Console operation from a symbol
 let classifyConsoleOp (symbol: FSharpSymbol) : ConsoleOp option =
-    let fullName = symbol.FullName
+    let fullName = getFullNameOrDefault symbol ""
     let displayName = symbol.DisplayName
 
     // Check for WriteLine (must check before Write since Write is substring)
@@ -121,22 +180,21 @@ let classifyConsoleOp (symbol: FSharpSymbol) : ConsoleOp option =
          fullName.EndsWith(".Prompt") ||
          fullName.Contains("Console.Prompt") then
         Some Write  // Prompt behaves like Write
-    // Check for ReadLine
+    // Check for ReadLine (public API only, not internal readLine function)
+    // Console.ReadLine is the user-facing API that gets inlined
+    // Console.readLine (lowercase) is the internal implementation that should be a normal function call
     elif displayName = "ReadLine" ||
-         displayName = "readLine" ||
-         fullName.Contains("Console.ReadLine") ||
-         fullName.Contains("Console.readLine") then
+         fullName.Contains("Console.ReadLine") then
         Some ReadLine
-    // Check for readInto
-    elif displayName = "readInto" ||
-         fullName.Contains("Console.readInto") then
-        Some Read
+    // Note: readInto is NOT special-cased here - it uses SRTP which resolves
+    // to concrete trait member calls. The TraitCall nodes are emitted properly
+    // and resolve to the actual member implementations.
     else
         None
 
 /// Classify a Time operation from a symbol
 let classifyTimeOp (symbol: FSharpSymbol) : TimeOp option =
-    let fullName = symbol.FullName
+    let fullName = getFullNameOrDefault symbol ""
     let displayName = symbol.DisplayName
 
     if displayName = "currentTicks" || fullName.Contains("currentTicks") then
@@ -158,7 +216,7 @@ let classifyTimeOp (symbol: FSharpSymbol) : TimeOp option =
 
 /// Classify a Text.Format operation from a symbol
 let classifyTextFormatOp (symbol: FSharpSymbol) : TextFormatOp option =
-    let fullName = symbol.FullName
+    let fullName = getFullNameOrDefault symbol ""
     let displayName = symbol.DisplayName
 
     if displayName = "intToString" || fullName.Contains("intToString") then
@@ -174,7 +232,7 @@ let classifyTextFormatOp (symbol: FSharpSymbol) : TextFormatOp option =
 
 /// Classify a Memory operation from a symbol
 let classifyMemoryOp (symbol: FSharpSymbol) : MemoryOp option =
-    let fullName = symbol.FullName
+    let fullName = getFullNameOrDefault symbol ""
     let displayName = symbol.DisplayName
 
     if displayName = "stackBuffer" || fullName.Contains("Memory.stackBuffer") then
@@ -183,6 +241,47 @@ let classifyMemoryOp (symbol: FSharpSymbol) : MemoryOp option =
         Some SpanToString
     elif displayName = "AsReadOnlySpan" || fullName.Contains("AsReadOnlySpan") then
         Some AsReadOnlySpan
+    else
+        None
+
+/// Classify a Result DU constructor operation from a symbol
+let classifyResultOp (symbol: FSharpSymbol) : ResultOp option =
+    let fullName = getFullNameOrDefault symbol ""
+    let displayName = symbol.DisplayName
+
+    // Match Ok and Error DU constructors
+    // They may appear as Alloy.Core.Ok, Alloy.Core.Error, or just Ok/Error
+    if displayName = "Ok" || fullName.Contains(".Ok") || fullName.EndsWith(".Ok") then
+        Some OkCtor
+    elif displayName = "Error" || fullName.Contains(".Error") || fullName.EndsWith(".Error") then
+        Some ErrorCtor
+    else
+        None
+
+/// Classify a NativePtr operation from a symbol
+let classifyNativePtrOp (symbol: FSharpSymbol) : NativePtrOp option =
+    let fullName = getFullNameOrDefault symbol ""
+    let displayName = symbol.DisplayName
+
+    // Match NativePtr operations from FSharp.NativeInterop or Alloy.NativeTypes
+    if displayName = "get" && (fullName.Contains("NativePtr") || fullName.Contains("NativeInterop")) then
+        Some PtrGet
+    elif displayName = "set" && (fullName.Contains("NativePtr") || fullName.Contains("NativeInterop")) then
+        Some PtrSet
+    elif displayName = "read" && (fullName.Contains("NativePtr") || fullName.Contains("NativeInterop")) then
+        Some PtrRead
+    elif displayName = "write" && (fullName.Contains("NativePtr") || fullName.Contains("NativeInterop")) then
+        Some PtrWrite
+    elif displayName = "add" && (fullName.Contains("NativePtr") || fullName.Contains("NativeInterop")) then
+        Some PtrAdd
+    elif displayName = "toNativeInt" && (fullName.Contains("NativePtr") || fullName.Contains("NativeInterop")) then
+        Some PtrToInt
+    elif displayName = "nullPtr" && (fullName.Contains("NativePtr") || fullName.Contains("NativeInterop")) then
+        Some PtrNull
+    elif displayName = "toVoidPtr" && (fullName.Contains("NativePtr") || fullName.Contains("NativeInterop")) then
+        Some PtrToVoid
+    elif displayName = "ofVoidPtr" && (fullName.Contains("NativePtr") || fullName.Contains("NativeInterop")) then
+        Some PtrOfVoid
     else
         None
 
@@ -200,7 +299,9 @@ let classifyArithOp (mfv: FSharpMemberOrFunctionOrValue) : ArithOp option =
     | "op_LeftShift" -> Some ShiftLeft
     | "op_RightShift" -> Some ShiftRight
     | "op_UnaryNegation" -> Some Negate
-    | _ when mfv.DisplayName = "not" -> Some Not
+    | "op_LogicalNot" -> Some Not
+    | "not" -> Some Not  // CompiledName for F# not function
+    | _ when mfv.DisplayName = "not" || mfv.DisplayName = "``not``" -> Some Not
     | _ -> None
 
 /// Classify a comparison operator from an MFV
@@ -213,6 +314,36 @@ let classifyCompareOp (mfv: FSharpMemberOrFunctionOrValue) : CompareOp option =
     | "op_LessThanOrEqual" -> Some Lte
     | "op_GreaterThanOrEqual" -> Some Gte
     | _ -> None
+
+/// Classify a type conversion operator from an MFV
+let classifyConversionOp (mfv: FSharpMemberOrFunctionOrValue) : ConversionOp option =
+    let displayName = mfv.DisplayName
+    let fullName = getFullNameOrDefault mfv ""
+    // Match F# core conversion operators
+    if displayName = "byte" || fullName.EndsWith(".byte") || fullName.Contains("Operators.byte") then
+        Some ToByte
+    elif displayName = "sbyte" || fullName.EndsWith(".sbyte") || fullName.Contains("Operators.sbyte") then
+        Some ToSByte
+    elif displayName = "int16" || fullName.EndsWith(".int16") || fullName.Contains("Operators.int16") then
+        Some ToInt16
+    elif displayName = "uint16" || fullName.EndsWith(".uint16") || fullName.Contains("Operators.uint16") then
+        Some ToUInt16
+    elif displayName = "int" || displayName = "int32" || fullName.EndsWith(".int") || fullName.EndsWith(".int32") ||
+         fullName.Contains("Operators.int") || fullName.Contains("Operators.int32") then
+        Some ToInt32
+    elif displayName = "uint32" || fullName.EndsWith(".uint32") || fullName.Contains("Operators.uint32") then
+        Some ToUInt32
+    elif displayName = "int64" || fullName.EndsWith(".int64") || fullName.Contains("Operators.int64") then
+        Some ToInt64
+    elif displayName = "uint64" || fullName.EndsWith(".uint64") || fullName.Contains("Operators.uint64") then
+        Some ToUInt64
+    elif displayName = "float32" || fullName.EndsWith(".float32") || fullName.Contains("Operators.float32") then
+        Some ToFloat
+    elif displayName = "float" || displayName = "double" || fullName.EndsWith(".float") ||
+         fullName.Contains("Operators.float") then
+        Some ToDouble
+    else
+        None
 
 // ===================================================================
 // Node Classifiers - Extract operation type from PSGNode
@@ -267,6 +398,97 @@ let extractMemoryOp (graph: ProgramSemanticGraph) (node: PSGNode) : MemoryOp opt
             | Some s -> classifyMemoryOp s
             | None -> None
 
+/// Extract Result DU constructor operation from a node
+let extractResultOp (graph: ProgramSemanticGraph) (node: PSGNode) : ResultOp option =
+    if not (node.SyntaxKind.StartsWith("App")) then None
+    else
+        let children = getChildNodes graph node
+        match getFunctionSymbolFromChildren children with
+        | Some symbol -> classifyResultOp symbol
+        | None ->
+            match node.Symbol with
+            | Some s -> classifyResultOp s
+            | None -> None
+
+/// Extract NativePtr operation from a node
+/// NativePtr operations are curried: NativePtr.set ptr idx value is ((NativePtr.set ptr) idx) value
+/// Also handles TypeApp nodes for generic operations like nullPtr<byte>
+let extractNativePtrOp (graph: ProgramSemanticGraph) (node: PSGNode) : NativePtrOp option =
+    // Handle TypeApp nodes (like nullPtr<byte>) - check child for NativePtr symbol
+    if node.SyntaxKind.StartsWith("TypeApp") then
+        let children = getChildNodes graph node
+        match getFunctionSymbolFromChildren children with
+        | Some symbol -> classifyNativePtrOp symbol
+        | None ->
+            // Also check all children for LongIdent with NativePtr
+            children
+            |> List.tryPick (fun child ->
+                match child.Symbol with
+                | Some sym -> classifyNativePtrOp sym
+                | None -> None)
+    elif not (node.SyntaxKind.StartsWith("App")) then None
+    else
+        let children = getChildNodes graph node
+        // Look through curried applications to find the NativePtr function
+        let rec findPtrOp (children: PSGNode list) : NativePtrOp option =
+            match getFunctionSymbolFromChildren children with
+            | Some symbol ->
+                match classifyNativePtrOp symbol with
+                | Some op -> Some op
+                | None ->
+                    // Check if first child is another App (curried call)
+                    match children with
+                    | innerApp :: _ when innerApp.SyntaxKind.StartsWith("App") ->
+                        findPtrOp (getChildNodes graph innerApp)
+                    | _ -> None
+            | None ->
+                match children with
+                | innerApp :: _ when innerApp.SyntaxKind.StartsWith("App") ->
+                    findPtrOp (getChildNodes graph innerApp)
+                | _ -> None
+
+        findPtrOp children
+
+/// Extract type conversion operation from a node
+/// Conversion ops are unary: byte value is (byte) value
+let extractConversionOp (graph: ProgramSemanticGraph) (node: PSGNode) : ConversionOp option =
+    if not (node.SyntaxKind.StartsWith("App")) then None
+    else
+        let children = getChildNodes graph node
+        match getFunctionSymbolFromChildren children with
+        | Some symbol ->
+            match symbol with
+            | :? FSharpMemberOrFunctionOrValue as mfv -> classifyConversionOp mfv
+            | _ -> None
+        | None ->
+            // Also check the node's own symbol
+            match node.Symbol with
+            | Some (:? FSharpMemberOrFunctionOrValue as mfv) -> classifyConversionOp mfv
+            | _ -> None
+
+/// Classify a symbol as a Core operation
+let private classifyCoreOp (sym: FSharpSymbol) : CoreOp option =
+    match sym with
+    | :? FSharpMemberOrFunctionOrValue as mfv ->
+        let displayName = mfv.DisplayName
+        let fullName = getFullNameOrDefault sym displayName
+        // Check for Alloy.Core.ignore
+        if displayName = "ignore" && (fullName.Contains("Alloy") || fullName.Contains("Core")) then
+            Some Ignore
+        else
+            None
+    | _ -> None
+
+/// Extract Core operation from a node
+/// Core ops like 'ignore' are simple unary functions: ignore x
+let extractCoreOp (graph: ProgramSemanticGraph) (node: PSGNode) : CoreOp option =
+    if not (node.SyntaxKind.StartsWith("App")) then None
+    else
+        let children = getChildNodes graph node
+        match getFunctionSymbolFromChildren children with
+        | Some symbol -> classifyCoreOp symbol
+        | None -> None
+
 /// Extract any Alloy operation from a node
 let extractAlloyOp (graph: ProgramSemanticGraph) (node: PSGNode) : AlloyOp option =
     match extractConsoleOp graph node with
@@ -280,24 +502,76 @@ let extractAlloyOp (graph: ProgramSemanticGraph) (node: PSGNode) : AlloyOp optio
     | None ->
     match extractMemoryOp graph node with
     | Some op -> Some (Memory op)
+    | None ->
+    match extractResultOp graph node with
+    | Some op -> Some (Result op)
+    | None ->
+    match extractCoreOp graph node with
+    | Some op -> Some (Core op)
     | None -> None
 
 /// Extract arithmetic operation from an App node
+/// Handles curried operators: a + b is ((+) a) b
+/// For curried form, the structure is: App[App[op, leftArg], rightArg]
+/// The operator is the FIRST child of the FIRST App child
+/// IMPORTANT: Only check immediate operator, not nested expressions
 let extractArithOp (graph: ProgramSemanticGraph) (node: PSGNode) : ArithOp option =
     if not (node.SyntaxKind.StartsWith("App")) then None
     else
         let children = getChildNodes graph node
-        match getFunctionSymbolFromChildren children with
-        | Some (:? FSharpMemberOrFunctionOrValue as mfv) -> classifyArithOp mfv
+
+        // Helper to check if a node is an arithmetic operator
+        let isArithOpNode (opNode: PSGNode) =
+            opNode.SyntaxKind.StartsWith("LongIdent:op_") ||
+            opNode.SyntaxKind.StartsWith("Ident:op_") ||
+            opNode.SyntaxKind = "Ident:not" ||
+            opNode.SyntaxKind.Contains(":not")
+
+        match children with
+        | innerApp :: _ when innerApp.SyntaxKind.StartsWith("App") ->
+            // For curried operators, the inner App's first child is the operator
+            let innerChildren = getChildNodes graph innerApp
+            match innerChildren with
+            | opNode :: _ when isArithOpNode opNode ->
+                match opNode.Symbol with
+                | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+                    classifyArithOp mfv
+                | _ -> None
+            | _ -> None
+        | opNode :: _ when isArithOpNode opNode ->
+            // Direct operator/function application (like "not x")
+            match opNode.Symbol with
+            | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+                classifyArithOp mfv
+            | _ -> None
         | _ -> None
 
 /// Extract comparison operation from an App node
+/// Handles curried operators: a >= b is ((>=) a) b
+/// For curried form, the structure is: App[App[op, leftArg], rightArg]
+/// The operator is the FIRST child of the FIRST App child
+/// IMPORTANT: Only check immediate operator, not nested expressions
 let extractCompareOp (graph: ProgramSemanticGraph) (node: PSGNode) : CompareOp option =
     if not (node.SyntaxKind.StartsWith("App")) then None
     else
         let children = getChildNodes graph node
-        match getFunctionSymbolFromChildren children with
-        | Some (:? FSharpMemberOrFunctionOrValue as mfv) -> classifyCompareOp mfv
+        match children with
+        | innerApp :: _ when innerApp.SyntaxKind.StartsWith("App") ->
+            // For curried operators, the inner App's first child is the operator
+            let innerChildren = getChildNodes graph innerApp
+            match innerChildren with
+            | opNode :: _ when opNode.SyntaxKind.StartsWith("LongIdent:op_") ->
+                match opNode.Symbol with
+                | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+                    classifyCompareOp mfv
+                | _ -> None
+            | _ -> None
+        | opNode :: _ when opNode.SyntaxKind.StartsWith("LongIdent:op_") ->
+            // Direct operator application (unusual but handle it)
+            match opNode.Symbol with
+            | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+                classifyCompareOp mfv
+            | _ -> None
         | _ -> None
 
 // ===================================================================
@@ -333,25 +607,96 @@ let isCompareCall (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
     extractCompareOp graph node |> Option.isSome
 
 // ===================================================================
-// Function Call Info Extraction
+// Pipe Operator Extraction
 // ===================================================================
 
-/// Extract function call information from an App node
-let extractFunctionCall (graph: ProgramSemanticGraph) (node: PSGNode) : FunctionCallInfo option =
+/// Check if a symbol is the pipe operator (|>)
+let private isPipeOperator (sym: FSharpSymbol) : bool =
+    match sym with
+    | :? FSharpMemberOrFunctionOrValue as mfv ->
+        mfv.DisplayName = "op_PipeRight" || mfv.CompiledName = "op_PipeRight"
+    | _ -> false
+
+/// Extract pipe expression information from an App node
+/// The pipe operator (|>) has structure: App[App[op_PipeRight, value], func]
+/// Where value |> func means func(value)
+let extractPipe (graph: ProgramSemanticGraph) (node: PSGNode) : PipeInfo option =
     if not (node.SyntaxKind.StartsWith("App")) then None
     else
         let children = getChildNodes graph node
         match children with
-        | funcNode :: args ->
+        | [innerApp; funcNode] when innerApp.SyntaxKind.StartsWith("App") ->
+            // Check if innerApp contains the pipe operator
+            let innerChildren = getChildNodes graph innerApp
+            match innerChildren with
+            | [pipeOpNode; valueNode] ->
+                match pipeOpNode.Symbol with
+                | Some sym when isPipeOperator sym ->
+                    Some { Value = valueNode; Function = funcNode }
+                | _ -> None
+            | _ -> None
+        | _ -> None
+
+/// Check if node is a pipe expression
+let isPipe (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
+    extractPipe graph node |> Option.isSome
+
+// ===================================================================
+// Function Call Info Extraction
+// ===================================================================
+
+/// Extract function call information from an App node
+/// Handles curried calls by recursively traversing nested App nodes
+/// For `f a b c`, the PSG structure is: App(App(App(f, a), b), c)
+/// This function collects all arguments from all curry levels
+/// Uses PSG node data only - no FCS lookups
+let extractFunctionCall (graph: ProgramSemanticGraph) (node: PSGNode) : FunctionCallInfo option =
+    if not (node.SyntaxKind.StartsWith("App")) then None
+    else
+        // Recursively traverse nested App nodes to find the function and collect all arguments
+        // Arguments are collected in reverse order (innermost first), then reversed at the end
+        let rec collectCurriedArgs (appNode: PSGNode) (accArgs: PSGNode list) : (PSGNode * PSGNode list) option =
+            let children = getChildNodes graph appNode
+            match children with
+            | funcOrApp :: args ->
+                let newArgs = args @ accArgs  // Prepend args from this level
+                if funcOrApp.SyntaxKind.StartsWith("App") then
+                    // This is a nested application, recurse into it
+                    collectCurriedArgs funcOrApp newArgs
+                else
+                    // This is the actual function node
+                    Some (funcOrApp, newArgs)
+            | [] -> None
+
+        match collectCurriedArgs node [] with
+        | Some (funcNode, allArgs) ->
             match funcNode.Symbol with
             | Some sym ->
                 Some {
-                    FunctionSymbol = sym
-                    FunctionName = sym.FullName
-                    Arguments = args
+                    AppNode = node          // The outermost App node has the final result type
+                    FunctionNode = funcNode
+                    FunctionName = getFullNameOrDefault sym sym.DisplayName
+                    Arguments = allArgs
                 }
-            | None -> None
-        | [] -> None
+            | None ->
+                // Function node doesn't have a symbol directly, but might be a LongIdent or TypeApp
+                // Try to get the name from the syntax kind
+                let name =
+                    if funcNode.SyntaxKind.StartsWith("LongIdent:") then
+                        funcNode.SyntaxKind.Substring(10)
+                    elif funcNode.SyntaxKind.StartsWith("Ident:") then
+                        funcNode.SyntaxKind.Substring(6)
+                    else
+                        funcNode.SyntaxKind
+                if name <> "" && name <> funcNode.SyntaxKind then
+                    Some {
+                        AppNode = node
+                        FunctionNode = funcNode
+                        FunctionName = name
+                        Arguments = allArgs
+                    }
+                else None
+        | None -> None
 
 // ===================================================================
 // MLIR Operation Names for Operators

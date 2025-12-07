@@ -151,7 +151,7 @@ let buildResolvedTypeIndex (checkResults: FSharpCheckProjectResults) : ResolvedT
                         // Assembly signatures have COMPLETED constraint resolution
                         let resolvedType = mfv.FullType
                         let typeConstraints = extractResolvedConstraints resolvedType
-                        
+
                         let typeInfo = {
                             Type = resolvedType
                             Constraints = typeConstraints
@@ -159,16 +159,56 @@ let buildResolvedTypeIndex (checkResults: FSharpCheckProjectResults) : ResolvedT
                             IsFromUsageSite = false
                             SourceSymbol = Some (mfv :> FSharpSymbol)
                         }
-                        
+
                         let key = rangeToKey mfv.DeclarationLocation
                         rangeToTypeInfo <- Map.add key typeInfo rangeToTypeInfo
-                        
+
                         let symbolKey = symbolToKey (mfv :> FSharpSymbol)
                         symbolToTypeInfo <- Map.add symbolKey (typeInfo, mfv :> FSharpSymbol) symbolToTypeInfo
-                        
+
+                        // Walk the expression tree to capture types for ALL expressions
+                        let rec walkExpr (fexpr: FSharpExpr) =
+                            try
+                                let exprType = fexpr.Type
+                                let exprRange = fexpr.Range
+                                let exprTypeInfo = {
+                                    Type = exprType
+                                    Constraints = extractResolvedConstraints exprType
+                                    Range = exprRange
+                                    IsFromUsageSite = true
+                                    SourceSymbol = None
+                                }
+                                let exprKey = rangeToKey exprRange
+                                rangeToTypeInfo <- Map.add exprKey exprTypeInfo rangeToTypeInfo
+
+                                // Recursively walk sub-expressions
+                                for subExpr in fexpr.ImmediateSubExpressions do
+                                    walkExpr subExpr
+                            with _ -> ()
+
+                        walkExpr expr
+
                     | FSharpImplementationFileDeclaration.InitAction expr ->
-                        // Skip expression processing to avoid constraint solver activation
-                        ()
+                        // Walk the expression tree for init actions too
+                        let rec walkExpr (fexpr: FSharpExpr) =
+                            try
+                                let exprType = fexpr.Type
+                                let exprRange = fexpr.Range
+                                let exprTypeInfo = {
+                                    Type = exprType
+                                    Constraints = extractResolvedConstraints exprType
+                                    Range = exprRange
+                                    IsFromUsageSite = true
+                                    SourceSymbol = None
+                                }
+                                let exprKey = rangeToKey exprRange
+                                rangeToTypeInfo <- Map.add exprKey exprTypeInfo rangeToTypeInfo
+
+                                for subExpr in fexpr.ImmediateSubExpressions do
+                                    walkExpr subExpr
+                            with _ -> ()
+
+                        walkExpr expr
                 with
                 | ex ->
                     printfn "[TYPE INTEGRATION] Note: Declaration processing skipped: %s" ex.Message
@@ -190,31 +230,52 @@ let buildResolvedTypeIndex (checkResults: FSharpCheckProjectResults) : ResolvedT
 /// Correlate RESOLVED type and constraint information with PSG node
 let correlateNodeWithResolvedTypes (node: PSGNode) (resolvedIndex: ResolvedTypeIndex) : (FSharpType * IList<FSharpGenericParameterConstraint>) option =
     try
-        // Strategy 1: Direct symbol-based correlation (preserved from original)
-        match node.Symbol with
-        | Some symbol ->
-            let symbolKey = symbolToKey symbol
-            match Map.tryFind symbolKey resolvedIndex.SymbolToTypeInfo with
-            | Some (typeInfo, _) -> Some (typeInfo.Type, typeInfo.Constraints)
-            | None ->
-                // Strategy 2: Range-based correlation for expressions (preserved from original)  
-                let rangeKey = rangeToKey node.Range
-                match Map.tryFind rangeKey resolvedIndex.RangeToTypeInfo with
-                | Some typeInfo -> Some (typeInfo.Type, typeInfo.Constraints)
-                | None -> None
-        | None ->
-            // Strategy 3: Range-based correlation only (preserved from original)
+        // For App nodes (function applications), PREFER range-based correlation
+        // because the range gives us the RESULT type of the expression,
+        // while the symbol gives us the FUNCTION type (which is wrong for emissions)
+        let isAppNode = node.SyntaxKind.StartsWith("App")
+
+        if isAppNode then
+            // Strategy 1 for App: Range-based correlation first (gives result type)
             let rangeKey = rangeToKey node.Range
             match Map.tryFind rangeKey resolvedIndex.RangeToTypeInfo with
             | Some typeInfo -> Some (typeInfo.Type, typeInfo.Constraints)
             | None ->
-                // Strategy 4: Tolerant range matching within same file (preserved from original)
-                resolvedIndex.RangeToTypeInfo
-                |> Map.tryPick (fun rangeStr typeInfo ->
-                    if rangeStr.StartsWith(System.IO.Path.GetFileName node.Range.FileName) then
-                        Some (typeInfo.Type, typeInfo.Constraints)
-                    else None
-                )
+                // Fallback to symbol if range not found
+                match node.Symbol with
+                | Some symbol ->
+                    let symbolKey = symbolToKey symbol
+                    match Map.tryFind symbolKey resolvedIndex.SymbolToTypeInfo with
+                    | Some (typeInfo, _) -> Some (typeInfo.Type, typeInfo.Constraints)
+                    | None -> None
+                | None -> None
+        else
+            // For non-App nodes, use original strategy
+            // Strategy 1: Direct symbol-based correlation
+            match node.Symbol with
+            | Some symbol ->
+                let symbolKey = symbolToKey symbol
+                match Map.tryFind symbolKey resolvedIndex.SymbolToTypeInfo with
+                | Some (typeInfo, _) -> Some (typeInfo.Type, typeInfo.Constraints)
+                | None ->
+                    // Strategy 2: Range-based correlation for expressions
+                    let rangeKey = rangeToKey node.Range
+                    match Map.tryFind rangeKey resolvedIndex.RangeToTypeInfo with
+                    | Some typeInfo -> Some (typeInfo.Type, typeInfo.Constraints)
+                    | None -> None
+            | None ->
+                // Strategy 3: Range-based correlation only
+                let rangeKey = rangeToKey node.Range
+                match Map.tryFind rangeKey resolvedIndex.RangeToTypeInfo with
+                | Some typeInfo -> Some (typeInfo.Type, typeInfo.Constraints)
+                | None ->
+                    // Strategy 4: Tolerant range matching within same file
+                    resolvedIndex.RangeToTypeInfo
+                    |> Map.tryPick (fun rangeStr typeInfo ->
+                        if rangeStr.StartsWith(System.IO.Path.GetFileName node.Range.FileName) then
+                            Some (typeInfo.Type, typeInfo.Constraints)
+                        else None
+                    )
     with
     | ex ->
         printfn "[TYPE INTEGRATION] Warning: Type correlation failed for node %s: %s" node.Id.Value ex.Message

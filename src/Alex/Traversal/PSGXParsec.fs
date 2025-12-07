@@ -17,8 +17,17 @@ module Alex.Traversal.PSGXParsec
 
 open System
 open XParsec
+open FSharp.Compiler.Symbols
 open Core.PSG.Types
 open Alex.Traversal.PSGZipper
+
+// ═══════════════════════════════════════════════════════════════════
+// Safe Symbol Helpers
+// ═══════════════════════════════════════════════════════════════════
+
+/// Safely get a symbol's FullName, handling types like 'unit' that throw exceptions
+let private tryGetFullName (sym: FSharpSymbol) : string option =
+    try Some sym.FullName with _ -> None
 
 // ═══════════════════════════════════════════════════════════════════
 // PSGChildSlice - IReadable implementation for PSG node children
@@ -179,7 +188,10 @@ let childKindPrefix (prefix: string) : PSGChildParser<PSGNode> =
 let childSymbolName (name: string) : PSGChildParser<PSGNode> =
     satisfyChild (fun n ->
         match n.Symbol with
-        | Some s -> s.FullName = name
+        | Some s ->
+            match tryGetFullName s with
+            | Some fullName -> fullName = name
+            | None -> false
         | None -> false)
 
 /// Match child with symbol display name
@@ -193,14 +205,20 @@ let childSymbolDisplayName (name: string) : PSGChildParser<PSGNode> =
 let childSymbolContains (substring: string) : PSGChildParser<PSGNode> =
     satisfyChild (fun n ->
         match n.Symbol with
-        | Some s -> s.FullName.Contains(substring) || s.DisplayName.Contains(substring)
+        | Some s ->
+            match tryGetFullName s with
+            | Some fullName -> fullName.Contains(substring) || s.DisplayName.Contains(substring)
+            | None -> s.DisplayName.Contains(substring)
         | None -> false)
 
 /// Match child with symbol name ending with suffix
 let childSymbolEndsWith (suffix: string) : PSGChildParser<PSGNode> =
     satisfyChild (fun n ->
         match n.Symbol with
-        | Some s -> s.FullName.EndsWith(suffix) || s.DisplayName.EndsWith(suffix)
+        | Some s ->
+            match tryGetFullName s with
+            | Some fullName -> fullName.EndsWith(suffix) || s.DisplayName.EndsWith(suffix)
+            | None -> s.DisplayName.EndsWith(suffix)
         | None -> false)
 
 // ═══════════════════════════════════════════════════════════════════

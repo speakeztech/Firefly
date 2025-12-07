@@ -11,8 +11,13 @@ open FSharp.Compiler.Symbols
 /// Convert an F# type to its MLIR representation
 let rec fsharpTypeToMLIR (ftype: FSharpType) : string =
     try
+        // Check for nativeptr early - it may not have HasTypeDefinition = true
+        // but its string representation contains "nativeptr"
+        let typeStr = ftype.ToString()
+        if typeStr.Contains("nativeptr") then
+            "!llvm.ptr"
         // Check for unit first, before other patterns
-        if ftype.HasTypeDefinition && ftype.TypeDefinition.DisplayName = "unit" then
+        elif ftype.HasTypeDefinition && ftype.TypeDefinition.DisplayName = "unit" then
             "()"
         elif ftype.IsAbbreviation then
             fsharpTypeToMLIR ftype.AbbreviatedType
@@ -59,6 +64,19 @@ let rec fsharpTypeToMLIR (ftype: FSharpType) : string =
             // Native pointer
             | Some name when name.StartsWith("Microsoft.FSharp.Core.nativeptr") -> "!llvm.ptr"
 
+            // Alloy StackBuffer - stack-allocated byte buffer, represented as pointer
+            | Some name when name.Contains("Alloy.Memory.StackBuffer") -> "!llvm.ptr"
+
+            // Alloy Span/ReadOnlySpan - memory spans, represented as pointer
+            | Some name when name.Contains("Alloy.Memory.Span") -> "!llvm.ptr"
+            | Some name when name.Contains("Alloy.Memory.ReadOnlySpan") -> "!llvm.ptr"
+
+            // Alloy NativeStr - fat pointer struct (ptr + length)
+            // Emitted as !llvm.struct<(ptr, i64)> per NativeString.fs docs
+            | Some name when name.Contains("Alloy.NativeTypes.NativeStr") ||
+                            name.Contains("NativeStr") ->
+                "!llvm.struct<(ptr, i64)>"
+
             // Option type
             | Some name when name.StartsWith("Microsoft.FSharp.Core.FSharpOption") ->
                 let innerType =
@@ -66,6 +84,12 @@ let rec fsharpTypeToMLIR (ftype: FSharpType) : string =
                         fsharpTypeToMLIR ftype.GenericArguments.[0]
                     else "i32"
                 sprintf "!variant<Some: %s, None: ()>" innerType
+
+            // Result type (from Alloy.Core or Microsoft.FSharp.Core)
+            // Represented as struct<(tag: i32, payload1: i64, payload2: i64)>
+            // Tag 0 = Ok, Tag 1 = Error
+            | Some name when name.Contains("Result`2") || name.Contains("Result<") ->
+                "!llvm.struct<(i32, i64, i64)>"
 
             // List type
             | Some name when name.StartsWith("Microsoft.FSharp.Collections.FSharpList") ->
@@ -79,44 +103,47 @@ let rec fsharpTypeToMLIR (ftype: FSharpType) : string =
                     else "i32"
                 sprintf "memref<?x%s>" elemType
 
-            // Fallback
-            | Some _ -> "i32"
+            // Fallback - print type info for debugging (comment out in production)
+            | Some name ->
+                // Check if it looks like a pointer/buffer type by name
+                if name.Contains("nativeptr") || name.Contains("Ptr") ||
+                   name.Contains("Buffer") || name.Contains("Span") then
+                    "!llvm.ptr"
+                else
+                    "i32"
             | None -> "i32"
+        // Generic parameters (SRTP type variables) - check if pointer-like
+        elif ftype.IsGenericParameter then
+            // For now, assume SRTP buffer types are pointers
+            // This covers common patterns in Alloy library
+            "!llvm.ptr"
         else "i32"
     with _ -> "i32"
 
-/// Get the MLIR return type for a function/method
-let getFunctionReturnType (mfv: FSharpMemberOrFunctionOrValue) : string =
+/// Extract return type from a function type (stored in PSG node.Type)
+/// Walks through curried function type to get the final return type
+let getReturnTypeFromFSharpType (ftype: FSharpType) : string =
     try
-        // For functions, the actual return type is the last type in the function type
-        // e.g., for `unit -> unit`, return type is unit
-        let fullType = mfv.FullType
-        if fullType.IsFunctionType then
-            // Walk through function type to get final return
-            let rec getReturnType (t: FSharpType) =
-                if t.IsFunctionType && t.GenericArguments.Count >= 2 then
-                    getReturnType t.GenericArguments.[1]
-                else
-                    t
-            fsharpTypeToMLIR (getReturnType fullType)
-        else
-            fsharpTypeToMLIR mfv.ReturnParameter.Type
+        let rec getReturnType (t: FSharpType) =
+            if t.IsFunctionType && t.GenericArguments.Count >= 2 then
+                getReturnType t.GenericArguments.[1]
+            else
+                t
+        fsharpTypeToMLIR (getReturnType ftype)
     with _ -> "i32"
 
-/// Get MLIR parameter types for a function/method
-/// Returns list of (paramName, mlirType) pairs
-/// Note: Unit parameters should be filtered out by the caller
-let getFunctionParamTypes (mfv: FSharpMemberOrFunctionOrValue) : (string * string) list =
+/// Extract parameter types from a function type (stored in PSG node.Type)
+/// Returns list of MLIR types for each curried parameter
+let getParamTypesFromFSharpType (ftype: FSharpType) : string list =
     try
-        // For unit -> T functions, CurriedParameterGroups may be empty or have a unit param
-        // We handle this at the call site by filtering out "()" types
-        mfv.CurriedParameterGroups
-        |> Seq.collect id
-        |> Seq.map (fun p ->
-            let name = p.DisplayName
-            let mlirType = fsharpTypeToMLIR p.Type
-            (name, mlirType))
-        |> Seq.toList
+        let rec extractParamTypes (funcType: FSharpType) (acc: string list) =
+            if funcType.IsFunctionType && funcType.GenericArguments.Count >= 2 then
+                let argType = funcType.GenericArguments.[0]
+                let paramType = fsharpTypeToMLIR argType
+                extractParamTypes funcType.GenericArguments.[1] (paramType :: acc)
+            else
+                List.rev acc
+        extractParamTypes ftype []
     with _ -> []
 
 /// Check if a type is a primitive MLIR type (i32, i64, f32, etc.)

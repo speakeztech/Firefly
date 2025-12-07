@@ -10,6 +10,77 @@
 module Alex.Traversal.PSGZipper
 
 open Core.PSG.Types
+open FSharp.Compiler.Symbols
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Symbol SSA Context - Symbol-keyed SSA value tracking for Zipper traversal
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// SSA information for an emitted node
+type SSAInfo = {
+    Value: string      // e.g., "%v42"
+    Type: string       // e.g., "!llvm.ptr", "i32"
+}
+
+/// Symbol-keyed SSA context built during Zipper traversal
+/// Maps PSG nodes and symbols to their emitted SSA values
+/// This replaces string-based local variable tracking with symbol-based lookup
+type SymbolSSAContext = {
+    /// Map from NodeId to SSA info - the primary lookup for emitted nodes
+    NodeSSA: Map<string, SSAInfo>
+    /// Map from Symbol to defining NodeId - for resolving Ident references
+    SymbolDefs: Map<string, string>  // symbol key -> NodeId
+}
+
+module SymbolSSAContext =
+    let empty = {
+        NodeSSA = Map.empty
+        SymbolDefs = Map.empty
+    }
+
+    /// Generate a stable key for a symbol
+    /// Uses DeclarationLocation for local variables (stable across symbol instances)
+    /// Falls back to DisplayName + hash for other symbols
+    let symbolKey (sym: FSharpSymbol) : string =
+        match sym with
+        | :? FSharpMemberOrFunctionOrValue as mfv ->
+            // For local variables and functions, use declaration location as unique identifier
+            // This is stable because there's exactly one definition site
+            let loc = mfv.DeclarationLocation
+            sprintf "%s@%s:%d:%d" mfv.DisplayName loc.FileName loc.StartLine loc.StartColumn
+        | _ ->
+            // Fallback for other symbol types
+            sprintf "%s_%d" sym.DisplayName (sym.GetHashCode())
+
+    /// Record that a node produced an SSA value
+    let recordNodeSSA (nodeId: NodeId) (ssa: SSAInfo) (ctx: SymbolSSAContext) : SymbolSSAContext =
+        { ctx with NodeSSA = Map.add nodeId.Value ssa ctx.NodeSSA }
+
+    /// Record that a symbol is defined at a node (for Binding nodes)
+    let recordSymbolDef (sym: FSharpSymbol) (nodeId: NodeId) (ctx: SymbolSSAContext) : SymbolSSAContext =
+        let key = symbolKey sym
+        { ctx with SymbolDefs = Map.add key nodeId.Value ctx.SymbolDefs }
+
+    /// Record both the SSA value and symbol definition in one call
+    let recordBinding (sym: FSharpSymbol) (nodeId: NodeId) (ssa: SSAInfo) (ctx: SymbolSSAContext) : SymbolSSAContext =
+        ctx
+        |> recordNodeSSA nodeId ssa
+        |> recordSymbolDef sym nodeId
+
+    /// Look up SSA info for a node by its NodeId
+    let lookupNode (nodeId: NodeId) (ctx: SymbolSSAContext) : SSAInfo option =
+        Map.tryFind nodeId.Value ctx.NodeSSA
+
+    /// Look up SSA info for an identifier by finding its defining node
+    let lookupSymbol (sym: FSharpSymbol) (ctx: SymbolSSAContext) : SSAInfo option =
+        let key = symbolKey sym
+        match Map.tryFind key ctx.SymbolDefs with
+        | Some defNodeId -> Map.tryFind defNodeId ctx.NodeSSA
+        | None -> None
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PSG Path - Zipper navigation context
+// ═══════════════════════════════════════════════════════════════════════════
 
 /// The path from the current focus back to the root.
 /// Each step records what we "left behind" when descending.
@@ -30,11 +101,11 @@ type PSGPath =
 type EmissionState = {
     /// SSA counter for unique value names
     SSACounter: int
-    /// Map from F# variable name to SSA value name
-    Locals: Map<string, string>
-    /// Map from F# variable name to MLIR type
-    LocalTypes: Map<string, string>
-    /// Map from SSA name to MLIR type
+    /// Label counter for unique block labels
+    LabelCounter: int
+    /// Symbol-keyed SSA context - primary mechanism for variable resolution
+    SymbolSSA: SymbolSSAContext
+    /// Map from SSA name to MLIR type (for type lookups during emission)
     SSATypes: Map<string, string>
     /// Accumulated string literals: content -> global name
     StringLiterals: (string * string) list
@@ -42,17 +113,28 @@ type EmissionState = {
     CurrentFunction: string option
     /// Block labels that have been emitted
     EmittedBlocks: Set<string>
+    /// Map from mutable F# variable name to its stack slot SSA name (pointer)
+    /// Mutable variables are stored on the stack to avoid SSA complications
+    MutableSlots: Map<string, string * string>  // name -> (slot_ptr, element_type)
+    // DEPRECATED: These are being replaced by SSAContext
+    // Kept temporarily for backwards compatibility during migration
+    Locals: Map<string, string>
+    LocalTypes: Map<string, string>
 }
 
 module EmissionState =
     let empty = {
         SSACounter = 0
-        Locals = Map.empty
-        LocalTypes = Map.empty
+        LabelCounter = 0
+        SymbolSSA = SymbolSSAContext.empty
         SSATypes = Map.empty
         StringLiterals = []
         CurrentFunction = None
         EmittedBlocks = Set.empty
+        MutableSlots = Map.empty
+        // DEPRECATED
+        Locals = Map.empty
+        LocalTypes = Map.empty
     }
 
     /// Generate next SSA value name
@@ -67,18 +149,56 @@ module EmissionState =
             SSACounter = state.SSACounter + 1
             SSATypes = Map.add name mlirType state.SSATypes }, name
 
-    /// Bind an F# local to an SSA name
+    /// Generate next block label
+    let nextLabel state =
+        let name = sprintf "bb%d" state.LabelCounter
+        { state with LabelCounter = state.LabelCounter + 1 }, name
+
+    // ═══════════════════════════════════════════════════════════════════
+    // NEW: Symbol-based SSA binding (preferred)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Bind a symbol to an SSA value at a specific node
+    /// Use this when emitting Binding nodes
+    let bindSymbolSSA (sym: FSharpSymbol) (nodeId: NodeId) (ssaValue: string) (mlirType: string) (state: EmissionState) : EmissionState =
+        let ssaInfo = { Value = ssaValue; Type = mlirType }
+        { state with
+            SymbolSSA = SymbolSSAContext.recordBinding sym nodeId ssaInfo state.SymbolSSA
+            SSATypes = Map.add ssaValue mlirType state.SSATypes }
+
+    /// Record an SSA value for a node (without symbol binding)
+    /// Use this for intermediate expressions that don't define variables
+    let recordNodeSSA (nodeId: NodeId) (ssaValue: string) (mlirType: string) (state: EmissionState) : EmissionState =
+        let ssaInfo = { Value = ssaValue; Type = mlirType }
+        { state with
+            SymbolSSA = SymbolSSAContext.recordNodeSSA nodeId ssaInfo state.SymbolSSA
+            SSATypes = Map.add ssaValue mlirType state.SSATypes }
+
+    /// Look up SSA info for a symbol (for Ident nodes)
+    let lookupSymbolSSA (sym: FSharpSymbol) (state: EmissionState) : SSAInfo option =
+        SymbolSSAContext.lookupSymbol sym state.SymbolSSA
+
+    /// Look up SSA info for a node by its ID
+    let lookupNodeSSA (nodeId: NodeId) (state: EmissionState) : SSAInfo option =
+        SymbolSSAContext.lookupNode nodeId state.SymbolSSA
+
+    // ═══════════════════════════════════════════════════════════════════
+    // DEPRECATED: String-based binding (for backwards compatibility)
+    // These will be removed once migration is complete
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Bind an F# local to an SSA name (DEPRECATED - use bindSymbolSSA)
     let bindLocal fsharpName ssaName mlirType state =
         { state with
             Locals = Map.add fsharpName ssaName state.Locals
             LocalTypes = Map.add fsharpName mlirType state.LocalTypes
             SSATypes = Map.add ssaName mlirType state.SSATypes }
 
-    /// Lookup a local variable's SSA name
+    /// Lookup a local variable's SSA name (DEPRECATED - use lookupSymbolSSA)
     let lookupLocal name state =
         Map.tryFind name state.Locals
 
-    /// Lookup a local variable's MLIR type
+    /// Lookup a local variable's MLIR type (DEPRECATED)
     let lookupLocalType name state =
         Map.tryFind name state.LocalTypes
 
@@ -132,11 +252,9 @@ module PSGZipper =
         Map.tryFind nodeId.Value zipper.Graph.Nodes
 
     /// Get children of the focus node as NodeIds (in source order)
-    /// Note: Children are stored in reverse order during construction (prepended),
-    /// so we reverse them to get source order
+    /// Note: Children are now in correct source order after PSG finalization
     let children (zipper: PSGZipper) : NodeId list =
         ChildrenStateHelpers.getChildrenList zipper.Focus
-        |> List.rev
 
     /// Get children of the focus node as actual nodes (in source order)
     let childNodes (zipper: PSGZipper) : PSGNode list =

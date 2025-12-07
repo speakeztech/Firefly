@@ -43,6 +43,7 @@ let rec processBindingWithUseFlag binding parentId fileName (context: BuildConte
             if hasEntryPointAttr then "Binding:EntryPoint"
             elif isMainFunc then "Binding:Main"
             elif isUse then "Binding:Use"
+            elif isMutable then "Binding:Mutable"
             else "Binding"
 
         let bindingNode = createNode syntaxKind range fileName symbol parentId

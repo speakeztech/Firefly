@@ -16,6 +16,41 @@ let mutable private processBindingWithUseFlagRef : (SynBinding -> NodeId option 
 let setBindingProcessor processor =
     processBindingWithUseFlagRef <- Some processor
 
+// ===================================================================
+// Short-circuit Boolean Operator Detection
+// ===================================================================
+
+/// Detect if an expression is the && or || operator
+/// Returns Some "&&" or Some "||" if it's a boolean operator, None otherwise
+let private tryGetBooleanOperator (expr: SynExpr) : string option =
+    match expr with
+    | SynExpr.Ident ident ->
+        match ident.idText with
+        | "op_BooleanAnd" -> Some "&&"
+        | "op_BooleanOr" -> Some "||"
+        | _ -> None
+    | SynExpr.LongIdent(_, longDotId, _, _) ->
+        let lastIdent = longDotId.LongIdent |> List.tryLast
+        match lastIdent with
+        | Some ident ->
+            match ident.idText with
+            | "op_BooleanAnd" -> Some "&&"
+            | "op_BooleanOr" -> Some "||"
+            | _ -> None
+        | None -> None
+    | _ -> None
+
+/// Try to extract a short-circuit boolean operation from a curried App expression
+/// Pattern: App(App(op, leftArg), rightArg) where op is && or ||
+/// Returns Some (operator, leftExpr, rightExpr) if it matches
+let private tryExtractBooleanOp (funcExpr: SynExpr) (rightArg: SynExpr) : (string * SynExpr * SynExpr) option =
+    match funcExpr with
+    | SynExpr.App(_, _, innerFuncExpr, leftArg, _) ->
+        match tryGetBooleanOperator innerFuncExpr with
+        | Some op -> Some (op, leftArg, rightArg)
+        | None -> None
+    | _ -> None
+
 /// Process an expression node in the PSG
 let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: string)
                           (context: BuildContext) (graph: ProgramSemanticGraph) : ProgramSemanticGraph =
@@ -91,40 +126,77 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
         processExpression expr (Some typeAppNode.Id) fileName context graph'''
 
     // ENHANCED: Function calls with better correlation
+    // FIRST: Check for short-circuit boolean operators (&&, ||) and desugar to IfThenElse
     | SynExpr.App(_, _, funcExpr, argExpr, range) ->
-        let syntaxKind = "App:FunctionCall"
-        let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
-        let appNode = createNode syntaxKind range fileName symbol parentId
+        match tryExtractBooleanOp funcExpr argExpr with
+        | Some (op, leftExpr, rightExpr) ->
+            // Desugar boolean operators to IfThenElse for correct control flow semantics
+            // a || b  =>  if a then true else b
+            // a && b  =>  if a then b else false
+            let syntaxKind = sprintf "IfThenElse:BoolOp(%s)" op
+            let ifNode = createNode syntaxKind range fileName None parentId
+            let graph' = { graph with Nodes = Map.add ifNode.Id.Value ifNode graph.Nodes }
+            let graph'' = addChildToParent ifNode.Id parentId graph'
 
-        let graph' = { graph with Nodes = Map.add appNode.Id.Value appNode graph.Nodes }
-        let graph'' = addChildToParent appNode.Id parentId graph'
+            // Process the condition (left operand)
+            let graph''' = processExpression leftExpr (Some ifNode.Id) fileName context graph''
 
-        let graph''' =
-            match symbol with
-            | Some sym ->
-                { graph'' with SymbolTable = Map.add sym.DisplayName sym graph''.SymbolTable }
-            | None -> graph''
+            // For ||: then branch is "true", else branch is right operand
+            // For &&: then branch is right operand, else branch is "false"
+            match op with
+            | "||" ->
+                // Create a synthetic "true" constant node for the then branch
+                let trueNode = createNode "Const:Bool true" range fileName None (Some ifNode.Id)
+                let graph'''' = { graph''' with Nodes = Map.add trueNode.Id.Value trueNode graph'''.Nodes }
+                let graph''''' = addChildToParent trueNode.Id (Some ifNode.Id) graph''''
+                // Process the else branch (right operand)
+                processExpression rightExpr (Some ifNode.Id) fileName context graph'''''
+            | "&&" ->
+                // Process the then branch (right operand)
+                let graph'''' = processExpression rightExpr (Some ifNode.Id) fileName context graph'''
+                // Create a synthetic "false" constant node for the else branch
+                let falseNode = createNode "Const:Bool false" range fileName None (Some ifNode.Id)
+                let graph''''' = { graph'''' with Nodes = Map.add falseNode.Id.Value falseNode graph''''.Nodes }
+                addChildToParent falseNode.Id (Some ifNode.Id) graph'''''
+            | _ ->
+                // Should not happen, but fall through to normal App processing
+                graph'''
 
-        let graph'''' = processExpression funcExpr (Some appNode.Id) fileName context graph'''
-        let graph''''' = processExpression argExpr (Some appNode.Id) fileName context graph''''
+        | None ->
+            // Normal function application
+            let syntaxKind = "App:FunctionCall"
+            let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+            let appNode = createNode syntaxKind range fileName symbol parentId
 
-        // Create function call edges
-        let functionCallEdges =
-            match funcExpr with
-            | SynExpr.Ident ident ->
-                match tryCorrelateSymbolWithContext ident.idRange fileName (sprintf "Ident:%s" ident.idText) context.CorrelationContext with
-                | Some funcSym when isFunction funcSym ->
-                    [{ Source = appNode.Id; Target = appNode.Id; Kind = FunctionCall }]
+            let graph' = { graph with Nodes = Map.add appNode.Id.Value appNode graph.Nodes }
+            let graph'' = addChildToParent appNode.Id parentId graph'
+
+            let graph''' =
+                match symbol with
+                | Some sym ->
+                    { graph'' with SymbolTable = Map.add sym.DisplayName sym graph''.SymbolTable }
+                | None -> graph''
+
+            let graph'''' = processExpression funcExpr (Some appNode.Id) fileName context graph'''
+            let graph''''' = processExpression argExpr (Some appNode.Id) fileName context graph''''
+
+            // Create function call edges
+            let functionCallEdges =
+                match funcExpr with
+                | SynExpr.Ident ident ->
+                    match tryCorrelateSymbolWithContext ident.idRange fileName (sprintf "Ident:%s" ident.idText) context.CorrelationContext with
+                    | Some funcSym when isFunction funcSym ->
+                        [{ Source = appNode.Id; Target = appNode.Id; Kind = FunctionCall }]
+                    | _ -> []
+                | SynExpr.LongIdent(_, longDotId, _, _) ->
+                    let identText = longDotId.LongIdent |> List.map (fun id -> id.idText) |> String.concat "."
+                    match tryCorrelateSymbolWithContext longDotId.Range fileName (sprintf "LongIdent:%s" identText) context.CorrelationContext with
+                    | Some funcSym when isFunction funcSym ->
+                        [{ Source = appNode.Id; Target = appNode.Id; Kind = FunctionCall }]
+                    | _ -> []
                 | _ -> []
-            | SynExpr.LongIdent(_, longDotId, _, _) ->
-                let identText = longDotId.LongIdent |> List.map (fun id -> id.idText) |> String.concat "."
-                match tryCorrelateSymbolWithContext longDotId.Range fileName (sprintf "LongIdent:%s" identText) context.CorrelationContext with
-                | Some funcSym when isFunction funcSym ->
-                    [{ Source = appNode.Id; Target = appNode.Id; Kind = FunctionCall }]
-                | _ -> []
-            | _ -> []
 
-        { graph''''' with Edges = graph'''''.Edges @ functionCallEdges }
+            { graph''''' with Edges = graph'''''.Edges @ functionCallEdges }
 
     // ENHANCED: Match expressions with union case detection
     | SynExpr.Match(_, expr, clauses, range, _) ->
@@ -167,51 +239,79 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
         | None -> graph''
 
     | SynExpr.LongIdent(_, longDotId, _, range) ->
-        let identText = longDotId.LongIdent |> List.map (fun id -> id.idText) |> String.concat "."
+        let parts = longDotId.LongIdent
+        let identText = parts |> List.map (fun id -> id.idText) |> String.concat "."
 
-        // ENHANCED: Detect method calls in LongIdent (like buffer.AsReadOnlySpan)
-        let syntaxKind, isMethodCall =
-            let parts = longDotId.LongIdent |> List.map (fun id -> id.idText)
-            if parts.Length > 1 then
-                let methodName = parts |> List.last
-                // Check if this looks like a method call pattern
-                if methodName = "AsReadOnlySpan" || methodName = "Pointer" || methodName = "Length" ||
-                   methodName.StartsWith("get_") || methodName.StartsWith("set_") then
-                    (sprintf "LongIdent:MethodCall:%s" methodName, true)
-                else
-                    (sprintf "LongIdent:%s" identText, false)
+        // ENHANCED: Detect property/method access patterns (like oldValue.Length)
+        // When we have multiple parts and the last is a property/method, decompose into
+        // a PropertyAccess node with the receiver as a child
+        let isPropertyAccess =
+            if List.length parts > 1 then
+                let methodName = (List.last parts).idText
+                methodName = "AsReadOnlySpan" || methodName = "Pointer" || methodName = "Length" ||
+                methodName.StartsWith("get_") || methodName.StartsWith("set_")
             else
-                (sprintf "LongIdent:%s" identText, false)
+                false
 
-        let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
-        let longIdentNode = createNode syntaxKind range fileName symbol parentId
+        if isPropertyAccess && List.length parts >= 2 then
+            // Decompose: receiver.Property becomes PropertyAccess:Property with receiver as child
+            let propertyName = (List.last parts).idText
+            let receiverParts = parts |> List.take (List.length parts - 1)
+            let receiverText = receiverParts |> List.map (fun id -> id.idText) |> String.concat "."
 
-        let graph' = { graph with Nodes = Map.add longIdentNode.Id.Value longIdentNode graph.Nodes }
-        let graph'' = addChildToParent longIdentNode.Id parentId graph'
+            // Create the PropertyAccess node
+            let syntaxKind = sprintf "PropertyAccess:%s" propertyName
+            let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+            let propAccessNode = createNode syntaxKind range fileName symbol parentId
 
-        let graph''' =
-            match symbol with
-            | Some sym ->
-                let updatedSymbolTable = Map.add sym.DisplayName sym graph''.SymbolTable
+            let graph' = { graph with Nodes = Map.add propAccessNode.Id.Value propAccessNode graph.Nodes }
+            let graph'' = addChildToParent propAccessNode.Id parentId graph'
 
-                // Create method reference edge for method calls
-                if isMethodCall then
+            // Create the receiver node as a child
+            // Use the range of the first ident for the receiver
+            let receiverRange = (List.head receiverParts).idRange
+            let receiverKind =
+                if List.length receiverParts = 1 then sprintf "Ident:%s" receiverText
+                else sprintf "LongIdent:%s" receiverText
+            let receiverSymbol = tryCorrelateSymbolWithContext receiverRange fileName receiverKind context.CorrelationContext
+            let receiverNode = createNode receiverKind receiverRange fileName receiverSymbol (Some propAccessNode.Id)
+
+            let graph''' = { graph'' with Nodes = Map.add receiverNode.Id.Value receiverNode graph'' .Nodes }
+            let graph'''' = addChildToParent receiverNode.Id (Some propAccessNode.Id) graph'''
+
+            // Add symbols to table
+            let graph''''' =
+                match symbol with
+                | Some sym ->
+                    let st = Map.add sym.DisplayName sym graph''''.SymbolTable
                     let methodRefEdge = {
-                        Source = longIdentNode.Id
-                        Target = longIdentNode.Id
+                        Source = propAccessNode.Id
+                        Target = propAccessNode.Id
                         Kind = SymRef
                     }
-                    { graph'' with
-                        SymbolTable = updatedSymbolTable
-                        Edges = methodRefEdge :: graph''.Edges }
-                else
-                    { graph'' with SymbolTable = updatedSymbolTable }
-            | None ->
-                if isMethodCall then
-                    printfn "[BUILDER] Warning: Method call in LongIdent '%s' at %s has no symbol correlation" identText (range.ToString())
-                graph''
+                    { graph'''' with SymbolTable = st; Edges = methodRefEdge :: graph''''.Edges }
+                | None ->
+                    printfn "[BUILDER] Warning: Property access '%s' at %s has no symbol correlation" identText (range.ToString())
+                    graph''''
 
-        graph'''
+            match receiverSymbol with
+            | Some recSym ->
+                { graph''''' with SymbolTable = Map.add recSym.DisplayName recSym graph'''''.SymbolTable }
+            | None -> graph'''''
+
+        else
+            // Simple identifier or qualified name without property access
+            let syntaxKind = sprintf "LongIdent:%s" identText
+            let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+            let longIdentNode = createNode syntaxKind range fileName symbol parentId
+
+            let graph' = { graph with Nodes = Map.add longIdentNode.Id.Value longIdentNode graph.Nodes }
+            let graph'' = addChildToParent longIdentNode.Id parentId graph'
+
+            match symbol with
+            | Some sym ->
+                { graph'' with SymbolTable = Map.add sym.DisplayName sym graph''.SymbolTable }
+            | None -> graph''
 
     | SynExpr.LetOrUse(isUse, _, bindings, body, range, _) ->
         let syntaxKind = if isUse then "LetOrUse:Use" else "LetOrUse:Let"
@@ -238,9 +338,13 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
 
         processExpression body (Some letNode.Id) fileName context graph''''
 
-    | SynExpr.Sequential(_, _, expr1, expr2, _, _) ->
-        let graph' = processExpression expr1 parentId fileName context graph
-        processExpression expr2 parentId fileName context graph'
+    | SynExpr.Sequential(_, _, expr1, expr2, range, _) ->
+        // Create a Sequential node to wrap the sequence of expressions
+        let seqNode = createNode "Sequential" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add seqNode.Id.Value seqNode graph.Nodes }
+        let graph'' = addChildToParent seqNode.Id parentId graph'
+        let graph''' = processExpression expr1 (Some seqNode.Id) fileName context graph''
+        processExpression expr2 (Some seqNode.Id) fileName context graph'''
 
     | SynExpr.Const(constant, range) ->
         let constNode = createNode (sprintf "Const:%A" constant) range fileName None parentId
@@ -350,8 +454,23 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
         processExpression innerExpr parentId fileName context graph
 
     // SRTP trait calls (statically resolved type parameters)
-    | SynExpr.TraitCall(typeArgs, memberSig, argExpr, range) ->
-        let traitNode = createNode "TraitCall" range fileName None parentId
+    // Extract the member name from the trait signature for proper emission
+    | SynExpr.TraitCall(supportTys, traitSig, argExpr, range) ->
+        // Extract member name from the trait signature
+        let memberName =
+            match traitSig with
+            | SynMemberSig.Member(SynValSig(_, SynIdent(ident, _), _, _, _, _, _, _, _, _, _, _), _, _, _) ->
+                Some ident.idText
+            | _ -> None
+
+        let syntaxKind =
+            match memberName with
+            | Some name -> sprintf "TraitCall:%s" name
+            | None -> "TraitCall"
+
+        // Try to correlate with the resolved symbol from FCS
+        let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+        let traitNode = createNode syntaxKind range fileName symbol parentId
         let graph' = { graph with Nodes = Map.add traitNode.Id.Value traitNode graph.Nodes }
         let graph'' = addChildToParent traitNode.Id parentId graph'
         processExpression argExpr (Some traitNode.Id) fileName context graph''
@@ -419,6 +538,50 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
                 | Some whenE -> processExpression whenE (Some clauseNode.Id) fileName context graphAcc'''
                 | None -> graphAcc'''
             processExpression resultExpr (Some clauseNode.Id) fileName context graphAcc''''
+        ) graph''
+
+    // Indexed access (arr.[idx])
+    | SynExpr.DotIndexedGet(objectExpr, indexArgs, dotRange, range) ->
+        let indexNode = createNode "DotIndexedGet" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add indexNode.Id.Value indexNode graph.Nodes }
+        let graph'' = addChildToParent indexNode.Id parentId graph'
+        // Process the object being indexed
+        let graph''' = processExpression objectExpr (Some indexNode.Id) fileName context graph''
+        // Process the index argument
+        let graph'''' = processExpression indexArgs (Some indexNode.Id) fileName context graph'''
+        graph''''
+
+    // Indexed set (arr.[idx] <- value)
+    | SynExpr.DotIndexedSet(objectExpr, indexArgs, valueExpr, leftOfSetRange, dotRange, range) ->
+        let setNode = createNode "DotIndexedSet" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add setNode.Id.Value setNode graph.Nodes }
+        let graph'' = addChildToParent setNode.Id parentId graph'
+        // Process the object being indexed
+        let graph''' = processExpression objectExpr (Some setNode.Id) fileName context graph''
+        // Process the index argument
+        let graph'''' = processExpression indexArgs (Some setNode.Id) fileName context graph'''
+        // Process the value being assigned
+        let graph''''' = processExpression valueExpr (Some setNode.Id) fileName context graph''''
+        graph'''''
+
+    // Interpolated strings ($"Hello, {name}!")
+    | SynExpr.InterpolatedString(parts, _, range) ->
+        let interpNode = createNode "InterpolatedString" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add interpNode.Id.Value interpNode graph.Nodes }
+        let graph'' = addChildToParent interpNode.Id parentId graph'
+
+        // Process each part - strings are literals, FillExpr contains expressions to interpolate
+        parts |> List.fold (fun graphAcc part ->
+            match part with
+            | SynInterpolatedStringPart.String(text, range) ->
+                let strPartNode = createNode "InterpolatedStringPart:String" range fileName None (Some interpNode.Id)
+                let graphAcc' = { graphAcc with Nodes = Map.add strPartNode.Id.Value strPartNode graphAcc.Nodes }
+                addChildToParent strPartNode.Id (Some interpNode.Id) graphAcc'
+            | SynInterpolatedStringPart.FillExpr(fillExpr, qualifiers) ->
+                let fillNode = createNode "InterpolatedStringPart:Fill" fillExpr.Range fileName None (Some interpNode.Id)
+                let graphAcc' = { graphAcc with Nodes = Map.add fillNode.Id.Value fillNode graphAcc.Nodes }
+                let graphAcc'' = addChildToParent fillNode.Id (Some interpNode.Id) graphAcc'
+                processExpression fillExpr (Some fillNode.Id) fileName context graphAcc''
         ) graph''
 
     // Hard stop on unhandled expressions
