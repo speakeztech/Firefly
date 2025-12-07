@@ -3,6 +3,7 @@ module Examples.HelloWorldHalfCurried
 open FSharp.NativeInterop
 open Alloy
 open Alloy.NativeTypes
+open Alloy.NativeTypes.NativeString
 open Alloy.Memory
 
 #nowarn "9"
@@ -11,14 +12,20 @@ open Alloy.Memory
 /// Uses native types throughout - no BCL string types.
 ///
 /// Tests HALF-CURRIED patterns:
-/// - Pipe operator: `x |> ignore`
+/// - Pipe operator: `x |> f`
 /// - Partial application in function calls
 /// - Curried Console functions
+/// - Alloy semantic primitives (concat3)
+///
+/// Note: String concatenation uses concat3, a semantic primitive
+/// that Firefly will lower to target-optimal code (SIMD on x86, tight loops
+/// on ARM, parallel lanes on GPU). The loops are hidden in the primitive,
+/// keeping user code clean and F#-idiomatic.
 let hello() =
     // Allocate input buffer on stack
     let inputBuffer = NativePtr.stackalloc<byte> 256
 
-    // Write prompt using pipe operator (tests |> ignore pattern)
+    // Write prompt - tests curried Console function
     Console.writeB "Enter your name: "B
 
     // Read user input - tests curried function application
@@ -27,25 +34,15 @@ let hello() =
 
     // Allocate output buffer for greeting
     let outputBuffer = NativePtr.stackalloc<byte> 512
-    let mutable pos = 0
 
-    // Copy "Hello, " using byte literal helpers
-    let helloBytes = "Hello, "B
-    for i = 0 to bytesLen helloBytes - 1 do
-        NativePtr.set outputBuffer pos helloBytes.[i]
-        pos <- pos + 1
-
-    // Copy name
-    for i = 0 to name.Length - 1 do
-        NativePtr.set outputBuffer pos (NativePtr.get name.Pointer i)
-        pos <- pos + 1
-
-    // Add "!"
-    NativePtr.set outputBuffer pos (byte '!')
-    pos <- pos + 1
+    // Build greeting using semantic primitive
+    // concat3 expresses INTENT (concatenate three strings)
+    // Firefly/Alex chooses optimal implementation for target hardware
+    let prefix = ofBytes "Hello, "B
+    let suffix = ofBytes "!"B
+    let greeting = concat3 outputBuffer prefix name suffix
 
     // Write greeting using pipe operator (tests |> pattern)
-    let greeting = NativeStr(outputBuffer, pos)
     greeting |> Console.writeln
 
 [<EntryPoint>]

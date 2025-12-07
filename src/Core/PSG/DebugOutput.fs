@@ -456,14 +456,14 @@ let generateDebugOutputs
 let generateCompleteDebugOutput (psg: ProgramSemanticGraph) (correlations: (range * FSharpSymbol)[]) (outputDir: string) =
     generatePSGDebugOutput psg outputDir
     generateCorrelationDebugOutput correlations outputDir
-    
-    let reachableSymbols = 
+
+    let reachableSymbols =
         psg.Nodes
         |> Map.toSeq
-        |> Seq.choose (fun (_, node) -> 
+        |> Seq.choose (fun (_, node) ->
             if node.IsReachable then
                 node.Symbol |> Option.map (fun s -> s.FullName)
             else None)
         |> Set.ofSeq
-    
+
     generateSymbolCorrelationAnalysis psg reachableSymbols outputDir

@@ -268,7 +268,16 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
             
             // Step 4: Build Program Semantic Graph
             printfn "[Pipeline] Building Program Semantic Graph..."
+
+            // Enable nanopass intermediate emission if outputting intermediates
+            if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                Core.PSG.Construction.Main.emitNanopassIntermediates <- true
+                Core.PSG.Construction.Main.nanopassOutputDir <- config.IntermediatesDir.Value
+
             let psg = buildProgramSemanticGraph projectResults.CheckResults projectResults.ParseResults
+
+            // Reset nanopass emission flags
+            Core.PSG.Construction.Main.emitNanopassIntermediates <- false
             
             // Basic validation of PSG structure
             if psg.Nodes.Count = 0 then

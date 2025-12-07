@@ -211,103 +211,97 @@ let private computeSemanticReachability
     reachable
 
 /// Mark PSG nodes based on semantic reachability
-let private markNodesForSemanticReachability 
-    (psg: ProgramSemanticGraph) 
+///
+/// KEY PRINCIPLE: Reachability has two levels:
+/// 1. Symbol-level: Which functions/bindings are called from entry points
+/// 2. Node-level: ALL nodes within a reachable function body are reachable
+///
+/// The previous implementation only did symbol-level marking, leaving function
+/// body nodes (Sequential, Const, Tuple, etc.) marked as unreachable even when
+/// their containing function was reachable. This broke emission.
+let private markNodesForSemanticReachability
+    (psg: ProgramSemanticGraph)
     (reachableSymbols: Set<string>) : ProgramSemanticGraph =
-    
+
     printfn "[SEMANTIC] Marking nodes for %d reachable symbols" (Set.count reachableSymbols)
-    
-    // First pass: mark nodes directly associated with reachable symbols
-    let firstPassNodes = 
+
+    // Step 1: Find all binding nodes for reachable symbols
+    let reachableBindingNodeIds =
+        psg.Nodes
+        |> Map.toSeq
+        |> Seq.choose (fun (nodeId, node) ->
+            match node.Symbol with
+            | Some symbol when Set.contains symbol.FullName reachableSymbols ->
+                match node.SyntaxKind with
+                | sk when sk.StartsWith("Binding") || sk.StartsWith("Member") ->
+                    Some nodeId
+                | _ -> None
+            | _ -> None)
+        |> Set.ofSeq
+
+    // Step 2: For each reachable binding, mark ALL descendant nodes as reachable
+    // This ensures function bodies are fully emitted
+    let mutable reachableNodeIds = Set.empty
+
+    let rec markDescendants nodeId =
+        if not (Set.contains nodeId reachableNodeIds) then
+            reachableNodeIds <- Set.add nodeId reachableNodeIds
+            match Map.tryFind nodeId psg.Nodes with
+            | Some node ->
+                match node.Children with
+                | Parent children ->
+                    for childId in children do
+                        markDescendants childId.Value
+                | _ -> ()
+            | None -> ()
+
+    // Mark all descendants of reachable bindings
+    for bindingId in reachableBindingNodeIds do
+        markDescendants bindingId
+
+    // Step 3: Also mark parent chain up to module level for structural completeness
+    let markParentChain nodeId =
+        let mutable currentId = Some nodeId
+        while currentId.IsSome do
+            let nId = currentId.Value
+            reachableNodeIds <- Set.add nId reachableNodeIds
+            match Map.tryFind nId psg.Nodes with
+            | Some node ->
+                currentId <- node.ParentId |> Option.map (fun p -> p.Value)
+            | None ->
+                currentId <- None
+
+    for bindingId in reachableBindingNodeIds do
+        markParentChain bindingId
+
+    // Step 4: Mark nodes that call reachable functions (App nodes with reachable targets)
+    for KeyValue(nodeId, node) in psg.Nodes do
+        match node.SyntaxKind with
+        | sk when sk.StartsWith("App") ->
+            match node.Symbol with
+            | Some symbol when Set.contains symbol.FullName reachableSymbols ->
+                markDescendants nodeId
+            | _ -> ()
+        | _ -> ()
+
+    // Step 5: Apply reachability to all nodes
+    let finalNodes =
         psg.Nodes
         |> Map.map (fun nodeId node ->
-            let isReachable = 
-                match node.Symbol with
-                | Some symbol ->
-                    let symbolName = symbol.FullName
-                    let symbolReachable = Set.contains symbolName reachableSymbols
-                    
-                    match node.SyntaxKind with
-                    // Binding nodes that define reachable functions
-                    | sk when sk.StartsWith("Binding") -> 
-                        symbolReachable
-                    // Function application nodes
-                    | "App:FunctionCall" ->
-                        // Mark if calling a reachable function
-                        symbolReachable
-                    | sk when sk.Contains("MethodCall:") ->
-                        // Mark if calling a reachable function
-                        symbolReachable || 
-                        // Or if it's a call to a known function
-                        (sk.Contains("Write") || sk.Contains("WriteLine") || 
-                         sk.Contains("readInto") || sk.Contains("sprintf") ||
-                         sk.Contains("stackBuffer") || sk.Contains("spanToString"))
-                    // Identifiers that reference functions
-                    | sk when sk.StartsWith("Ident:") || sk.StartsWith("LongIdent:") ->
-                        if sk.Contains("hello") && Set.contains "Examples.HelloWorldDirect.hello" reachableSymbols then
-                            true
-                        elif sk.Contains("Console") then
-                            true  // Keep Console references
-                        else
-                            symbolReachable
-                    // Pattern matches for union cases
-                    | sk when sk.Contains("Pattern:UnionCase:") ->
-                        sk.Contains("Ok") || sk.Contains("Error")  // Keep Result cases
-                    // Type applications
-                    | sk when sk.StartsWith("TypeApp:") ->
-                        sk.Contains("byte") && symbolReachable  // Keep stackBuffer<byte>
-                    | _ -> false
-                | None ->
-                    // Nodes without symbols
-                    match node.SyntaxKind with
-                    | "Module" | "NestedModule" -> true  // Keep module structure
-                    | "LetDeclaration" -> false  // Will be marked if contains reachable binding
-                    | "Match" | "MatchClause" -> false  // Will be marked if needed
-                    | sk when sk.StartsWith("Const:") -> false  // Constants marked if used
-                    | _ -> false
-            
-            { node with 
+            let isReachable = Set.contains nodeId reachableNodeIds
+            { node with
                 IsReachable = isReachable
                 EliminationReason = if isReachable then None else Some "Not semantically reachable"
                 EliminationPass = if isReachable then None else Some 1 }
         )
-    
-    // Now mark the minimal structural nodes needed for reachable symbols
-    let mutable finalNodes = firstPassNodes
-    
-    // For each reachable binding, ensure its immediate parent and pattern are marked
-    for KeyValue(nodeId, node) in firstPassNodes do
-        if node.IsReachable && node.SyntaxKind.StartsWith("Binding") then
-            // Mark the parent LetDeclaration if it exists
-            match node.ParentId with
-            | Some parentId ->
-                match Map.tryFind parentId.Value finalNodes with
-                | Some parentNode ->
-                    finalNodes <- Map.add parentId.Value { parentNode with IsReachable = true } finalNodes
-                | None -> ()
-            | None -> ()
-            
-            // Mark direct children that are patterns (for the binding's name)
-            match node.Children with
-            | Parent children ->
-                for childId in children do
-                    match Map.tryFind childId.Value finalNodes with
-                    | Some childNode when childNode.SyntaxKind.StartsWith("Pattern:") ->
-                        finalNodes <- Map.add childId.Value { childNode with IsReachable = true } finalNodes
-                    | _ -> ()
-            | _ -> ()
-    
-    let reachableNodeCount = 
-        finalNodes 
-        |> Map.toSeq 
-        |> Seq.filter (fun (_, n) -> n.IsReachable) 
-        |> Seq.length
-    
-    printfn "[SEMANTIC] Marked %d nodes as reachable (%.1f%% of %d total)" 
-        reachableNodeCount 
+
+    let reachableNodeCount = Set.count reachableNodeIds
+
+    printfn "[SEMANTIC] Marked %d nodes as reachable (%.1f%% of %d total)"
+        reachableNodeCount
         (float reachableNodeCount / float (Map.count finalNodes) * 100.0)
         (Map.count finalNodes)
-    
+
     { psg with Nodes = finalNodes }
 
 /// Perform semantic reachability analysis

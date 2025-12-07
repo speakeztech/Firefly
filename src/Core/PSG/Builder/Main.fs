@@ -7,8 +7,16 @@ open FSharp.Compiler.CodeAnalysis
 open Core.PSG.Types
 open Core.PSG.Correlation
 open Core.PSG.TypeIntegration
+open Core.PSG.Nanopass.IntermediateEmission
+open Core.PSG.Nanopass.DefUseEdges
 open Core.PSG.Construction.Types
 open Core.PSG.Construction.DeclarationProcessing
+
+/// Flag to enable nanopass intermediate emission (set via --verbose or -k flags)
+let mutable emitNanopassIntermediates = false
+
+/// Output directory for nanopass intermediates
+let mutable nanopassOutputDir = ""
 
 /// Symbol validation helper
 let private validateSymbolCapture (graph: ProgramSemanticGraph) =
@@ -114,6 +122,10 @@ let buildProgramSemanticGraph
     printfn "[BUILDER] Phase 1 complete: Enhanced PSG built with %d nodes, %d entry points"
         structuralGraph.Nodes.Count structuralGraph.EntryPoints.Length
 
+    // Emit Phase 1 intermediate
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediate structuralGraph "1_structural" nanopassOutputDir
+
     // Validate symbol capture
     validateSymbolCapture structuralGraph
 
@@ -121,20 +133,41 @@ let buildProgramSemanticGraph
     printfn "[BUILDER] Phase 2: Applying FCS constraint resolution"
     let typeEnhancedGraph = integrateTypesWithCheckResults structuralGraph checkResults
 
-    // Phase 3: Finalize nodes and analyze context
-    printfn "[BUILDER] Phase 3: Finalizing PSG nodes and analyzing context"
+    // Emit Phase 2 intermediate
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediate typeEnhancedGraph "2_type_integration" nanopassOutputDir
+        emitNanopassDiff structuralGraph typeEnhancedGraph "1_structural" "2_type_integration" nanopassOutputDir
+
+    // Phase 3: Nanopass - Add def-use edges
+    // This makes variable binding relationships explicit in the PSG structure,
+    // eliminating the need for scope tracking in the emitter.
+    printfn "[BUILDER] Phase 3: Running def-use nanopass"
+    let defUseGraph = addDefUseEdges typeEnhancedGraph
+
+    // Emit Phase 3 intermediate
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediate defUseGraph "3_def_use_edges" nanopassOutputDir
+        emitNanopassDiff typeEnhancedGraph defUseGraph "2_type_integration" "3_def_use_edges" nanopassOutputDir
+
+    // Phase 4: Finalize nodes and analyze context
+    printfn "[BUILDER] Phase 4: Finalizing PSG nodes and analyzing context"
     let finalNodes =
-        typeEnhancedGraph.Nodes
+        defUseGraph.Nodes
         |> Map.map (fun _ node ->
             node
             |> ChildrenStateHelpers.finalizeChildren
             |> ReachabilityHelpers.updateNodeContext)
 
     let finalGraph =
-        { typeEnhancedGraph with
+        { defUseGraph with
             Nodes = finalNodes
             CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> List.ofArray
         }
+
+    // Emit Phase 4 intermediate (final)
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediate finalGraph "4_finalized" nanopassOutputDir
+        emitNanopassDiff defUseGraph finalGraph "3_def_use_edges" "4_finalized" nanopassOutputDir
 
     printfn "[BUILDER] ENHANCED PSG construction complete (FCS 43.9.300 compatible)"
     printfn "[BUILDER] Final PSG: %d nodes, %d edges, %d entry points, %d symbols"

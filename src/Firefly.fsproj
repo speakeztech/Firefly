@@ -44,6 +44,10 @@
       <Compile Include="Core/PSG/Correlation.fs" />
       <Compile Include="Core/PSG/SymbolAnalysis.fs" />
 
+      <!-- PSG Nanopass (small, single-purpose transformations) -->
+      <Compile Include="Core/PSG/Nanopass/IntermediateEmission.fs" />
+      <Compile Include="Core/PSG/Nanopass/DefUseEdges.fs" />
+
       <!-- PSG Builder (refactored into sub-modules) -->
       <Compile Include="Core/PSG/Builder/Types.fs" />
       <Compile Include="Core/PSG/Builder/SymbolCorrelation.fs" />

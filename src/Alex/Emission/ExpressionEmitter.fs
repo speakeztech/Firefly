@@ -316,6 +316,22 @@ let private tryEmitTime : Emit<ExprResult option> =
 // Memory Emission Handlers
 // ===================================================================
 
+// Helper: Emit a null pointer (!llvm.ptr)
+let private emitNullPtr : Emit<string> =
+    freshSSAWithType "!llvm.ptr" >>= fun ssa ->
+    line (sprintf "%s = llvm.mlir.zero : !llvm.ptr" ssa) >>.
+    emit ssa
+
+// Helper: Construct a NativeStr struct from pointer and length
+let private emitNativeStrStruct (ptr: string) (len: string) : Emit<ExprResult> =
+    freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun undef ->
+    line (sprintf "%s = llvm.mlir.undef : !llvm.struct<(ptr, i64)>" undef) >>.
+    freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun withPtr ->
+    line (sprintf "%s = llvm.insertvalue %s, %s[0] : !llvm.struct<(ptr, i64)>" withPtr ptr undef) >>.
+    freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun withLen ->
+    line (sprintf "%s = llvm.insertvalue %s, %s[1] : !llvm.struct<(ptr, i64)>" withLen len withPtr) >>.
+    emit (Value(withLen, "!llvm.struct<(ptr, i64)>"))
+
 /// Handler for Memory operations
 let private handleMemory (op: MemoryOp) : Emit<ExprResult> =
     getZipper >>= fun z ->
@@ -387,12 +403,379 @@ let private handleMemory (op: MemoryOp) : Emit<ExprResult> =
         | None ->
             emit (Error "AsReadOnlySpan: no symbol for receiver")
 
+    // ═══════════════════════════════════════════════════════════════════
+    // Semantic Memory Primitives
+    // These express INTENT - Alex chooses optimal implementation for target
+    // Current target: x86_64-linux - emit llvm.memcpy/memset intrinsics
+    // Future: ARM MCU would emit tight loops, GPU would emit parallel ops
+    // ═══════════════════════════════════════════════════════════════════
+
+    | Copy ->
+        // Memory.copy src dest len -> unit
+        // For x86_64: emit llvm.memcpy intrinsic
+        match children with
+        | [_; srcNode; destNode; lenNode] | [srcNode; destNode; lenNode] ->
+            atNode srcNode callEmitExpr >>= fun srcResult ->
+            atNode destNode callEmitExpr >>= fun destResult ->
+            atNode lenNode callEmitExpr >>= fun lenResult ->
+            match srcResult, destResult, lenResult with
+            | Value(src, _), Value(dest, _), Value(len, lenTy) ->
+                // Convert length to i64 if needed
+                (if lenTy = "i32" then emitExtsi len "i32" "i64" else emit len) >>= fun len64 ->
+                // Emit: call void @llvm.memcpy.p0.p0.i64(ptr %dest, ptr %src, i64 %len, i1 false)
+                line (sprintf "llvm.intr.memcpy(%s, %s, %s) {isVolatile = false} : (!llvm.ptr, !llvm.ptr, i64) -> ()" dest src len64) >>.
+                emit Void
+            | _ -> emit (Error "Memory.copy requires src, dest, and len arguments")
+        | _ -> emit (Error (sprintf "Memory.copy: expected 3-4 children, got %d" (List.length children)))
+
+    | CopyElements ->
+        // Memory.copyElements<T> src dest count -> unit
+        // Same as Copy for byte-level operations
+        match children with
+        | [_; srcNode; destNode; countNode] | [srcNode; destNode; countNode] ->
+            atNode srcNode callEmitExpr >>= fun srcResult ->
+            atNode destNode callEmitExpr >>= fun destResult ->
+            atNode countNode callEmitExpr >>= fun countResult ->
+            match srcResult, destResult, countResult with
+            | Value(src, _), Value(dest, _), Value(count, countTy) ->
+                (if countTy = "i32" then emitExtsi count "i32" "i64" else emit count) >>= fun count64 ->
+                line (sprintf "llvm.intr.memcpy(%s, %s, %s) {isVolatile = false} : (!llvm.ptr, !llvm.ptr, i64) -> ()" dest src count64) >>.
+                emit Void
+            | _ -> emit (Error "Memory.copyElements requires src, dest, and count arguments")
+        | _ -> emit (Error "Memory.copyElements: expected 3-4 children")
+
+    | Zero ->
+        // Memory.zero dest len -> unit
+        // For x86_64: emit llvm.memset intrinsic with value 0
+        match children with
+        | [_; destNode; lenNode] | [destNode; lenNode] ->
+            atNode destNode callEmitExpr >>= fun destResult ->
+            atNode lenNode callEmitExpr >>= fun lenResult ->
+            match destResult, lenResult with
+            | Value(dest, _), Value(len, lenTy) ->
+                (if lenTy = "i32" then emitExtsi len "i32" "i64" else emit len) >>= fun len64 ->
+                // Emit: call void @llvm.memset.p0.i64(ptr %dest, i8 0, i64 %len, i1 false)
+                line (sprintf "llvm.intr.memset(%s, 0 : i8, %s) {isVolatile = false} : (!llvm.ptr, i8, i64) -> ()" dest len64) >>.
+                emit Void
+            | _ -> emit (Error "Memory.zero requires dest and len arguments")
+        | _ -> emit (Error "Memory.zero: expected 2-3 children")
+
+    | ZeroElements ->
+        // Memory.zeroElements<T> dest count -> unit
+        // Same as Zero for byte-level operations
+        match children with
+        | [_; destNode; countNode] | [destNode; countNode] ->
+            atNode destNode callEmitExpr >>= fun destResult ->
+            atNode countNode callEmitExpr >>= fun countResult ->
+            match destResult, countResult with
+            | Value(dest, _), Value(count, countTy) ->
+                (if countTy = "i32" then emitExtsi count "i32" "i64" else emit count) >>= fun count64 ->
+                line (sprintf "llvm.intr.memset(%s, 0 : i8, %s) {isVolatile = false} : (!llvm.ptr, i8, i64) -> ()" dest count64) >>.
+                emit Void
+            | _ -> emit (Error "Memory.zeroElements requires dest and count arguments")
+        | _ -> emit (Error "Memory.zeroElements: expected 2-3 children")
+
+    | Fill ->
+        // Memory.fill dest value len -> unit
+        match children with
+        | [_; destNode; valueNode; lenNode] | [destNode; valueNode; lenNode] ->
+            atNode destNode callEmitExpr >>= fun destResult ->
+            atNode valueNode callEmitExpr >>= fun valueResult ->
+            atNode lenNode callEmitExpr >>= fun lenResult ->
+            match destResult, valueResult, lenResult with
+            | Value(dest, _), Value(value, _), Value(len, lenTy) ->
+                (if lenTy = "i32" then emitExtsi len "i32" "i64" else emit len) >>= fun len64 ->
+                line (sprintf "llvm.intr.memset(%s, %s, %s) {isVolatile = false} : (!llvm.ptr, i8, i64) -> ()" dest value len64) >>.
+                emit Void
+            | _ -> emit (Error "Memory.fill requires dest, value, and len arguments")
+        | _ -> emit (Error "Memory.fill: expected 3-4 children")
+
+    | Compare ->
+        // Memory.compare a b len -> bool
+        // For now, emit as a function call - memcmp returns i32
+        match children with
+        | [_; aNode; bNode; lenNode] | [aNode; bNode; lenNode] ->
+            atNode aNode callEmitExpr >>= fun aResult ->
+            atNode bNode callEmitExpr >>= fun bResult ->
+            atNode lenNode callEmitExpr >>= fun lenResult ->
+            match aResult, bResult, lenResult with
+            | Value(a, _), Value(b, _), Value(len, lenTy) ->
+                (if lenTy = "i32" then emitExtsi len "i32" "i64" else emit len) >>= fun len64 ->
+                // memcmp returns 0 if equal, nonzero otherwise
+                // We want bool (true if equal), so compare result == 0
+                freshSSAWithType "i32" >>= fun cmpResult ->
+                freshSSAWithType "i1" >>= fun boolResult ->
+                line (sprintf "%s = llvm.intr.memcmp(%s, %s, %s) : (!llvm.ptr, !llvm.ptr, i64) -> i32" cmpResult a b len64) >>.
+                emitI32 0 >>= fun zero ->
+                line (sprintf "%s = arith.cmpi eq, %s, %s : i32" boolResult cmpResult zero) >>.
+                emit (Value(boolResult, "i1"))
+            | _ -> emit (Error "Memory.compare requires a, b, and len arguments")
+        | _ -> emit (Error "Memory.compare: expected 3-4 children")
+
 /// Try to emit as Memory operation
 let private tryEmitMemory : Emit<ExprResult option> =
     getZipper >>= fun z ->
     match extractMemoryOp z.Graph z.Focus with
     | Some op -> handleMemory op |>> Some
     | None -> emit None
+
+// ===================================================================
+// NativeStr Semantic Primitives
+// ===================================================================
+
+/// Handler for NativeStr operations
+/// These are semantic primitives that express INTENT for string operations
+/// Alex chooses optimal implementation based on target
+let private handleNativeStr (op: NativeStrOp) : Emit<ExprResult> =
+    getZipper >>= fun z ->
+    let children = PSGZipper.childNodes z
+
+    match op with
+    | StrCreate ->
+        // NativeStr(ptr, len) - construct the fat pointer struct
+        // Already handled by tryEmitNativeStrConstruction, but provide fallback
+        match children with
+        | [_ctorNode; tupleNode] ->
+            // Tuple contains (ptr, len)
+            let tupleChildren = PSGZipper.childNodes { z with Focus = tupleNode }
+            match tupleChildren with
+            | [ptrNode; lenNode] ->
+                atNode ptrNode callEmitExpr >>= fun ptrResult ->
+                atNode lenNode callEmitExpr >>= fun lenResult ->
+                match ptrResult, lenResult with
+                | Value(ptr, _), Value(len, lenTy) ->
+                    (if lenTy = "i32" then emitExtsi len "i32" "i64" else emit len) >>= fun len64 ->
+                    emitNativeStrStruct ptr len64
+                | _ -> emit (Error "NativeStr constructor requires ptr and len")
+            | _ -> emit (Error "NativeStr constructor: expected tuple with 2 elements")
+        | _ -> emit (Error "NativeStr constructor: unexpected structure")
+
+    | StrEmpty ->
+        // empty() -> NativeStr with null ptr and 0 length
+        emitNullPtr >>= fun nullPtr ->
+        emitI64 0L >>= fun zeroLen ->
+        emitNativeStrStruct nullPtr zeroLen
+
+    | StrIsEmpty ->
+        // isEmpty s -> bool (check if length == 0)
+        match children with
+        | [_; strNode] | [strNode] ->
+            atNode strNode callEmitExpr >>= fun strResult ->
+            match strResult with
+            | Value(strReg, _) ->
+                // Extract length (field 1)
+                freshSSAWithType "i64" >>= fun lenReg ->
+                line (sprintf "%s = llvm.extractvalue %s[1] : !llvm.struct<(ptr, i64)>" lenReg strReg) >>.
+                // Compare with 0
+                emitI64 0L >>= fun zero ->
+                freshSSAWithType "i1" >>= fun result ->
+                line (sprintf "%s = arith.cmpi eq, %s, %s : i64" result lenReg zero) >>.
+                emit (Value(result, "i1"))
+            | _ -> emit (Error "isEmpty requires NativeStr argument")
+        | _ -> emit (Error "isEmpty: expected 1-2 children")
+
+    | StrLength ->
+        // length s -> int (extract length field)
+        match children with
+        | [_; strNode] | [strNode] ->
+            atNode strNode callEmitExpr >>= fun strResult ->
+            match strResult with
+            | Value(strReg, _) ->
+                freshSSAWithType "i64" >>= fun lenReg ->
+                line (sprintf "%s = llvm.extractvalue %s[1] : !llvm.struct<(ptr, i64)>" lenReg strReg) >>.
+                // Truncate to i32 for F# int
+                freshSSAWithType "i32" >>= fun len32 ->
+                line (sprintf "%s = arith.trunci %s : i64 to i32" len32 lenReg) >>.
+                emit (Value(len32, "i32"))
+            | _ -> emit (Error "length requires NativeStr argument")
+        | _ -> emit (Error "length: expected 1-2 children")
+
+    | StrByteAt ->
+        // byteAt index s -> byte
+        match children with
+        | [_; indexNode; strNode] | [indexNode; strNode] ->
+            atNode indexNode callEmitExpr >>= fun indexResult ->
+            atNode strNode callEmitExpr >>= fun strResult ->
+            match indexResult, strResult with
+            | Value(index, _), Value(strReg, _) ->
+                // Extract pointer (field 0)
+                freshSSAWithType "!llvm.ptr" >>= fun ptrReg ->
+                line (sprintf "%s = llvm.extractvalue %s[0] : !llvm.struct<(ptr, i64)>" ptrReg strReg) >>.
+                // GEP to the byte at index
+                freshSSAWithType "!llvm.ptr" >>= fun elemPtr ->
+                line (sprintf "%s = llvm.getelementptr %s[%s] : (!llvm.ptr, i32) -> !llvm.ptr, i8" elemPtr ptrReg index) >>.
+                // Load the byte
+                freshSSAWithType "i8" >>= fun byteVal ->
+                line (sprintf "%s = llvm.load %s : !llvm.ptr -> i8" byteVal elemPtr) >>.
+                emit (Value(byteVal, "i8"))
+            | _ -> emit (Error "byteAt requires index and NativeStr arguments")
+        | _ -> emit (Error "byteAt: expected 2-3 children")
+
+    | StrCopyTo ->
+        // copyTo dest s -> int (copy bytes to dest, return length)
+        match children with
+        | [_; destNode; strNode] | [destNode; strNode] ->
+            atNode destNode callEmitExpr >>= fun destResult ->
+            atNode strNode callEmitExpr >>= fun strResult ->
+            match destResult, strResult with
+            | Value(dest, _), Value(strReg, _) ->
+                // Extract ptr and length
+                freshSSAWithType "!llvm.ptr" >>= fun srcPtr ->
+                freshSSAWithType "i64" >>= fun lenReg ->
+                line (sprintf "%s = llvm.extractvalue %s[0] : !llvm.struct<(ptr, i64)>" srcPtr strReg) >>.
+                line (sprintf "%s = llvm.extractvalue %s[1] : !llvm.struct<(ptr, i64)>" lenReg strReg) >>.
+                // Use memcpy
+                line (sprintf "llvm.intr.memcpy(%s, %s, %s) {isVolatile = false} : (!llvm.ptr, !llvm.ptr, i64) -> ()" dest srcPtr lenReg) >>.
+                // Return length as i32
+                freshSSAWithType "i32" >>= fun len32 ->
+                line (sprintf "%s = arith.trunci %s : i64 to i32" len32 lenReg) >>.
+                emit (Value(len32, "i32"))
+            | _ -> emit (Error "copyTo requires dest and NativeStr arguments")
+        | _ -> emit (Error "copyTo: expected 2-3 children")
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Semantic String Primitives
+    // These express INTENT - Alex chooses optimal implementation for target
+    // ═══════════════════════════════════════════════════════════════════
+
+    | StrOfBytes ->
+        // ofBytes bytes -> NativeStr (create from byte literal)
+        // bytes is a byte[] with null terminator, length is len-1
+        match children with
+        | [_; bytesNode] | [bytesNode] ->
+            atNode bytesNode callEmitExpr >>= fun bytesResult ->
+            match bytesResult with
+            | Value(ptr, _) ->
+                // The byte literal is already a global constant
+                // We need to get the length from the type or compute it
+                // For now, assume the type info is available from the node
+                getFocus >>= fun node ->
+                // Try to extract length from the byte literal
+                // Byte literals like "Hello"B have length embedded in the global
+                // For simplicity, we'll create a NativeStr with the pointer
+                // The caller should provide length info via the node
+                emitI64 0L >>= fun zeroLen -> // Placeholder - needs type info
+                emitNativeStrStruct ptr zeroLen
+            | _ -> emit (Error "ofBytes requires byte[] argument")
+        | _ -> emit (Error "ofBytes: expected 1-2 children")
+
+    | StrCopyToBuffer ->
+        // copyToBuffer dest s -> NativeStr
+        match children with
+        | [_; destNode; strNode] | [destNode; strNode] ->
+            atNode destNode callEmitExpr >>= fun destResult ->
+            atNode strNode callEmitExpr >>= fun strResult ->
+            match destResult, strResult with
+            | Value(dest, _), Value(strReg, _) ->
+                freshSSAWithType "!llvm.ptr" >>= fun srcPtr ->
+                freshSSAWithType "i64" >>= fun lenReg ->
+                line (sprintf "%s = llvm.extractvalue %s[0] : !llvm.struct<(ptr, i64)>" srcPtr strReg) >>.
+                line (sprintf "%s = llvm.extractvalue %s[1] : !llvm.struct<(ptr, i64)>" lenReg strReg) >>.
+                line (sprintf "llvm.intr.memcpy(%s, %s, %s) {isVolatile = false} : (!llvm.ptr, !llvm.ptr, i64) -> ()" dest srcPtr lenReg) >>.
+                emitNativeStrStruct dest lenReg
+            | _ -> emit (Error "copyToBuffer requires dest and NativeStr arguments")
+        | _ -> emit (Error "copyToBuffer: expected 2-3 children")
+
+    | StrConcat2 ->
+        // concat2 dest a b -> NativeStr
+        match children with
+        | [_; destNode; aNode; bNode] | [destNode; aNode; bNode] ->
+            atNode destNode callEmitExpr >>= fun destResult ->
+            atNode aNode callEmitExpr >>= fun aResult ->
+            atNode bNode callEmitExpr >>= fun bResult ->
+            match destResult, aResult, bResult with
+            | Value(dest, _), Value(aStr, _), Value(bStr, _) ->
+                // Extract pointers and lengths
+                freshSSAWithType "!llvm.ptr" >>= fun aPtr ->
+                freshSSAWithType "i64" >>= fun aLen ->
+                freshSSAWithType "!llvm.ptr" >>= fun bPtr ->
+                freshSSAWithType "i64" >>= fun bLen ->
+                line (sprintf "%s = llvm.extractvalue %s[0] : !llvm.struct<(ptr, i64)>" aPtr aStr) >>.
+                line (sprintf "%s = llvm.extractvalue %s[1] : !llvm.struct<(ptr, i64)>" aLen aStr) >>.
+                line (sprintf "%s = llvm.extractvalue %s[0] : !llvm.struct<(ptr, i64)>" bPtr bStr) >>.
+                line (sprintf "%s = llvm.extractvalue %s[1] : !llvm.struct<(ptr, i64)>" bLen bStr) >>.
+                // Copy a to dest
+                line (sprintf "llvm.intr.memcpy(%s, %s, %s) {isVolatile = false} : (!llvm.ptr, !llvm.ptr, i64) -> ()" dest aPtr aLen) >>.
+                // Compute dest + aLen for b's destination
+                freshSSAWithType "!llvm.ptr" >>= fun destB ->
+                line (sprintf "%s = llvm.getelementptr %s[%s] : (!llvm.ptr, i64) -> !llvm.ptr, i8" destB dest aLen) >>.
+                // Copy b to dest + aLen
+                line (sprintf "llvm.intr.memcpy(%s, %s, %s) {isVolatile = false} : (!llvm.ptr, !llvm.ptr, i64) -> ()" destB bPtr bLen) >>.
+                // Total length = aLen + bLen
+                freshSSAWithType "i64" >>= fun totalLen ->
+                line (sprintf "%s = arith.addi %s, %s : i64" totalLen aLen bLen) >>.
+                emitNativeStrStruct dest totalLen
+            | _ -> emit (Error "concat2 requires dest, a, and b arguments")
+        | _ -> emit (Error "concat2: expected 3-4 children")
+
+    | StrConcat3 ->
+        // concat3 dest a b c -> NativeStr
+        // This is the common "prefix + content + suffix" pattern
+        match children with
+        | [_; destNode; aNode; bNode; cNode] | [destNode; aNode; bNode; cNode] ->
+            atNode destNode callEmitExpr >>= fun destResult ->
+            atNode aNode callEmitExpr >>= fun aResult ->
+            atNode bNode callEmitExpr >>= fun bResult ->
+            atNode cNode callEmitExpr >>= fun cResult ->
+            match destResult, aResult, bResult, cResult with
+            | Value(dest, _), Value(aStr, _), Value(bStr, _), Value(cStr, _) ->
+                // Extract pointers and lengths for all three
+                freshSSAWithType "!llvm.ptr" >>= fun aPtr ->
+                freshSSAWithType "i64" >>= fun aLen ->
+                freshSSAWithType "!llvm.ptr" >>= fun bPtr ->
+                freshSSAWithType "i64" >>= fun bLen ->
+                freshSSAWithType "!llvm.ptr" >>= fun cPtr ->
+                freshSSAWithType "i64" >>= fun cLen ->
+                line (sprintf "%s = llvm.extractvalue %s[0] : !llvm.struct<(ptr, i64)>" aPtr aStr) >>.
+                line (sprintf "%s = llvm.extractvalue %s[1] : !llvm.struct<(ptr, i64)>" aLen aStr) >>.
+                line (sprintf "%s = llvm.extractvalue %s[0] : !llvm.struct<(ptr, i64)>" bPtr bStr) >>.
+                line (sprintf "%s = llvm.extractvalue %s[1] : !llvm.struct<(ptr, i64)>" bLen bStr) >>.
+                line (sprintf "%s = llvm.extractvalue %s[0] : !llvm.struct<(ptr, i64)>" cPtr cStr) >>.
+                line (sprintf "%s = llvm.extractvalue %s[1] : !llvm.struct<(ptr, i64)>" cLen cStr) >>.
+                // Copy a to dest
+                line (sprintf "llvm.intr.memcpy(%s, %s, %s) {isVolatile = false} : (!llvm.ptr, !llvm.ptr, i64) -> ()" dest aPtr aLen) >>.
+                // Copy b to dest + aLen
+                freshSSAWithType "!llvm.ptr" >>= fun destB ->
+                line (sprintf "%s = llvm.getelementptr %s[%s] : (!llvm.ptr, i64) -> !llvm.ptr, i8" destB dest aLen) >>.
+                line (sprintf "llvm.intr.memcpy(%s, %s, %s) {isVolatile = false} : (!llvm.ptr, !llvm.ptr, i64) -> ()" destB bPtr bLen) >>.
+                // Copy c to dest + aLen + bLen
+                freshSSAWithType "i64" >>= fun abLen ->
+                line (sprintf "%s = arith.addi %s, %s : i64" abLen aLen bLen) >>.
+                freshSSAWithType "!llvm.ptr" >>= fun destC ->
+                line (sprintf "%s = llvm.getelementptr %s[%s] : (!llvm.ptr, i64) -> !llvm.ptr, i8" destC dest abLen) >>.
+                line (sprintf "llvm.intr.memcpy(%s, %s, %s) {isVolatile = false} : (!llvm.ptr, !llvm.ptr, i64) -> ()" destC cPtr cLen) >>.
+                // Total length = aLen + bLen + cLen
+                freshSSAWithType "i64" >>= fun totalLen ->
+                line (sprintf "%s = arith.addi %s, %s : i64" totalLen abLen cLen) >>.
+                emitNativeStrStruct dest totalLen
+            | _ -> emit (Error "concat3 requires dest, a, b, and c arguments")
+        | _ -> emit (Error "concat3: expected 4-5 children")
+
+    | StrFromBytesTo ->
+        // fromBytesTo dest bytes -> NativeStr
+        // Similar to copyToBuffer but from a byte literal
+        match children with
+        | [_; destNode; bytesNode] | [destNode; bytesNode] ->
+            atNode destNode callEmitExpr >>= fun destResult ->
+            atNode bytesNode callEmitExpr >>= fun bytesResult ->
+            match destResult, bytesResult with
+            | Value(dest, _), Value(bytesPtr, _) ->
+                // For byte literals, we need to extract length
+                // This is a simplified version - full impl would get len from type
+                emit (Error "fromBytesTo: not yet implemented - use ofBytes instead")
+            | _ -> emit (Error "fromBytesTo requires dest and bytes arguments")
+        | _ -> emit (Error "fromBytesTo: expected 2-3 children")
+
+/// Try to emit as NativeStr operation
+let private tryEmitNativeStr : Emit<ExprResult option> =
+    getZipper >>= fun z ->
+    let node = z.Focus
+
+    match extractNativeStrOp z.Graph z.Focus with
+    | Some op ->
+        handleNativeStr op |>> Some
+    | None ->
+        emit None
 
 // ===================================================================
 // Result DU Constructor Handlers
@@ -2158,8 +2541,11 @@ let emitExpr : Emit<ExprResult> =
         // Time operations
         tryEmitTime
 
-        // Memory operations (stackBuffer, spanToString, etc.)
+        // Memory operations (stackBuffer, spanToString, semantic primitives)
         tryEmitMemory
+
+        // NativeStr semantic primitives (ofBytes, concat2, concat3, etc.)
+        tryEmitNativeStr
 
         // Result DU constructors (Ok, Error)
         tryEmitResult

@@ -68,6 +68,28 @@ type MemoryOp =
     | StackBuffer of elementType: string option  // stackBuffer<T>
     | SpanToString  // Convert Span<byte> to string
     | AsReadOnlySpan  // Get read-only span from buffer
+    // Semantic memory primitives - express WHAT not HOW
+    | Copy           // Memory.copy src dest len
+    | CopyElements   // Memory.copyElements<T> src dest count
+    | Zero           // Memory.zero dest len
+    | ZeroElements   // Memory.zeroElements<T> dest count
+    | Fill           // Memory.fill dest value len
+    | Compare        // Memory.compare a b len
+
+/// NativeStr operation types (from Alloy.NativeTypes.NativeString)
+type NativeStrOp =
+    | StrCreate      // NativeStr(ptr, len) constructor
+    | StrEmpty       // empty() -> NativeStr
+    | StrIsEmpty     // isEmpty s -> bool
+    | StrLength      // length s -> int
+    | StrByteAt      // byteAt index s -> byte
+    | StrCopyTo      // copyTo dest s -> int
+    // Semantic string primitives
+    | StrOfBytes     // ofBytes bytes -> NativeStr (from byte literal)
+    | StrCopyToBuffer// copyToBuffer dest s -> NativeStr
+    | StrConcat2     // concat2 dest a b -> NativeStr
+    | StrConcat3     // concat3 dest a b c -> NativeStr
+    | StrFromBytesTo // fromBytesTo dest bytes -> NativeStr
 
 /// Result DU constructor types
 type ResultOp =
@@ -96,6 +118,7 @@ type AlloyOp =
     | Time of TimeOp
     | TextFormat of TextFormatOp
     | Memory of MemoryOp
+    | NativeStr of NativeStrOp
     | Result of ResultOp
     | Core of CoreOp
 
@@ -262,6 +285,54 @@ let classifyMemoryOp (symbol: FSharpSymbol) : MemoryOp option =
         Some SpanToString
     elif displayName = "AsReadOnlySpan" || fullName.Contains("AsReadOnlySpan") then
         Some AsReadOnlySpan
+    // Semantic memory primitives
+    elif displayName = "copy" && fullName.Contains("Memory") then
+        Some Copy
+    elif displayName = "copyElements" && fullName.Contains("Memory") then
+        Some CopyElements
+    elif displayName = "zero" && fullName.Contains("Memory") then
+        Some Zero
+    elif displayName = "zeroElements" && fullName.Contains("Memory") then
+        Some ZeroElements
+    elif displayName = "fill" && fullName.Contains("Memory") then
+        Some Fill
+    elif displayName = "compare" && fullName.Contains("Memory") then
+        Some Compare
+    else
+        None
+
+/// Classify a NativeStr operation from a symbol
+let classifyNativeStrOp (symbol: FSharpSymbol) : NativeStrOp option =
+    let fullName = getFullNameOrDefault symbol ""
+    let displayName = symbol.DisplayName
+
+    // Check for NativeString module functions
+    let isNativeString = fullName.Contains("NativeString") || fullName.Contains("NativeStr")
+
+    if not isNativeString then None
+    elif displayName = ".ctor" || displayName = "NativeStr" then
+        Some StrCreate
+    elif displayName = "empty" then
+        Some StrEmpty
+    elif displayName = "isEmpty" then
+        Some StrIsEmpty
+    elif displayName = "length" then
+        Some StrLength
+    elif displayName = "byteAt" then
+        Some StrByteAt
+    elif displayName = "copyTo" then
+        Some StrCopyTo
+    // Semantic string primitives
+    elif displayName = "ofBytes" then
+        Some StrOfBytes
+    elif displayName = "copyToBuffer" then
+        Some StrCopyToBuffer
+    elif displayName = "concat2" then
+        Some StrConcat2
+    elif displayName = "concat3" then
+        Some StrConcat3
+    elif displayName = "fromBytesTo" then
+        Some StrFromBytesTo
     else
         None
 
@@ -419,6 +490,18 @@ let extractMemoryOp (graph: ProgramSemanticGraph) (node: PSGNode) : MemoryOp opt
             | Some s -> classifyMemoryOp s
             | None -> None
 
+/// Extract NativeStr operation from a node
+let extractNativeStrOp (graph: ProgramSemanticGraph) (node: PSGNode) : NativeStrOp option =
+    if not (node.SyntaxKind.StartsWith("App")) then None
+    else
+        let children = getChildNodes graph node
+        match getFunctionSymbolFromChildren graph children with
+        | Some symbol -> classifyNativeStrOp symbol
+        | None ->
+            match node.Symbol with
+            | Some s -> classifyNativeStrOp s
+            | None -> None
+
 /// Extract Result DU constructor operation from a node
 let extractResultOp (graph: ProgramSemanticGraph) (node: PSGNode) : ResultOp option =
     if not (node.SyntaxKind.StartsWith("App")) then None
@@ -524,12 +607,19 @@ let extractAlloyOp (graph: ProgramSemanticGraph) (node: PSGNode) : AlloyOp optio
     match extractMemoryOp graph node with
     | Some op -> Some (Memory op)
     | None ->
+    match extractNativeStrOp graph node with
+    | Some op -> Some (NativeStr op)
+    | None ->
     match extractResultOp graph node with
     | Some op -> Some (Result op)
     | None ->
     match extractCoreOp graph node with
     | Some op -> Some (Core op)
     | None -> None
+
+/// Check if node is a NativeStr operation
+let isNativeStrCall (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
+    extractNativeStrOp graph node |> Option.isSome
 
 /// Extract arithmetic operation from an App node
 /// Handles curried operators: a + b is ((+) a) b

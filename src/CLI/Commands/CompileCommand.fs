@@ -229,7 +229,17 @@ let execute (args: ParseResults<CompileArgs>) =
 
         report verbose "PSG" "Building Program Semantic Graph..."
 
+        // Enable nanopass intermediate emission when keeping intermediates or in verbose mode
+        match intermediatesDir with
+        | Some dir ->
+            Core.PSG.Construction.Main.emitNanopassIntermediates <- true
+            Core.PSG.Construction.Main.nanopassOutputDir <- dir
+        | None -> ()
+
         let psg = buildProgramSemanticGraph checkResults parseResults
+
+        // Reset nanopass emission flags
+        Core.PSG.Construction.Main.emitNanopassIntermediates <- false
 
         printfn "[PSG] Built: %d nodes, %d edges, %d entry points, %d symbols"
             psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length psg.SymbolTable.Count

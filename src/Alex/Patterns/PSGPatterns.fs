@@ -74,8 +74,9 @@ let isIdent (node: PSGNode) : bool =
     node.SyntaxKind.StartsWith("LongIdent")
 
 /// Is a Let binding
+/// Matches: LetOrUse, LetOrUse:Let, Let, LetDeclaration, etc.
 let isLet (node: PSGNode) : bool =
-    node.SyntaxKind = "LetOrUse" || node.SyntaxKind.StartsWith("Let")
+    node.SyntaxKind.StartsWith("LetOrUse") || node.SyntaxKind.StartsWith("Let")
 
 /// Is a Sequential expression
 let isSequential (node: PSGNode) : bool =
