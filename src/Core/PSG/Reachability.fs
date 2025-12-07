@@ -70,27 +70,42 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
         let mutable result = Map.empty
 
         // Walk the graph to find all function/method definitions
+        // Only top-level function bindings start new "containing function" scopes
+        // Local let bindings (for variables) should NOT start new scopes
         for KeyValue(nodeId, node) in psg.Nodes do
             match node.SyntaxKind with
             | sk when sk.StartsWith("Binding") || sk.StartsWith("Member") ->
                 match node.Symbol with
                 | Some sym ->
-                    // This node defines a function - mark all its descendants
-                    // Use visited set to prevent infinite recursion on cyclic references
-                    let visited = System.Collections.Generic.HashSet<string>()
-                    let rec markDescendants nId funcName =
-                        if visited.Add(nId) then  // Only process if not already visited
-                            result <- Map.add nId funcName result
-                            match Map.tryFind nId psg.Nodes with
-                            | Some n ->
-                                match n.Children with
-                                | Parent children ->
-                                    for child in children do
-                                        markDescendants child.Value funcName
-                                | _ -> ()
-                            | None -> ()
+                    // Only mark as a function boundary if this is a module-level function
+                    // (not a local let binding for a variable)
+                    let mfvOpt =
+                        match sym with
+                        | :? FSharpMemberOrFunctionOrValue as mfv -> Some mfv
+                        | _ -> None
 
-                    markDescendants nodeId sym.FullName
+                    let isTopLevelFunction =
+                        match mfvOpt with
+                        | Some mfv -> mfv.IsModuleValueOrMember && mfv.IsFunction
+                        | None -> false
+
+                    if isTopLevelFunction then
+                        // This node defines a function - mark all its descendants
+                        // Use visited set to prevent infinite recursion on cyclic references
+                        let visited = System.Collections.Generic.HashSet<string>()
+                        let rec markDescendants nId funcName =
+                            if visited.Add(nId) then  // Only process if not already visited
+                                result <- Map.add nId funcName result
+                                match Map.tryFind nId psg.Nodes with
+                                | Some n ->
+                                    match n.Children with
+                                    | Parent children ->
+                                        for child in children do
+                                            markDescendants child.Value funcName
+                                    | _ -> ()
+                                | None -> ()
+
+                        markDescendants nodeId sym.FullName
                 | None -> ()
             | _ -> ()
 

@@ -137,7 +137,7 @@ let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targe
     EmissionErrors.reset()
 
     // Register all platform bindings
-    // These define which Alloy library functions are handled by inline emission
+    // Register which Alloy library functions are handled by inline emission
     Alex.Bindings.Time.TimeBindings.registerAllBindings ()
     Alex.Bindings.Console.ConsoleBindings.registerAll ()
 

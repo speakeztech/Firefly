@@ -14,9 +14,10 @@ open Alex.CodeGeneration.EmissionMonad
 open Alex.Traversal.PSGZipper
 open Alex.Bindings.BindingTypes
 
-// Import the new MLIR builder types
+// Import the MLIR builder types and PSG emitter
 module MB = Alex.CodeGeneration.MLIRBuilder
 module EE = Alex.Emission.ExpressionEmitter
+module PE = Alex.Emission.PSGEmitter
 
 // ═══════════════════════════════════════════════════════════════════
 // ExprResult Type - mirrors ExpressionEmitter.EmitResult
@@ -73,6 +74,7 @@ let findEntryPoints (psg: ProgramSemanticGraph) : PSGNode list =
 /// Find all reachable function definitions (excluding entry points which are handled separately)
 /// Uses symbol's IsFunction/IsMember properties (stored at PSG construction, not a new FCS query)
 /// Also excludes functions that are handled by Alex bindings (their calls are inlined at call sites)
+/// ALSO excludes Alloy library functions - they are inlined at call sites, not emitted as top-level functions
 let findReachableFunctions (psg: ProgramSemanticGraph) : PSGNode list =
     let entryPointIds = psg.EntryPoints |> List.map (fun ep -> ep.Value) |> Set.ofList
 
@@ -99,6 +101,17 @@ let findReachableFunctions (psg: ProgramSemanticGraph) : PSGNode list =
         | Some sym ->
             match tryGetFullName sym with
             | Some fullName -> not (BindingRegistry.isHandledByBinding fullName)
+            | None -> true
+        | None -> true)
+    |> List.filter (fun node ->
+        // Exclude Alloy library functions - they are inlined at call sites
+        // Only user-defined functions should be emitted as top-level MLIR functions
+        match node.Symbol with
+        | Some sym ->
+            match tryGetFullName sym with
+            | Some fullName ->
+                not (fullName.StartsWith("Alloy.") ||
+                     fullName.StartsWith("Microsoft.FSharp."))
             | None -> true
         | None -> true)
 
@@ -137,8 +150,8 @@ let runMLIREmission (psg: ProgramSemanticGraph) (node: PSGNode) : Emit<FuncEmitR
             Globals = []
         }
 
-        // Run the MLIR CE emission
-        let mlirExpr = EE.emitExpr psg node
+        // Run the MLIR CE emission via PSGEmitter
+        let mlirExpr = PE.emitExpr psg node
         let result = mlirExpr builderState
 
         // Transfer emitted MLIR lines to the function-level builder

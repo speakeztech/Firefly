@@ -107,6 +107,7 @@
 
       <!-- Alex Emission -->
       <Compile Include="Alex/Emission/ExpressionEmitter.fs" />
+      <Compile Include="Alex/Emission/PSGEmitter.fs" />
       <Compile Include="Alex/Emission/FunctionEmitter.fs" />
 
       <!-- Alex Pipeline Orchestration -->
