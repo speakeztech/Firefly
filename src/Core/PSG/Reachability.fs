@@ -64,11 +64,11 @@ let private classifyLibraryCategory (symbolName: string) : LibraryCategory =
 /// Build semantic call graph from PSG using principled graph analysis
 let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, string list> =
     let mutable callGraph = Map.empty
-    
+
     // Build a map from nodes to their containing function/method
-    let nodeToFunction = 
+    let nodeToFunction =
         let mutable result = Map.empty
-        
+
         // Walk the graph to find all function/method definitions
         for KeyValue(nodeId, node) in psg.Nodes do
             match node.SyntaxKind with
@@ -93,71 +93,73 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
                     markDescendants nodeId sym.FullName
                 | None -> ()
             | _ -> ()
-        
+
         result
+
+    printfn "[CALLGRAPH] nodeToFunction has %d entries" (Map.count nodeToFunction)
     
+    // Helper: Check if a symbol represents a callable function/method (not a parameter or local)
+    // Key insight: Parameters and local bindings are NOT module-level values/members
+    let isCallableSymbol (sym: FSharpSymbol) : bool =
+        match sym with
+        | :? FSharpMemberOrFunctionOrValue as mfv ->
+            // Must be a module-level value/member (not a parameter or local binding)
+            // AND must be a function or member (not just a value constant)
+            mfv.IsModuleValueOrMember && (mfv.IsFunction || mfv.IsMember)
+        | _ -> false
+
+    // Helper: Try to add a call edge to the graph
+    let tryAddCallEdge caller targetSym =
+        if isCallableSymbol targetSym then
+            let calledFunc = targetSym.FullName
+            if caller <> calledFunc then
+                let currentCalls = Map.tryFind caller callGraph |> Option.defaultValue []
+                if not (List.contains calledFunc currentCalls) then
+                    callGraph <- Map.add caller (calledFunc :: currentCalls) callGraph
+
     // Analyze edges to build call graph
     for edge in psg.Edges do
         match edge.Kind with
         | FunctionCall ->
-            // Find the calling function and called function
             let callerOpt = Map.tryFind edge.Source.Value nodeToFunction
             let targetOpt = Map.tryFind edge.Target.Value psg.Nodes
-            
+
             match callerOpt, targetOpt with
             | Some caller, Some targetNode ->
                 match targetNode.Symbol with
-                | Some targetSym ->
-                    let calledFunc = targetSym.FullName
-                    // Only add if it's a different function and not already in the list
-                    if caller <> calledFunc then
-                        let currentCalls = Map.tryFind caller callGraph |> Option.defaultValue []
-                        if not (List.contains calledFunc currentCalls) then
-                            callGraph <- Map.add caller (calledFunc :: currentCalls) callGraph
+                | Some targetSym -> tryAddCallEdge caller targetSym
                 | None -> ()
             | _ -> ()
         | MethodCall ->
-            // Find the calling function and called function
             let callerOpt = Map.tryFind edge.Source.Value nodeToFunction
             let targetOpt = Map.tryFind edge.Target.Value psg.Nodes
-            
+
             match callerOpt, targetOpt with
             | Some caller, Some targetNode ->
                 match targetNode.Symbol with
-                | Some targetSym ->
-                    let calledFunc = targetSym.FullName
-                    // Only add if it's a different function and not already in the list
-                    if caller <> calledFunc then
-                        let currentCalls = Map.tryFind caller callGraph |> Option.defaultValue []
-                        if not (List.contains calledFunc currentCalls) then
-                            callGraph <- Map.add caller (calledFunc :: currentCalls) callGraph
+                | Some targetSym -> tryAddCallEdge caller targetSym
                 | None -> ()
             | _ -> ()
         | Reference ->
-            // Find the calling function and called function
+            // References can be to values, types, etc. - only add if it's a callable
             let callerOpt = Map.tryFind edge.Source.Value nodeToFunction
             let targetOpt = Map.tryFind edge.Target.Value psg.Nodes
-            
+
             match callerOpt, targetOpt with
             | Some caller, Some targetNode ->
                 match targetNode.Symbol with
-                | Some targetSym ->
-                    let calledFunc = targetSym.FullName
-                    // Only add if it's a different function and not already in the list
-                    if caller <> calledFunc then
-                        let currentCalls = Map.tryFind caller callGraph |> Option.defaultValue []
-                        if not (List.contains calledFunc currentCalls) then
-                            callGraph <- Map.add caller (calledFunc :: currentCalls) callGraph
+                | Some targetSym -> tryAddCallEdge caller targetSym
                 | None -> ()
             | _ -> ()
         | _ -> ()
     
     // Also analyze application nodes for function calls not captured by edges
+    // KEY FIX: Only consider actual function/method symbols, not parameters or local bindings
     for KeyValue(nodeId, node) in psg.Nodes do
         match node.SyntaxKind with
         | "App" | "App:FunctionCall" | "TypeApp" ->
             let callerOpt = Map.tryFind nodeId nodeToFunction
-            
+
             match callerOpt with
             | Some caller ->
                 // Look at children to find what's being called
@@ -167,47 +169,58 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
                         match Map.tryFind childId.Value psg.Nodes with
                         | Some childNode ->
                             match childNode.Symbol with
-                            | Some childSym when childSym.FullName <> caller ->
-                                let currentCalls = Map.tryFind caller callGraph |> Option.defaultValue []
-                                if not (List.contains childSym.FullName currentCalls) then
-                                    callGraph <- Map.add caller (childSym.FullName :: currentCalls) callGraph
-                            | _ -> ()
+                            | Some sym -> tryAddCallEdge caller sym
+                            | None -> ()
                         | None -> ()
                 | _ -> ()
             | None -> ()
         | _ -> ()
     
+    // Debug: print what main calls
+    match Map.tryFind "Examples.HelloWorldDirect.main" callGraph with
+    | Some calls -> printfn "[CALLGRAPH] main calls: %A" calls
+    | None -> printfn "[CALLGRAPH] main not found in call graph"
+
+    // Debug: print what Console.Write and WriteLine call
+    for funcName in ["Alloy.Console.Write"; "Alloy.Console.WriteLine"] do
+        match Map.tryFind funcName callGraph with
+        | Some calls -> printfn "[CALLGRAPH] %s calls: %A" funcName calls
+        | None -> printfn "[CALLGRAPH] %s not in call graph" funcName
+
     callGraph
 
 /// Compute reachable symbols using semantic analysis
-let private computeSemanticReachability 
-    (entryPoints: FSharpSymbol list) 
+let private computeSemanticReachability
+    (entryPoints: FSharpSymbol list)
     (callGraph: Map<string, string list>) : Set<string> =
-    
+
     let mutable reachable = Set.empty
     let mutable toProcess = []
-    
+
     // Start with entry points
     for ep in entryPoints do
+        printfn "[REACH-TRACE] Entry point: %s" ep.FullName
         reachable <- Set.add ep.FullName reachable
         toProcess <- ep.FullName :: toProcess
-    
+
     // Process call graph
     while not (List.isEmpty toProcess) do
         match toProcess with
         | current :: rest ->
             toProcess <- rest
-            
+
             // Add all functions called by current
             match Map.tryFind current callGraph with
             | Some callees ->
                 for callee in callees do
                     if not (Set.contains callee reachable) then
+                        printfn "[REACH-TRACE] %s -> %s" current callee
                         reachable <- Set.add callee reachable
                         toProcess <- callee :: toProcess
             | None -> ()
         | [] -> ()
-    
+
+    printfn "[REACH-TRACE] Total from call graph traversal: %d" (Set.count reachable)
     reachable
 
 /// Mark PSG nodes based on semantic reachability

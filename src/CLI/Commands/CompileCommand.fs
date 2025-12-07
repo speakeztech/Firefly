@@ -68,7 +68,8 @@ let private findEntryPointFunctionName (psg: Core.PSG.Types.ProgramSemanticGraph
         | None -> "main"
 
 /// Generate MLIR from PSG using Alex emission pipeline
-let private generateMLIRFromPSG (psg: Core.PSG.Types.ProgramSemanticGraph) (projectName: string) (targetTriple: string) (_outputKind: Core.Types.MLIRTypes.OutputKind) : string =
+/// Returns the MLIR content and any emission errors
+let private generateMLIRFromPSG (psg: Core.PSG.Types.ProgramSemanticGraph) (projectName: string) (targetTriple: string) (_outputKind: Core.Types.MLIRTypes.OutputKind) : Alex.Pipeline.CompilationOrchestrator.MLIRGenerationResult =
     // Use Alex.Pipeline.CompilationOrchestrator.generateMLIRViaAlex
     generateMLIRViaAlex psg projectName targetTriple
 
@@ -266,12 +267,21 @@ let execute (args: ParseResults<CompileArgs>) =
 
         report verbose "MLIR" "Generating MLIR..."
 
-        let mlirOutput = generateMLIRFromPSG reachabilityResult.MarkedPSG resolved.Name targetTriple resolved.OutputKind
+        let mlirResult = generateMLIRFromPSG reachabilityResult.MarkedPSG resolved.Name targetTriple resolved.OutputKind
+
+        // Report emission errors
+        if mlirResult.HasErrors then
+            printfn ""
+            printfn "[MLIR] Emission errors detected:"
+            for error in mlirResult.Errors do
+                printfn "  ERROR: %s" error.Message
+            printfn ""
 
         match intermediatesDir with
         | Some dir ->
+            // Always write MLIR file (even with errors) for debugging
             let mlirPath = Path.Combine(dir, resolved.Name + ".mlir")
-            File.WriteAllText(mlirPath, mlirOutput)
+            File.WriteAllText(mlirPath, mlirResult.Content)
             printfn "[MLIR] Wrote: %s" mlirPath
 
             // Write PSG debug info with tree structure for reachable nodes
@@ -386,8 +396,19 @@ let execute (args: ParseResults<CompileArgs>) =
 
             if emitMLIR then
                 printfn ""
-                printfn "Stopped after MLIR generation (--emit-mlir)"
-                0
+                if mlirResult.HasErrors then
+                    printfn "MLIR generation completed with errors (--emit-mlir)"
+                    printfn "Check %s for partial output" (Path.Combine(dir, resolved.Name + ".mlir"))
+                    1
+                else
+                    printfn "Stopped after MLIR generation (--emit-mlir)"
+                    0
+            elif mlirResult.HasErrors then
+                // Don't continue to LLVM if MLIR had errors
+                printfn ""
+                printfn "Compilation failed due to emission errors."
+                printfn "MLIR output written to: %s" (Path.Combine(dir, resolved.Name + ".mlir"))
+                1
             else
                 // =========================================================================
                 // PHASE 5: LLVM IR Generation (MLIR's job)
@@ -429,6 +450,14 @@ let execute (args: ParseResults<CompileArgs>) =
         | None ->
             // No intermediates requested, but we still did the analysis
             printfn ""
-            printfn "Compilation analysis complete."
-            printfn "Use -k or --emit-mlir to see generated code."
-            0
+            if mlirResult.HasErrors then
+                printfn "Compilation analysis found errors:"
+                for error in mlirResult.Errors do
+                    printfn "  ERROR: %s" error.Message
+                printfn ""
+                printfn "Use -k to generate intermediate files for debugging."
+                1
+            else
+                printfn "Compilation analysis complete."
+                printfn "Use -k or --emit-mlir to see generated code."
+                0

@@ -77,3 +77,58 @@ type ProjectLoadingPhase =
 
 // Note: Removed projectPhaseToCompilationPhase as it was causing type issues
 // The phases are handled differently in the orchestrator
+
+// ===================================================================
+// Emission Error Collection
+// ===================================================================
+
+/// An error that occurred during MLIR emission
+type EmissionError = {
+    NodeKind: string
+    NodeSymbol: string option
+    Message: string
+    Phase: CompilationPhase
+}
+
+/// Mutable collector for emission errors
+/// Used during emission to accumulate errors while continuing to emit
+/// what we can (for intermediate file generation)
+type EmissionErrorCollector() =
+    let mutable errors: EmissionError list = []
+
+    member _.Add(error: EmissionError) =
+        errors <- error :: errors
+
+    member _.AddError(nodeKind: string, symbol: string option, message: string) =
+        errors <- { NodeKind = nodeKind; NodeSymbol = symbol; Message = message; Phase = MLIRGeneration } :: errors
+
+    member _.Errors = List.rev errors
+
+    member _.HasErrors = not (List.isEmpty errors)
+
+    member _.Clear() = errors <- []
+
+    /// Convert to CompilerError list for reporting
+    member _.ToCompilerErrors() : CompilerError list =
+        errors
+        |> List.rev
+        |> List.map (fun e ->
+            {
+                Phase = "MLIR Emission"
+                Message = sprintf "[%s] %s%s"
+                    e.NodeKind
+                    (match e.NodeSymbol with Some s -> s + ": " | None -> "")
+                    e.Message
+                Location = None
+                Severity = ErrorSeverity.Error
+            })
+
+/// Global emission error collector (thread-local in future if needed)
+module EmissionErrors =
+    let mutable private collector = EmissionErrorCollector()
+
+    let reset() = collector <- EmissionErrorCollector()
+    let add nodeKind symbol message = collector.AddError(nodeKind, symbol, message)
+    let errors() = collector.Errors
+    let hasErrors() = collector.HasErrors
+    let toCompilerErrors() = collector.ToCompilerErrors()

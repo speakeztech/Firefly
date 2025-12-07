@@ -195,3 +195,18 @@ module BindingRegistry =
     let clear () =
         bindings <- []
         currentPlatform <- None
+
+    /// Check if a symbol name is handled by any registered binding
+    /// This is used to determine if a function definition should be emitted
+    /// or if the binding handles it at call sites (inline emission)
+    let isHandledByBinding (symbolFullName: string) : bool =
+        bindings
+        |> List.exists (fun b ->
+            b.SymbolPatterns |> List.exists (fun pattern ->
+                symbolFullName = pattern || symbolFullName.EndsWith("." + pattern)))
+
+    /// Get all symbol patterns that are handled by bindings
+    let getAllHandledPatterns () : string list =
+        bindings
+        |> List.collect (fun b -> b.SymbolPatterns)
+        |> List.distinct

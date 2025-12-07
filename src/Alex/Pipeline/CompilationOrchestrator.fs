@@ -10,6 +10,7 @@ open Core.Utilities.IntermediateWriter
 open Core.PSG.Types
 open Alex.Pipeline.CompilationTypes
 open Alex.Emission.FunctionEmitter
+open Alex.Bindings.BindingTypes
 
 // ===================================================================
 // Pipeline Integration Types
@@ -122,8 +123,29 @@ let generateStatistics (pipelineResult: PipelineResult) (startTime: DateTime) : 
 // MLIR Generation via Alex
 // ===================================================================
 
+/// Result of MLIR generation including any errors
+type MLIRGenerationResult = {
+    Content: string
+    Errors: CompilerError list
+    HasErrors: bool
+}
+
 /// Generate MLIR from PSG using the Alex emission infrastructure
-let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targetTriple: string) : string =
+/// Returns the generated MLIR and any errors that occurred
+let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targetTriple: string) : MLIRGenerationResult =
+    // Reset error collector for this compilation
+    EmissionErrors.reset()
+
+    // Register all platform bindings
+    // These define which Alloy library functions are handled by inline emission
+    Alex.Bindings.Time.TimeBindings.registerAllBindings ()
+    Alex.Bindings.Console.ConsoleBindings.registerAll ()
+
+    // Set target platform from triple
+    match TargetPlatform.parseTriple targetTriple with
+    | Some platform -> BindingRegistry.setTargetPlatform platform
+    | None -> ()  // Use default (auto-detect)
+
     // Use Alex FunctionEmitter to generate MLIR
     let mlirContent = emitProgram psg
 
@@ -132,7 +154,14 @@ let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targe
         sprintf "// Firefly-generated MLIR for %s (via Alex)\n// Target: %s\n// PSG: %d nodes, %d edges, %d entry points\n\n"
             projectName targetTriple psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length
 
-    header + mlirContent
+    // Collect any emission errors
+    let emissionErrors = EmissionErrors.toCompilerErrors()
+
+    {
+        Content = header + mlirContent
+        Errors = emissionErrors
+        HasErrors = EmissionErrors.hasErrors()
+    }
 
 // ===================================================================
 // Intermediate File Management

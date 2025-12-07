@@ -12,6 +12,7 @@ open Alex.CodeGeneration.EmissionContext
 open Alex.CodeGeneration.TypeMapping
 open Alex.CodeGeneration.EmissionMonad
 open Alex.Traversal.PSGZipper
+open Alex.Bindings.BindingTypes
 
 // Import the new MLIR builder types
 module MB = Alex.CodeGeneration.MLIRBuilder
@@ -71,6 +72,7 @@ let findEntryPoints (psg: ProgramSemanticGraph) : PSGNode list =
 
 /// Find all reachable function definitions (excluding entry points which are handled separately)
 /// Uses symbol's IsFunction/IsMember properties (stored at PSG construction, not a new FCS query)
+/// Also excludes functions that are handled by Alex bindings (their calls are inlined at call sites)
 let findReachableFunctions (psg: ProgramSemanticGraph) : PSGNode list =
     let entryPointIds = psg.EntryPoints |> List.map (fun ep -> ep.Value) |> Set.ofList
 
@@ -91,26 +93,13 @@ let findReachableFunctions (psg: ProgramSemanticGraph) : PSGNode list =
             mfv.IsFunction || mfv.IsMember
         | _ -> false)
     |> List.filter (fun node ->
-        // Skip Alloy functions that have special inline implementations
-        // Uses symbol's FullName - just reading stored string, not querying FCS
+        // Exclude functions that have Alex binding implementations
+        // These are library functions whose calls are inlined at call sites
         match node.Symbol with
         | Some sym ->
             match tryGetFullName sym with
-            | Some fullName ->
-                // List of Alloy functions that should be inlined at call sites
-                let shouldSkip =
-                    fullName = "Alloy.Core.string" ||
-                    fullName.StartsWith("Alloy.Core.Ok") ||
-                    fullName.StartsWith("Alloy.Core.Error") ||
-                    fullName.StartsWith("Alloy.Console.Write") ||
-                    fullName.StartsWith("Alloy.Console.Prompt") ||
-                    fullName.StartsWith("Alloy.Console.ReadLine") ||
-                    fullName.StartsWith("Alloy.Time.") ||
-                    fullName.StartsWith("Alloy.Math.") ||
-                    fullName.StartsWith("Alloy.Memory.stackBuffer") ||
-                    fullName.StartsWith("Alloy.Text.UTF8.spanToString")
-                not shouldSkip
-            | None -> true  // Can't get FullName, include it
+            | Some fullName -> not (BindingRegistry.isHandledByBinding fullName)
+            | None -> true
         | None -> true)
 
 // ═══════════════════════════════════════════════════════════════════
