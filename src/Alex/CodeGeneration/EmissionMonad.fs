@@ -572,13 +572,13 @@ let emitDefaultValue (mlirType: string) : Emit<string> =
         // Unknown type - try i32 default
         emitI32 0
 
-/// Emit cf.br (unconditional branch)
+/// Emit llvm.br (unconditional branch) - using LLVM dialect for mlir-translate compatibility
 let emitBr (label: string) : Emit<unit> =
-    line (sprintf "cf.br ^%s" label)
+    line (sprintf "llvm.br ^%s" label)
 
-/// Emit cf.cond_br (conditional branch)
+/// Emit llvm.cond_br (conditional branch) - using LLVM dialect for mlir-translate compatibility
 let emitCondBr (cond: string) (trueLabel: string) (falseLabel: string) : Emit<unit> =
-    line (sprintf "cf.cond_br %s, ^%s, ^%s" cond trueLabel falseLabel)
+    line (sprintf "llvm.cond_br %s, ^%s, ^%s" cond trueLabel falseLabel)
 
 /// Emit a block label
 let emitBlockLabel (label: string) : Emit<unit> =

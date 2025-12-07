@@ -13,6 +13,7 @@ open Core.PSG.Nanopass.ReducePipeOperators
 open Core.PSG.Nanopass.DefUseEdges
 open Core.PSG.Nanopass.ParameterAnnotation
 open Core.PSG.Nanopass.ClassifyOperations
+open Core.PSG.Nanopass.LowerInterpolatedStrings
 open Core.PSG.Construction.Types
 open Core.PSG.Construction.DeclarationProcessing
 
@@ -193,17 +194,27 @@ let buildProgramSemanticGraph
         emitNanopassIntermediate classifiedGraph "3c_classified_ops" nanopassOutputDir
         emitNanopassDiff paramAnnotatedGraph classifiedGraph "3b_param_annotated" "3c_classified_ops" nanopassOutputDir
 
+    // Phase 3d: Nanopass - Lower interpolated strings
+    // Transforms InterpolatedString nodes to NativeStr.concat* semantic primitives
+    printfn "[BUILDER] Phase 3d: Running interpolated string lowering nanopass"
+    let loweredGraph = lowerInterpolatedStrings classifiedGraph
+
+    // Emit Phase 3d intermediate
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediate loweredGraph "3d_lowered_interp_strings" nanopassOutputDir
+        emitNanopassDiff classifiedGraph loweredGraph "3c_classified_ops" "3d_lowered_interp_strings" nanopassOutputDir
+
     // Phase 4: Finalize nodes and analyze context
     printfn "[BUILDER] Phase 4: Finalizing PSG nodes and analyzing context"
     let finalNodes =
-        classifiedGraph.Nodes
+        loweredGraph.Nodes
         |> Map.map (fun _ node ->
             node
             |> ChildrenStateHelpers.finalizeChildren
             |> ReachabilityHelpers.updateNodeContext)
 
     let finalGraph =
-        { classifiedGraph with
+        { loweredGraph with
             Nodes = finalNodes
             CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> List.ofArray
         }
@@ -211,7 +222,7 @@ let buildProgramSemanticGraph
     // Emit Phase 4 intermediate (final)
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
         emitNanopassIntermediate finalGraph "4_finalized" nanopassOutputDir
-        emitNanopassDiff classifiedGraph finalGraph "3c_classified_ops" "4_finalized" nanopassOutputDir
+        emitNanopassDiff loweredGraph finalGraph "3d_lowered_interp_strings" "4_finalized" nanopassOutputDir
 
     printfn "[BUILDER] ENHANCED PSG construction complete (FCS 43.9.300 compatible)"
     printfn "[BUILDER] Final PSG: %d nodes, %d edges, %d entry points, %d symbols"

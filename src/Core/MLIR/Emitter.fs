@@ -324,7 +324,7 @@ let emitWriteInt32 (builder: MLIRBuilder) (ctx: SSAContext) (valueReg: string) :
     let exitLabel = sprintf "int_to_str_done_%d" ctx.Counter
     ctx.Counter <- ctx.Counter + 1
 
-    MLIRBuilder.line builder (sprintf "cf.br ^%s" loopLabel)
+    MLIRBuilder.line builder (sprintf "llvm.br ^%s" loopLabel)
     MLIRBuilder.lineNoIndent builder (sprintf "^%s:" loopLabel)
 
     // Load current value
@@ -369,7 +369,7 @@ let emitWriteInt32 (builder: MLIRBuilder) (ctx: SSAContext) (valueReg: string) :
     MLIRBuilder.line builder (sprintf "%s = arith.constant 0 : i64" zero64)
     let isDone = SSAContext.nextValue ctx
     MLIRBuilder.line builder (sprintf "%s = arith.cmpi eq, %s, %s : i64" isDone newVal zero64)
-    MLIRBuilder.line builder (sprintf "cf.cond_br %s, ^%s, ^%s" isDone exitLabel loopLabel)
+    MLIRBuilder.line builder (sprintf "llvm.cond_br %s, ^%s, ^%s" isDone exitLabel loopLabel)
 
     MLIRBuilder.lineNoIndent builder (sprintf "^%s:" exitLabel)
 
@@ -379,7 +379,7 @@ let emitWriteInt32 (builder: MLIRBuilder) (ctx: SSAContext) (valueReg: string) :
     let writeLabel = sprintf "do_write_%d" ctx.Counter
     ctx.Counter <- ctx.Counter + 1
 
-    MLIRBuilder.line builder (sprintf "cf.cond_br %s, ^%s, ^%s" isNeg negLabel writeLabel)
+    MLIRBuilder.line builder (sprintf "llvm.cond_br %s, ^%s, ^%s" isNeg negLabel writeLabel)
 
     MLIRBuilder.lineNoIndent builder (sprintf "^%s:" negLabel)
     let finalPos = SSAContext.nextValue ctx
@@ -392,7 +392,7 @@ let emitWriteInt32 (builder: MLIRBuilder) (ctx: SSAContext) (valueReg: string) :
     let posMinusOne = SSAContext.nextValue ctx
     MLIRBuilder.line builder (sprintf "%s = arith.subi %s, %s : i64" posMinusOne finalPos one64)
     MLIRBuilder.line builder (sprintf "llvm.store %s, %s : i64, !llvm.ptr" posMinusOne posAlloc)
-    MLIRBuilder.line builder (sprintf "cf.br ^%s" writeLabel)
+    MLIRBuilder.line builder (sprintf "llvm.br ^%s" writeLabel)
 
     MLIRBuilder.lineNoIndent builder (sprintf "^%s:" writeLabel)
     // Calculate start position and length
@@ -469,7 +469,7 @@ let emitWriteInt64 (builder: MLIRBuilder) (ctx: SSAContext) (valueReg: string) :
     let exitLabel = sprintf "i64_to_str_done_%d" ctx.Counter
     ctx.Counter <- ctx.Counter + 1
 
-    MLIRBuilder.line builder (sprintf "cf.br ^%s" loopLabel)
+    MLIRBuilder.line builder (sprintf "llvm.br ^%s" loopLabel)
     MLIRBuilder.lineNoIndent builder (sprintf "^%s:" loopLabel)
 
     let curVal = SSAContext.nextValue ctx
@@ -505,7 +505,7 @@ let emitWriteInt64 (builder: MLIRBuilder) (ctx: SSAContext) (valueReg: string) :
 
     let isDone = SSAContext.nextValue ctx
     MLIRBuilder.line builder (sprintf "%s = arith.cmpi eq, %s, %s : i64" isDone newVal zero64)
-    MLIRBuilder.line builder (sprintf "cf.cond_br %s, ^%s, ^%s" isDone exitLabel loopLabel)
+    MLIRBuilder.line builder (sprintf "llvm.cond_br %s, ^%s, ^%s" isDone exitLabel loopLabel)
 
     MLIRBuilder.lineNoIndent builder (sprintf "^%s:" exitLabel)
 
@@ -514,7 +514,7 @@ let emitWriteInt64 (builder: MLIRBuilder) (ctx: SSAContext) (valueReg: string) :
     let writeLabel = sprintf "do_write64_%d" ctx.Counter
     ctx.Counter <- ctx.Counter + 1
 
-    MLIRBuilder.line builder (sprintf "cf.cond_br %s, ^%s, ^%s" isNeg negLabel writeLabel)
+    MLIRBuilder.line builder (sprintf "llvm.cond_br %s, ^%s, ^%s" isNeg negLabel writeLabel)
 
     MLIRBuilder.lineNoIndent builder (sprintf "^%s:" negLabel)
     let finalPos = SSAContext.nextValue ctx
@@ -527,7 +527,7 @@ let emitWriteInt64 (builder: MLIRBuilder) (ctx: SSAContext) (valueReg: string) :
     let posMinusOne = SSAContext.nextValue ctx
     MLIRBuilder.line builder (sprintf "%s = arith.subi %s, %s : i64" posMinusOne finalPos one64)
     MLIRBuilder.line builder (sprintf "llvm.store %s, %s : i64, !llvm.ptr" posMinusOne posAlloc)
-    MLIRBuilder.line builder (sprintf "cf.br ^%s" writeLabel)
+    MLIRBuilder.line builder (sprintf "llvm.br ^%s" writeLabel)
 
     MLIRBuilder.lineNoIndent builder (sprintf "^%s:" writeLabel)
     let startPos = SSAContext.nextValue ctx
@@ -2235,7 +2235,7 @@ let rec emitExpression (builder: MLIRBuilder) (ctx: SSAContext) (psg: ProgramSem
         let exitBlock = sprintf "while_exit_%d" loopId
 
         // Branch to condition block
-        MLIRBuilder.line builder (sprintf "cf.br ^%s" condBlock)
+        MLIRBuilder.line builder (sprintf "llvm.br ^%s" condBlock)
 
         // Condition block
         MLIRBuilder.lineNoIndent builder (sprintf "^%s:" condBlock)
@@ -2246,16 +2246,16 @@ let rec emitExpression (builder: MLIRBuilder) (ctx: SSAContext) (psg: ProgramSem
             match emitExpression builder ctx psg cond with
             | Some condResult ->
                 // Convert to i1 if needed (comparison should already be i1)
-                MLIRBuilder.line builder (sprintf "cf.cond_br %s, ^%s, ^%s" condResult bodyBlock exitBlock)
+                MLIRBuilder.line builder (sprintf "llvm.cond_br %s, ^%s, ^%s" condResult bodyBlock exitBlock)
             | None ->
                 // Default: always enter loop once then exit (shouldn't happen)
                 let trueVal = SSAContext.nextValue ctx
                 MLIRBuilder.line builder (sprintf "%s = arith.constant true" trueVal)
-                MLIRBuilder.line builder (sprintf "cf.cond_br %s, ^%s, ^%s" trueVal bodyBlock exitBlock)
+                MLIRBuilder.line builder (sprintf "llvm.cond_br %s, ^%s, ^%s" trueVal bodyBlock exitBlock)
         | None ->
             let trueVal = SSAContext.nextValue ctx
             MLIRBuilder.line builder (sprintf "%s = arith.constant true" trueVal)
-            MLIRBuilder.line builder (sprintf "cf.cond_br %s, ^%s, ^%s" trueVal bodyBlock exitBlock)
+            MLIRBuilder.line builder (sprintf "llvm.cond_br %s, ^%s, ^%s" trueVal bodyBlock exitBlock)
 
         // Body block
         MLIRBuilder.lineNoIndent builder (sprintf "^%s:" bodyBlock)
@@ -2265,7 +2265,7 @@ let rec emitExpression (builder: MLIRBuilder) (ctx: SSAContext) (psg: ProgramSem
             emitExpression builder ctx psg body |> ignore
 
         // Branch back to condition
-        MLIRBuilder.line builder (sprintf "cf.br ^%s" condBlock)
+        MLIRBuilder.line builder (sprintf "llvm.br ^%s" condBlock)
 
         // Exit block
         MLIRBuilder.lineNoIndent builder (sprintf "^%s:" exitBlock)
@@ -2411,7 +2411,7 @@ let emitStartWrapper (builder: MLIRBuilder) =
     // Mark as has_side_effects to prevent optimization
     MLIRBuilder.line builder "%sys_exit = arith.constant 60 : i64"
     MLIRBuilder.line builder "%unused = llvm.inline_asm has_side_effects \"syscall\", \"=r,{rax},{rdi}\" %sys_exit, %retval64 : (i64, i64) -> i64"
-    // Use cf.br to self as infinite loop after exit - exit should never return
+    // Use llvm.br to self as infinite loop after exit - exit should never return
     // Actually just return - the exit syscall will terminate the process
     MLIRBuilder.line builder "return"
     MLIRBuilder.pop builder

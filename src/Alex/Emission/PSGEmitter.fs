@@ -17,6 +17,21 @@ open Alex.CodeGeneration.MLIRBuilder
 open Alex.Emission.ExpressionEmitter
 
 // ═══════════════════════════════════════════════════════════════════
+// MLIR Monad Helpers
+// ═══════════════════════════════════════════════════════════════════
+
+/// Map a function over a list in the MLIR monad, collecting results
+let rec private mlirMapM (f: 'a -> MLIR<'b>) (xs: 'a list) : MLIR<'b list> =
+    match xs with
+    | [] -> mlir { return [] }
+    | x :: rest ->
+        mlir {
+            let! y = f x
+            let! ys = mlirMapM f rest
+            return y :: ys
+        }
+
+// ═══════════════════════════════════════════════════════════════════
 // Helper: Get Children
 // ═══════════════════════════════════════════════════════════════════
 
@@ -230,23 +245,7 @@ let private isUserDefinedFunction (node: PSGNode) : bool =
         | _ -> false
     | None -> false
 
-/// Emit a user function call
-let private emitUserFunctionCall (psg: ProgramSemanticGraph) (node: PSGNode) : MLIR<EmitResult> =
-    let children = getChildNodes psg node
-    match children with
-    | funcNode :: _args ->
-        match getSymbolFullName funcNode with
-        | Some fullName ->
-            let mlirFuncName = toMLIRFunctionName fullName
-            mlir {
-                // For now, handle unit-returning, zero-arg functions
-                do! func.callVoid mlirFuncName [] []
-                return Void
-            }
-        | None ->
-            mlir { return Error "User function call: no symbol name" }
-    | [] ->
-        mlir { return Error "User function call: empty children" }
+// NOTE: emitUserFunctionCall is defined in the mutual recursion group below
 
 // ═══════════════════════════════════════════════════════════════════
 // Main Expression Emission - recursive traversal with pattern matching
@@ -267,8 +266,8 @@ let private extractIdentName (kind: string) : string option =
 /// Check if this is a primitive operation that should be emitted directly
 let private isPrimitiveOp (name: string) : bool =
     name.StartsWith("Microsoft.FSharp.Core.Operators.") ||
-    name.StartsWith("Microsoft.FSharp.NativeInterop.NativePtr.") ||
     name = "Microsoft.FSharp.Core.LanguagePrimitives.GenericZero"
+    // Note: NativePtr operations are handled separately by emitNativePtrOp
 
 /// Emit an expression node to MLIR with context
 /// This is the main traversal function that dispatches based on node kind
@@ -420,6 +419,9 @@ and private emitLetWithContext (psg: ProgramSemanticGraph) (ctx: EmissionContext
                     let bindingName =
                         if patternNode.SyntaxKind.StartsWith("Pattern:Named:") then
                             Some (patternNode.SyntaxKind.Substring(14))
+                        elif patternNode.SyntaxKind.StartsWith("Pattern:LongIdent:") then
+                            // For function definitions like "let buffer = ..."
+                            Some (patternNode.SyntaxKind.Substring(18))
                         else None
 
                     // Emit the value expression
@@ -445,11 +447,53 @@ and private emitLetWithContext (psg: ProgramSemanticGraph) (ctx: EmissionContext
         | None -> return Void
     }
 
-/// Emit a WhileLoop - for now emit as error/placeholder
+/// Emit a WhileLoop using cf.br/cf.cond_br control flow
+/// WhileLoop has structure: [condition; body]
+/// Translates to:
+///   ^header:
+///     %cond = <condition>
+///     cf.cond_br %cond, ^body, ^exit
+///   ^body:
+///     <body>
+///     cf.br ^header
+///   ^exit:
 and private emitWhileLoopWithContext (psg: ProgramSemanticGraph) (ctx: EmissionContext) (node: PSGNode) : MLIR<EmitResult> =
-    // WhileLoop has [condition; body]
-    // For now, emit a comment indicating it's not yet implemented
-    mlir { return Error "WhileLoop: not yet implemented" }
+    let children = getChildNodes psg node
+    match children with
+    | [condNode; bodyNode] ->
+        mlir {
+            // Generate unique labels for this loop
+            let! headerLabel = freshLabel ()
+            let! bodyLabel = freshLabel ()
+            let! exitLabel = freshLabel ()
+
+            // Jump to header to start the loop
+            do! cf.br headerLabel []
+
+            // Header block: evaluate condition
+            do! emitBlockLabel headerLabel []
+            let! condResult = emitExprWithContext psg ctx condNode
+            match condResult with
+            | Emitted condVal ->
+                // Branch based on condition
+                do! cf.condBr condVal bodyLabel [] exitLabel []
+
+                // Body block: execute body, then jump back to header
+                do! emitBlockLabel bodyLabel []
+                let! _ = emitExprWithContext psg ctx bodyNode
+                do! cf.br headerLabel []
+
+                // Exit block: loop is done
+                do! emitBlockLabel exitLabel []
+                return Void
+
+            | Error msg ->
+                return Error $"WhileLoop condition failed: {msg}"
+            | Void ->
+                return Error "WhileLoop condition produced no value"
+        }
+    | _ ->
+        mlir { return Error $"WhileLoop: expected 2 children (condition, body), got {children.Length}" }
 
 /// Emit an IfThenElse - emit as scf.if or just emit branches
 and private emitIfThenElseWithContext (psg: ProgramSemanticGraph) (ctx: EmissionContext) (node: PSGNode) : MLIR<EmitResult> =
@@ -483,55 +527,259 @@ and private emitAddressOfWithContext (psg: ProgramSemanticGraph) (ctx: EmissionC
     // For now, emit as error/placeholder
     mlir { return Error "AddressOf: not yet implemented" }
 
+/// Emit a NativeStr operation based on the classified Operation field
+/// This handles lowered interpolated strings and direct NativeStr calls
+and private emitNativeStrOp (psg: ProgramSemanticGraph) (ctx: EmissionContext) (node: PSGNode) (op: NativeStrOp) : MLIR<EmitResult> =
+    let children = getChildNodes psg node
+    match op with
+    | StrConcat3 ->
+        // Lowered interpolated string: concat3 dest a b c
+        // The children are the parts of the interpolated string
+        // Structure: [InterpolatedStringPart:String:<hash>; InterpolatedStringPart:Fill; ...]
+        mlir {
+            match children with
+            | [] ->
+                return Error "StrConcat3: no children"
+            | parts ->
+                // Allocate result buffer (256 bytes max for now)
+                let! bufSize = arith.constant 256L I64
+                let! resultBuf = llvm.alloca bufSize (Int I8)
+
+                // Track current position in buffer
+                let! initialPos = arith.constant 0L I64
+
+                // Process each part and accumulate into buffer
+                let rec emitParts (pos: Val) (remaining: PSGNode list) : MLIR<Val> =
+                    mlir {
+                        match remaining with
+                        | [] -> return pos
+                        | part :: rest ->
+                            let partKind = part.SyntaxKind
+
+                            // Check if this is a string literal part
+                            if partKind.StartsWith("InterpolatedStringPart:String:") then
+                                // Extract hash from "InterpolatedStringPart:String:<hash>"
+                                let hashStr = partKind.Substring("InterpolatedStringPart:String:".Length)
+                                match System.UInt32.TryParse(hashStr) with
+                                | true, hash ->
+                                    // Look up string content in PSG's StringLiterals
+                                    match Map.tryFind hash psg.StringLiterals with
+                                    | Some content ->
+                                        // Build NativeStr from the string literal
+                                        let! strVal = buildNativeStr content
+                                        let! (srcPtr, srcLen) = extractNativeStr strVal
+
+                                        // Copy this part to the buffer at current position
+                                        // GEP to get pointer at current offset
+                                        let! destPtr = llvm.getelementptr resultBuf (Int I8) [pos]
+
+                                        // Emit a simple byte-by-byte copy loop
+                                        // For efficiency, we'd use llvm.memcpy, but let's do inline loop
+                                        // Actually, for simple strings, just copy inline (compiler will optimize)
+                                        let contentLen = int64 content.Length
+                                        let! lenVal = arith.constant contentLen I64
+
+                                        // Emit inline copy using llvm.memcpy intrinsic pattern
+                                        // For now, do an unrolled store of each character
+                                        for i = 0 to content.Length - 1 do
+                                            let! offset = arith.constant (int64 i) I64
+                                            let! byteVal = arith.constant (int64 (byte content.[i])) I8
+                                            let! destI = llvm.getelementptr destPtr (Int I8) [offset]
+                                            do! llvm.store byteVal destI
+
+                                        // Advance position
+                                        let! newPos = arith.addi pos lenVal
+                                        return! emitParts newPos rest
+                                    | None ->
+                                        do! errorComment $"String literal not found for hash {hash}"
+                                        return! emitParts pos rest
+                                | false, _ ->
+                                    do! errorComment $"Invalid hash in: {partKind}"
+                                    return! emitParts pos rest
+
+                            // Check if this is a fill expression (variable interpolation)
+                            elif partKind.StartsWith("InterpolatedStringPart:Fill") then
+                                // The fill part contains child expression(s)
+                                let fillChildren = getChildNodes psg part
+                                match fillChildren with
+                                | [exprNode] ->
+                                    // Emit the expression - should return a NativeStr
+                                    let! exprResult = emitExprWithContext psg ctx exprNode
+                                    match exprResult with
+                                    | Emitted exprVal ->
+                                        let! (srcPtr, srcLen) = extractNativeStr exprVal
+
+                                        // GEP to get dest pointer at current offset
+                                        let! destPtr = llvm.getelementptr resultBuf (Int I8) [pos]
+
+                                        // Use inline assembly for memcpy (rep movsb on x86-64)
+                                        // This copies srcLen bytes from srcPtr to destPtr
+                                        // rep movsb: RCX=count, RSI=src, RDI=dest
+                                        let! _ = llvm.inlineAsm "rep movsb" "={rcx},{rcx},{rsi},{rdi},~{memory},~{dirflag}" [srcLen; srcPtr; destPtr] (Int I64)
+
+                                        // Advance position by srcLen
+                                        let! newPos = arith.addi pos srcLen
+                                        return! emitParts newPos rest
+                                    | Void ->
+                                        do! errorComment "Fill expression produced no value"
+                                        return! emitParts pos rest
+                                    | Error msg ->
+                                        do! errorComment $"Fill expression error: {msg}"
+                                        return! emitParts pos rest
+                                | _ ->
+                                    do! errorComment $"Fill part has {fillChildren.Length} children, expected 1"
+                                    return! emitParts pos rest
+                            else
+                                do! errorComment $"Unknown part kind: {partKind}"
+                                return! emitParts pos rest
+                    }
+
+                // Process all parts
+                let! finalPos = emitParts initialPos parts
+
+                // Build final NativeStr from result buffer and total length
+                let! result = buildNativeStrFromValues resultBuf finalPos
+                return Emitted result
+        }
+    | StrConcat2 ->
+        mlir { return Error "StrConcat2: not yet implemented" }
+    | StrCreate ->
+        // NativeStr constructor - delegate to existing implementation
+        let args = match children with | _ :: rest -> rest | [] -> []
+        emitNativeStrConstructor psg ctx args
+    | StrEmpty ->
+        mlir {
+            // Empty string: ptr=zero, len=0
+            let! nullPtr = llvm.zero Ptr
+            let! zero = arith.constant 0L I64
+            let! nstr = buildNativeStrFromValues nullPtr zero
+            return Emitted nstr
+        }
+    | StrLength ->
+        match children with
+        | [_func; strArg] ->
+            mlir {
+                let! strResult = emitExprWithContext psg ctx strArg
+                match strResult with
+                | Emitted strVal ->
+                    let! (_, len) = extractNativeStr strVal
+                    return Emitted len
+                | _ -> return Error "StrLength: argument emission failed"
+            }
+        | _ -> mlir { return Error "StrLength: expected 1 argument" }
+    | _ ->
+        mlir { return Error $"NativeStr op not implemented: {op}" }
+
+/// Emit a Console operation based on the classified Operation field
+and private emitConsoleOp (psg: ProgramSemanticGraph) (ctx: EmissionContext) (node: PSGNode) (op: ConsoleOp) : MLIR<EmitResult> =
+    match op with
+    | ConsoleWrite ->
+        emitConsoleWriteWithContext psg ctx node
+    | ConsoleWriteln ->
+        emitConsoleWriteLineWithContext psg ctx node
+    | ConsoleReadBytes ->
+        let children = getChildNodes psg node
+        let args = match children with | _ :: rest -> rest | [] -> []
+        emitReadBytesSyscall psg ctx args
+    | ConsoleWriteBytes ->
+        let children = getChildNodes psg node
+        let args = match children with | _ :: rest -> rest | [] -> []
+        emitWriteBytesSyscall psg ctx args
+    | ConsoleReadLine ->
+        // ReadLine/readln/readLine - inline the correct function based on symbol
+        let children = getChildNodes psg node
+        let funcNode = children |> List.tryHead
+        let funcName = funcNode |> Option.bind getSymbolFullName |> Option.defaultValue "Alloy.Console.ReadLine"
+        let args = match children with | _ :: rest -> rest | [] -> []
+        emitInlinedAlloyFunction psg ctx funcName args
+    | ConsoleReadInto ->
+        // readInto/readLineInto - use specialized emission with proper mutable state handling
+        let children = getChildNodes psg node
+        let args = match children with | _ :: rest -> rest | [] -> []
+        emitReadLineInto psg ctx args
+    | ConsoleNewLine ->
+        // newLine - emit a single newline character
+        mlir {
+            let! nl = arith.constant 10L I8
+            let! one = arith.constant 1L I64
+            let! buf = llvm.alloca one (Int I8)
+            do! llvm.store nl buf
+            let! fd = arith.constant 1L I32
+            let! fdExt = arith.extsi fd I64
+            let! syscallNum = arith.constant 1L I64
+            let! _ = llvm.inlineAsm "syscall" "={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}" [syscallNum; fdExt; buf; one] (Int I64)
+            return Void
+        }
+    | _ ->
+        mlir { return Error $"Console op not implemented: {op}" }
+
 /// Emit a function application with context - handles inlining
 and private emitAppWithContext (psg: ProgramSemanticGraph) (ctx: EmissionContext) (node: PSGNode) : MLIR<EmitResult> =
-    let children = getChildNodes psg node
-    match children with
-    | funcNode :: args ->
-        match getSymbolFullName funcNode with
-        // Console.Write - inline directly as syscall
-        | Some name when name = "Alloy.Console.Write" || name.EndsWith(".Console.Write") ->
-            emitConsoleWriteWithContext psg ctx node
+    // First, check if this node has a classified Operation (set by ClassifyOperations nanopass)
+    // This takes precedence over symbol-based dispatch
+    match node.Operation with
+    | Some (NativeStr op) ->
+        emitNativeStrOp psg ctx node op
+    | Some (Console op) ->
+        emitConsoleOp psg ctx node op
+    | _ ->
+        // Fall back to symbol-based dispatch
+        let children = getChildNodes psg node
+        match children with
+        | funcNode :: args ->
+            let symbolName = getSymbolFullName funcNode
+            match symbolName with
+            // Console.Write - inline directly as syscall
+            | Some name when name = "Alloy.Console.Write" || name.EndsWith(".Console.Write") ->
+                emitConsoleWriteWithContext psg ctx node
 
-        // Console.WriteLine - inline directly as syscall
-        | Some name when name = "Alloy.Console.WriteLine" || name.EndsWith(".Console.WriteLine") ->
-            emitConsoleWriteLineWithContext psg ctx node
+            // Console.WriteLine - inline directly as syscall
+            | Some name when name = "Alloy.Console.WriteLine" || name.EndsWith(".Console.WriteLine") ->
+                emitConsoleWriteLineWithContext psg ctx node
 
-        // Console.readBytes - primitive syscall (read from fd)
-        | Some name when name = "Alloy.Console.readBytes" || name.EndsWith(".Console.readBytes") ->
-            emitReadBytesSyscall psg ctx args
+            // Console.readLineInto - specialized emission with proper mutable state handling
+            | Some name when name = "Alloy.Console.readLineInto" || name.EndsWith(".Console.readLineInto") ->
+                emitReadLineInto psg ctx args
 
-        // Console.writeBytes - primitive syscall (write to fd)
-        | Some name when name = "Alloy.Console.writeBytes" || name.EndsWith(".Console.writeBytes") ->
-            emitWriteBytesSyscall psg ctx args
+            // Console.readBytes - primitive syscall (read from fd)
+            | Some name when name = "Alloy.Console.readBytes" || name.EndsWith(".Console.readBytes") ->
+                emitReadBytesSyscall psg ctx args
 
-        // NativeStr constructor - build struct {ptr, len}
-        | Some name when name = "Alloy.NativeTypes.NativeString.NativeStr" || name.EndsWith(".NativeStr") ->
-            emitNativeStrConstructor psg ctx args
+            // Console.writeBytes - primitive syscall (write to fd)
+            | Some name when name = "Alloy.Console.writeBytes" || name.EndsWith(".Console.writeBytes") ->
+                emitWriteBytesSyscall psg ctx args
 
-        // Primitive operations (operators, NativePtr, etc.) - emit directly
-        | Some name when isPrimitiveOp name ->
-            emitPrimitiveOp psg ctx name args
+            // NativeStr constructor - build struct {ptr, len}
+            | Some name when name = "Alloy.NativeTypes.NativeString.NativeStr" || name.EndsWith(".NativeStr") ->
+                emitNativeStrConstructor psg ctx args
 
-        // NativePtr operations
-        | Some name when name.Contains("NativePtr.") ->
-            emitNativePtrOp psg ctx name args
+            // Primitive operations (operators, NativePtr, etc.) - emit directly
+            | Some name when isPrimitiveOp name ->
+                emitPrimitiveOp psg ctx name args
 
-        // Alloy library functions - INLINE from PSG
-        | Some name when name.StartsWith("Alloy.") && EmissionContext.canInline ctx ->
-            emitInlinedAlloyFunction psg ctx name args
+            // NativePtr operations
+            | Some name when name.Contains("NativePtr.") ->
+                emitNativePtrOp psg ctx name args
 
-        // User-defined functions - emit as call
-        | Some name when not (isLibraryFunction name) && isUserDefinedFunction funcNode ->
-            emitUserFunctionCall psg node
+            // Alloy library functions - INLINE from PSG
+            | Some name when name.StartsWith("Alloy.") && EmissionContext.canInline ctx ->
+                emitInlinedAlloyFunction psg ctx name args
 
-        // Unhandled
-        | Some name ->
-            mlir { return Error $"Unhandled function: {name}" }
-        | None ->
-            mlir { return Error "App: no symbol on function node" }
-    | [] ->
-        mlir { return Error "App: no children" }
+            // Alloy library functions - depth exceeded
+            | Some name when name.StartsWith("Alloy.") ->
+                mlir { return Error $"Alloy function inline depth exceeded: {name}" }
+
+            // User-defined functions - emit as call
+            | Some name when not (isLibraryFunction name) && isUserDefinedFunction funcNode ->
+                emitUserFunctionCall psg ctx node
+
+            // Unhandled
+            | Some name ->
+                mlir { return Error $"Unhandled function: {name}" }
+            | None ->
+                mlir { return Error "App: no symbol on function node" }
+        | [] ->
+            mlir { return Error "App: no children" }
 
 /// Emit Console.Write with context
 and private emitConsoleWriteWithContext (psg: ProgramSemanticGraph) (ctx: EmissionContext) (node: PSGNode) : MLIR<EmitResult> =
@@ -640,6 +888,123 @@ and private emitWriteBytesSyscall (psg: ProgramSemanticGraph) (ctx: EmissionCont
     | _ ->
         mlir { return Error "writeBytes: expected 3 arguments (fd, buffer, count)" }
 
+/// Emit readLineInto - specialized emission with proper mutable state handling
+/// This implements the loop that reads one byte at a time until newline or EOF
+/// Signature: readLineInto (fd: int) (buffer: nativeptr<byte>) (maxLength: int) : int
+and private emitReadLineInto (psg: ProgramSemanticGraph) (ctx: EmissionContext) (args: PSGNode list) : MLIR<EmitResult> =
+    match args with
+    | [fdArg; bufferArg; maxLengthArg] ->
+        mlir {
+            let! fdResult = emitExprWithContext psg ctx fdArg
+            let! bufferResult = emitExprWithContext psg ctx bufferArg
+            let! maxLengthResult = emitExprWithContext psg ctx maxLengthArg
+
+            match fdResult, bufferResult, maxLengthResult with
+            | Emitted fdVal, Emitted bufferPtr, Emitted maxLenVal ->
+                // Allocate mutable state on stack
+                let! one64 = arith.constant 1L I64
+
+                // count: i32 initialized to 0
+                let! countAlloca = llvm.alloca one64 (Int I32)
+                let! zeroI32 = arith.constant 0L I32
+                do! llvm.store zeroI32 countAlloca
+
+                // done_: i1 initialized to false
+                let! doneAlloca = llvm.alloca one64 (Int I1)
+                let! falseBool = arith.constBool false
+                do! llvm.store falseBool doneAlloca
+
+                // Allocate single byte buffer for reading one character at a time
+                let! byteBuf = llvm.alloca one64 (Int I8)
+
+                // Generate labels
+                let! headerLabel = freshLabel ()
+                let! bodyLabel = freshLabel ()
+                let! exitLabel = freshLabel ()
+
+                // Jump to loop header
+                do! cf.br headerLabel []
+
+                // === Header block: check loop condition ===
+                do! emitBlockLabel headerLabel []
+                // Load done_ and count
+                let! doneVal = llvm.load (Int I1) doneAlloca
+                let! countVal = llvm.load (Int I32) countAlloca
+
+                // Check: not done_ && count < (maxLength - 1)
+                let! trueBool = arith.constBool true
+                let! notDone = arith.xori doneVal trueBool
+                let! oneI32 = arith.constant 1L I32
+                let! maxMinusOne = arith.subi maxLenVal oneI32
+                let! countLtMax = arith.cmpi "slt" countVal maxMinusOne
+                let! loopCond = arith.andi notDone countLtMax
+
+                // Branch: continue or exit
+                do! cf.condBr loopCond bodyLabel [] exitLabel []
+
+                // === Body block: read one byte ===
+                do! emitBlockLabel bodyLabel []
+
+                // syscall read(fd, byteBuf, 1)
+                let! fdI64 = arith.extsi fdVal I64
+                let! syscallRead = arith.constant 0L I64  // read = 0
+                let! bytesRead = llvm.inlineAsm "syscall" "={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}" [syscallRead; fdI64; byteBuf; one64] (Int I64)
+                let! bytesReadI32 = arith.trunci bytesRead I32
+
+                // Check if bytesRead <= 0 -> EOF or error -> done
+                let! zeroI32Check = arith.constant 0L I32
+                let! isEofOrError = arith.cmpi "sle" bytesReadI32 zeroI32Check
+
+                // Load the byte we read
+                let! byteVal = llvm.load (Int I8) byteBuf
+                let! newlineChar = arith.constant 10L I8  // '\n'
+                let! isNewline = arith.cmpi "eq" byteVal newlineChar
+
+                // done_ = isEofOrError || isNewline
+                let! newDone = arith.ori isEofOrError isNewline
+                do! llvm.store newDone doneAlloca
+
+                // If not done, store byte in buffer and increment count
+                // Only store the byte if it's not a newline and we got data
+                let! trueBool2 = arith.constBool true
+                let! notNewDone = arith.xori newDone trueBool2
+                let! shouldStore = arith.andi notNewDone trueBool2
+
+                // Get current count and compute buffer offset
+                let! curCount = llvm.load (Int I32) countAlloca
+                let! curCountI64 = arith.extsi curCount I64
+                let! destPtr = llvm.getelementptr bufferPtr (Int I8) [curCountI64]
+
+                // Store the byte (will only matter if we didn't hit newline/EOF)
+                do! llvm.store byteVal destPtr
+
+                // Increment count (only if we actually stored)
+                let! newCount = arith.addi curCount oneI32
+                // Use select to conditionally update count: if shouldStore then newCount else curCount
+                let! actualNewCount = llvm.select shouldStore newCount curCount
+                do! llvm.store actualNewCount countAlloca
+
+                // Jump back to header
+                do! cf.br headerLabel []
+
+                // === Exit block ===
+                do! emitBlockLabel exitLabel []
+
+                // Null-terminate the buffer
+                let! finalCount = llvm.load (Int I32) countAlloca
+                let! finalCountI64 = arith.extsi finalCount I64
+                let! nullPtr = llvm.getelementptr bufferPtr (Int I8) [finalCountI64]
+                let! zeroI8 = arith.constant 0L I8
+                do! llvm.store zeroI8 nullPtr
+
+                // Return the count
+                return Emitted finalCount
+            | _ ->
+                return Error "readLineInto: argument emission failed"
+        }
+    | _ ->
+        mlir { return Error $"readLineInto: expected 3 arguments (fd, buffer, maxLength), got {args.Length}" }
+
 /// Emit NativeStr constructor - builds struct {ptr, len}
 /// Signature: NativeStr(ptr: nativeptr<byte>, len: int) : NativeStr
 /// The PSG structure is: App [ Ident:NativeStr ; Tuple [ ptrArg ; lenArg ] ]
@@ -666,7 +1031,7 @@ and private emitNativeStrConstructor (psg: ProgramSemanticGraph) (ctx: EmissionC
                 let! nstr = buildNativeStrFromValues ptrVal lenI64
                 return Emitted nstr
             | _ ->
-                return Error "NativeStr: argument emission failed"
+                return Error $"NativeStr: argument emission failed (ptr={ptrResult}, len={lenResult})"
         }
     | _ ->
         mlir { return Error $"NativeStr: expected 2 arguments (ptr, len), got {actualArgs.Length}" }
@@ -850,7 +1215,7 @@ and private emitInlinedAlloyFunction (psg: ProgramSemanticGraph) (ctx: EmissionC
                 | [], _ -> mlir { return paramCtx }
                 | (paramName, _) :: pRest, argNode :: aRest ->
                     mlir {
-                        let! argResult = emitExprWithContext psg ctx argNode
+                        let! argResult = emitExprWithContext psg paramCtx argNode
                         match argResult with
                         | Emitted argVal ->
                             let newCtx = EmissionContext.withParam paramName argVal paramCtx
@@ -867,15 +1232,53 @@ and private emitInlinedAlloyFunction (psg: ProgramSemanticGraph) (ctx: EmissionC
                 let inlineCtx = EmissionContext.enterInline ctx
                 let! boundCtx = bindParams inlineCtx params' args
                 // Emit the function body with bound parameters
-                return! emitExprWithContext psg boundCtx body
+                let! result = emitExprWithContext psg boundCtx body
+                return result
             }
         | None ->
             mlir { return Error $"Alloy function has no body: {funcName}" }
     | None ->
         mlir { return Error $"Alloy function not in index: {funcName}" }
 
+/// Emit a user function call
+and private emitUserFunctionCall (psg: ProgramSemanticGraph) (ctx: EmissionContext) (node: PSGNode) : MLIR<EmitResult> =
+    let children = getChildNodes psg node
+    match children with
+    | funcNode :: args ->
+        match getSymbolFullName funcNode with
+        | Some fullName ->
+            let mlirFuncName = toMLIRFunctionName fullName
+            mlir {
+                // Emit all arguments
+                let! argResults = mlirMapM (emitExprWithContext psg ctx) args
+                let emittedArgs =
+                    argResults |> List.choose (function
+                        | Emitted v -> Some v
+                        | _ -> None)
+                let argTypes = emittedArgs |> List.map (fun v -> v.Type)
+
+                // If we have args, pass them; otherwise call with no args
+                if List.isEmpty emittedArgs then
+                    do! func.callVoid mlirFuncName [] []
+                    return Void
+                else
+                    do! func.callVoid mlirFuncName emittedArgs argTypes
+                    return Void
+            }
+        | None ->
+            mlir { return Error "User function call: no symbol name" }
+    | [] ->
+        mlir { return Error "User function call: empty children" }
+
 /// Legacy wrapper for backward compatibility
 let emitExpr (psg: ProgramSemanticGraph) (node: PSGNode) : MLIR<EmitResult> =
     let funcIndex = buildFunctionIndex psg
     let ctx = EmissionContext.create funcIndex
+    emitExprWithContext psg ctx node
+
+/// Emit an expression with initial parameter bindings
+/// Used when emitting function bodies where parameters are already bound
+let emitExprWithParams (psg: ProgramSemanticGraph) (paramBindings: Map<string, Val>) (node: PSGNode) : MLIR<EmitResult> =
+    let funcIndex = buildFunctionIndex psg
+    let ctx = { EmissionContext.create funcIndex with ParamBindings = paramBindings }
     emitExprWithContext psg ctx node

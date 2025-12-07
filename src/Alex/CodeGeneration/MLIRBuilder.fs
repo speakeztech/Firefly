@@ -199,15 +199,15 @@ let resetLabels () : MLIR<unit> = fun _ ->
     labelCounter <- 0
 
 module cf =
-    /// cf.br - unconditional branch
+    /// llvm.br - unconditional branch (using LLVM dialect for mlir-translate compatibility)
     let br (target: string) (args: Val list) : MLIR<unit> = mlir {
         let argStr =
             if args.IsEmpty then ""
             else "(" + (args |> List.map (fun a -> sprintf "%s : %s" a.SSA.Name (Serialize.ty a.Type)) |> String.concat ", ") + ")"
-        do! emitLine (sprintf "cf.br ^%s%s" target argStr)
+        do! emitLine (sprintf "llvm.br ^%s%s" target argStr)
     }
 
-    /// cf.cond_br - conditional branch
+    /// llvm.cond_br - conditional branch (using LLVM dialect for mlir-translate compatibility)
     let condBr (cond: Val) (trueTarget: string) (trueArgs: Val list) (falseTarget: string) (falseArgs: Val list) : MLIR<unit> = mlir {
         let trueArgStr =
             if trueArgs.IsEmpty then ""
@@ -215,7 +215,7 @@ module cf =
         let falseArgStr =
             if falseArgs.IsEmpty then ""
             else "(" + (falseArgs |> List.map (fun a -> sprintf "%s : %s" a.SSA.Name (Serialize.ty a.Type)) |> String.concat ", ") + ")"
-        do! emitLine (sprintf "cf.cond_br %s, ^%s%s, ^%s%s" cond.SSA.Name trueTarget trueArgStr falseTarget falseArgStr)
+        do! emitLine (sprintf "llvm.cond_br %s, ^%s%s, ^%s%s" cond.SSA.Name trueTarget trueArgStr falseTarget falseArgStr)
     }
 
 /// Emit a block label with optional arguments
@@ -304,6 +304,22 @@ module arith =
         let! ssa = freshSSA
         let tyStr = Serialize.ty lhs.Type
         do! emitLine (sprintf "%s = arith.xori %s, %s : %s" ssa.Name lhs.SSA.Name rhs.SSA.Name tyStr)
+        return { SSA = ssa; Type = lhs.Type }
+    }
+
+    /// arith.andi - infers type from operands
+    let andi (lhs: Val) (rhs: Val) : MLIR<Val> = mlir {
+        let! ssa = freshSSA
+        let tyStr = Serialize.ty lhs.Type
+        do! emitLine (sprintf "%s = arith.andi %s, %s : %s" ssa.Name lhs.SSA.Name rhs.SSA.Name tyStr)
+        return { SSA = ssa; Type = lhs.Type }
+    }
+
+    /// arith.ori - infers type from operands
+    let ori (lhs: Val) (rhs: Val) : MLIR<Val> = mlir {
+        let! ssa = freshSSA
+        let tyStr = Serialize.ty lhs.Type
+        do! emitLine (sprintf "%s = arith.ori %s, %s : %s" ssa.Name lhs.SSA.Name rhs.SSA.Name tyStr)
         return { SSA = ssa; Type = lhs.Type }
     }
 
@@ -404,6 +420,15 @@ module llvm =
         do! emitLine (sprintf "%s = llvm.inline_asm has_side_effects \"%s\", \"%s\" %s : (%s) -> %s"
             ssa.Name asm constraints argNames argTypes (Serialize.ty resultTy))
         return { SSA = ssa; Type = resultTy }
+    }
+
+    /// llvm.select - conditional select
+    let select (cond: Val) (trueVal: Val) (falseVal: Val) : MLIR<Val> = mlir {
+        let! ssa = freshSSA
+        let tyStr = Serialize.ty trueVal.Type
+        do! emitLine (sprintf "%s = llvm.select %s, %s, %s : i1, %s"
+            ssa.Name cond.SSA.Name trueVal.SSA.Name falseVal.SSA.Name tyStr)
+        return { SSA = ssa; Type = trueVal.Type }
     }
 
 // ═══════════════════════════════════════════════════════════════════

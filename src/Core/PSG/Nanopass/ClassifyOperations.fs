@@ -99,9 +99,9 @@ let private classifyConsoleOp (displayName: string) : ConsoleOp option =
     | "writeBytes" -> Some ConsoleWriteBytes
     | "readBytes" -> Some ConsoleReadBytes
     | "write" | "Write" -> Some ConsoleWrite
-    | "writeln" | "WriteLine" -> Some ConsoleWriteln
-    | "readLine" | "ReadLine" -> Some ConsoleReadLine
-    | "readInto" | "ReadInto" -> Some ConsoleReadInto
+    | "writeln" | "writeLine" | "WriteLine" -> Some ConsoleWriteln
+    | "readln" | "readLine" | "ReadLine" -> Some ConsoleReadLine
+    | "readInto" | "ReadInto" | "readLineInto" -> Some ConsoleReadInto
     | "newLine" -> Some ConsoleNewLine
     | _ -> None
 
@@ -235,6 +235,13 @@ let private classifyAppNode (psg: ProgramSemanticGraph) (node: PSGNode) : Operat
             let funcSymbol = funcNode.Symbol
             let funcKind = funcNode.SyntaxKind
 
+            // Debug: print when we see Console functions
+            if funcKind.Contains("Console") then
+                let symInfo = match funcSymbol with
+                              | Some s -> try sprintf "full=%s display=%s" (getFullName s) (getDisplayName s) with _ -> "error getting name"
+                              | None -> "no symbol"
+                printfn "[CLASSIFY DEBUG] Console function: kind=%s symbol=%s" funcKind symInfo
+
             // Check for operator in function node
             if funcKind.Contains("op_") then
                 classifyOperator funcKind
@@ -313,7 +320,11 @@ let private classifyAppNode (psg: ProgramSemanticGraph) (node: PSGNode) : Operat
 /// Classify a single node (only processes App nodes)
 let private classifyNode (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode =
     if node.SyntaxKind.StartsWith("App") && node.Operation.IsNone then
-        match classifyAppNode psg node with
+        let result = classifyAppNode psg node
+        // Debug Console operations
+        if node.SyntaxKind.Contains("Console") || (node.Symbol |> Option.exists (fun s -> s.FullName.Contains("Console"))) then
+            printfn "[CLASSIFY NODE] App node: %s result=%A" node.SyntaxKind result
+        match result with
         | Some op -> { node with Operation = Some op }
         | None -> node
     else

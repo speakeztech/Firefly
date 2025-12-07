@@ -136,6 +136,21 @@ let private tyToString (ty: MB.Ty) : string =
     | MB.Unit -> "()"
     | MB.Index -> "index"
 
+/// Convert MLIR type string to MB.Ty
+let private stringToTy (s: string) : MB.Ty =
+    match s with
+    | "i1" -> MB.Int MB.I1
+    | "i8" -> MB.Int MB.I8
+    | "i16" -> MB.Int MB.I16
+    | "i32" -> MB.Int MB.I32
+    | "i64" -> MB.Int MB.I64
+    | "f32" -> MB.Float MB.F32
+    | "f64" -> MB.Float MB.F64
+    | "!llvm.ptr" -> MB.Ptr
+    | "()" -> MB.Unit
+    | s when s.StartsWith("!llvm.struct") -> MB.Struct [MB.Ptr; MB.Int MB.I64]  // NativeStr approximation
+    | _ -> MB.Int MB.I32  // fallback
+
 /// Run an MLIR CE emission within the EmissionMonad context.
 /// This bridges the new MLIR CE with the function-level EmissionMonad.
 /// Note: String literals are now read directly from PSG.StringLiterals,
@@ -150,8 +165,34 @@ let runMLIREmission (psg: ProgramSemanticGraph) (node: PSGNode) : Emit<FuncEmitR
             Globals = []
         }
 
-        // Run the MLIR CE emission via PSGEmitter
-        let mlirExpr = PE.emitExpr psg node
+        // Build parameter bindings from NodeSSA map
+        // The NodeSSA map has entries for Pattern:Named parameter nodes
+        // We need to convert these to name -> Val bindings for PSGEmitter
+        let paramBindings =
+            state.NodeSSA
+            |> Map.toSeq
+            |> Seq.choose (fun (nodeIdStr, (ssaValue, mlirType)) ->
+                // Look up the node to get its name
+                match Map.tryFind nodeIdStr psg.Nodes with
+                | Some n when n.SyntaxKind.StartsWith("Pattern:Named:") ->
+                    let paramName = n.SyntaxKind.Substring("Pattern:Named:".Length)
+                    // Parse SSA value into MB.SSA
+                    let ssaId =
+                        if ssaValue.StartsWith("%arg") then
+                            let num = ssaValue.Substring(4) |> int
+                            MB.Arg num
+                        else if ssaValue.StartsWith("%v") then
+                            let num = ssaValue.Substring(2) |> int
+                            MB.V num
+                        else
+                            MB.V 0
+                    let ty = stringToTy mlirType
+                    Some (paramName, { MB.SSA = ssaId; MB.Type = ty })
+                | _ -> None)
+            |> Map.ofSeq
+
+        // Run the MLIR CE emission via PSGEmitter with param bindings
+        let mlirExpr = PE.emitExprWithParams psg paramBindings node
         let result = mlirExpr builderState
 
         // Transfer emitted MLIR lines to the function-level builder
@@ -188,12 +229,6 @@ let runMLIREmission (psg: ProgramSemanticGraph) (node: PSGNode) : Emit<FuncEmitR
 let emitFunctionBody (psg: ProgramSemanticGraph) : Emit<FuncEmitResult> =
     getZipper >>= fun z ->
     let children = PSGZipper.childNodes z
-
-    // Debug: Print what we're seeing
-    printfn "[EMIT DEBUG] emitFunctionBody for node: %s" z.Focus.SyntaxKind
-    printfn "[EMIT DEBUG]   Children count: %d" (List.length children)
-    for child in children do
-        printfn "[EMIT DEBUG]   - %s" child.SyntaxKind
 
     // Filter out Pattern nodes - they're structural, not expressions
     let exprChildren =
@@ -288,35 +323,39 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
         emitFuncHeader funcName parameters returnType >>.
         pushIndent >>.
 
-        // Register function parameters in NodeSSA
-        // Use zipper navigation: funcNode -> Pattern:LongIdent -> Pattern:Named children
-        getZipper >>= fun z ->
-        let parameterNodes =
-            // Get children of funcNode (the Binding)
-            PSGZipper.childNodes z
-            // Find Pattern:LongIdent (function name pattern)
-            |> List.filter (fun n -> n.SyntaxKind.StartsWith("Pattern:LongIdent"))
-            // Get Pattern:Named children of each (the parameters)
-            |> List.collect (fun longIdentNode ->
-                match longIdentNode.Children with
-                | Parent childIds ->
-                    childIds
-                    |> List.choose (fun id -> Map.tryFind id.Value z.Graph.Nodes)
-                    |> List.filter (fun n -> n.SyntaxKind.StartsWith("Pattern:Named"))
-                | _ -> [])
+        // Navigate to function node first, then find/register parameters and emit body
+        atNode funcNode (
+            // Register function parameters in NodeSSA
+            // Use zipper navigation: funcNode -> Pattern:LongIdent -> Pattern:Named children
+            getZipper >>= fun z ->
+            let directChildren = PSGZipper.childNodes z
+            let parameterNodes =
+                // Get children of funcNode (the Binding)
+                directChildren
+                // Find Pattern:LongIdent (function name pattern)
+                |> List.filter (fun n -> n.SyntaxKind.StartsWith("Pattern:LongIdent"))
+                // Get Pattern:Named children of each (the parameters)
+                |> List.collect (fun longIdentNode ->
+                    match longIdentNode.Children with
+                    | Parent childIds ->
+                        childIds
+                        |> List.choose (fun id -> Map.tryFind id.Value z.Graph.Nodes)
+                        |> List.filter (fun n -> n.SyntaxKind.StartsWith("Pattern:Named"))
+                    | _ -> [])
 
-        // Record SSA for each parameter node in order
-        forEach (fun (node, idx) ->
-            if idx < List.length paramTypes then
-                let ssaName = sprintf "%%arg%d" idx
-                let typ = paramTypes.[idx]
-                recordNodeSSA node.Id ssaName typ
-            else
-                emit ()
-        ) (parameterNodes |> List.mapi (fun i n -> (n, i))) >>.
+            // Record SSA for each parameter node in order
+            forEach (fun (node, idx) ->
+                if idx < List.length paramTypes then
+                    let ssaName = sprintf "%%arg%d" idx
+                    let typ = paramTypes.[idx]
+                    recordNodeSSA node.Id ssaName typ
+                else
+                    emit ()
+            ) (parameterNodes |> List.mapi (fun i n -> (n, i))) >>.
 
-        // Navigate to function node and emit its body
-        atNode funcNode (emitFunctionBody psg) >>= fun result ->
+            // Emit the function body
+            emitFunctionBody psg
+        ) >>= fun result ->
 
         // For entry points, emit exit syscall
         (if isEntryPoint then

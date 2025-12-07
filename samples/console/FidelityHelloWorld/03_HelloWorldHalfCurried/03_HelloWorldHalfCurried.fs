@@ -1,17 +1,20 @@
 module Examples.HelloWorldHalfCurried
 
 open Alloy
+open Alloy.NativeTypes
 
 /// Demonstrates HALF-CURRIED patterns:
 /// - Pipe operator: `x |> f`
-/// - Partial application
-/// - String interpolation with pipe
+/// - Function composition with pipes
+/// Uses a helper function to format the greeting with NativeStr
+let greet (name: NativeStr) : unit =
+    Console.WriteLine $"Hello, {name}!"
+
 let hello() =
     Console.Write "Enter your name: "
 
     Console.ReadLine()
-    |> sprintf "Hello, %s!"
-    |> Console.WriteLine
+    |> greet
 
 [<EntryPoint>]
 let main argv =

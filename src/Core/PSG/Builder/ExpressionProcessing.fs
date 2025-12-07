@@ -581,8 +581,13 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
         parts |> List.fold (fun graphAcc part ->
             match part with
             | SynInterpolatedStringPart.String(text, range) ->
-                let strPartNode = createNode "InterpolatedStringPart:String" range fileName None (Some interpNode.Id)
-                let graphAcc' = { graphAcc with Nodes = Map.add strPartNode.Id.Value strPartNode graphAcc.Nodes }
+                // Include the string content in the SyntaxKind and add to StringLiterals
+                let hash = uint32 (hash text)
+                let strPartNode = createNode (sprintf "InterpolatedStringPart:String:%u" hash) range fileName None (Some interpNode.Id)
+                let graphAcc' =
+                    { graphAcc with
+                        Nodes = Map.add strPartNode.Id.Value strPartNode graphAcc.Nodes
+                        StringLiterals = Map.add hash text graphAcc.StringLiterals }
                 addChildToParent strPartNode.Id (Some interpNode.Id) graphAcc'
             | SynInterpolatedStringPart.FillExpr(fillExpr, qualifiers) ->
                 let fillNode = createNode "InterpolatedStringPart:Fill" fillExpr.Range fileName None (Some interpNode.Id)
