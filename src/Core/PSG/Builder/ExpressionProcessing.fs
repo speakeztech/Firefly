@@ -349,7 +349,14 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
     | SynExpr.Const(constant, range) ->
         let constNode = createNode (sprintf "Const:%A" constant) range fileName None parentId
         let graph' = { graph with Nodes = Map.add constNode.Id.Value constNode graph.Nodes }
-        addChildToParent constNode.Id parentId graph'
+        let graph'' = addChildToParent constNode.Id parentId graph'
+
+        // Register string literals in the PSG for later emission as globals
+        match constant with
+        | SynConst.String(text, _, _) ->
+            let hash = uint32 (text.GetHashCode())
+            { graph'' with StringLiterals = Map.add hash text graph''.StringLiterals }
+        | _ -> graph''
 
     | SynExpr.TryWith(tryExpr, withCases, range, _, _, trivia) ->
         let tryWithNode = createNode "TryWith" range fileName None parentId

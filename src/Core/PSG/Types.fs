@@ -230,6 +230,10 @@ type ProgramSemanticGraph = {
     EntryPoints: NodeId list
     SourceFiles: Map<string, string>
     CompilationOrder: string list
+    /// String literals discovered during PSG construction.
+    /// Maps hash -> content for deduplication.
+    /// Populated during FCS ingestion, consumed during MLIR emission.
+    StringLiterals: Map<uint32, string>
 }
 
 /// Result type for PSG operations

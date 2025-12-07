@@ -92,6 +92,7 @@ let buildProgramSemanticGraph
                     EntryPoints = []
                     SourceFiles = sourceFiles
                     CompilationOrder = []
+                    StringLiterals = Map.empty
                 }
                 let processedGraph =
                     modules |> List.fold (fun acc implFile ->
@@ -110,6 +111,7 @@ let buildProgramSemanticGraph
                 EntryPoints = []
                 SourceFiles = sourceFiles
                 CompilationOrder = []
+                StringLiterals = Map.empty
             }
         else
             graphs |> Array.reduce (fun g1 g2 ->
@@ -120,6 +122,7 @@ let buildProgramSemanticGraph
                     EntryPoints = g1.EntryPoints @ g2.EntryPoints
                     SourceFiles = Map.fold (fun acc k v -> Map.add k v acc) g1.SourceFiles g2.SourceFiles
                     CompilationOrder = g1.CompilationOrder @ g2.CompilationOrder
+                    StringLiterals = Map.fold (fun acc k v -> Map.add k v acc) g1.StringLiterals g2.StringLiterals
                 }
             )
 

@@ -136,6 +136,8 @@ let private tyToString (ty: MB.Ty) : string =
 
 /// Run an MLIR CE emission within the EmissionMonad context.
 /// This bridges the new MLIR CE with the function-level EmissionMonad.
+/// Note: String literals are now read directly from PSG.StringLiterals,
+/// which is populated during PSG construction (not during emission).
 let runMLIREmission (psg: ProgramSemanticGraph) (node: PSGNode) : Emit<FuncEmitResult> =
     fun env state ->
         // Create a fresh BuilderState for expression emission
@@ -157,6 +159,7 @@ let runMLIREmission (psg: ProgramSemanticGraph) (node: PSGNode) : Emit<FuncEmitR
                 MLIRBuilder.line env.Builder lineText
 
         // Update state with new SSA counter
+        // Note: String literals are read from PSG, not tracked in emission state
         let newState = {
             state with
                 SSACounter = builderState.SSACounter
@@ -367,16 +370,23 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
 // String Literal Emission
 // ═══════════════════════════════════════════════════════════════════
 
-/// Emit all registered string literals as global constants
-let emitStringLiterals : Emit<unit> =
-    getState >>= fun state ->
-    forEach (fun ((content: string), (name: string)) ->
-        let escaped = content.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\0A")
-        // name is "%strN", globalName is "strN" for the @strN reference
-        let globalName = name.Substring(1)
-        // MLIR syntax: llvm.mlir.global constant @name("content") : !llvm.array<N x i8>
-        line (sprintf "llvm.mlir.global private constant @%s(\"%s\") : !llvm.array<%d x i8>" globalName escaped content.Length)
-    ) state.StringLiterals
+/// Escape a string for MLIR string literal syntax
+let private escapeForMLIR (s: string) : string =
+    s.Replace("\\", "\\\\")
+     .Replace("\"", "\\\"")
+     .Replace("\n", "\\0A")
+     .Replace("\r", "\\0D")
+     .Replace("\t", "\\09")
+
+/// Emit all string literals from the PSG as global constants
+/// The PSG.StringLiterals map (hash -> content) is populated during PSG construction
+let emitStringLiterals (psg: ProgramSemanticGraph) : Emit<unit> =
+    let literals = psg.StringLiterals |> Map.toList
+    forEach (fun (hash: uint32, content: string) ->
+        let escaped = escapeForMLIR content
+        // MLIR syntax: llvm.mlir.global constant @str_HASH("content") : !llvm.array<N x i8>
+        line (sprintf "llvm.mlir.global private constant @str_%u(\"%s\") : !llvm.array<%d x i8>" hash escaped content.Length)
+    ) literals
 
 /// Emit a module with its functions
 let emitModule (psg: ProgramSemanticGraph) : Emit<unit> =
@@ -392,8 +402,8 @@ let emitModule (psg: ProgramSemanticGraph) : Emit<unit> =
     let otherFunctions = findReachableFunctions psg
     forEach (fun fn -> emitFunction psg fn false) otherFunctions >>.
 
-    // Emit string literals inside the module
-    emitStringLiterals >>.
+    // Emit string literals from PSG (populated during construction)
+    emitStringLiterals psg >>.
 
     popIndent >>.
     line "}"
