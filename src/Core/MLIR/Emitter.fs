@@ -763,14 +763,11 @@ let getConstValue (node: PSGNode) : string option =
         Some "()"
     else None
 
-/// Walk children of a node
-/// Note: Children are stored in reverse order (prepended during construction),
-/// so we reverse them to get source order
+/// Walk children of a node (already in source order)
 let getChildren (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode list =
     match node.Children with
     | Parent childIds ->
         childIds
-        |> List.rev  // Reverse to get source order
         |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
     | _ -> []
 

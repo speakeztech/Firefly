@@ -296,12 +296,11 @@ let execute (args: ParseResults<CompileArgs>) =
             psgInfo.AppendLine("Reachable Node Tree (for emission debugging)") |> ignore
             psgInfo.AppendLine("═══════════════════════════════════════════════════════════════════") |> ignore
 
-            // Helper to get children in source order
+            // Helper to get children (already in source order)
             let getChildren (node: Core.PSG.Types.PSGNode) =
                 match node.Children with
                 | Core.PSG.Types.ChildrenState.Parent childIds ->
                     childIds
-                    |> List.rev  // Children stored in reverse order
                     |> List.choose (fun id -> Map.tryFind id.Value markedPsg.Nodes)
                 | _ -> []
 

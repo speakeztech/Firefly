@@ -356,6 +356,20 @@ let registerStringLiteral (content: string) : Emit<string> =
             let state' = { state with StringLiterals = (content, name) :: state.StringLiterals }
             (state', name)
 
+/// Register a byte array literal (stored as string with escaped bytes)
+/// Returns the global name
+let registerByteLiteral (bytes: byte[]) : Emit<string> =
+    fun _env state ->
+        // Convert bytes to an escaped string format for storage
+        // We use the raw byte values as the string content
+        let content = System.String(bytes |> Array.map char)
+        match state.StringLiterals |> List.tryFind (fun (c, _) -> c = content) with
+        | Some (_, name) -> (state, name)
+        | None ->
+            let name = sprintf "@bytes%d" (List.length state.StringLiterals)
+            let state' = { state with StringLiterals = (content, name) :: state.StringLiterals }
+            (state', name)
+
 // ═══════════════════════════════════════════════════════════════════
 // Bindings Bridge
 // ═══════════════════════════════════════════════════════════════════

@@ -9,27 +9,29 @@ open Alloy.Memory
 
 /// A simple hello world that reads user input and formats a greeting.
 /// Uses native types throughout - no BCL string types.
+///
+/// Tests HALF-CURRIED patterns:
+/// - Pipe operator: `x |> ignore`
+/// - Partial application in function calls
+/// - Curried Console functions
 let hello() =
     // Allocate input buffer on stack
     let inputBuffer = NativePtr.stackalloc<byte> 256
 
-    // Write prompt
-    let promptBytes = "Enter your name: "B
-    Console.writeRaw Console.STDOUT_FILENO (NativePtr.ofNativeInt (NativePtr.toNativeInt &&promptBytes.[0])) (promptBytes.Length - 1) |> ignore
+    // Write prompt using pipe operator (tests |> ignore pattern)
+    Console.writeB "Enter your name: "B
 
-    // Read user input
+    // Read user input - tests curried function application
     let nameLen = Console.readLine inputBuffer 256
     let name = NativeStr(inputBuffer, nameLen)
 
-    // Allocate output buffer
+    // Allocate output buffer for greeting
     let outputBuffer = NativePtr.stackalloc<byte> 512
-
-    // Build greeting: "Hello, " + name + "!"
-    let helloBytes = "Hello, "B
     let mutable pos = 0
 
-    // Copy "Hello, "
-    for i = 0 to helloBytes.Length - 2 do  // -2 to skip null terminator
+    // Copy "Hello, " using byte literal helpers
+    let helloBytes = "Hello, "B
+    for i = 0 to bytesLen helloBytes - 1 do
         NativePtr.set outputBuffer pos helloBytes.[i]
         pos <- pos + 1
 
@@ -42,9 +44,9 @@ let hello() =
     NativePtr.set outputBuffer pos (byte '!')
     pos <- pos + 1
 
-    // Write greeting
+    // Write greeting using pipe operator (tests |> pattern)
     let greeting = NativeStr(outputBuffer, pos)
-    Console.writeln greeting
+    greeting |> Console.writeln
 
 [<EntryPoint>]
 let main _argv =

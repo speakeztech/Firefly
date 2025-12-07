@@ -150,11 +150,32 @@ let private getChildNodes (graph: ProgramSemanticGraph) (node: PSGNode) : PSGNod
         ids |> List.choose (fun id -> Map.tryFind id.Value graph.Nodes)
     | _ -> []
 
-/// Get the function symbol from an App node's first child
-let private getFunctionSymbolFromChildren (children: PSGNode list) : FSharpSymbol option =
-    match children with
-    | funcChild :: _ -> funcChild.Symbol
-    | [] -> None
+/// Get the function symbol from an App node's children
+/// Handles PSG child ordering by looking for the child that is most likely the function reference:
+/// - LongIdent or Ident nodes (direct function references)
+/// - For curried apps, we may need to recurse into inner Apps
+let rec private getFunctionSymbolFromChildren (graph: ProgramSemanticGraph) (children: PSGNode list) : FSharpSymbol option =
+    // First, try to find a LongIdent (qualified function reference like Console.readLine)
+    children
+    |> List.tryFind (fun c -> c.SyntaxKind.StartsWith("LongIdent:"))
+    |> Option.bind (fun c -> c.Symbol)
+    |> Option.orElseWith (fun () ->
+        // Then try to find an Ident with a function type
+        children
+        |> List.tryFind (fun c ->
+            c.SyntaxKind.StartsWith("Ident:") &&
+            match c.Type with
+            | Some ftype -> ftype.IsFunctionType
+            | None -> false)
+        |> Option.bind (fun c -> c.Symbol))
+    |> Option.orElseWith (fun () ->
+        // Then recurse into App children to find the function
+        children
+        |> List.tryPick (fun c ->
+            if c.SyntaxKind.StartsWith("App") then
+                let innerChildren = getChildNodes graph c
+                getFunctionSymbolFromChildren graph innerChildren
+            else None))
 
 // ===================================================================
 // Symbol Classification Helpers
@@ -349,12 +370,12 @@ let classifyConversionOp (mfv: FSharpMemberOrFunctionOrValue) : ConversionOp opt
 // Node Classifiers - Extract operation type from PSGNode
 // ===================================================================
 
-/// Extract Console operation from a node (checks first child for function symbol)
+/// Extract Console operation from a node (checks children recursively for function symbol)
 let extractConsoleOp (graph: ProgramSemanticGraph) (node: PSGNode) : ConsoleOp option =
     if not (node.SyntaxKind.StartsWith("App")) then None
     else
         let children = getChildNodes graph node
-        match getFunctionSymbolFromChildren children with
+        match getFunctionSymbolFromChildren graph children with
         | Some symbol -> classifyConsoleOp symbol
         | None ->
             // Also check the node's own symbol
@@ -367,7 +388,7 @@ let extractTimeOp (graph: ProgramSemanticGraph) (node: PSGNode) : TimeOp option 
     if not (node.SyntaxKind.StartsWith("App")) then None
     else
         let children = getChildNodes graph node
-        match getFunctionSymbolFromChildren children with
+        match getFunctionSymbolFromChildren graph children with
         | Some symbol -> classifyTimeOp symbol
         | None ->
             match node.Symbol with
@@ -379,7 +400,7 @@ let extractTextFormatOp (graph: ProgramSemanticGraph) (node: PSGNode) : TextForm
     if not (node.SyntaxKind.StartsWith("App")) then None
     else
         let children = getChildNodes graph node
-        match getFunctionSymbolFromChildren children with
+        match getFunctionSymbolFromChildren graph children with
         | Some symbol -> classifyTextFormatOp symbol
         | None ->
             match node.Symbol with
@@ -391,7 +412,7 @@ let extractMemoryOp (graph: ProgramSemanticGraph) (node: PSGNode) : MemoryOp opt
     if not (node.SyntaxKind.StartsWith("App")) then None
     else
         let children = getChildNodes graph node
-        match getFunctionSymbolFromChildren children with
+        match getFunctionSymbolFromChildren graph children with
         | Some symbol -> classifyMemoryOp symbol
         | None ->
             match node.Symbol with
@@ -403,7 +424,7 @@ let extractResultOp (graph: ProgramSemanticGraph) (node: PSGNode) : ResultOp opt
     if not (node.SyntaxKind.StartsWith("App")) then None
     else
         let children = getChildNodes graph node
-        match getFunctionSymbolFromChildren children with
+        match getFunctionSymbolFromChildren graph children with
         | Some symbol -> classifyResultOp symbol
         | None ->
             match node.Symbol with
@@ -417,7 +438,7 @@ let extractNativePtrOp (graph: ProgramSemanticGraph) (node: PSGNode) : NativePtr
     // Handle TypeApp nodes (like nullPtr<byte>) - check child for NativePtr symbol
     if node.SyntaxKind.StartsWith("TypeApp") then
         let children = getChildNodes graph node
-        match getFunctionSymbolFromChildren children with
+        match getFunctionSymbolFromChildren graph children with
         | Some symbol -> classifyNativePtrOp symbol
         | None ->
             // Also check all children for LongIdent with NativePtr
@@ -431,7 +452,7 @@ let extractNativePtrOp (graph: ProgramSemanticGraph) (node: PSGNode) : NativePtr
         let children = getChildNodes graph node
         // Look through curried applications to find the NativePtr function
         let rec findPtrOp (children: PSGNode list) : NativePtrOp option =
-            match getFunctionSymbolFromChildren children with
+            match getFunctionSymbolFromChildren graph children with
             | Some symbol ->
                 match classifyNativePtrOp symbol with
                 | Some op -> Some op
@@ -455,7 +476,7 @@ let extractConversionOp (graph: ProgramSemanticGraph) (node: PSGNode) : Conversi
     if not (node.SyntaxKind.StartsWith("App")) then None
     else
         let children = getChildNodes graph node
-        match getFunctionSymbolFromChildren children with
+        match getFunctionSymbolFromChildren graph children with
         | Some symbol ->
             match symbol with
             | :? FSharpMemberOrFunctionOrValue as mfv -> classifyConversionOp mfv
@@ -485,7 +506,7 @@ let extractCoreOp (graph: ProgramSemanticGraph) (node: PSGNode) : CoreOp option 
     if not (node.SyntaxKind.StartsWith("App")) then None
     else
         let children = getChildNodes graph node
-        match getFunctionSymbolFromChildren children with
+        match getFunctionSymbolFromChildren graph children with
         | Some symbol -> classifyCoreOp symbol
         | None -> None
 
@@ -514,7 +535,9 @@ let extractAlloyOp (graph: ProgramSemanticGraph) (node: PSGNode) : AlloyOp optio
 /// Handles curried operators: a + b is ((+) a) b
 /// For curried form, the structure is: App[App[op, leftArg], rightArg]
 /// The operator is the FIRST child of the FIRST App child
-/// IMPORTANT: Only check immediate operator, not nested expressions
+/// IMPORTANT: Only matches COMPLETE binary applications with both operands.
+/// Partial applications like ((+) a) are NOT matched - they need to be
+/// emitted as partial function applications.
 let extractArithOp (graph: ProgramSemanticGraph) (node: PSGNode) : ArithOp option =
     if not (node.SyntaxKind.StartsWith("App")) then None
     else
@@ -522,57 +545,107 @@ let extractArithOp (graph: ProgramSemanticGraph) (node: PSGNode) : ArithOp optio
 
         // Helper to check if a node is an arithmetic operator
         let isArithOpNode (opNode: PSGNode) =
-            opNode.SyntaxKind.StartsWith("LongIdent:op_") ||
-            opNode.SyntaxKind.StartsWith("Ident:op_") ||
-            opNode.SyntaxKind = "Ident:not" ||
-            opNode.SyntaxKind.Contains(":not")
+            let result =
+                opNode.SyntaxKind.StartsWith("LongIdent:op_") ||
+                opNode.SyntaxKind.StartsWith("Ident:op_") ||
+                opNode.SyntaxKind = "Ident:not" ||
+                opNode.SyntaxKind.Contains(":not")
+            result
 
+        // Find the inner App among children (PSG order may be [arg, App] or [App, arg])
+        let findInnerApp (children: PSGNode list) =
+            children |> List.tryFind (fun c -> c.SyntaxKind.StartsWith("App"))
+
+        // Find an operator node in children
+        let findOpNode (children: PSGNode list) =
+            children |> List.tryFind isArithOpNode
+
+        // For binary operators, we need:
+        // 1. Two children in the outer App (inner partial app + right operand)
+        // 2. The inner App must contain the operator + left operand
         match children with
-        | innerApp :: _ when innerApp.SyntaxKind.StartsWith("App") ->
-            // For curried operators, the inner App's first child is the operator
-            let innerChildren = getChildNodes graph innerApp
-            match innerChildren with
-            | opNode :: _ when isArithOpNode opNode ->
-                match opNode.Symbol with
-                | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
-                    classifyArithOp mfv
-                | _ -> None
-            | _ -> None
-        | opNode :: _ when isArithOpNode opNode ->
-            // Direct operator/function application (like "not x")
-            match opNode.Symbol with
-            | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
-                classifyArithOp mfv
-            | _ -> None
-        | _ -> None
+        | [c1; c2] ->
+            // Two children - could be a complete binary operation
+            match findInnerApp children with
+            | Some innerApp ->
+                // The outer App has an inner App and the right operand
+                // Now check if inner App contains an operator
+                let innerChildren = getChildNodes graph innerApp
+                match findOpNode innerChildren with
+                | Some opNode ->
+                    match opNode.Symbol with
+                    | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+                        classifyArithOp mfv
+                    | _ -> None
+                | None -> None
+            | None ->
+                // No inner App - might be a unary operator like "not x"
+                // For unary ops, we have [opNode, operandNode] directly
+                match findOpNode children with
+                | Some opNode ->
+                    match opNode.Symbol with
+                    | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+                        // Only unary operators (Negate, Not) should match here
+                        match classifyArithOp mfv with
+                        | Some Negate -> Some Negate
+                        | Some Not -> Some Not
+                        | _ -> None  // Binary operators need the curried form
+                    | _ -> None
+                | None -> None
+        | [_] ->
+            // Single child - might be unary operator application (rare case)
+            None
+        | _ ->
+            // More than 2 children or empty - not a valid operator application
+            None
 
 /// Extract comparison operation from an App node
 /// Handles curried operators: a >= b is ((>=) a) b
 /// For curried form, the structure is: App[App[op, leftArg], rightArg]
-/// The operator is the FIRST child of the FIRST App child
-/// IMPORTANT: Only check immediate operator, not nested expressions
+/// PSG children order may be [arg, App] or [App, arg]
+/// IMPORTANT: Only matches COMPLETE binary comparisons with both operands.
+/// Partial applications are NOT matched.
 let extractCompareOp (graph: ProgramSemanticGraph) (node: PSGNode) : CompareOp option =
     if not (node.SyntaxKind.StartsWith("App")) then None
     else
         let children = getChildNodes graph node
+
+        // Helper to check if a node is a comparison operator
+        let isCompareOpNode (opNode: PSGNode) =
+            opNode.SyntaxKind.StartsWith("LongIdent:op_") ||
+            opNode.SyntaxKind.StartsWith("Ident:op_")
+
+        // Find the inner App among children
+        let findInnerApp (children: PSGNode list) =
+            children |> List.tryFind (fun c -> c.SyntaxKind.StartsWith("App"))
+
+        // Find a comparison operator node in children
+        let findOpNode (children: PSGNode list) =
+            children |> List.tryFind isCompareOpNode
+
+        // For binary comparison operators, we need:
+        // 1. Two children in the outer App (inner partial app + right operand)
+        // 2. The inner App must contain the operator + left operand
         match children with
-        | innerApp :: _ when innerApp.SyntaxKind.StartsWith("App") ->
-            // For curried operators, the inner App's first child is the operator
-            let innerChildren = getChildNodes graph innerApp
-            match innerChildren with
-            | opNode :: _ when opNode.SyntaxKind.StartsWith("LongIdent:op_") ->
-                match opNode.Symbol with
-                | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
-                    classifyCompareOp mfv
-                | _ -> None
-            | _ -> None
-        | opNode :: _ when opNode.SyntaxKind.StartsWith("LongIdent:op_") ->
-            // Direct operator application (unusual but handle it)
-            match opNode.Symbol with
-            | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
-                classifyCompareOp mfv
-            | _ -> None
-        | _ -> None
+        | [_; _] ->
+            // Two children - could be a complete comparison
+            match findInnerApp children with
+            | Some innerApp ->
+                // The outer App has an inner App and the right operand
+                let innerChildren = getChildNodes graph innerApp
+                match findOpNode innerChildren with
+                | Some opNode ->
+                    match opNode.Symbol with
+                    | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+                        classifyCompareOp mfv
+                    | _ -> None
+                | None -> None
+            | None ->
+                // No inner App - not a valid curried comparison
+                None
+        | _ ->
+            // Not two children - not a valid comparison operator application
+            None
 
 // ===================================================================
 // Node Predicates - Boolean checks for PSGNode
@@ -648,23 +721,104 @@ let isPipe (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
 /// Extract function call information from an App node
 /// Handles curried calls by recursively traversing nested App nodes
 /// For `f a b c`, the PSG structure is: App(App(App(f, a), b), c)
+/// PSG children order may be [arg, func] due to construction order
 /// This function collects all arguments from all curry levels
 /// Uses PSG node data only - no FCS lookups
 let extractFunctionCall (graph: ProgramSemanticGraph) (node: PSGNode) : FunctionCallInfo option =
     if not (node.SyntaxKind.StartsWith("App")) then None
     else
+        // Helper to check if a node is a function/partial application (not a plain value)
+        let isFuncOrPartial (n: PSGNode) =
+            n.SyntaxKind.StartsWith("App") ||
+            n.SyntaxKind.StartsWith("LongIdent:") ||
+            n.SyntaxKind.StartsWith("Ident:") ||
+            n.SyntaxKind.StartsWith("TypeApp:")
+
+        // Helper to check if a node looks like a value/argument (not a function ref)
+        let isLikelyArg (n: PSGNode) =
+            n.SyntaxKind.StartsWith("Const") ||
+            n.SyntaxKind.StartsWith("PropertyAccess") ||
+            n.SyntaxKind.StartsWith("AddressOf") ||
+            n.SyntaxKind.StartsWith("DotIndexedGet")
+
+        // Helper to check if a node's type is a function type (has arrows)
+        let hasFunctionType (n: PSGNode) : bool =
+            match n.Type with
+            | Some ftype -> ftype.IsFunctionType
+            | None -> false
+
+        // Given two children, determine which is the func/partial and which is the arg
+        let classifyChildren (c1: PSGNode) (c2: PSGNode) : (PSGNode * PSGNode) =
+            // If one is clearly a value (Const, etc), it's the arg
+            if isLikelyArg c1 && not (isLikelyArg c2) then (c2, c1)
+            elif isLikelyArg c2 && not (isLikelyArg c1) then (c1, c2)
+            // If one is a LongIdent/Ident (function ref) and the other is App,
+            // the App is the partial application, LongIdent is the function
+            elif c1.SyntaxKind.StartsWith("LongIdent:") && c2.SyntaxKind.StartsWith("App") then (c2, c1)
+            elif c2.SyntaxKind.StartsWith("LongIdent:") && c1.SyntaxKind.StartsWith("App") then (c1, c2)
+            elif c1.SyntaxKind.StartsWith("Ident:") && c2.SyntaxKind.StartsWith("App") then (c2, c1)
+            elif c2.SyntaxKind.StartsWith("Ident:") && c1.SyntaxKind.StartsWith("App") then (c1, c2)
+            // Both are Apps - first one is usually the arg in PSG structure
+            elif c1.SyntaxKind.StartsWith("App") && c2.SyntaxKind.StartsWith("App") then (c2, c1)
+            // Both are Idents - use type information to determine which is the function
+            // The one with a function type (arrows) is the function, the other is the arg
+            elif c1.SyntaxKind.StartsWith("Ident:") && c2.SyntaxKind.StartsWith("Ident:") then
+                if hasFunctionType c2 && not (hasFunctionType c1) then (c2, c1)
+                elif hasFunctionType c1 && not (hasFunctionType c2) then (c1, c2)
+                else (c2, c1)  // Default if both or neither have function types
+            // If c2 is a function reference (LongIdent/Ident), c1 is the arg
+            elif c2.SyntaxKind.StartsWith("LongIdent:") || c2.SyntaxKind.StartsWith("Ident:") then (c2, c1)
+            elif c1.SyntaxKind.StartsWith("LongIdent:") || c1.SyntaxKind.StartsWith("Ident:") then (c1, c2)
+            // Default: assume c1 is func, c2 is arg (original assumption)
+            else (c1, c2)
+
+        // Helper to check if an App is an operator application (should not recurse into)
+        let isOperatorApp (appNode: PSGNode) =
+            let appChildren = getChildNodes graph appNode
+            appChildren |> List.exists (fun c ->
+                c.SyntaxKind.StartsWith("LongIdent:op_") ||
+                c.SyntaxKind.StartsWith("Ident:op_") ||
+                c.SyntaxKind.StartsWith("LongIdent:not") ||
+                c.SyntaxKind = "Ident:not")
+
         // Recursively traverse nested App nodes to find the function and collect all arguments
-        // Arguments are collected in reverse order (innermost first), then reversed at the end
+        // STOPS at operator applications (arithmetic, comparison) - those are values, not partial applications
+        // Returns None if the final "function" is actually an operator application
         let rec collectCurriedArgs (appNode: PSGNode) (accArgs: PSGNode list) : (PSGNode * PSGNode list) option =
             let children = getChildNodes graph appNode
             match children with
-            | funcOrApp :: args ->
-                let newArgs = args @ accArgs  // Prepend args from this level
+            | [c1; c2] ->
+                let (funcOrApp, arg) = classifyChildren c1 c2
+                let newArgs = arg :: accArgs
+                // Only recurse if it's an App AND not an operator application
                 if funcOrApp.SyntaxKind.StartsWith("App") then
-                    // This is a nested application, recurse into it
-                    collectCurriedArgs funcOrApp newArgs
+                    if isOperatorApp funcOrApp then
+                        // The "function" is actually an operator application - this whole expression
+                        // is an arithmetic/comparison operation, not a function call
+                        None
+                    else
+                        collectCurriedArgs funcOrApp newArgs
                 else
-                    // This is the actual function node
+                    Some (funcOrApp, newArgs)
+            | [single] ->
+                if single.SyntaxKind.StartsWith("App") then
+                    if isOperatorApp single then
+                        None  // Operator application, not a function call
+                    else
+                        collectCurriedArgs single accArgs
+                else
+                    Some (single, accArgs)
+            | first :: rest ->
+                // More than 2 children - use classification on first two
+                let (funcOrApp, arg) = classifyChildren first (List.head rest)
+                let remainingArgs = List.tail rest
+                let newArgs = arg :: remainingArgs @ accArgs
+                if funcOrApp.SyntaxKind.StartsWith("App") then
+                    if isOperatorApp funcOrApp then
+                        None  // Operator application, not a function call
+                    else
+                        collectCurriedArgs funcOrApp newArgs
+                else
                     Some (funcOrApp, newArgs)
             | [] -> None
 

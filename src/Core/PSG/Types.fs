@@ -144,23 +144,20 @@ module ChildrenStateHelpers =
         ComputationPattern = None
     }
     
-    /// Add a child to a node's children state
+    /// Add a child to a node (appends to maintain source order)
     let addChild childId node =
         match node.Children with
         | NotProcessed -> { node with Children = Parent [childId] }
-        | Parent existingChildren -> { node with Children = Parent (childId :: existingChildren) }
+        | Parent existing -> { node with Children = Parent (existing @ [childId]) }
         | NoChildren -> { node with Children = Parent [childId] }
-    
-    /// Finalize a node's children state
-    /// IMPORTANT: Children are prepended during construction for O(1) insertion,
-    /// so we reverse here to restore logical source order (func before args, etc.)
+
+    /// Mark unprocessed nodes as having no children
     let finalizeChildren node =
         match node.Children with
         | NotProcessed -> { node with Children = NoChildren }
-        | Parent children -> { node with Children = Parent (List.rev children) }
-        | NoChildren -> node
-    
-    /// Get children as list for compatibility with DebugOutput.fs
+        | _ -> node
+
+    /// Get children as list
     let getChildrenList node =
         match node.Children with
         | NotProcessed -> []

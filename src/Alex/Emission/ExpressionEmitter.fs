@@ -81,6 +81,30 @@ let private extractByteFromKind (kind: string) : byte option =
         | false, _ -> None
     else None
 
+/// Extract byte array from Const:Bytes syntax kind
+/// Format: "Const:Bytes\n  ([|69uy; 110uy; ...|], Regular, ...)"
+/// Returns the bytes and the length
+let private extractBytesFromKind (kind: string) : (byte[] * int) option =
+    if kind.StartsWith("Const:Bytes") then
+        // Find the byte array literal: [|...|]
+        let start = kind.IndexOf("[|")
+        let endPos = kind.IndexOf("|]")
+        if start >= 0 && endPos > start then
+            let content = kind.Substring(start + 2, endPos - start - 2)
+            // Parse individual bytes like "69uy; 110uy; ..."
+            let bytes =
+                content.Split([|';'|], System.StringSplitOptions.RemoveEmptyEntries)
+                |> Array.choose (fun s ->
+                    let trimmed = s.Trim().TrimEnd('u', 'y')
+                    match System.Byte.TryParse(trimmed) with
+                    | true, v -> Some v
+                    | false, _ -> None)
+            Some (bytes, bytes.Length)
+        else
+            None
+    else
+        None
+
 // ===================================================================
 // Forward declaration for mutual recursion
 // ===================================================================
@@ -511,27 +535,66 @@ let private tryEmitCore : Emit<ExprResult option> =
 /// Helper to extract all arguments from a curried NativePtr call
 /// NativePtr.set ptr idx value -> [ptr, idx, value]
 /// Uses the same curried collection algorithm as extractFunctionCall
+/// PSG children order may be [arg, func] due to construction order
 let private extractNativePtrArgs (graph: ProgramSemanticGraph) (node: PSGNode) : PSGNode list =
     let getChildNodes (n: PSGNode) : PSGNode list =
         match n.Children with
         | ChildrenState.Parent ids -> ids |> List.choose (fun id -> Map.tryFind id.Value graph.Nodes)
         | _ -> []
 
+    // Helper to check if a node looks like a value/argument (not a function ref)
+    let isLikelyArg (n: PSGNode) =
+        n.SyntaxKind.StartsWith("Const") ||
+        n.SyntaxKind.StartsWith("PropertyAccess") ||
+        n.SyntaxKind.StartsWith("AddressOf") ||
+        n.SyntaxKind.StartsWith("DotIndexedGet") ||
+        n.SyntaxKind.StartsWith("Ident:")  // Variable references are args in NativePtr context
+
+    // Given two children, determine which is the func/partial and which is the arg
+    let classifyChildren (c1: PSGNode) (c2: PSGNode) : (PSGNode * PSGNode) =
+        // If one is clearly a value, it's the arg
+        if isLikelyArg c1 && not (isLikelyArg c2) then (c2, c1)
+        elif isLikelyArg c2 && not (isLikelyArg c1) then (c1, c2)
+        // TypeApp is the function (stackalloc<T>)
+        elif c1.SyntaxKind.StartsWith("TypeApp") then (c1, c2)
+        elif c2.SyntaxKind.StartsWith("TypeApp") then (c2, c1)
+        // LongIdent is the function
+        elif c1.SyntaxKind.StartsWith("LongIdent:") && c2.SyntaxKind.StartsWith("App") then (c2, c1)
+        elif c2.SyntaxKind.StartsWith("LongIdent:") && c1.SyntaxKind.StartsWith("App") then (c1, c2)
+        // Both Apps - first is usually arg in PSG
+        elif c1.SyntaxKind.StartsWith("App") && c2.SyntaxKind.StartsWith("App") then (c2, c1)
+        // c2 is function ref
+        elif c2.SyntaxKind.StartsWith("LongIdent:") then (c2, c1)
+        elif c1.SyntaxKind.StartsWith("LongIdent:") then (c1, c2)
+        else (c1, c2)
+
     // Recursively traverse nested App nodes to collect all arguments
-    // For `f a b c`, the PSG structure is: App(App(App(f, a), b), c)
     let rec collectCurriedArgs (appNode: PSGNode) (accArgs: PSGNode list) : PSGNode list =
         let children = getChildNodes appNode
         match children with
-        | funcOrApp :: args ->
-            let newArgs = args @ accArgs  // Collect args from this level
+        | [c1; c2] ->
+            let (funcOrApp, arg) = classifyChildren c1 c2
+            let newArgs = arg :: accArgs
             if funcOrApp.SyntaxKind.StartsWith("App") then
-                // This is a nested application, recurse into it
                 collectCurriedArgs funcOrApp newArgs
             elif funcOrApp.SyntaxKind.StartsWith("TypeApp") then
-                // TypeApp is the function (e.g., stackalloc<byte>), args are what we have
                 newArgs
             else
-                // This is the actual function node, return collected args
+                newArgs
+        | [single] ->
+            if single.SyntaxKind.StartsWith("App") then
+                collectCurriedArgs single accArgs
+            else
+                accArgs
+        | first :: rest ->
+            let (funcOrApp, arg) = classifyChildren first (List.head rest)
+            let remainingArgs = List.tail rest
+            let newArgs = arg :: remainingArgs @ accArgs
+            if funcOrApp.SyntaxKind.StartsWith("App") then
+                collectCurriedArgs funcOrApp newArgs
+            elif funcOrApp.SyntaxKind.StartsWith("TypeApp") then
+                newArgs
+            else
                 newArgs
         | [] -> accArgs
 
@@ -667,20 +730,41 @@ let private tryEmitNativePtr : Emit<ExprResult option> =
 // ===================================================================
 
 /// Helper to extract operands from curried binary operator application
-/// For ((op) left) right, children are [innerApp, right] where innerApp has [op, left]
-/// Note: Children are now in correct source order after PSG finalization
+/// For ((op) left) right, structure is App[App[op, left], right]
+/// PSG children order may be [arg, App] or [App, arg]
+/// The inner App contains [left_operand, operator] where operator starts with LongIdent:op_ or Ident:op_
 let private extractBinaryOperands (graph: ProgramSemanticGraph) (children: PSGNode list) : (PSGNode * PSGNode) option =
+    // Find the inner App among children
+    let findInnerApp (children: PSGNode list) =
+        children |> List.tryFind (fun c -> c.SyntaxKind.StartsWith("App"))
+
+    // Check if a node is an operator (starts with op_ pattern)
+    let isOperatorNode (n: PSGNode) =
+        n.SyntaxKind.StartsWith("LongIdent:op_") ||
+        n.SyntaxKind.StartsWith("Ident:op_")
+
+    // Find the operand (non-operator) child in inner App
+    let findOperandChild (innerChildren: PSGNode list) =
+        innerChildren |> List.tryFind (fun c -> not (isOperatorNode c))
+
     match children with
-    | innerApp :: rightNode :: _ when innerApp.SyntaxKind.StartsWith("App") ->
-        // Curried form: ((op) left) right
-        let innerChildren =
-            match innerApp.Children with
-            | ChildrenState.Parent ids -> ids |> List.choose (fun id -> Map.tryFind id.Value graph.Nodes)
-            | _ -> []
-        match innerChildren with
-        | _ :: leftNode :: _ -> Some (leftNode, rightNode)
-        | [_opOnly] -> None  // Unary or missing operand
-        | _ -> None
+    | [c1; c2] ->
+        // Two children - find which is the inner App and which is the right operand
+        let innerAppOpt = findInnerApp [c1; c2]
+        match innerAppOpt with
+        | Some innerApp ->
+            let rightNode = if c1.Id = innerApp.Id then c2 else c1
+            // Get inner children to find left operand
+            let innerChildren =
+                match innerApp.Children with
+                | ChildrenState.Parent ids -> ids |> List.choose (fun id -> Map.tryFind id.Value graph.Nodes)
+                | _ -> []
+            // Left operand is the non-operator child of inner App
+            let leftNodeOpt = findOperandChild innerChildren
+            match leftNodeOpt with
+            | Some leftNode -> Some (leftNode, rightNode)
+            | None -> None
+        | None -> None
     | _ :: leftNode :: rightNode :: _ ->
         // Non-curried form: [op, left, right]
         Some (leftNode, rightNode)
@@ -886,7 +970,25 @@ let private handleConst (kind: string) : Emit<ExprResult> =
         match extractInt64FromKind kind with
         | Some v -> emitI64 v |>> fun ssa -> Value(ssa, "i64")
         | None -> emit (Error "Invalid i64 constant")
-    elif kind.StartsWith("Const:Byte") then
+    // IMPORTANT: Check Const:Bytes BEFORE Const:Byte (prefix match issue)
+    elif kind.StartsWith("Const:Bytes") then
+        match extractBytesFromKind kind with
+        | Some (bytes, len) ->
+            // Create a NativeStr/ByteArray struct: { ptr: !llvm.ptr, len: i64 }
+            // Register bytes as a global constant
+            registerByteLiteral bytes >>= fun globalName ->
+            emitAddressOf globalName >>= fun ptr ->
+            emitI64 (int64 len) >>= fun lenReg ->
+            // Build the struct
+            freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun undef ->
+            line (sprintf "%s = llvm.mlir.undef : !llvm.struct<(ptr, i64)>" undef) >>.
+            freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun withPtr ->
+            line (sprintf "%s = llvm.insertvalue %s, %s[0] : !llvm.struct<(ptr, i64)>" withPtr ptr undef) >>.
+            freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun withLen ->
+            line (sprintf "%s = llvm.insertvalue %s, %s[1] : !llvm.struct<(ptr, i64)>" withLen lenReg withPtr) >>.
+            emit (Value(withLen, "!llvm.struct<(ptr, i64)>"))
+        | None -> emit (Error "Invalid byte array constant")
+    elif kind.StartsWith("Const:Byte ") then
         match extractByteFromKind kind with
         | Some v -> emitI8 v |>> fun ssa -> Value(ssa, "i8")
         | None -> emit (Error "Invalid byte constant")
@@ -979,8 +1081,8 @@ let private tryEmitIdent : Emit<ExprResult option> =
             // Use symbol-based lookup (new, preferred)
             handleIdentBySymbol sym node >>= fun result ->
             match result with
-            | Error _ ->
-                // Not a local variable - check if it's a [<Literal>] constant
+            | Error errMsg ->
+                // Not found in local scope - check if it's a [<Literal>] constant or module-level value
                 match sym with
                 | :? FSharp.Compiler.Symbols.FSharpMemberOrFunctionOrValue as mfv when mfv.LiteralValue.IsSome ->
                     // This is a [<Literal>] constant - inline the value
@@ -990,18 +1092,18 @@ let private tryEmitIdent : Emit<ExprResult option> =
                     | :? byte as b -> emitI8 b |>> fun ssa -> Some (Value(ssa, "i8"))
                     | :? bool as b -> emitI1 b |>> fun ssa -> Some (Value(ssa, "i1"))
                     | other ->
-                        // Unsupported literal type - fall back to function call
+                        // Unsupported literal type
                         emit (Some (Error (sprintf "Unsupported literal type: %A" (other.GetType()))))
-                | _ ->
-                    // Not a literal - try as a module-level value (zero-arg function call)
+                | :? FSharp.Compiler.Symbols.FSharpMemberOrFunctionOrValue as mfv
+                    when mfv.IsModuleValueOrMember &&
+                         not (mfv.DisplayName.Contains(".ctor") || mfv.DisplayName.Contains("ctor")) ->
+                    // Module-level value (not a constructor) - emit as zero-arg function call
                     // Get the result type from the PSG node's Type field
-                    // If it's a function type, get the return type; otherwise use as-is
                     let resultType =
                         match node.Type with
                         | Some ftype ->
                             if ftype.IsFunctionType then
-                                // This is a function value - return it as a function pointer for now
-                                // In reality, we'd need proper closure support
+                                // This is a function value - return it as a function pointer
                                 "!llvm.ptr"
                             else
                                 fsharpTypeToMLIR ftype
@@ -1017,6 +1119,10 @@ let private tryEmitIdent : Emit<ExprResult option> =
                     freshSSAWithType resultType >>= fun resultReg ->
                     line (sprintf "%s = func.call @%s() : () -> %s" resultReg funcName resultType) >>.
                     emit (Some (Value(resultReg, resultType)))
+                | _ ->
+                    // Local variable that should have been bound but wasn't found
+                    // This is an error - don't fall back to function call
+                    emit (Some (Error errMsg))
             | success -> emit (Some success)
         | None ->
             // No symbol - fall back to string-based lookup
@@ -1070,13 +1176,17 @@ let private emitBindingNode (bindingNode: PSGNode) : Emit<ExprResult> =
     atNode bindingNode (
         getZipper >>= fun bz ->
         let bindingChildren = PSGZipper.childNodes bz
+        // Binding children are typically [valueExpr, pattern] or [valueExpr, pattern, ...]
+        // The value expression is the FIRST child (before the pattern)
         match bindingChildren with
-        | _ :: valueNode :: _ ->
+        | valueNode :: _ when not (valueNode.SyntaxKind.StartsWith("Pattern:")) ->
             atNode valueNode callEmitExpr
         | [_patternOnly] ->
             emit Void
         | [] ->
             emit Void
+        | _ ->
+            emit Void  // Edge case: only patterns, no value expression
     ) >>= fun valueResult ->
     match valueResult with
     | Value(ssa, typ) ->
@@ -1603,10 +1713,14 @@ let private tryEmitAddressOf : Emit<ExprResult option> =
 
 /// Handler for NativeStr struct construction: NativeStr(ptr, len)
 /// This is fundamental lowering - struct construction becomes inline MLIR, not a function call
+///
+/// Per F# spec (expressions.md:1619-1652), NativeStr(ptr, len) is a standard
+/// object construction expression that gets resolved to a constructor call.
+/// We inline the struct construction here instead of emitting a function call.
 let private tryEmitNativeStrConstruction : Emit<ExprResult option> =
     getZipper >>= fun z ->
     let node = z.Focus
-    // Check if this is a function call to .ctor that returns NativeStr
+    // Check if this is a function call that returns NativeStr
     if not (node.SyntaxKind.StartsWith("App")) then
         emit None
     else
@@ -1621,49 +1735,72 @@ let private tryEmitNativeStrConstruction : Emit<ExprResult option> =
         if not isNativeStr then
             emit None
         else
-            // Get children - should be: Ident:.ctor, Tuple:(ptr, len)
+            // Get children - PSG may store them as [Tuple; Ident:NativeStr] or [Ident; Tuple]
             let children = PSGZipper.childNodes z
-            match children with
-            | [funcNode; argNode] when funcNode.SyntaxKind.StartsWith("Ident") ->
-                // Check if it's a constructor call
-                match funcNode.Symbol with
-                | Some sym when sym.DisplayName = ".ctor" || sym.DisplayName.Contains("ctor") ->
-                    // Navigate to argNode and get its children (the tuple elements)
-                    atNode argNode (
-                        getZipper >>= fun argZ ->
-                        let argChildren = PSGZipper.childNodes argZ
-                        match argChildren with
-                        | [ptrNode; lenNode] ->
-                            // Emit the pointer argument
-                            atNode ptrNode callEmitExpr >>= fun ptrResult ->
-                            match ptrResult with
-                            | Value(ptrSsa, _) ->
-                                // Emit the length argument
-                                atNode lenNode callEmitExpr >>= fun lenResult ->
-                                match lenResult with
-                                | Value(lenSsa, lenType) ->
-                                    // Convert length to i64 if needed
-                                    let emitLen64 =
-                                        if lenType = "i64" then emit lenSsa
-                                        else
-                                            freshSSAWithType "i64" >>= fun len64 ->
-                                            line (sprintf "%s = arith.extsi %s : %s to i64" len64 lenSsa lenType) >>.
-                                            emit len64
-                                    emitLen64 >>= fun len64Ssa ->
-                                    // Build the NativeStr struct
-                                    freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun strStruct ->
-                                    line (sprintf "%s = llvm.mlir.undef : !llvm.struct<(ptr, i64)>" strStruct) >>.
-                                    freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun strStruct1 ->
-                                    line (sprintf "%s = llvm.insertvalue %s, %s[0] : !llvm.struct<(ptr, i64)>" strStruct1 ptrSsa strStruct) >>.
-                                    freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun strStruct2 ->
-                                    line (sprintf "%s = llvm.insertvalue %s, %s[1] : !llvm.struct<(ptr, i64)>" strStruct2 len64Ssa strStruct1) >>.
-                                    emit (Some (Value(strStruct2, "!llvm.struct<(ptr, i64)>")))
-                                | _ -> emit None
+
+            // Helper to check if a node is a NativeStr constructor ident
+            let isNativeStrCtor (n: PSGNode) : bool =
+                if not (n.SyntaxKind.StartsWith("Ident")) then false
+                else
+                    // Check 1: SyntaxKind contains "NativeStr" (e.g., "Ident:NativeStr")
+                    let syntaxHasNativeStr = n.SyntaxKind.Contains("NativeStr")
+                    // Check 2: Symbol is a constructor
+                    let hasCtorSymbol =
+                        match n.Symbol with
+                        | Some sym -> sym.DisplayName = ".ctor" || sym.DisplayName.Contains("ctor")
+                        | None -> false
+                    // Either the syntax indicates NativeStr OR it's a ctor symbol
+                    syntaxHasNativeStr || hasCtorSymbol
+
+            // Helper to identify the constructor ident and arguments
+            // Children are in source order: [funcExpr, argExpr] for App nodes
+            let findCtorAndArgs (nodes: PSGNode list) : (PSGNode * PSGNode) option =
+                match nodes with
+                | [n1; n2] ->
+                    // n1 should be the constructor ident, n2 should be the args tuple
+                    if isNativeStrCtor n1 then Some (n1, n2)
+                    // Handle curried case where ctor might be deeper in nested App
+                    elif isNativeStrCtor n2 then Some (n2, n1)
+                    else None
+                | _ -> None
+
+            match findCtorAndArgs children with
+            | Some (_ctorNode, argNode) ->
+                // Navigate to argNode and get its children (the tuple elements)
+                atNode argNode (
+                    getZipper >>= fun argZ ->
+                    let argChildren = PSGZipper.childNodes argZ
+                    match argChildren with
+                    | [ptrNode; lenNode] ->
+                        // Emit the pointer argument
+                        atNode ptrNode callEmitExpr >>= fun ptrResult ->
+                        match ptrResult with
+                        | Value(ptrSsa, _) ->
+                            // Emit the length argument
+                            atNode lenNode callEmitExpr >>= fun lenResult ->
+                            match lenResult with
+                            | Value(lenSsa, lenType) ->
+                                // Convert length to i64 if needed
+                                let emitLen64 =
+                                    if lenType = "i64" then emit lenSsa
+                                    else
+                                        freshSSAWithType "i64" >>= fun len64 ->
+                                        line (sprintf "%s = arith.extsi %s : %s to i64" len64 lenSsa lenType) >>.
+                                        emit len64
+                                emitLen64 >>= fun len64Ssa ->
+                                // Build the NativeStr struct
+                                freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun strStruct ->
+                                line (sprintf "%s = llvm.mlir.undef : !llvm.struct<(ptr, i64)>" strStruct) >>.
+                                freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun strStruct1 ->
+                                line (sprintf "%s = llvm.insertvalue %s, %s[0] : !llvm.struct<(ptr, i64)>" strStruct1 ptrSsa strStruct) >>.
+                                freshSSAWithType "!llvm.struct<(ptr, i64)>" >>= fun strStruct2 ->
+                                line (sprintf "%s = llvm.insertvalue %s, %s[1] : !llvm.struct<(ptr, i64)>" strStruct2 len64Ssa strStruct1) >>.
+                                emit (Some (Value(strStruct2, "!llvm.struct<(ptr, i64)>")))
                             | _ -> emit None
-                        | _ -> emit None  // Wrong number of arguments
-                    )
-                | _ -> emit None  // Not a constructor
-            | _ -> emit None  // Wrong structure
+                        | _ -> emit None
+                    | _ -> emit None  // Wrong number of arguments
+                )
+            | None -> emit None  // Not a NativeStr constructor call
 
 // ===================================================================
 // Function Call Handler
@@ -1785,6 +1922,15 @@ let private tryEmitPipe : Emit<ExprResult option> =
     | Some info -> handlePipe info |>> Some
     | None -> emit None
 
+/// Check if a function call info represents a constructor call
+let private isConstructorCall (info: FunctionCallInfo) : bool =
+    info.FunctionName.Contains(".ctor") ||
+    info.FunctionName.Contains("ctor") ||
+    // Also check the symbol on the function node if available
+    (info.FunctionNode.Symbol
+     |> Option.map (fun sym -> sym.DisplayName = ".ctor" || sym.DisplayName.Contains("ctor"))
+     |> Option.defaultValue false)
+
 /// Try to emit as function call (for user-defined functions, not Alloy ops or operators)
 let private tryEmitFunctionCall : Emit<ExprResult option> =
     getZipper >>= fun z ->
@@ -1811,7 +1957,18 @@ let private tryEmitFunctionCall : Emit<ExprResult option> =
                     | None ->
                         // This is a user-defined function call
                         match extractFunctionCall z.Graph node with
-                        | Some info -> handleFunctionCall info |>> Some
+                        | Some info ->
+                            // FAIL-FAST: Constructor calls should have been handled by struct construction handlers.
+                            // If we reach here with a constructor, it means the struct lowering failed.
+                            // Do NOT silently generate a broken function call - error out immediately.
+                            if isConstructorCall info then
+                                let typeName =
+                                    match node.Type with
+                                    | Some t when t.HasTypeDefinition -> t.TypeDefinition.FullName
+                                    | _ -> "unknown type"
+                                emit (Some (Error (sprintf "Unhandled struct constructor for '%s'. Constructor calls must be lowered to inline struct construction, not function calls. This indicates a missing pattern in tryEmitNativeStrConstruction or similar handler." typeName)))
+                            else
+                                handleFunctionCall info |>> Some
                         | None -> emit None
 
 // ===================================================================
