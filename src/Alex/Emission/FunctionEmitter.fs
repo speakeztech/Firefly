@@ -1,7 +1,8 @@
 /// FunctionEmitter - Emit complete MLIR functions
 ///
-/// Orchestrates expression emission within function contexts using
-/// zipper-based traversal.
+/// This module uses the EmissionMonad for function-level emission,
+/// while delegating expression emission to ExpressionEmitter which
+/// uses the MLIR computation expression (no sprintf).
 module Alex.Emission.FunctionEmitter
 
 open System.Text
@@ -11,7 +12,20 @@ open Alex.CodeGeneration.EmissionContext
 open Alex.CodeGeneration.TypeMapping
 open Alex.CodeGeneration.EmissionMonad
 open Alex.Traversal.PSGZipper
-open Alex.Emission.ExpressionEmitter
+
+// Import the new MLIR builder types
+module MB = Alex.CodeGeneration.MLIRBuilder
+module EE = Alex.Emission.ExpressionEmitter
+
+// ═══════════════════════════════════════════════════════════════════
+// ExprResult Type - mirrors ExpressionEmitter.EmitResult
+// ═══════════════════════════════════════════════════════════════════
+
+/// Result of expression emission - for function-level handling
+type FuncEmitResult =
+    | Value of ssa: string * typ: string
+    | Void
+    | EmitError of string
 
 // ═══════════════════════════════════════════════════════════════════
 // Safe Symbol Helpers
@@ -100,14 +114,81 @@ let findReachableFunctions (psg: ProgramSemanticGraph) : PSGNode list =
         | None -> true)
 
 // ═══════════════════════════════════════════════════════════════════
+// Bridge: MLIR CE to EmissionMonad
+// ═══════════════════════════════════════════════════════════════════
+
+/// Convert MLIR builder type to string representation
+let private tyToString (ty: MB.Ty) : string =
+    match ty with
+    | MB.Int MB.I1 -> "i1"
+    | MB.Int MB.I8 -> "i8"
+    | MB.Int MB.I16 -> "i16"
+    | MB.Int MB.I32 -> "i32"
+    | MB.Int MB.I64 -> "i64"
+    | MB.Float MB.F32 -> "f32"
+    | MB.Float MB.F64 -> "f64"
+    | MB.Ptr -> "!llvm.ptr"
+    | MB.Struct _ -> "!llvm.struct<...>"
+    | MB.Array _ -> "!llvm.array<...>"
+    | MB.Func _ -> "func"
+    | MB.Unit -> "()"
+    | MB.Index -> "index"
+
+/// Run an MLIR CE emission within the EmissionMonad context.
+/// This bridges the new MLIR CE with the function-level EmissionMonad.
+let runMLIREmission (psg: ProgramSemanticGraph) (node: PSGNode) : Emit<FuncEmitResult> =
+    fun env state ->
+        // Create a fresh BuilderState for expression emission
+        let builderState : MB.BuilderState = {
+            Output = StringBuilder()
+            SSACounter = state.SSACounter
+            Indent = 0
+            Globals = []
+        }
+
+        // Run the MLIR CE emission
+        let mlirExpr = EE.emitExpr psg node
+        let result = mlirExpr builderState
+
+        // Transfer emitted MLIR lines to the function-level builder
+        let emittedText = builderState.Output.ToString()
+        for lineText in emittedText.Split('\n') do
+            if not (System.String.IsNullOrWhiteSpace(lineText)) then
+                MLIRBuilder.line env.Builder lineText
+
+        // Update state with new SSA counter
+        let newState = {
+            state with
+                SSACounter = builderState.SSACounter
+        }
+
+        // Convert EE.EmitResult to FuncEmitResult
+        let funcResult =
+            match result with
+            | EE.Emitted v ->
+                let ssaName = v.SSA.Name
+                let typStr = tyToString v.Type
+                Value(ssaName, typStr)
+            | EE.Void -> Void
+            | EE.Error msg -> EmitError msg
+
+        (newState, funcResult)
+
+// ═══════════════════════════════════════════════════════════════════
 // Function Body Emission (Zipper-based)
 // ═══════════════════════════════════════════════════════════════════
 
 /// Emit the body of a function by traversing its children with the zipper
 /// Skips Pattern nodes (which are structural) and emits expression children
-let emitFunctionBody : Emit<ExprResult> =
+let emitFunctionBody (psg: ProgramSemanticGraph) : Emit<FuncEmitResult> =
     getZipper >>= fun z ->
     let children = PSGZipper.childNodes z
+
+    // Debug: Print what we're seeing
+    printfn "[EMIT DEBUG] emitFunctionBody for node: %s" z.Focus.SyntaxKind
+    printfn "[EMIT DEBUG]   Children count: %d" (List.length children)
+    for child in children do
+        printfn "[EMIT DEBUG]   - %s" child.SyntaxKind
 
     // Filter out Pattern nodes - they're structural, not expressions
     let exprChildren =
@@ -116,15 +197,15 @@ let emitFunctionBody : Emit<ExprResult> =
 
     match exprChildren with
     | [] -> emit Void
-    | [single] -> atNode single emitCurrentExpr
+    | [single] -> runMLIREmission psg single
     | _ ->
         // Emit all but last for side effects, return last
         let allButLast = exprChildren |> List.take (List.length exprChildren - 1)
         let lastNode = exprChildren |> List.last
         forEach (fun child ->
-            atNode child emitCurrentExpr >>= fun _ -> emit ()
+            runMLIREmission psg child >>= fun _ -> emit ()
         ) allButLast >>.
-        atNode lastNode emitCurrentExpr
+        runMLIREmission psg lastNode
 
 // ═══════════════════════════════════════════════════════════════════
 // Function Emission
@@ -184,14 +265,14 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
                 |> Seq.toList
             | _ -> []
 
-        // Clear locals from previous function - each function has its own scope
-        clearLocals >>.
+        // Clear state from previous function - each function has its own scope
+        clearFunctionScope >>.
 
         // Build parameter list (using actual names where available, falling back to argN)
         let paramStr =
             paramTypes
             |> List.mapi (fun i typ ->
-                let name = if i < List.length paramNames then paramNames.[i] else sprintf "arg%d" i
+                let _name = if i < List.length paramNames then paramNames.[i] else sprintf "arg%d" i
                 sprintf "%%arg%d: %s" i typ)  // MLIR uses argN but we track the source name
             |> String.concat ", "
 
@@ -200,21 +281,35 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
         line (sprintf "func.func @%s(%s) -> %s {" funcName paramStr returnType) >>.
         pushIndent >>.
 
-        // Register parameters in local scope with BOTH their source names AND argN names
-        forEach (fun (typ, i) ->
-            let ssaName = sprintf "%%arg%d" i
-            // Bind with source name (e.g., "oldValue" -> %arg1)
-            let sourceName = if i < List.length paramNames then paramNames.[i] else sprintf "arg%d" i
-            bindLocal sourceName ssaName typ >>= fun _ ->
-            // Also bind with argN name for backwards compatibility
-            if i < List.length paramNames then
-                bindLocal (sprintf "arg%d" i) ssaName typ
+        // Register function parameters in NodeSSA
+        // Use zipper navigation: funcNode -> Pattern:LongIdent -> Pattern:Named children
+        getZipper >>= fun z ->
+        let parameterNodes =
+            // Get children of funcNode (the Binding)
+            PSGZipper.childNodes z
+            // Find Pattern:LongIdent (function name pattern)
+            |> List.filter (fun n -> n.SyntaxKind.StartsWith("Pattern:LongIdent"))
+            // Get Pattern:Named children of each (the parameters)
+            |> List.collect (fun longIdentNode ->
+                match longIdentNode.Children with
+                | Parent childIds ->
+                    childIds
+                    |> List.choose (fun id -> Map.tryFind id.Value z.Graph.Nodes)
+                    |> List.filter (fun n -> n.SyntaxKind.StartsWith("Pattern:Named"))
+                | _ -> [])
+
+        // Record SSA for each parameter node in order
+        forEach (fun (node, idx) ->
+            if idx < List.length paramTypes then
+                let ssaName = sprintf "%%arg%d" idx
+                let typ = paramTypes.[idx]
+                recordNodeSSA node.Id ssaName typ
             else
                 emit ()
-        ) (paramTypes |> List.mapi (fun i p -> (p, i))) >>.
+        ) (parameterNodes |> List.mapi (fun i n -> (n, i))) >>.
 
         // Navigate to function node and emit its body
-        atNode funcNode emitFunctionBody >>= fun result ->
+        atNode funcNode (emitFunctionBody psg) >>= fun result ->
 
         // For entry points, emit exit syscall
         (if isEntryPoint then
@@ -232,9 +327,9 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
             emitExtsi exitCode "i32" "i64" >>= fun exitCode64 ->
             // Emit exit syscall (syscall 60 on Linux x86-64)
             emitI64 60L >>= fun syscallNum ->
-            freshSSAWithType "i64" >>= fun result ->
+            freshSSAWithType "i64" >>= fun resultSSA ->
             line (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},~{rcx},~{r11},~{memory}\" %s, %s : (i64, i64) -> i64"
-                result syscallNum exitCode64) >>.
+                resultSSA syscallNum exitCode64) >>.
             emitReturn exitCode "i32"
         else
             // Non-entry-point function - match return type
@@ -253,7 +348,7 @@ let emitFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (isEntryPoint: 
                     // Need to return a default value of the declared type
                     emitDefaultValue returnType >>= fun defaultVal ->
                     emitReturn defaultVal returnType
-            | Error msg ->
+            | EmitError msg ->
                 line (sprintf "// ERROR: %s" msg) >>.
                 // Still need valid return for MLIR
                 if returnType = "()" then
@@ -329,6 +424,7 @@ let emitProgram (psg: ProgramSemanticGraph) : string =
         ReachabilityDistance = Some 0
         ContextRequirement = None
         ComputationPattern = None
+        Operation = None
     }
     let zipper = PSGZipper.create psg dummyNode
 

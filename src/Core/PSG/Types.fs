@@ -59,11 +59,141 @@ type ContextRequirement =
     | Pure              // No external dependencies
     | AsyncBoundary     // Suspension point
     | ResourceAccess    // File/network access
+    | Parameter of int  // Function parameter with index
 
 /// Computation patterns for optimization decisions
 type ComputationPattern =
     | DataDriven        // Push-based, eager evaluation
     | DemandDriven      // Pull-based, lazy evaluation
+
+// ═══════════════════════════════════════════════════════════════════
+// Library Operation Classifications
+// These types describe the semantic operation at an App node,
+// enabling the emitter to dispatch directly without re-analyzing symbols.
+// ═══════════════════════════════════════════════════════════════════
+
+/// Arithmetic operations (emit as arith dialect ops)
+type ArithmeticOp =
+    | Add | Sub | Mul | Div | Mod
+    | Negate  // Unary negation
+
+/// Bitwise operations (emit as arith dialect ops)
+type BitwiseOp =
+    | BitwiseAnd | BitwiseOr | BitwiseXor
+    | ShiftLeft | ShiftRight
+    | BitwiseNot  // Unary complement
+
+/// Comparison operations (emit as arith.cmpi)
+type ComparisonOp =
+    | Eq | Neq | Lt | Gt | Lte | Gte
+
+/// Type conversion operations
+type ConversionOp =
+    | ToByte | ToSByte
+    | ToInt16 | ToUInt16
+    | ToInt32 | ToUInt32
+    | ToInt64 | ToUInt64
+    | ToFloat32 | ToFloat64
+    | ToChar
+    | ToNativeInt | ToUNativeInt
+
+/// NativePtr operations (from FSharp.NativeInterop)
+type NativePtrOp =
+    | PtrRead       // NativePtr.read ptr
+    | PtrWrite      // NativePtr.write ptr value
+    | PtrGet        // NativePtr.get ptr index
+    | PtrSet        // NativePtr.set ptr index value
+    | PtrAdd        // NativePtr.add ptr offset
+    | PtrStackAlloc // NativePtr.stackalloc<T> count
+    | PtrNull       // NativePtr.nullPtr<T>
+    | PtrToNativeInt
+    | PtrOfNativeInt
+    | PtrToVoidPtr
+    | PtrOfVoidPtr
+
+/// Console I/O operations (platform-specific emission)
+type ConsoleOp =
+    | ConsoleWriteBytes   // writeBytes fd ptr count
+    | ConsoleReadBytes    // readBytes fd ptr count
+    | ConsoleWrite        // write (high-level)
+    | ConsoleWriteln      // writeln
+    | ConsoleReadLine     // readLine
+    | ConsoleReadInto     // readInto (SRTP)
+    | ConsoleNewLine      // newLine
+
+/// Time operations (platform-specific emission)
+type TimeOp =
+    | CurrentTicks
+    | HighResolutionTicks
+    | TickFrequency
+    | Sleep
+
+/// NativeString operations
+type NativeStrOp =
+    | StrCreate       // NativeStr(ptr, len) constructor
+    | StrEmpty        // empty()
+    | StrIsEmpty      // isEmpty s
+    | StrLength       // length s
+    | StrByteAt       // byteAt index s
+    | StrCopyTo       // copyTo dest s
+    | StrOfBytes      // ofBytes bytes
+    | StrCopyToBuffer // copyToBuffer dest s
+    | StrConcat2      // concat2 dest a b
+    | StrConcat3      // concat3 dest a b c
+    | StrFromBytesTo  // fromBytesTo dest bytes
+
+/// Memory operations
+type MemoryOp =
+    | MemStackBuffer  // Memory.stackBuffer<T> size
+    | MemCopy         // Memory.copy src dest len
+    | MemZero         // Memory.zero dest len
+    | MemCompare      // Memory.compare a b len
+
+/// Result DU operations
+type ResultOp =
+    | ResultOk        // Ok value
+    | ResultError     // Error err
+
+/// Core operations
+type CoreOp =
+    | Ignore          // ignore value
+    | Failwith        // failwith message
+    | InvalidArg      // invalidArg paramName message
+    | Not             // not (boolean negation)
+
+/// Text formatting operations
+type TextFormatOp =
+    | IntToString
+    | Int64ToString
+    | FloatToString
+    | BoolToString
+
+/// Information about a regular function call (for unclassified App nodes)
+type RegularCallInfo = {
+    FunctionName: string
+    ModulePath: string option
+    ArgumentCount: int
+}
+
+/// Classified operation for App nodes
+/// The nanopass ClassifyOperations sets this on App nodes
+/// so the emitter can dispatch directly without re-analyzing symbols.
+type OperationKind =
+    | Arithmetic of ArithmeticOp
+    | Bitwise of BitwiseOp
+    | Comparison of ComparisonOp
+    | Conversion of ConversionOp
+    | NativePtr of NativePtrOp
+    | Console of ConsoleOp
+    | Time of TimeOp
+    | NativeStr of NativeStrOp
+    | Memory of MemoryOp
+    | Result of ResultOp
+    | Core of CoreOp
+    | TextFormat of TextFormatOp
+    | RegularCall of RegularCallInfo
+    // Note: Pipe operators (|>, <|) are reduced by ReducePipeOperators nanopass
+    // and should never appear as OperationKind
 
 /// PSG node with soft-delete support added to existing structure
 type PSGNode = {
@@ -87,6 +217,9 @@ type PSGNode = {
     // NEW FIELDS - Context tracking for continuation compilation
     ContextRequirement: ContextRequirement option
     ComputationPattern: ComputationPattern option
+
+    // NEW FIELD - Operation classification (set by ClassifyOperations nanopass)
+    Operation: OperationKind option
 }
 
 /// Complete Program Semantic Graph
@@ -142,6 +275,9 @@ module ChildrenStateHelpers =
         // Initialize context tracking fields
         ContextRequirement = None
         ComputationPattern = None
+
+        // Initialize operation classification
+        Operation = None
     }
     
     /// Add a child to a node (appends to maintain source order)
@@ -322,3 +458,48 @@ module ReachabilityHelpers =
         with ex ->
             printfn "[CONTEXT] Error analyzing node %s (kind: %s): %s" node.Id.Value node.SyntaxKind ex.Message
             node
+
+/// Helper functions for operation classification and MLIR emission
+module OperationHelpers =
+
+    /// Get MLIR operation name for arithmetic op
+    let arithmeticOpToMLIR (op: ArithmeticOp) : string =
+        match op with
+        | Add -> "arith.addi"
+        | Sub -> "arith.subi"
+        | Mul -> "arith.muli"
+        | Div -> "arith.divsi"
+        | Mod -> "arith.remsi"
+        | Negate -> "arith.subi" // 0 - x
+
+    /// Get MLIR operation name for bitwise op
+    let bitwiseOpToMLIR (op: BitwiseOp) : string =
+        match op with
+        | BitwiseAnd -> "arith.andi"
+        | BitwiseOr -> "arith.ori"
+        | BitwiseXor -> "arith.xori"
+        | ShiftLeft -> "arith.shli"
+        | ShiftRight -> "arith.shrsi"
+        | BitwiseNot -> "arith.xori" // xor with -1
+
+    /// Get MLIR predicate for comparison op (for arith.cmpi)
+    let comparisonOpToPredicate (op: ComparisonOp) : string =
+        match op with
+        | Eq -> "eq"
+        | Neq -> "ne"
+        | Lt -> "slt"
+        | Gt -> "sgt"
+        | Lte -> "sle"
+        | Gte -> "sge"
+
+    /// Check if operation is a binary arithmetic op
+    let isBinaryArithOp (op: ArithmeticOp) : bool =
+        match op with
+        | Add | Sub | Mul | Div | Mod -> true
+        | Negate -> false
+
+    /// Check if operation is a binary bitwise op
+    let isBinaryBitwiseOp (op: BitwiseOp) : bool =
+        match op with
+        | BitwiseAnd | BitwiseOr | BitwiseXor | ShiftLeft | ShiftRight -> true
+        | BitwiseNot -> false

@@ -46,7 +46,11 @@
 
       <!-- PSG Nanopass (small, single-purpose transformations) -->
       <Compile Include="Core/PSG/Nanopass/IntermediateEmission.fs" />
+      <Compile Include="Core/PSG/Nanopass/FlattenApplications.fs" />
+      <Compile Include="Core/PSG/Nanopass/ReducePipeOperators.fs" />
       <Compile Include="Core/PSG/Nanopass/DefUseEdges.fs" />
+      <Compile Include="Core/PSG/Nanopass/ParameterAnnotation.fs" />
+      <Compile Include="Core/PSG/Nanopass/ClassifyOperations.fs" />
 
       <!-- PSG Builder (refactored into sub-modules) -->
       <Compile Include="Core/PSG/Builder/Types.fs" />
@@ -75,6 +79,7 @@
       <Compile Include="Core/MLIR/Emitter.fs" />
 
       <!-- Alex CodeGeneration -->
+      <Compile Include="Alex/CodeGeneration/MLIRBuilder.fs" />
       <Compile Include="Alex/CodeGeneration/EmissionContext.fs" />
       <Compile Include="Alex/CodeGeneration/TypeMapping.fs" />
 
@@ -91,7 +96,6 @@
 
       <!-- Alex Patterns -->
       <Compile Include="Alex/Patterns/PSGPatterns.fs" />
-      <Compile Include="Alex/Patterns/AlloyPatterns.fs" />
 
       <!-- Alex CodeGeneration (depends on Traversal) -->
       <Compile Include="Alex/CodeGeneration/EmissionMonad.fs" />

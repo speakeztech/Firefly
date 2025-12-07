@@ -292,59 +292,46 @@ let freshLabel : Emit<string> =
         let state' = { state with LabelCounter = state.LabelCounter + 1 }
         (state', name)
 
-/// Look up a local variable
-let lookupLocal (name: string) : Emit<string option> =
-    getState |>> fun s -> Map.tryFind name s.Locals
-
-/// Look up a local variable's type
-let lookupLocalType (name: string) : Emit<string option> =
-    getState |>> fun s -> Map.tryFind name s.LocalTypes
-
-/// Bind a local variable
-let bindLocal (fsharpName: string) (ssaName: string) (mlirType: string) : Emit<unit> =
-    modifyState (fun s -> {
-        s with
-            Locals = Map.add fsharpName ssaName s.Locals
-            LocalTypes = Map.add fsharpName mlirType s.LocalTypes
-            SSATypes = Map.add ssaName mlirType s.SSATypes
-    })
-
-/// Clear all local variable mappings for a new function scope
-/// Preserves SSA counter and string literals (which are module-level)
-let clearLocals : Emit<unit> =
-    modifyState (fun s -> {
-        s with
-            Locals = Map.empty
-            LocalTypes = Map.empty
-            SSATypes = Map.empty
-            MutableSlots = Map.empty
-            SymbolSSA = SymbolSSAContext.empty
-    })
-
 // ═══════════════════════════════════════════════════════════════════
-// Symbol-Based SSA Lookup (preferred over string-based)
+// Node SSA Recording (for binding nodes)
 // ═══════════════════════════════════════════════════════════════════
 
-open FSharp.Compiler.Symbols
+/// Record that a node was emitted with a given SSA value
+/// Called when emitting Binding nodes - stores in NodeSSA map
+let recordNodeSSA (nodeId: NodeId) (ssaValue: string) (mlirType: string) : Emit<unit> =
+    modifyState (EmissionState.recordNodeSSA nodeId ssaValue mlirType)
 
-/// Bind a symbol to an SSA value at a node
-/// Use this when emitting Binding nodes
-let bindSymbolSSA (sym: FSharpSymbol) (nodeId: NodeId) (ssaValue: string) (mlirType: string) : Emit<unit> =
-    modifyState (EmissionState.bindSymbolSSA sym nodeId ssaValue mlirType)
+/// Look up SSA value for a node by its ID
+/// Used after following PSG def-use edges to find the defining node
+let lookupNodeSSA (nodeId: NodeId) : Emit<(string * string) option> =
+    getState |>> EmissionState.lookupNodeSSA nodeId
 
-/// Look up SSA info for a symbol (for Ident nodes)
-let lookupSymbolSSA (sym: FSharpSymbol) : Emit<SSAInfo option> =
-    getState |>> EmissionState.lookupSymbolSSA sym
+// ═══════════════════════════════════════════════════════════════════
+// PSG Def-Use Edge Resolution
+// ═══════════════════════════════════════════════════════════════════
 
-/// Register a mutable variable's stack slot
-let registerMutableSlot (fsharpName: string) (slotPtr: string) (elemType: string) : Emit<unit> =
-    modifyState (fun s -> {
-        s with MutableSlots = Map.add fsharpName (slotPtr, elemType) s.MutableSlots
-    })
+/// Find the defining node for a variable use by following SymbolUse edges
+/// This is the NEW way to resolve variables - via PSG structure, not scope tracking
+let findDefiningNodeId (useNode: PSGNode) : Emit<NodeId option> =
+    getZipper >>= fun z ->
+    let defEdge =
+        z.Graph.Edges
+        |> List.tryFind (fun edge ->
+            edge.Source = useNode.Id && edge.Kind = SymbolUse)
+    emit (defEdge |> Option.map (fun e -> e.Target))
 
-/// Look up a mutable variable's stack slot
-let lookupMutableSlot (name: string) : Emit<(string * string) option> =
-    getState |>> fun s -> Map.tryFind name s.MutableSlots
+/// Resolve a variable use to its SSA value by following def-use edges
+/// 1. Follow SymbolUse edge from use node to definition node
+/// 2. Look up definition node's SSA value in NodeSSA map
+let resolveVariableUse (useNode: PSGNode) : Emit<(string * string) option> =
+    findDefiningNodeId useNode >>= fun defNodeIdOpt ->
+    match defNodeIdOpt with
+    | Some defNodeId -> lookupNodeSSA defNodeId
+    | None -> emit None
+
+// ═══════════════════════════════════════════════════════════════════
+// String/Byte Literals
+// ═══════════════════════════════════════════════════════════════════
 
 /// Register a string literal
 let registerStringLiteral (content: string) : Emit<string> =
@@ -371,39 +358,17 @@ let registerByteLiteral (bytes: byte[]) : Emit<string> =
             (state', name)
 
 // ═══════════════════════════════════════════════════════════════════
-// Bindings Bridge
+// Function Scope Reset
 // ═══════════════════════════════════════════════════════════════════
 
-/// Create an SSAContext that is synchronized with the current EmissionState
-/// This allows calling into the Bindings layer from the monad
-let withSSAContext (action: SSAContext -> 'T) : Emit<'T> =
-    fun env state ->
-        // Create a temporary SSAContext from our state
-        let ctx = SSAContext.create ()
-        ctx.Counter <- state.SSACounter
-        ctx.Locals <- state.Locals
-        ctx.LocalTypes <- state.LocalTypes
-        ctx.SSATypes <- state.SSATypes
-        ctx.StringLiterals <- state.StringLiterals
-
-        // Run the action
-        let result = action ctx
-
-        // Sync state back from SSAContext
-        let state' = {
-            state with
-                SSACounter = ctx.Counter
-                Locals = ctx.Locals
-                LocalTypes = ctx.LocalTypes
-                SSATypes = ctx.SSATypes
-                StringLiterals = ctx.StringLiterals
-        }
-        (state', result)
-
-/// Execute a Bindings function that uses MLIRBuilder and SSAContext
-let invokeBinding (action: MLIRBuilder -> SSAContext -> 'T) : Emit<'T> =
-    getBuilder >>= fun builder ->
-    withSSAContext (fun ctx -> action builder ctx)
+/// Clear node SSA mappings for a new function scope
+/// Preserves SSA counter and string literals (which are module-level)
+let clearFunctionScope : Emit<unit> =
+    modifyState (fun s -> {
+        s with
+            SSATypes = Map.empty
+            NodeSSA = Map.empty
+    })
 
 // ═══════════════════════════════════════════════════════════════════
 // Output Operations

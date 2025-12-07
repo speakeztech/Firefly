@@ -50,14 +50,38 @@ let symbolKey (sym: FSharpSymbol) : string =
 /// Built by scanning all Binding nodes in the PSG.
 type SymbolDefinitionIndex = Map<string, NodeId>
 
-/// Build an index of symbol definitions from Binding nodes.
+/// Check if a Pattern:Named node is a function parameter (not inside a Binding).
+/// Function parameters have Pattern:LongIdent as parent, not Binding.
+let private isParameterPattern (psg: ProgramSemanticGraph) (node: PSGNode) : bool =
+    match node.ParentId with
+    | Some parentId ->
+        match Map.tryFind parentId.Value psg.Nodes with
+        | Some parentNode -> parentNode.SyntaxKind.StartsWith("Pattern:LongIdent")
+        | None -> false
+    | None -> false
+
+/// Check if a node represents a symbol definition.
+/// Definitions include:
+/// - Binding nodes (let bindings - SSA recorded here by emitBindingNode)
+/// - Pattern:Named nodes ONLY if they are function parameters (SSA recorded by FunctionEmitter)
+///   Pattern:Named inside Bindings are NOT indexed - we use the Binding node instead
+let private isDefinitionNode (psg: ProgramSemanticGraph) (node: PSGNode) : bool =
+    if node.SyntaxKind.StartsWith("Binding") then
+        true
+    elif node.SyntaxKind.StartsWith("Pattern:Named") then
+        // Only index Pattern:Named that are function parameters
+        isParameterPattern psg node
+    else
+        false
+
+/// Build an index of symbol definitions from Binding and parameter Pattern:Named nodes.
 /// This is Nanopass 3a - a pure function from PSG to index.
 let buildDefinitionIndex (psg: ProgramSemanticGraph) : SymbolDefinitionIndex =
     psg.Nodes
     |> Map.toSeq
     |> Seq.choose (fun (_, node) ->
-        // Only index Binding nodes (where symbols are defined)
-        if node.SyntaxKind.StartsWith("Binding") then
+        // Index Binding nodes and parameter Pattern:Named nodes
+        if isDefinitionNode psg node then
             match node.Symbol with
             | Some symbol ->
                 let key = symbolKey symbol

@@ -8,7 +8,11 @@ open Core.PSG.Types
 open Core.PSG.Correlation
 open Core.PSG.TypeIntegration
 open Core.PSG.Nanopass.IntermediateEmission
+open Core.PSG.Nanopass.FlattenApplications
+open Core.PSG.Nanopass.ReducePipeOperators
 open Core.PSG.Nanopass.DefUseEdges
+open Core.PSG.Nanopass.ParameterAnnotation
+open Core.PSG.Nanopass.ClassifyOperations
 open Core.PSG.Construction.Types
 open Core.PSG.Construction.DeclarationProcessing
 
@@ -138,28 +142,65 @@ let buildProgramSemanticGraph
         emitNanopassIntermediate typeEnhancedGraph "2_type_integration" nanopassOutputDir
         emitNanopassDiff structuralGraph typeEnhancedGraph "1_structural" "2_type_integration" nanopassOutputDir
 
+    // Phase 2b: Nanopass - Flatten curried applications
+    // Normalizes nested App nodes from curried calls into flat structure.
+    // Must run BEFORE def-use edges so edges are built on flattened structure.
+    printfn "[BUILDER] Phase 2b: Running application flattening nanopass"
+    let flattenedGraph = flattenApplications typeEnhancedGraph
+
+    // Emit Phase 2b intermediate
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediate flattenedGraph "2b_flattened_apps" nanopassOutputDir
+        emitNanopassDiff typeEnhancedGraph flattenedGraph "2_type_integration" "2b_flattened_apps" nanopassOutputDir
+
+    // Phase 2c: Nanopass - Reduce pipe operators
+    // Beta-reduces |> and <| to direct function application.
+    // Arithmetic/comparison operators are preserved for Alex to handle with type context.
+    printfn "[BUILDER] Phase 2c: Running pipe operator reduction nanopass"
+    let pipeReducedGraph = reducePipeOperators flattenedGraph
+
+    // Emit Phase 2c intermediate
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediate pipeReducedGraph "2c_pipe_reduced" nanopassOutputDir
+        emitNanopassDiff flattenedGraph pipeReducedGraph "2b_flattened_apps" "2c_pipe_reduced" nanopassOutputDir
+
     // Phase 3: Nanopass - Add def-use edges
     // This makes variable binding relationships explicit in the PSG structure,
     // eliminating the need for scope tracking in the emitter.
     printfn "[BUILDER] Phase 3: Running def-use nanopass"
-    let defUseGraph = addDefUseEdges typeEnhancedGraph
+    let defUseGraph = addDefUseEdges pipeReducedGraph
 
     // Emit Phase 3 intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
         emitNanopassIntermediate defUseGraph "3_def_use_edges" nanopassOutputDir
         emitNanopassDiff typeEnhancedGraph defUseGraph "2_type_integration" "3_def_use_edges" nanopassOutputDir
 
+    // Phase 3b: Nanopass - Annotate function parameters
+    // Marks Pattern:Named nodes that are function parameters with their index
+    printfn "[BUILDER] Phase 3b: Running parameter annotation nanopass"
+    let paramAnnotatedGraph = annotateParameters defUseGraph
+
+    // Phase 3c: Nanopass - Classify operations
+    // Sets Operation field on App nodes based on symbol analysis
+    printfn "[BUILDER] Phase 3c: Running operation classification nanopass"
+    let classifiedGraph = classifyOperations paramAnnotatedGraph
+
+    // Emit Phase 3c intermediate
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediate classifiedGraph "3c_classified_ops" nanopassOutputDir
+        emitNanopassDiff paramAnnotatedGraph classifiedGraph "3b_param_annotated" "3c_classified_ops" nanopassOutputDir
+
     // Phase 4: Finalize nodes and analyze context
     printfn "[BUILDER] Phase 4: Finalizing PSG nodes and analyzing context"
     let finalNodes =
-        defUseGraph.Nodes
+        classifiedGraph.Nodes
         |> Map.map (fun _ node ->
             node
             |> ChildrenStateHelpers.finalizeChildren
             |> ReachabilityHelpers.updateNodeContext)
 
     let finalGraph =
-        { defUseGraph with
+        { classifiedGraph with
             Nodes = finalNodes
             CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> List.ofArray
         }
@@ -167,7 +208,7 @@ let buildProgramSemanticGraph
     // Emit Phase 4 intermediate (final)
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
         emitNanopassIntermediate finalGraph "4_finalized" nanopassOutputDir
-        emitNanopassDiff defUseGraph finalGraph "3_def_use_edges" "4_finalized" nanopassOutputDir
+        emitNanopassDiff classifiedGraph finalGraph "3c_classified_ops" "4_finalized" nanopassOutputDir
 
     printfn "[BUILDER] ENHANCED PSG construction complete (FCS 43.9.300 compatible)"
     printfn "[BUILDER] Final PSG: %d nodes, %d edges, %d entry points, %d symbols"

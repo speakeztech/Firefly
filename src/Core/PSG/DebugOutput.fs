@@ -74,12 +74,13 @@ let private preparePSGNodeForJson (node: PSGNode) = {|
             | name when name.StartsWith("Examples.") -> "UserCode"
             | _ -> "UserCode") |> Option.defaultValue "Unknown"
     // Context tracking fields for Phase 1
-    ContextRequirement = 
+    ContextRequirement =
         node.ContextRequirement |> Option.map (fun cr ->
             match cr with
             | Pure -> "Pure"
             | AsyncBoundary -> "AsyncBoundary"
-            | ResourceAccess -> "ResourceAccess")
+            | ResourceAccess -> "ResourceAccess"
+            | Parameter idx -> sprintf "Parameter(%d)" idx)
     ComputationPattern = 
         node.ComputationPattern |> Option.map (fun cp ->
             match cp with

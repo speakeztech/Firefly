@@ -70,34 +70,118 @@ let createSliceFromList (nodes: PSGNode list) : PSGChildSlice =
     PSGChildSlice(arr, 0, arr.Length)
 
 // ═══════════════════════════════════════════════════════════════════
+// Emission Context - Mutable state for MLIR emission (outside XParsec equality)
+// ═══════════════════════════════════════════════════════════════════
+
+open System.Text
+open Alex.CodeGeneration.EmissionContext
+
+/// Mutable emission context - holds state that shouldn't be in XParsec's equality-based state.
+/// Access through reference in PSGParseState.
+/// This is a CLASS (reference type) so equality is reference equality, which is fine for XParsec.
+[<Sealed>]
+type EmitContext(graph: ProgramSemanticGraph) =
+    /// The full PSG for edge lookups (def-use resolution)
+    member _.Graph = graph
+    /// MLIR output builder
+    member val Builder = MLIRBuilder.create () with get
+    /// Map from NodeId to emitted SSA value (for variable resolution via def-use edges)
+    member val NodeSSA : Map<string, string * string> = Map.empty with get, set
+    /// Accumulated string literals: content -> global name
+    member val StringLiterals : (string * string) list = [] with get, set
+    /// Current function name being emitted
+    member val CurrentFunction : string option = None with get, set
+
+module EmitContext =
+    /// Create emission context from a PSG
+    let create (graph: ProgramSemanticGraph) : EmitContext =
+        EmitContext(graph)
+
+    /// Record that a node was emitted with a given SSA value
+    let recordNodeSSA (ctx: EmitContext) (nodeId: NodeId) (ssa: string) (mlirType: string) : unit =
+        ctx.NodeSSA <- Map.add nodeId.Value (ssa, mlirType) ctx.NodeSSA
+
+    /// Look up SSA value for a node by its ID
+    let lookupNodeSSA (ctx: EmitContext) (nodeId: NodeId) : (string * string) option =
+        Map.tryFind nodeId.Value ctx.NodeSSA
+
+    /// Register a string literal, returning its global name
+    let registerStringLiteral (ctx: EmitContext) (content: string) : string =
+        match ctx.StringLiterals |> List.tryFind (fun (c, _) -> c = content) with
+        | Some (_, name) -> name
+        | None ->
+            let name = sprintf "@str%d" (List.length ctx.StringLiterals)
+            ctx.StringLiterals <- (content, name) :: ctx.StringLiterals
+            name
+
+    /// Emit a line of MLIR
+    let emitLine (ctx: EmitContext) (text: string) : unit =
+        MLIRBuilder.line ctx.Builder text
+
+    /// Get output string
+    let getOutput (ctx: EmitContext) : string =
+        MLIRBuilder.toString ctx.Builder
+
+// ═══════════════════════════════════════════════════════════════════
 // PSGParseState - Minimal state for XParsec (supports equality)
 // ═══════════════════════════════════════════════════════════════════
 
 /// Minimal state carried through XParsec parsing.
 /// Does NOT contain the full zipper - that stays outside XParsec.
 /// This type supports equality for XParsec's backtracking/infinite loop detection.
+///
+/// The EmitContext reference is for emission operations - reference equality is fine
+/// since we never backtrack to a different context.
 [<Struct>]
 type PSGParseState = {
     /// SSA counter for generating unique names during child parsing
     SSACounter: int
+    /// Label counter for unique block labels
+    LabelCounter: int
     /// Current focus node ID (for context, not navigation)
     FocusNodeId: string
+    /// Reference to mutable emission context (nullable - not all parsing needs emission)
+    EmitCtx: EmitContext option
 }
 
 module PSGParseState =
-    /// Create initial parse state
+    /// Create initial parse state (no emission context)
     let create (focusNodeId: string) (ssaCounter: int) : PSGParseState =
-        { SSACounter = ssaCounter; FocusNodeId = focusNodeId }
+        { SSACounter = ssaCounter
+          LabelCounter = 0
+          FocusNodeId = focusNodeId
+          EmitCtx = None }
 
-    /// Create from a zipper (extracts minimal state)
+    /// Create from a zipper (extracts minimal state, no emission context)
     let fromZipper (zipper: PSGZipper) : PSGParseState =
         { SSACounter = zipper.State.SSACounter
-          FocusNodeId = zipper.Focus.Id.Value }
+          LabelCounter = zipper.State.LabelCounter
+          FocusNodeId = zipper.Focus.Id.Value
+          EmitCtx = None }
+
+    /// Create for emission with full context
+    let forEmission (graph: ProgramSemanticGraph) (focusNodeId: string) (ssaCounter: int) : PSGParseState =
+        { SSACounter = ssaCounter
+          LabelCounter = 0
+          FocusNodeId = focusNodeId
+          EmitCtx = Some (EmitContext.create graph) }
+
+    /// Create for emission from zipper
+    let forEmissionFromZipper (zipper: PSGZipper) : PSGParseState =
+        { SSACounter = zipper.State.SSACounter
+          LabelCounter = zipper.State.LabelCounter
+          FocusNodeId = zipper.Focus.Id.Value
+          EmitCtx = Some (EmitContext.create zipper.Graph) }
 
     /// Increment SSA counter
     let nextSSA (state: PSGParseState) : PSGParseState * string =
         let name = sprintf "%%v%d" state.SSACounter
         { state with SSACounter = state.SSACounter + 1 }, name
+
+    /// Increment label counter
+    let nextLabel (state: PSGParseState) : PSGParseState * string =
+        let name = sprintf "bb%d" state.LabelCounter
+        { state with LabelCounter = state.LabelCounter + 1 }, name
 
 // ═══════════════════════════════════════════════════════════════════
 // PSGChildParser - XParsec parser type for PSG children
@@ -296,3 +380,128 @@ let freshSSAMany (count: int) : PSGChildParser<string list> =
                 reader.State <- state
                 yield name ]
         Parsers.preturn names reader
+
+/// Generate a fresh block label
+let freshLabel : PSGChildParser<string> =
+    fun reader ->
+        let state, name = PSGParseState.nextLabel reader.State
+        reader.State <- state
+        Parsers.preturn name reader
+
+// ═══════════════════════════════════════════════════════════════════
+// Emission Parsers - XParsec parsers that emit MLIR
+// ═══════════════════════════════════════════════════════════════════
+
+/// Get the emission context (fails if not in emission mode)
+let getEmitCtx : PSGChildParser<EmitContext> =
+    fun reader ->
+        match reader.State.EmitCtx with
+        | Some ctx -> Parsers.preturn ctx reader
+        | None -> Error { Position = reader.Position; Errors = Message "Not in emission mode - no EmitContext available" }
+
+/// Get the PSG graph from emission context
+let getGraph : PSGChildParser<ProgramSemanticGraph> =
+    fun reader ->
+        match reader.State.EmitCtx with
+        | Some ctx -> Parsers.preturn ctx.Graph reader
+        | None -> Error { Position = reader.Position; Errors = Message "Not in emission mode - no graph available" }
+
+/// Emit a line of MLIR
+let emitLine (text: string) : PSGChildParser<unit> =
+    fun reader ->
+        match reader.State.EmitCtx with
+        | Some ctx ->
+            EmitContext.emitLine ctx text
+            Parsers.preturn () reader
+        | None -> Error { Position = reader.Position; Errors = Message "Not in emission mode" }
+
+/// Emit MLIR line with format string
+let emitLinef fmt =
+    Printf.ksprintf emitLine fmt
+
+/// Record SSA value for a node (for later variable resolution via def-use edges)
+let recordNodeSSA (nodeId: NodeId) (ssa: string) (mlirType: string) : PSGChildParser<unit> =
+    fun reader ->
+        match reader.State.EmitCtx with
+        | Some ctx ->
+            EmitContext.recordNodeSSA ctx nodeId ssa mlirType
+            Parsers.preturn () reader
+        | None -> Error { Position = reader.Position; Errors = Message "Not in emission mode" }
+
+/// Look up SSA value for a node by following def-use edges
+let lookupNodeSSA (nodeId: NodeId) : PSGChildParser<(string * string) option> =
+    fun reader ->
+        match reader.State.EmitCtx with
+        | Some ctx -> Parsers.preturn (EmitContext.lookupNodeSSA ctx nodeId) reader
+        | None -> Parsers.preturn None reader
+
+/// Resolve a variable use to its SSA value by following SymbolUse edges
+let resolveVariableUse (useNode: PSGNode) : PSGChildParser<(string * string) option> =
+    fun reader ->
+        match reader.State.EmitCtx with
+        | Some ctx ->
+            // Find the SymbolUse edge from this node to its definition
+            let defEdge =
+                ctx.Graph.Edges
+                |> List.tryFind (fun edge ->
+                    edge.Source = useNode.Id && edge.Kind = SymbolUse)
+            match defEdge with
+            | Some edge ->
+                // Look up the definition node's SSA value
+                Parsers.preturn (EmitContext.lookupNodeSSA ctx edge.Target) reader
+            | None ->
+                Parsers.preturn None reader
+        | None -> Parsers.preturn None reader
+
+/// Register a string literal, returning its global name
+let registerStringLiteral (content: string) : PSGChildParser<string> =
+    fun reader ->
+        match reader.State.EmitCtx with
+        | Some ctx ->
+            let name = EmitContext.registerStringLiteral ctx content
+            Parsers.preturn name reader
+        | None -> Error { Position = reader.Position; Errors = Message "Not in emission mode" }
+
+/// Push indentation
+let pushIndent : PSGChildParser<unit> =
+    fun reader ->
+        match reader.State.EmitCtx with
+        | Some ctx ->
+            MLIRBuilder.push ctx.Builder
+            Parsers.preturn () reader
+        | None -> Parsers.preturn () reader
+
+/// Pop indentation
+let popIndent : PSGChildParser<unit> =
+    fun reader ->
+        match reader.State.EmitCtx with
+        | Some ctx ->
+            MLIRBuilder.pop ctx.Builder
+            Parsers.preturn () reader
+        | None -> Parsers.preturn () reader
+
+// ═══════════════════════════════════════════════════════════════════
+// Expression Result Type
+// ═══════════════════════════════════════════════════════════════════
+
+/// Result of emitting an expression
+type ExprResult =
+    | Value of ssa: string * mlirType: string
+    | Void
+    | EmitError of message: string
+
+module ExprResult =
+    let isValue = function Value _ -> true | _ -> false
+    let isVoid = function Void -> true | _ -> false
+    let isError = function EmitError _ -> true | _ -> false
+
+    let getSSA = function
+        | Value (ssa, _) -> Some ssa
+        | _ -> None
+
+    let getType = function
+        | Value (_, t) -> Some t
+        | _ -> None
+
+/// Emit type alias for emission parsers that produce ExprResult
+type Emission = PSGChildParser<ExprResult>
