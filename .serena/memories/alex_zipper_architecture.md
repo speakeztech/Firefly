@@ -20,7 +20,7 @@ PSG (built via true nanopass pipeline, with typed tree overlay)
 ```
 
 **CRITICAL**: The PSG must include typed tree overlay (Phase 4) for SRTP resolution.
-See `docs/PSG_Nanopass_Architecture_v2.md` and `docs/TypedTree_Zipper_Design.md`.
+See `docs/PSG_Nanopass_Architecture.md` and `docs/TypedTree_Zipper_Design.md`.
 
 ### Why Alloy CANNOT Know About Targets
 

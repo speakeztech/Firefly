@@ -132,7 +132,7 @@ let Write (s: string) = ()  // placeholder
 
 ## PSG Construction: True Nanopass Pipeline
 
-**See: `docs/PSG_Nanopass_Architecture_v2.md` for complete details.**
+**See: `docs/PSG_Nanopass_Architecture.md` for complete details.**
 
 PSG construction is a **nanopass pipeline**, not a monolithic operation. Each phase does ONE thing:
 

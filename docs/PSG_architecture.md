@@ -1,7 +1,7 @@
 # Program Semantic Graph (PSG) Architecture Decision Memo
 
 > **Related Documents:**
-> - `PSG_Nanopass_Architecture_v2.md` - How PSG is constructed (true nanopass pipeline)
+> - `PSG_Nanopass_Architecture.md` - How PSG is constructed (true nanopass pipeline)
 > - `TypedTree_Zipper_Design.md` - Typed tree overlay for SRTP resolution
 > - `Architecture_Canonical.md` - Top-level architecture reference
 

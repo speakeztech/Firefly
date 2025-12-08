@@ -36,7 +36,7 @@ This is a sophisticated compiler project with deep architectural constraints. Fa
 
 ## The PSG Nanopass Pipeline (CRITICAL)
 
-> **See: `docs/PSG_Nanopass_Architecture_v2.md` for authoritative details.**
+> **See: `docs/PSG_Nanopass_Architecture.md` for authoritative details.**
 
 PSG construction is a **true nanopass pipeline**, not a monolithic operation. Each phase does ONE thing:
 

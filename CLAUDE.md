@@ -122,7 +122,7 @@ F# Source → FCS → PSG (True Nanopass Pipeline) → Alex/Zipper → MLIR → 
 
 ### The PSG Nanopass Pipeline (CRITICAL)
 
-> **See: `docs/PSG_Nanopass_Architecture_v2.md` for authoritative details.**
+> **See: `docs/PSG_Nanopass_Architecture.md` for authoritative details.**
 
 PSG construction is itself a **true nanopass pipeline**, not a monolithic operation. Each phase does ONE thing:
 
@@ -174,14 +174,14 @@ The typed tree zipper captures this resolution INTO the PSG. Downstream passes (
    - **THE SINGLE SOURCE OF TRUTH** for all downstream stages
    - Built through a true nanopass pipeline
    - Contains typed tree overlay for SRTP resolution
-   - See `docs/PSG_Nanopass_Architecture_v2.md` (CANONICAL) and `docs/PSG_architecture.md`
+   - See `docs/PSG_Nanopass_Architecture.md` (CANONICAL) and `docs/PSG_architecture.md`
 
 3. **Nanopasses** - `/src/Core/PSG/Nanopass/`
    - Small, single-purpose transformations that enrich the PSG
    - Each pass does ONE thing (add def-use edges, classify operations, etc.)
    - Passes are composable and can be inspected independently
    - **Critical distinction**: Some nanopasses are part of PSG construction (Phase 4: Typed Tree Overlay), others enrich afterwards (Phase 5+)
-   - See `docs/PSG_Nanopass_Architecture_v2.md`
+   - See `docs/PSG_Nanopass_Architecture.md`
 
 4. **Alex** - `/src/Alex/`
    - Multi-dimensional hardware targeting layer ("Library of Alexandria")
@@ -460,14 +460,13 @@ Before making changes, review these documents in `/docs/`:
 | Document | Purpose |
 |----------|---------|
 | **`Architecture_Canonical.md`** | **AUTHORITATIVE: Two-layer model, extern primitives, nanopass pipeline** |
-| **`PSG_Nanopass_Architecture_v2.md`** | **CANONICAL: True nanopass pipeline, typed tree overlay, SRTP** |
+| **`PSG_Nanopass_Architecture.md`** | **CANONICAL: True nanopass pipeline, typed tree overlay, SRTP** |
 | **`TypedTree_Zipper_Design.md`** | **Zipper implementation for FSharpExpr/PSG correlation** |
 | `PSG_architecture.md` | PSG design decisions, node identity |
 | `Alex_Architecture_Overview.md` | Alex overview (references canonical doc) |
 | `XParsec_PSG_Architecture.md` | XParsec integration with Zipper |
 | `HelloWorld_Lessons_Learned.md` | Common pitfalls and solutions |
 
-**Note**: `PSG_Nanopass_Architecture.md` (v1) is superseded by `PSG_Nanopass_Architecture_v2.md`.
 
 ## Sample Projects
 
