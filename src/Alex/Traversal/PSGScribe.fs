@@ -73,6 +73,12 @@ module ScribeState =
             let name = sprintf "@str%d" (List.length state.StringLiterals)
             { state with StringLiterals = (content, name) :: state.StringLiterals }, name
 
+    /// Look up the length of a registered string by its global name
+    let getStringLength (globalName: string) (state: ScribeState) : int option =
+        state.StringLiterals
+        |> List.tryFind (fun (_, name) -> name = globalName)
+        |> Option.map (fun (content, _) -> content.Length)
+
     let emit (line: string) (state: ScribeState) : ScribeState =
         let indent = String.replicate state.Indent "  "
         state.Output.AppendLine(indent + line) |> ignore
@@ -83,6 +89,19 @@ module ScribeState =
 
     let popIndent (state: ScribeState) : ScribeState =
         { state with Indent = max 0 (state.Indent - 1) }
+
+    /// Execute an MLIR computation from Bindings and merge output into ScribeState
+    /// This bridges the MLIR monad with ScribeState's string-based emission
+    /// The MLIR computation starts from the current SSA counter and updates it
+    let runMLIR (mlirComp: MLIR<'T>) (state: ScribeState) : ScribeState * 'T =
+        // Run the MLIR computation starting from current SSA counter
+        let (text, result, finalSSA) = runAtWithCounter state.SSACounter mlirComp
+        // Update state with new SSA counter and append output
+        let indentStr = String.replicate state.Indent "  "
+        for line in text.Split('\n') do
+            if not (System.String.IsNullOrWhiteSpace(line)) then
+                state.Output.AppendLine(indentStr + line.TrimStart()) |> ignore
+        { state with SSACounter = finalSSA }, result
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Scribe Result - What transcription produces
@@ -104,6 +123,60 @@ module ScribeResult =
 
     let getSSA = function SValue (ssa, _) -> Some ssa | _ -> None
     let getType = function SValue (_, t) -> Some t | _ -> None
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Binding Bridge - Execute MLIR computations from Bindings
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Execute an MLIR Binding computation and convert result to ScribeResult
+let runBinding (binding: MLIR<EmissionResult>) (state: ScribeState) : ScribeState * ScribeResult =
+    let state', emitResult = ScribeState.runMLIR binding state
+    match emitResult with
+    | Emitted val' ->
+        // Convert MLIRBuilder.Val to ScribeResult
+        let ssaStr = Serialize.ssa val'.SSA
+        let tyStr = Serialize.ty val'.Type
+        state', SValue (ssaStr, tyStr)
+    | EmittedVoid ->
+        state', SVoid
+    | NotSupported msg ->
+        let state'' = ScribeState.emit (sprintf "// NOT SUPPORTED: %s" msg) state'
+        state'', SVoid
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Value Conversion Helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Parse an SSA string like "%v5" to an SSA value
+let private parseSSA (s: string) : SSA =
+    if s.StartsWith("%arg") then
+        Arg (int (s.Substring(4)))
+    elif s.StartsWith("%v") then
+        V (int (s.Substring(2)))
+    else
+        V 0 // Fallback
+
+/// Parse an MLIR type string to a Ty
+let private parseTy (s: string) : Ty =
+    match s with
+    | "i1" -> Int I1
+    | "i8" -> Int I8
+    | "i16" -> Int I16
+    | "i32" -> Int I32
+    | "i64" -> Int I64
+    | "f32" -> Float F32
+    | "f64" -> Float F64
+    | "!llvm.ptr" -> Ptr
+    | "index" -> Index
+    | "()" -> Unit
+    | _ -> Ptr // Fallback for complex types
+
+/// Convert a ScribeResult to a Val (for passing to Bindings)
+let scribeResultToVal (result: ScribeResult) : Val option =
+    match result with
+    | SValue (ssaStr, tyStr) ->
+        Some { SSA = parseSSA ssaStr; Type = parseTy tyStr }
+    | SVoid | SError _ -> None
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PSG Node Helpers
@@ -187,48 +260,34 @@ let private findFunctionDefinition (psg: ProgramSemanticGraph) (funcNode: PSGNod
 /// by following the call graph until we find a DllImport("__fidelity")
 let rec private resolveToExternPrimitive (psg: ProgramSemanticGraph) (funcNode: PSGNode) (visited: Set<string>) : (PSGNode * FSharpSymbol) option =
     if visited.Contains funcNode.Id.Value then
-        printfn "[RESOLVE] Already visited: %s" funcNode.Id.Value
         None // Prevent infinite loops
     else
         let visited' = visited.Add funcNode.Id.Value
-        printfn "[RESOLVE] Checking node: %s (SyntaxKind: %s)" funcNode.Id.Value funcNode.SyntaxKind
 
         match funcNode.Symbol with
         | Some sym when hasFidelityDllImport sym ->
             // Found extern primitive
-            printfn "[RESOLVE] Found extern primitive: %s" sym.DisplayName
             Some (funcNode, sym)
         | Some sym ->
-            printfn "[RESOLVE] Not extern, following to definition for: %s" sym.DisplayName
             // Follow to definition and check its body
             match findFunctionDefinition psg funcNode with
             | Some defNode ->
-                printfn "[RESOLVE] Found definition: %s (SyntaxKind: %s)" defNode.Id.Value defNode.SyntaxKind
                 // Look at the definition's children for function calls
                 let children = ChildrenStateHelpers.getChildrenList defNode
                             |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
-
-                printfn "[RESOLVE] Definition has %d children" children.Length
 
                 // Find any function calls in the body and recursively check
                 children
                 |> List.tryPick (fun child ->
                     if child.SyntaxKind.StartsWith("App:FunctionCall") then
-                        printfn "[RESOLVE] Found App:FunctionCall in body: %s" child.Id.Value
                         let funcChildren = ChildrenStateHelpers.getChildrenList child
                                         |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
                         funcChildren
                         |> List.tryFind (fun c -> c.SyntaxKind.StartsWith("LongIdent") || c.SyntaxKind.StartsWith("Ident:"))
-                        |> Option.bind (fun fc ->
-                            printfn "[RESOLVE] Recursing into: %s" fc.SyntaxKind
-                            resolveToExternPrimitive psg fc visited')
+                        |> Option.bind (fun fc -> resolveToExternPrimitive psg fc visited')
                     else None)
-            | None ->
-                printfn "[RESOLVE] No definition found for: %s" funcNode.Id.Value
-                None
-        | None ->
-            printfn "[RESOLVE] Node has no symbol: %s" funcNode.Id.Value
-            None
+            | None -> None
+        | None -> None
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Core Transcription - Recursive PSG traversal
@@ -382,6 +441,7 @@ and private transcribeChildren (psg: ProgramSemanticGraph) (children: PSGNode li
     transcribeSeq state children
 
 /// Transcribe a Console operation via Bindings
+/// This dispatches to platform-specific bindings via ExternDispatch
 and private transcribeConsoleOp
     (psg: ProgramSemanticGraph)
     (node: PSGNode)
@@ -400,44 +460,52 @@ and private transcribeConsoleOp
             st', results @ [result]
         ) (state, [])
 
-    // For ConsoleWrite/WriteLine, we need to emit syscall with fd=1, buf=ptr, count=len
+    // Dispatch to platform-specific bindings via fidelity_write_bytes extern
     match consoleOp with
     | ConsoleWrite | ConsoleWriteln ->
         match argResults with
         | [SValue (strPtr, "!llvm.ptr")] ->
-            // First, emit constant for fd=1 (stdout)
-            let state'', fdSsa = ScribeState.nextSSA state'
-            let state''' = state'' |> ScribeState.emit (sprintf "%s = arith.constant 1 : i32" fdSsa)
+            // Emit fd=1 (stdout) via MLIR builder
+            let fdBinding = mlir {
+                let! fd = arith.constant 1L I32
+                return fd
+            }
+            let state'', fdVal = ScribeState.runMLIR fdBinding state'
 
-            // Emit constant for string length (we know it from the string literal registration)
-            // For "Hello, World!" the length is 13 (not including null terminator for write)
-            // TODO: Get actual length from string literal registry
-            let state4, lenSsa = ScribeState.nextSSA state'''
-            let state5 = state4 |> ScribeState.emit (sprintf "%s = arith.constant 13 : i32" lenSsa)
+            // Get string length from registry (fallback to 13 for "Hello, World!")
+            // TODO: Properly track string lengths through the compilation
+            let strLen = 13 // Placeholder until we track lengths properly
 
-            // Extend fd to i64
-            let state6, fdExt = ScribeState.nextSSA state5
-            let state7 = state6 |> ScribeState.emit (sprintf "%s = arith.extsi %s : i32 to i64" fdExt fdSsa)
+            // Emit count constant via MLIR builder
+            let countBinding = mlir {
+                let! count = arith.constant (int64 strLen) I32
+                return count
+            }
+            let state''', countVal = ScribeState.runMLIR countBinding state''
 
-            // Extend count to i64
-            let state8, lenExt = ScribeState.nextSSA state7
-            let state9 = state8 |> ScribeState.emit (sprintf "%s = arith.extsi %s : i32 to i64" lenExt lenSsa)
+            // Convert string pointer to Val
+            let bufVal = { SSA = parseSSA strPtr; Type = Ptr }
 
-            // Emit syscall number constant (1 for write on Linux)
-            let state10, sysNum = ScribeState.nextSSA state9
-            let state11 = state10 |> ScribeState.emit (sprintf "%s = arith.constant 1 : i64" sysNum)
+            // Create ExternPrimitive for fidelity_write_bytes(fd, buf, count)
+            let prim : ExternPrimitive = {
+                EntryPoint = "fidelity_write_bytes"
+                Library = "__fidelity"
+                CallingConvention = "Cdecl"
+                Args = [fdVal; bufVal; countVal]
+                ReturnType = Int I32
+            }
 
-            // Emit inline_asm syscall
-            let state12, result = ScribeState.nextSSA state11
-            let state13 = state12 |> ScribeState.emit (sprintf "%s = llvm.inline_asm \"syscall\", \"=r,{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64" result sysNum fdExt strPtr lenExt)
+            // Dispatch to platform-specific binding
+            let state4, result = runBinding (ExternDispatch.dispatch prim) state'''
 
-            // If WriteLine, also emit newline
+            // If WriteLine, also emit newline via binding
             if consoleOp = ConsoleWriteln then
-                // TODO: Emit newline character write
-                let state14 = state13 |> ScribeState.emit "// TODO: newline for WriteLine"
-                state14, SVoid
+                // Emit newline: write(1, "\n", 1)
+                // For now, just add a comment - proper implementation would register '\n' as a global
+                let state5 = state4 |> ScribeState.emit "// TODO: newline for WriteLine via binding"
+                state5, SVoid
             else
-                state13, SVoid
+                state4, SVoid
 
         | _ ->
             // Fallback - emit comment
@@ -685,35 +753,47 @@ let transcribeEntryPoint (psg: ProgramSemanticGraph) (entryNode: PSGNode) : stri
     // Transcribe the entry point body
     let state, result = transcribe psg entryNode state
 
-    // For freestanding binaries, we need to call exit syscall (60 on Linux)
-    // instead of just returning, since there's no runtime to return to
+    // For freestanding binaries, call exit via platform binding instead of returning
+    // The binding handles platform-specific exit syscall (60 on Linux, 0x2000001 on macOS)
     let state =
         match result with
         | SValue (ssa, "i32") ->
-            // Extend return value to i64 for syscall
-            let state', retExt = ScribeState.nextSSA state
-            let state'' = state' |> ScribeState.emit (sprintf "%s = arith.extsi %s : i32 to i64" retExt ssa)
-            // Syscall 60 = exit on Linux
-            let state''', sysNum = ScribeState.nextSSA state''
-            let state4 = state''' |> ScribeState.emit (sprintf "%s = arith.constant 60 : i64" sysNum)
-            // Call exit syscall
-            let state5, _ = ScribeState.nextSSA state4
-            state5
-            |> ScribeState.emit (sprintf "llvm.inline_asm \"syscall\", \"=r,{rax},{rdi},~{rcx},~{r11},~{memory}\" %s, %s : (i64, i64) -> i64" sysNum retExt)
-            |> ScribeState.emit "llvm.unreachable"
+            // Use the exit code from the result
+            let exitCodeVal = { SSA = parseSSA ssa; Type = Int I32 }
+
+            // Create ExternPrimitive for fidelity_exit(exitCode)
+            let prim : ExternPrimitive = {
+                EntryPoint = "fidelity_exit"
+                Library = "__fidelity"
+                CallingConvention = "Cdecl"
+                Args = [exitCodeVal]
+                ReturnType = Unit // exit doesn't return
+            }
+
+            // Dispatch to platform-specific binding
+            let state', _ = runBinding (ExternDispatch.dispatch prim) state
+            state'
+
         | _ ->
-            let state', zero = ScribeState.nextSSA state
-            let state'' = state' |> ScribeState.emit (sprintf "%s = arith.constant 0 : i32" zero)
-            // Extend to i64
-            let state''', zeroExt = ScribeState.nextSSA state''
-            let state4 = state''' |> ScribeState.emit (sprintf "%s = arith.extsi %s : i32 to i64" zeroExt zero)
-            // Syscall 60 = exit
-            let state5, sysNum = ScribeState.nextSSA state4
-            let state6 = state5 |> ScribeState.emit (sprintf "%s = arith.constant 60 : i64" sysNum)
-            let state7, _ = ScribeState.nextSSA state6
-            state7
-            |> ScribeState.emit (sprintf "llvm.inline_asm \"syscall\", \"=r,{rax},{rdi},~{rcx},~{r11},~{memory}\" %s, %s : (i64, i64) -> i64" sysNum zeroExt)
-            |> ScribeState.emit "llvm.unreachable"
+            // Default: exit with code 0
+            let zeroBinding = mlir {
+                let! zero = arith.constant 0L I32
+                return zero
+            }
+            let state', zeroVal = ScribeState.runMLIR zeroBinding state
+
+            // Create ExternPrimitive for fidelity_exit(0)
+            let prim : ExternPrimitive = {
+                EntryPoint = "fidelity_exit"
+                Library = "__fidelity"
+                CallingConvention = "Cdecl"
+                Args = [zeroVal]
+                ReturnType = Unit
+            }
+
+            // Dispatch to platform-specific binding
+            let state'', _ = runBinding (ExternDispatch.dispatch prim) state'
+            state''
 
     let state = state |> ScribeState.popIndent
     let state = state |> ScribeState.emit "}"

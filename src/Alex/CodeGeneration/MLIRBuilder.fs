@@ -77,6 +77,15 @@ module BuilderState =
         Globals = []
     }
 
+    /// Create a BuilderState starting from a specific SSA counter
+    /// Used when embedding MLIR computations into existing SSA contexts
+    let createAt (ssaStart: int) = {
+        Output = StringBuilder()
+        SSACounter = ssaStart
+        Indent = 0
+        Globals = []
+    }
+
     let freshSSA (st: BuilderState) : SSA =
         let n = st.SSACounter
         st.SSACounter <- st.SSACounter + 1
@@ -98,10 +107,10 @@ module BuilderState =
         st.Globals <- (g, content) :: st.Globals
 
 // ═══════════════════════════════════════════════════════════════════
-// Type Serialization (internal only)
+// Type Serialization
 // ═══════════════════════════════════════════════════════════════════
 
-module private Serialize =
+module Serialize =
     let intTy = function
         | I1 -> "i1" | I8 -> "i8" | I16 -> "i16" | I32 -> "i32" | I64 -> "i64"
 
@@ -431,6 +440,11 @@ module llvm =
         return { SSA = ssa; Type = trueVal.Type }
     }
 
+    /// llvm.unreachable - marks code path as unreachable (never returns)
+    let unreachable : MLIR<unit> = mlir {
+        do! emitLine "llvm.unreachable"
+    }
+
 // ═══════════════════════════════════════════════════════════════════
 // Func Dialect Combinators
 // ═══════════════════════════════════════════════════════════════════
@@ -534,9 +548,10 @@ let buildNativeStrFromValues (ptr: Val) (len: Val) : MLIR<Val> = mlir {
 // Module Building
 // ═══════════════════════════════════════════════════════════════════
 
-/// Run MLIR builder and get output string
-let run (m: MLIR<'T>) : string * 'T =
-    let st = BuilderState.create ()
+/// Run MLIR builder starting from a specific SSA counter
+/// Returns (output text, result)
+let runAt (ssaStart: int) (m: MLIR<'T>) : string * 'T =
+    let st = BuilderState.createAt ssaStart
     let result = m st
 
     // Build globals section
@@ -552,6 +567,29 @@ let run (m: MLIR<'T>) : string * 'T =
         | GFunc _ -> ()
 
     (st.Output.ToString() + globalsStr.ToString(), result)
+
+/// Run and get output, result, AND final SSA counter
+let runAtWithCounter (ssaStart: int) (m: MLIR<'T>) : string * 'T * int =
+    let st = BuilderState.createAt ssaStart
+    let result = m st
+
+    // Build globals section (simplified - no globals for inline computations)
+    let globalsStr = StringBuilder()
+    for (g, content) in st.Globals |> List.rev do
+        match g with
+        | GStr hash ->
+            let escaped = Serialize.escape content
+            globalsStr.AppendLine(sprintf "  llvm.mlir.global private constant @str_%u(\"%s\") : !llvm.array<%d x i8>"
+                hash escaped content.Length) |> ignore
+        | GBytes idx ->
+            globalsStr.AppendLine(sprintf "  llvm.mlir.global private constant @bytes_%d(...) : !llvm.array<...>" idx) |> ignore
+        | GFunc _ -> ()
+
+    (st.Output.ToString() + globalsStr.ToString(), result, st.SSACounter)
+
+/// Run MLIR builder from SSA 0 and get output string
+let run (m: MLIR<'T>) : string * 'T =
+    runAt 0 m
 
 /// Run and get only the MLIR text
 let runText (m: MLIR<'T>) : string = run m |> fst

@@ -84,6 +84,7 @@
       <Compile Include="Alex/Bindings/BindingTypes.fs" />
       <Compile Include="Alex/Bindings/Console/ConsoleBindings.fs" />
       <Compile Include="Alex/Bindings/Time/TimeBindings.fs" />
+      <Compile Include="Alex/Bindings/Process/ProcessBindings.fs" />
 
       <!-- Alex Traversal -->
       <Compile Include="Alex/Traversal/PSGZipper.fs" />

@@ -148,6 +148,7 @@ let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targe
     // Register all platform bindings
     Alex.Bindings.Time.TimeBindings.registerBindings ()
     Alex.Bindings.Console.ConsoleBindings.registerBindings ()
+    Alex.Bindings.Process.ProcessBindings.registerBindings ()
 
     // Set target platform from triple
     match TargetPlatform.parseTriple targetTriple with
