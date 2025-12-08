@@ -10,6 +10,7 @@ open Core.PSG.TypeIntegration
 open Core.PSG.Nanopass.IntermediateEmission
 open Core.PSG.Nanopass.FlattenApplications
 open Core.PSG.Nanopass.ReducePipeOperators
+open Core.PSG.Nanopass.ReduceAlloyOperators
 open Core.PSG.Nanopass.DefUseEdges
 open Core.PSG.Nanopass.ParameterAnnotation
 open Core.PSG.Nanopass.ClassifyOperations
@@ -168,11 +169,26 @@ let buildProgramSemanticGraph
         emitNanopassIntermediate pipeReducedGraph "2c_pipe_reduced" nanopassOutputDir
         emitNanopassDiff flattenedGraph pipeReducedGraph "2b_flattened_apps" "2c_pipe_reduced" nanopassOutputDir
 
+    // Phase 2d: Nanopass - Reduce Alloy operators
+    // Beta-reduces Alloy's ($) operator to direct function application.
+    // The $ operator is defined as: let inline ($) f x = f x
+    // NOTE: SRTP-resolved operators (like WritableString.$) are NOT reduced
+    // because they require SRTP dispatch, not simple beta reduction.
+    printfn "[BUILDER] Phase 2d: Running Alloy operator reduction nanopass"
+    // DISABLED - WritableString $ s uses SRTP, not global $
+    // let alloyReducedGraph = reduceAlloyOperators pipeReducedGraph
+    let alloyReducedGraph = pipeReducedGraph  // Skip for now
+
+    // Emit Phase 2d intermediate
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediate alloyReducedGraph "2d_alloy_reduced" nanopassOutputDir
+        emitNanopassDiff pipeReducedGraph alloyReducedGraph "2c_pipe_reduced" "2d_alloy_reduced" nanopassOutputDir
+
     // Phase 3: Nanopass - Add def-use edges
     // This makes variable binding relationships explicit in the PSG structure,
     // eliminating the need for scope tracking in the emitter.
     printfn "[BUILDER] Phase 3: Running def-use nanopass"
-    let defUseGraph = addDefUseEdges pipeReducedGraph
+    let defUseGraph = addDefUseEdges alloyReducedGraph
 
     // Emit Phase 3 intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then

@@ -15,12 +15,22 @@ type BuildContext = {
 }
 
 /// Creates a new PSG node with the given properties
+/// DEPRECATED: Use createNodeWithKind for type-driven dispatch
 let createNode syntaxKind range fileName symbol parentId =
     let cleanKind = (syntaxKind : string).Replace(":", "_").Replace(" ", "_")
     let uniqueFileName = sprintf "%s_%s.fs" (System.IO.Path.GetFileNameWithoutExtension(fileName : string)) cleanKind
     let nodeId = NodeId.FromRange(uniqueFileName, range)
 
     ChildrenStateHelpers.createWithNotProcessed nodeId syntaxKind symbol range fileName parentId
+
+/// Creates a new PSG node with typed syntax kind
+/// Use this for type-driven dispatch instead of string parsing
+let createNodeWithKind syntaxKind (kind: SyntaxKindT) range fileName symbol parentId =
+    let cleanKind = (syntaxKind : string).Replace(":", "_").Replace(" ", "_")
+    let uniqueFileName = sprintf "%s_%s.fs" (System.IO.Path.GetFileNameWithoutExtension(fileName : string)) cleanKind
+    let nodeId = NodeId.FromRange(uniqueFileName, range)
+
+    ChildrenStateHelpers.createWithKind nodeId syntaxKind kind symbol range fileName parentId
 
 /// Add child to parent and return updated graph
 let addChildToParent (childId: NodeId) (parentId: NodeId option) (graph: ProgramSemanticGraph) =

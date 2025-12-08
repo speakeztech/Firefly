@@ -66,6 +66,120 @@ type ComputationPattern =
     | DataDriven        // Push-based, eager evaluation
     | DemandDriven      // Pull-based, lazy evaluation
 
+/// Constant values for Const nodes
+/// Extracted at PSG construction time so downstream doesn't parse SyntaxKind
+type ConstantValue =
+    | StringValue of string
+    | Int32Value of int
+    | Int64Value of int64
+    | FloatValue of float
+    | BoolValue of bool
+    | CharValue of char
+    | ByteValue of byte
+    | UnitValue
+
+// ═══════════════════════════════════════════════════════════════════
+// Typed Syntax Kind - Type-driven dispatch instead of string parsing
+// ═══════════════════════════════════════════════════════════════════
+
+/// Expression syntax kinds (mirrors FCS SynExpr cases)
+/// Names and other data come from Symbol/Type fields, not embedded here
+type ExprKind =
+    | EApp           // Function application
+    | ETypeApp       // Generic type application (e.g., stackalloc<byte>)
+    | EIdent         // Simple identifier
+    | ELongIdent     // Qualified identifier (e.g., Module.func)
+    | EConst         // Constant value (actual value in ConstantValue field)
+    | ELetOrUse      // Let or use binding
+    | ESequential    // Sequential expressions
+    | EIfThenElse    // Conditional
+    | EMatch         // Pattern match
+    | ELambda        // Lambda expression
+    | EForLoop       // For loop
+    | EWhileLoop     // While loop
+    | ETryWith       // Try/with exception handling
+    | ETryFinally    // Try/finally
+    | EMethodCall    // Method call (obj.Method)
+    | EPropertyAccess // Property access (obj.Property)
+    | EMutableSet    // Mutable variable assignment
+    | EAddressOf     // Address-of operator (&)
+    | ERecord        // Record construction
+    | ETuple         // Tuple construction
+    | EArrayOrList   // Array or list construction
+    | EIndexGet      // Indexer get (arr.[i])
+    | EIndexSet      // Indexer set (arr.[i] <- v)
+    | ETraitCall     // SRTP trait call
+    | EInterpolatedString // Interpolated string literal
+    | EObjExpr       // Object expression
+    | EUpcast        // Upcast (:>)
+    | EDowncast      // Downcast (:?>)
+
+/// Pattern syntax kinds (mirrors FCS SynPat cases)
+type PatternKind =
+    | PNamed        // Named pattern (binding)
+    | PLongIdent    // Union case or qualified name
+    | PWild         // Wildcard (_)
+    | PConst        // Constant pattern
+    | PTuple        // Tuple pattern
+    | PRecord       // Record pattern
+    | PArrayOrList  // Array/list pattern
+    | PAs           // As pattern
+    | POr           // Or pattern
+    | PTyped        // Typed pattern
+
+/// Declaration syntax kinds (mirrors FCS SynModuleDecl/SynTypeDefn)
+type DeclKind =
+    | DModule       // Module declaration
+    | DNestedModule // Nested module
+    | DTypeDefn     // Type definition
+    | DBinding      // Value/function binding
+    | DOpen         // Open declaration
+    | DAttribute    // Attribute application
+    | DException    // Exception type
+
+/// Binding kinds
+type BindingKind =
+    | BLet          // let x = ...
+    | BUse          // use x = ...
+    | BMutable      // let mutable x = ...
+    | BFunction     // let f x = ...
+
+/// Top-level syntax kind - the typed alternative to string SyntaxKind
+type SyntaxKindT =
+    | SKExpr of ExprKind
+    | SKPattern of PatternKind
+    | SKDecl of DeclKind
+    | SKBinding of BindingKind
+    | SKUnknown  // For cases not yet classified (temporary during migration)
+
+module SyntaxKindT =
+    /// Convert typed SyntaxKind to string (for backwards compatibility during migration)
+    let toString (sk: SyntaxKindT) : string =
+        match sk with
+        | SKExpr e -> sprintf "Expr:%A" e
+        | SKPattern p -> sprintf "Pattern:%A" p
+        | SKDecl d -> sprintf "Decl:%A" d
+        | SKBinding b -> sprintf "Binding:%A" b
+        | SKUnknown -> "Unknown"
+
+    /// Check if this is an expression kind
+    let isExpr = function SKExpr _ -> true | _ -> false
+
+    /// Check if this is a pattern kind
+    let isPattern = function SKPattern _ -> true | _ -> false
+
+    /// Check if this is a declaration kind
+    let isDecl = function SKDecl _ -> true | _ -> false
+
+    /// Check if this is a binding kind
+    let isBinding = function SKBinding _ -> true | _ -> false
+
+    /// Extract expression kind if present
+    let tryGetExpr = function SKExpr e -> Some e | _ -> None
+
+    /// Extract pattern kind if present
+    let tryGetPattern = function SKPattern p -> Some p | _ -> None
+
 // ═══════════════════════════════════════════════════════════════════
 // Library Operation Classifications
 // These types describe the semantic operation at an App node,
@@ -199,27 +313,34 @@ type OperationKind =
 type PSGNode = {
     // EXISTING FIELDS - DO NOT CHANGE
     Id: NodeId
-    SyntaxKind: string
+    SyntaxKind: string  // DEPRECATED: Use Kind field for type-driven dispatch
     Symbol: FSharpSymbol option
-    Type: FSharpType option          
-    Constraints: FSharpGenericParameterConstraint list option  
+    Type: FSharpType option
+    Constraints: FSharpGenericParameterConstraint list option
     Range: range
     SourceFile: string
     ParentId: NodeId option
     Children: ChildrenState
-    
+
     // NEW FIELDS - Soft-delete support
     IsReachable: bool
     EliminationPass: int option
     EliminationReason: string option
     ReachabilityDistance: int option
-    
+
     // NEW FIELDS - Context tracking for continuation compilation
     ContextRequirement: ContextRequirement option
     ComputationPattern: ComputationPattern option
 
     // NEW FIELD - Operation classification (set by ClassifyOperations nanopass)
     Operation: OperationKind option
+
+    // NEW FIELD - Constant value for Const nodes (set by PSG Builder)
+    ConstantValue: ConstantValue option
+
+    // NEW FIELD - Typed syntax kind for type-driven dispatch (set by PSG Builder)
+    // Use this instead of parsing SyntaxKind string
+    Kind: SyntaxKindT
 }
 
 /// Complete Program Semantic Graph
@@ -257,31 +378,70 @@ and PSGErrorKind =
 
 /// Helper functions for working with ChildrenState
 module ChildrenStateHelpers =
-    
+
     /// Create a new node with NotProcessed children state
+    /// The `kind` parameter defaults to Unknown for backwards compatibility during migration
     let createWithNotProcessed id syntaxKind symbol range sourceFile parentId = {
         Id = id
         SyntaxKind = syntaxKind
         Symbol = symbol
-        Type = None                  
-        Constraints = None           
+        Type = None
+        Constraints = None
         Range = range
         SourceFile = sourceFile
         ParentId = parentId
         Children = NotProcessed
-        
+
         // Initialize new soft-delete fields with defaults
-        IsReachable = false  
+        IsReachable = false
         EliminationPass = None
         EliminationReason = None
         ReachabilityDistance = None
-        
+
         // Initialize context tracking fields
         ContextRequirement = None
         ComputationPattern = None
 
         // Initialize operation classification
         Operation = None
+
+        // Initialize constant value
+        ConstantValue = None
+
+        // Initialize typed syntax kind (Unknown during migration)
+        Kind = SKUnknown
+    }
+
+    /// Create a new node with typed syntax kind
+    let createWithKind id syntaxKind kind symbol range sourceFile parentId = {
+        Id = id
+        SyntaxKind = syntaxKind
+        Symbol = symbol
+        Type = None
+        Constraints = None
+        Range = range
+        SourceFile = sourceFile
+        ParentId = parentId
+        Children = NotProcessed
+
+        // Initialize new soft-delete fields with defaults
+        IsReachable = false
+        EliminationPass = None
+        EliminationReason = None
+        ReachabilityDistance = None
+
+        // Initialize context tracking fields
+        ContextRequirement = None
+        ComputationPattern = None
+
+        // Initialize operation classification
+        Operation = None
+
+        // Initialize constant value
+        ConstantValue = None
+
+        // Set typed syntax kind
+        Kind = kind
     }
     
     /// Add a child to a node (appends to maintain source order)

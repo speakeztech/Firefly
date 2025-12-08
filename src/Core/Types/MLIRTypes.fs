@@ -16,7 +16,7 @@ module OutputKind =
         | "freestanding" | "bare" | "nostdlib" -> Freestanding
         | "embedded" | "firmware" | "mcu" -> Embedded
         | "library" | "lib" -> Library
-        | _ -> Console  // Default to console app
+        | other -> failwithf "OutputKind.fromString: Unrecognized output kind '%s' - expected console, freestanding, embedded, or library" other
 
     let toString = function
         | Console -> "console"
@@ -237,7 +237,7 @@ let parseTypeFromMLIRValue (value: MLIRValue): MLIRType =
     | "f32" -> MLIRTypes.f32
     | "f64" -> MLIRTypes.f64
     | "void" -> MLIRTypes.void_
-    | _ -> MLIRTypes.i32  // Default fallback
+    | other -> failwithf "parseTypeFromMLIRValue: Unrecognized MLIR type '%s' - add explicit handling" other
 
 /// Helper to parse type string back to MLIRType (temporary until better type system integration)
 let parseTypeFromString (typeStr: string): MLIRType =

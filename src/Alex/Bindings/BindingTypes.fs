@@ -85,14 +85,14 @@ module TargetPlatform =
                 System.Runtime.InteropServices.OSPlatform.Windows) then Windows
             elif System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
                 System.Runtime.InteropServices.OSPlatform.OSX) then MacOS
-            else Linux  // Default fallback
+            else failwith "detectCurrentPlatform: Unsupported OS - not Linux, Windows, or MacOS"
 
         let arch =
             match System.Runtime.InteropServices.RuntimeInformation.OSArchitecture with
             | System.Runtime.InteropServices.Architecture.X64 -> X86_64
             | System.Runtime.InteropServices.Architecture.Arm64 -> ARM64
             | System.Runtime.InteropServices.Architecture.Arm -> ARM32_Thumb
-            | _ -> X86_64
+            | other -> failwithf "detectCurrentPlatform: Unsupported architecture %A" other
 
         let triple =
             match os, arch with

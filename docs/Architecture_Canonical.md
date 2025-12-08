@@ -130,6 +130,45 @@ match symbolName with
 let Write (s: string) = ()  // placeholder
 ```
 
+## PSG Construction: True Nanopass Pipeline
+
+**See: `docs/PSG_Nanopass_Architecture_v2.md` for complete details.**
+
+PSG construction is a **nanopass pipeline**, not a monolithic operation. Each phase does ONE thing:
+
+```
+Phase 1: Structural Construction    SynExpr → PSG with nodes + ChildOf edges
+Phase 2: Symbol Correlation         + FSharpSymbol attachments (via FCS)
+Phase 3: Soft-Delete Reachability   + IsReachable marks (structure preserved!)
+Phase 4: Typed Tree Overlay         + Type, Constraints, SRTP resolution (Zipper)
+Phase 5+: Enrichment Nanopasses     + def-use edges, operation classification, etc.
+```
+
+**Critical Principles:**
+
+1. **Soft-delete reachability** - Mark unreachable nodes but preserve structure. The typed tree zipper needs full structure for navigation.
+
+2. **Typed tree overlay via zipper** - A zipper correlates `FSharpExpr` (typed tree) with PSG nodes by range, capturing:
+   - Resolved types (after inference)
+   - Resolved constraints (after solving)
+   - **SRTP resolution** (TraitCall → resolved member)
+
+3. **Each phase is inspectable** - Intermediate PSGs can be examined independently.
+
+### Why This Matters
+
+Without the typed tree overlay, we miss SRTP resolution. For example:
+
+```fsharp
+// Alloy/Console.fs
+let inline Write s = WritableString $ s  // $ is SRTP-dispatched!
+```
+
+- Syntax sees: `App [op_Dollar, WritableString, s]`
+- Typed tree knows: `TraitCall` resolving `$` to `WritableString.op_Dollar` → `writeSystemString`
+
+The typed tree zipper captures this resolution INTO the PSG. Downstream passes don't have to re-resolve.
+
 ## Validation Samples
 
 These samples must compile WITHOUT modification:
@@ -137,8 +176,9 @@ These samples must compile WITHOUT modification:
 - `02_HelloWorldSaturated` - Console.ReadLine, interpolated strings
 - `03_HelloWorldHalfCurried` - Pipe operators, NativeStr
 
-The samples use Alloy's BCL-sympathetic API. Firefly compiles them by:
-1. Building PSG from F# source + Alloy
-2. PSG captures extern primitive metadata from DllImport
-3. Alex dispatches externs to platform MLIR generators
-4. MLIR → LLVM → native binary
+The samples use Alloy's BCL-sympathetic API. Firefly compiles them via the nanopass PSG pipeline:
+1. Phase 1-4: Build PSG with full type/SRTP resolution
+2. Phase 5+: Enrich with def-use edges, classify operations
+3. Reachability prunes dead code
+4. Alex/Zipper traverses enriched PSG → MLIR
+5. MLIR → LLVM → native binary

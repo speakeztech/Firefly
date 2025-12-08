@@ -34,6 +34,45 @@ This is a sophisticated compiler project with deep architectural constraints. Fa
 - Look at how similar problems are solved in reference implementations
 - Recognize when Alloy should provide native implementations
 
+## The PSG Nanopass Pipeline (CRITICAL)
+
+> **See: `docs/PSG_Nanopass_Architecture_v2.md` for authoritative details.**
+
+PSG construction is a **true nanopass pipeline**, not a monolithic operation. Each phase does ONE thing:
+
+```
+Phase 1: Structural Construction    SynExpr → PSG with nodes + ChildOf edges
+Phase 2: Symbol Correlation         + FSharpSymbol attachments (via FCS)
+Phase 3: Soft-Delete Reachability   + IsReachable marks (structure preserved!)
+Phase 4: Typed Tree Overlay         + Type, Constraints, SRTP resolution (Zipper)
+Phase 5+: Enrichment Nanopasses     + def-use edges, operation classification, etc.
+```
+
+**CRITICAL Principles:**
+
+1. **Soft-delete reachability** - Mark unreachable nodes but preserve structure. The typed tree zipper needs full structure for navigation.
+
+2. **Typed tree overlay via zipper** - A zipper correlates `FSharpExpr` (typed tree) with PSG nodes by range, capturing:
+   - Resolved types (after inference)
+   - Resolved constraints (after solving)
+   - **SRTP resolution** (TraitCall → resolved member) - THIS IS ESSENTIAL
+
+3. **Each phase is inspectable** - Intermediate PSGs can be examined independently via `-k` flag.
+
+**Why the Typed Tree Matters:**
+
+Without the typed tree overlay, SRTP (Statically Resolved Type Parameters) cannot be resolved:
+
+```fsharp
+// Alloy/Console.fs
+let inline Write s = WritableString $ s  // $ is SRTP-dispatched!
+```
+
+- Syntax tree sees: `App [op_Dollar, WritableString, s]`
+- Typed tree knows: `TraitCall` resolving `$` to `WritableString.op_Dollar` → specific implementation
+
+> **See: `docs/TypedTree_Zipper_Design.md` for zipper implementation details.**
+
 ## The Layer Separation Principle
 
 > **Each layer in the pipeline has ONE responsibility. Do not mix concerns across layers.**

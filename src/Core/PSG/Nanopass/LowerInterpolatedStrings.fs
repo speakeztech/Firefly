@@ -56,6 +56,8 @@ let private createNode (syntaxKind: string) (range: range) (fileName: string) (p
         ContextRequirement = None
         ComputationPattern = None
         Operation = operation
+        ConstantValue = None
+        Kind = SKExpr EApp  // Lowered interpolated strings become App nodes
     }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -70,7 +72,7 @@ let private isInterpolatedString (node: PSGNode) : bool =
 let private extractStringContent (node: PSGNode) : string option =
     // The string content might be in a child Const:String node or in the SyntaxKind
     // For now, we'll need to look at the child nodes
-    None // TODO: Extract actual string content from PSG
+    failwithf "extractStringContent: Not yet implemented for node %s (Id: %s)" node.SyntaxKind node.Id.Value
 
 /// Count interpolated string parts
 let private countParts (psg: ProgramSemanticGraph) (node: PSGNode) : int =

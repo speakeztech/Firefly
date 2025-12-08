@@ -1,5 +1,10 @@
 # Program Semantic Graph (PSG) Architecture Decision Memo
 
+> **Related Documents:**
+> - `PSG_Nanopass_Architecture_v2.md` - How PSG is constructed (true nanopass pipeline)
+> - `TypedTree_Zipper_Design.md` - Typed tree overlay for SRTP resolution
+> - `Architecture_Canonical.md` - Top-level architecture reference
+
 ## Executive Summary
 
 This memo documents the architectural decisions for implementing the Program Semantic Graph (PSG) within the Firefly compiler. The PSG serves as the unified intermediate representation that correlates F# syntax with semantic type information, enabling precise reachability analysis and efficient MLIR generation while maintaining clear separation of concerns between the Core analysis phase and the Dabbit MLIR generation phase.

@@ -147,63 +147,35 @@ let extractMemberOrFunction (node: PSGNode) : FSharpMemberOrFunctionOrValue opti
     | Some (:? FSharpMemberOrFunctionOrValue as mfv) -> Some mfv
     | _ -> None
 
-/// Extract string constant value from a Const:String node
+/// Extract string constant value from a Const:String node using ConstantValue field
 let extractStringConst (node: PSGNode) : string option =
-    if node.SyntaxKind.StartsWith("Const:String") then
-        let kind = node.SyntaxKind
-        if kind.Contains("\"") then
-            let start = kind.IndexOf('"') + 1
-            let endIdx = kind.LastIndexOf('"')
-            if endIdx > start then
-                Some (kind.Substring(start, endIdx - start))
-            else None
-        else None
-    else None
+    match node.ConstantValue with
+    | Some (StringValue s) -> Some s
+    | _ -> None
 
-/// Extract int32 constant value
+/// Extract int32 constant value using ConstantValue field
 let extractIntConst (node: PSGNode) : int option =
-    if node.SyntaxKind.StartsWith("Const:Int32") then
-        let kind = node.SyntaxKind
-        let colonIdx = kind.LastIndexOf(':')
-        if colonIdx > 0 then
-            match System.Int32.TryParse(kind.Substring(colonIdx + 1)) with
-            | true, v -> Some v
-            | false, _ -> None
-        else None
-    else None
+    match node.ConstantValue with
+    | Some (Int32Value i) -> Some i
+    | _ -> None
 
-/// Extract int64 constant value
+/// Extract int64 constant value using ConstantValue field
 let extractInt64Const (node: PSGNode) : int64 option =
-    if node.SyntaxKind.StartsWith("Const:Int64") then
-        let kind = node.SyntaxKind
-        let colonIdx = kind.LastIndexOf(':')
-        if colonIdx > 0 then
-            match System.Int64.TryParse(kind.Substring(colonIdx + 1)) with
-            | true, v -> Some v
-            | false, _ -> None
-        else None
-    else None
+    match node.ConstantValue with
+    | Some (Int64Value i) -> Some i
+    | _ -> None
 
-/// Extract float constant value
+/// Extract float constant value using ConstantValue field
 let extractFloatConst (node: PSGNode) : float option =
-    if node.SyntaxKind.StartsWith("Const:Double") || node.SyntaxKind.StartsWith("Const:Single") then
-        let kind = node.SyntaxKind
-        let colonIdx = kind.LastIndexOf(':')
-        if colonIdx > 0 then
-            match System.Double.TryParse(kind.Substring(colonIdx + 1)) with
-            | true, v -> Some v
-            | false, _ -> None
-        else None
-    else None
+    match node.ConstantValue with
+    | Some (FloatValue f) -> Some f
+    | _ -> None
 
-/// Extract bool constant value
+/// Extract bool constant value using ConstantValue field
 let extractBoolConst (node: PSGNode) : bool option =
-    if node.SyntaxKind.StartsWith("Const:Boolean") then
-        let kind = node.SyntaxKind
-        if kind.EndsWith(":true") || kind.EndsWith(":True") then Some true
-        elif kind.EndsWith(":false") || kind.EndsWith(":False") then Some false
-        else None
-    else None
+    match node.ConstantValue with
+    | Some (BoolValue b) -> Some b
+    | _ -> None
 
 /// Extract variable name from MutableSet node
 let extractMutableSetName (node: PSGNode) : string option =

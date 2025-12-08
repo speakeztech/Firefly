@@ -1,6 +1,22 @@
-# PSG Nanopass Architecture
+# PSG Nanopass Architecture (v1 - SUPERSEDED)
 
-## Overview
+> **IMPORTANT: This document is SUPERSEDED by `PSG_Nanopass_Architecture_v2.md`.**
+>
+> The v2 document describes the true nanopass pipeline including:
+> - Soft-delete reachability (structure preserved for typed tree zipper)
+> - Typed tree overlay via zipper (CRITICAL for SRTP resolution)
+> - Phase 4: FSharpExpr/PSG correlation
+>
+> This v1 document is retained for:
+> - Historical reference
+> - The PHG (Program Hypergraph) addendum (still valid future vision)
+> - Def-use edge implementation details
+>
+> **For current architecture, see `PSG_Nanopass_Architecture_v2.md`.**
+
+---
+
+## Overview (Historical)
 
 This document describes the nanopass architecture for PSG (Program Semantic Graph) construction in Firefly. The nanopass approach, pioneered by Sarkar, Waddell, Dybvig, and Keep at Indiana University, advocates for compilers composed of many small, single-purpose passes rather than a few large, multi-task passes.
 

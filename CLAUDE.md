@@ -40,6 +40,7 @@ These resources are ESSENTIAL for understanding the project architecture and mak
 |----------|------|---------|
 | **F# Compiler Source** | `~/repos/fsharp` | F# compiler implementation, FSharp.Compiler.Service internals, AST structures |
 | **F# Language Specification** | `~/repos/fslang-spec` | Authoritative F# language semantics, type system, evaluation rules |
+| **Nanopass Framework** | `~/repos/nanopass-framework-scheme` | Reference implementation of nanopass compiler architecture (Scheme). Key resource for understanding `define-language`, `define-pass`, catamorphisms. See `doc/user-guide.pdf` |
 
 ### MLIR & Code Generation References
 
@@ -116,28 +117,71 @@ The PSG is not merely an AST - it is a **semantic graph carrying proofs** about 
 The compilation pipeline flows through these major phases:
 
 ```
-F# Source → FCS → PSG → Nanopasses → Alex/Zipper → MLIR → LLVM → Native Binary
+F# Source → FCS → PSG (True Nanopass Pipeline) → Alex/Zipper → MLIR → LLVM → Native Binary
 ```
+
+### The PSG Nanopass Pipeline (CRITICAL)
+
+> **See: `docs/PSG_Nanopass_Architecture_v2.md` for authoritative details.**
+
+PSG construction is itself a **true nanopass pipeline**, not a monolithic operation. Each phase does ONE thing:
+
+```
+Phase 1: Structural Construction    SynExpr → PSG with nodes + ChildOf edges
+Phase 2: Symbol Correlation         + FSharpSymbol attachments (via FCS)
+Phase 3: Soft-Delete Reachability   + IsReachable marks (structure preserved!)
+Phase 4: Typed Tree Overlay         + Type, Constraints, SRTP resolution (Zipper)
+Phase 5+: Enrichment Nanopasses     + def-use edges, operation classification, etc.
+```
+
+**CRITICAL Principles:**
+
+1. **Soft-delete reachability** - Mark unreachable nodes but preserve structure. The typed tree zipper needs full structure for navigation.
+
+2. **Typed tree overlay via zipper** - A zipper correlates `FSharpExpr` (typed tree) with PSG nodes by range, capturing:
+   - Resolved types (after inference)
+   - Resolved constraints (after solving)
+   - **SRTP resolution** (TraitCall → resolved member) - THIS IS ESSENTIAL
+
+3. **Each phase is inspectable** - Intermediate PSGs can be examined independently via `-k` flag.
+
+**Why the Typed Tree Matters:**
+
+Without the typed tree overlay, SRTP (Statically Resolved Type Parameters) cannot be resolved:
+
+```fsharp
+// Alloy/Console.fs
+let inline Write s = WritableString $ s  // $ is SRTP-dispatched!
+```
+
+- Syntax tree sees: `App [op_Dollar, WritableString, s]`
+- Typed tree knows: `TraitCall` resolving `$` to `WritableString.op_Dollar` → specific implementation
+
+The typed tree zipper captures this resolution INTO the PSG. Downstream passes (including Alex) use it directly.
+
+> **See: `docs/TypedTree_Zipper_Design.md` for zipper implementation details.**
 
 ### Core Components
 
 1. **FCS (F# Compiler Services)** - `/src/Core/FCS/`
-   - Provides parsing, type checking, and semantic analysis
+   - Provides parsing (`SynExpr`), type checking (`FSharpExpr`), and semantic analysis
    - Single source of truth for F# semantics
+   - **Both** syntax and typed trees are used during PSG construction
    - See `docs/FCS_*.md` for detailed documentation
 
 2. **PSG (Program Semantic Graph)** - `/src/Core/PSG/`
    - Unified intermediate representation correlating syntax with semantics
    - **THE SINGLE SOURCE OF TRUTH** for all downstream stages
-   - Enables reachability analysis for dead code elimination
-   - Fan-out traversal from entry points
-   - See `docs/PSG_*.md` for architecture decisions
+   - Built through a true nanopass pipeline
+   - Contains typed tree overlay for SRTP resolution
+   - See `docs/PSG_Nanopass_Architecture_v2.md` (CANONICAL) and `docs/PSG_architecture.md`
 
 3. **Nanopasses** - `/src/Core/PSG/Nanopass/`
    - Small, single-purpose transformations that enrich the PSG
    - Each pass does ONE thing (add def-use edges, classify operations, etc.)
    - Passes are composable and can be inspected independently
-   - See `docs/PSG_Nanopass_Architecture.md`
+   - **Critical distinction**: Some nanopasses are part of PSG construction (Phase 4: Typed Tree Overlay), others enrich afterwards (Phase 5+)
+   - See `docs/PSG_Nanopass_Architecture_v2.md`
 
 4. **Alex** - `/src/Alex/`
    - Multi-dimensional hardware targeting layer ("Library of Alexandria")
@@ -415,12 +459,15 @@ Before making changes, review these documents in `/docs/`:
 
 | Document | Purpose |
 |----------|---------|
-| **`Architecture_Canonical.md`** | **AUTHORITATIVE: Two-layer model, extern primitives, anti-patterns** |
-| `PSG_architecture.md` | PSG design decisions, node identity, reachability |
-| `PSG_Nanopass_Architecture.md` | Nanopass design, def-use edges, enrichment |
+| **`Architecture_Canonical.md`** | **AUTHORITATIVE: Two-layer model, extern primitives, nanopass pipeline** |
+| **`PSG_Nanopass_Architecture_v2.md`** | **CANONICAL: True nanopass pipeline, typed tree overlay, SRTP** |
+| **`TypedTree_Zipper_Design.md`** | **Zipper implementation for FSharpExpr/PSG correlation** |
+| `PSG_architecture.md` | PSG design decisions, node identity |
 | `Alex_Architecture_Overview.md` | Alex overview (references canonical doc) |
 | `XParsec_PSG_Architecture.md` | XParsec integration with Zipper |
 | `HelloWorld_Lessons_Learned.md` | Common pitfalls and solutions |
+
+**Note**: `PSG_Nanopass_Architecture.md` (v1) is superseded by `PSG_Nanopass_Architecture_v2.md`.
 
 ## Sample Projects
 
@@ -434,22 +481,60 @@ Located in `/samples/console/`:
   - `04_HelloWorldFullCurried/` - Full currying, Result.map, lambdas
 - `TimeLoop/` - Mutable state, while loops, DateTime, Sleep
 
-## Build and Test Commands
+## Build, Test, and Validation Commands
+
+> **CRITICAL: Compilation is NOT validation. The samples MUST be executed and their output validated.**
+
+A change is NOT complete until:
+1. The compiler builds successfully (`dotnet build`)
+2. Sample programs compile to native binaries
+3. **The native binaries execute correctly and produce expected output**
+
+### Validation Protocol
+
+After ANY change to the compiler pipeline, you MUST:
+
+1. **Build the compiler**
+2. **Compile a relevant sample** (start with `01_HelloWorldDirect`)
+3. **Execute the binary interactively** and verify output
+4. **Progress through samples** in order (01 → 02 → 03 → 04) as each succeeding sample tests more complex F# features
 
 ```bash
 # Build the compiler
 cd /home/hhh/repos/Firefly/src
 dotnet build
 
-# Compile a sample
+# Compile sample 01
+cd /home/hhh/repos/Firefly/samples/console/FidelityHelloWorld/01_HelloWorldDirect
 /home/hhh/repos/Firefly/src/bin/Debug/net9.0/Firefly compile HelloWorld.fidproj
 
-# With verbose output
+# CRITICAL: Execute and validate output
+./HelloWorld
+# Expected: "Hello, World!" (or prompts for input, then greeting)
+
+# If sample 01 passes, progress to sample 02, 03, 04
+cd ../02_HelloWorldSaturated
+/home/hhh/repos/Firefly/src/bin/Debug/net9.0/Firefly compile HelloWorld.fidproj
+./HelloWorld
+
+# With verbose output (for debugging)
 Firefly compile HelloWorld.fidproj --verbose
 
-# Keep intermediate files for debugging
+# Keep intermediate files for debugging (.mlir, .ll files)
 Firefly compile HelloWorld.fidproj -k
 ```
+
+### Sample Progression
+
+| Sample | Tests | Expected Behavior |
+|--------|-------|-------------------|
+| `01_HelloWorldDirect` | Static strings, basic Console calls | Prints greeting |
+| `02_HelloWorldSaturated` | Let bindings, string interpolation | Prints formatted greeting |
+| `03_HelloWorldHalfCurried` | Pipe operators, function values | Prints greeting with pipes |
+| `04_HelloWorldFullCurried` | Full currying, Result.map, lambdas | Interactive name input, greeting |
+| `TimeLoop` | Mutable state, while loops, Sleep | Countdown timer |
+
+**Do NOT claim a feature works until you have executed the binary and verified the output.**
 
 ## Key Files
 
@@ -475,6 +560,12 @@ Firefly compile HelloWorld.fidproj -k
 4. **Missing Nanopass**: If the PSG doesn't have the information you need, add a nanopass to enrich it. Don't compute it during MLIR generation.
 
 5. **Layer Violations**: Any time you find yourself importing a module from a different pipeline stage, stop and reconsider.
+
+6. **SRTP Blindness**: The syntax tree (`SynExpr`) shows SRTP operators like `$` as simple identifiers. Only the typed tree (`FSharpExpr.TraitCall`) knows the resolution. If your code doesn't have SRTP info, it means the typed tree overlay is incomplete.
+
+7. **Hard-Delete Reachability**: Physically removing unreachable nodes breaks the typed tree zipper. Use soft-delete (mark IsReachable = false) to preserve structure for correlation.
+
+8. **Wrong Nanopass Scope**: Different operator classes need different nanopasses. Pipe operators (`|>`, `<|`) are reduced by `ReducePipeOperators`. Alloy operators (like `$`) are a separate class. Don't mix concerns.
 
 ## Project Configuration
 

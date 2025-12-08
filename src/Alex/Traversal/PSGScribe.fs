@@ -1,24 +1,16 @@
 /// PSGScribe - Transcribes PSG to MLIR via Zipper traversal and XParsec pattern matching
 ///
-/// The Scribe walks the PSG via Zipper (the "attention"), pattern-matches children
-/// with XParsec combinators, and transcribes to MLIR via platform Bindings.
-///
-/// ARCHITECTURAL PRINCIPLE:
-/// - Zipper provides traversal (up/down/left/right navigation) AND context (ancestors, path)
-/// - XParsec provides pattern matching on children at each position
-/// - Bindings provide platform-specific MLIR generation for extern primitives
-/// - Scribe orchestrates these three concerns
-///
-/// CALL GRAPH TRAVERSAL:
-/// When encountering a function call, Scribe follows SymbolUse edges in the PSG
-/// to find the function definition. It then checks if the function is an extern
-/// primitive (has DllImport("__fidelity") attribute). If so, it dispatches to
-/// ExternDispatch. If not, it transcribes the function body.
+/// ARCHITECTURAL PRINCIPLES:
+/// 1. Zipper provides tree traversal with context preservation (up/down/left/right)
+/// 2. XParsec provides composable pattern matching on children at each position
+/// 3. Bindings provide platform-specific MLIR generation for extern primitives
+/// 4. Scribe orchestrates these three - it does NOT have its own traversal logic
 ///
 /// The Scribe does NOT:
-/// - Know about specific library names (no "Alloy.Console.Write" matching)
-/// - Make targeting decisions (that's Bindings' job)
-/// - Interpret or transform semantics (PSG already has full semantics)
+/// - Do ad-hoc recursive traversal (that's the Zipper's job)
+/// - Have its own state type (uses EmitContext from PSGXParsec)
+/// - Pattern match on strings (uses typed SyntaxKind and XParsec combinators)
+/// - Know about specific library names (dispatches based on PSG structure)
 module Alex.Traversal.PSGScribe
 
 open System.Text
@@ -30,184 +22,36 @@ open Alex.CodeGeneration.MLIRBuilder
 open Alex.Bindings.BindingTypes
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Scribe State - Accumulated output during transcription
+// Type-Driven Pattern Matchers - Match on typed SyntaxKind, not strings
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// State accumulated during PSG transcription
-type ScribeState = {
-    /// SSA counter for generating unique value names
-    SSACounter: int
-    /// Map from NodeId to (SSA name, MLIR type)
-    NodeSSA: Map<string, string * string>
-    /// Accumulated string literals: (content, global name)
-    StringLiterals: (string * string) list
-    /// MLIR output lines
-    Output: StringBuilder
-    /// Current indentation level
-    Indent: int
-}
+/// Match a node by its typed Kind field
+let kindIs (expected: SyntaxKindT) : PSGChildParser<PSGNode> =
+    satisfyChild (fun n -> n.Kind = expected)
 
-module ScribeState =
-    let empty () = {
-        SSACounter = 0
-        NodeSSA = Map.empty
-        StringLiterals = []
-        Output = StringBuilder()
-        Indent = 0
-    }
+/// Match any expression node
+let anyExpr : PSGChildParser<PSGNode> =
+    satisfyChild (fun n -> match n.Kind with SKExpr _ -> true | _ -> false)
 
-    let nextSSA (state: ScribeState) : ScribeState * string =
-        let name = sprintf "%%v%d" state.SSACounter
-        { state with SSACounter = state.SSACounter + 1 }, name
+/// Match specific expression kind
+let exprKind (ek: ExprKind) : PSGChildParser<PSGNode> =
+    kindIs (SKExpr ek)
 
-    let recordNodeSSA (nodeId: NodeId) (ssa: string) (mlirType: string) (state: ScribeState) : ScribeState =
-        { state with NodeSSA = Map.add nodeId.Value (ssa, mlirType) state.NodeSSA }
+/// Match any pattern node
+let anyPattern : PSGChildParser<PSGNode> =
+    satisfyChild (fun n -> match n.Kind with SKPattern _ -> true | _ -> false)
 
-    let lookupNodeSSA (nodeId: NodeId) (state: ScribeState) : (string * string) option =
-        Map.tryFind nodeId.Value state.NodeSSA
+/// Match any binding node
+let anyBinding : PSGChildParser<PSGNode> =
+    satisfyChild (fun n -> match n.Kind with SKBinding _ -> true | _ -> false)
 
-    let registerString (content: string) (state: ScribeState) : ScribeState * string =
-        match state.StringLiterals |> List.tryFind (fun (c, _) -> c = content) with
-        | Some (_, name) -> state, name
-        | None ->
-            let name = sprintf "@str%d" (List.length state.StringLiterals)
-            { state with StringLiterals = (content, name) :: state.StringLiterals }, name
-
-    /// Look up the length of a registered string by its global name
-    let getStringLength (globalName: string) (state: ScribeState) : int option =
-        state.StringLiterals
-        |> List.tryFind (fun (_, name) -> name = globalName)
-        |> Option.map (fun (content, _) -> content.Length)
-
-    let emit (line: string) (state: ScribeState) : ScribeState =
-        let indent = String.replicate state.Indent "  "
-        state.Output.AppendLine(indent + line) |> ignore
-        state
-
-    let pushIndent (state: ScribeState) : ScribeState =
-        { state with Indent = state.Indent + 1 }
-
-    let popIndent (state: ScribeState) : ScribeState =
-        { state with Indent = max 0 (state.Indent - 1) }
-
-    /// Execute an MLIR computation from Bindings and merge output into ScribeState
-    /// This bridges the MLIR monad with ScribeState's string-based emission
-    /// The MLIR computation starts from the current SSA counter and updates it
-    let runMLIR (mlirComp: MLIR<'T>) (state: ScribeState) : ScribeState * 'T =
-        // Run the MLIR computation starting from current SSA counter
-        let (text, result, finalSSA) = runAtWithCounter state.SSACounter mlirComp
-        // Update state with new SSA counter and append output
-        let indentStr = String.replicate state.Indent "  "
-        for line in text.Split('\n') do
-            if not (System.String.IsNullOrWhiteSpace(line)) then
-                state.Output.AppendLine(indentStr + line.TrimStart()) |> ignore
-        { state with SSACounter = finalSSA }, result
+/// Match any declaration node
+let anyDecl : PSGChildParser<PSGNode> =
+    satisfyChild (fun n -> match n.Kind with SKDecl _ -> true | _ -> false)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Scribe Result - What transcription produces
+// Symbol Helpers
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Result of transcribing an expression
-type ScribeResult =
-    /// Expression produced a value
-    | SValue of ssa: string * mlirType: string
-    /// Expression produced no value (unit/void)
-    | SVoid
-    /// Transcription error
-    | SError of message: string
-
-module ScribeResult =
-    let isValue = function SValue _ -> true | _ -> false
-    let isVoid = function SVoid -> true | _ -> false
-    let isError = function SError _ -> true | _ -> false
-
-    let getSSA = function SValue (ssa, _) -> Some ssa | _ -> None
-    let getType = function SValue (_, t) -> Some t | _ -> None
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Binding Bridge - Execute MLIR computations from Bindings
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Execute an MLIR Binding computation and convert result to ScribeResult
-let runBinding (binding: MLIR<EmissionResult>) (state: ScribeState) : ScribeState * ScribeResult =
-    let state', emitResult = ScribeState.runMLIR binding state
-    match emitResult with
-    | Emitted val' ->
-        // Convert MLIRBuilder.Val to ScribeResult
-        let ssaStr = Serialize.ssa val'.SSA
-        let tyStr = Serialize.ty val'.Type
-        state', SValue (ssaStr, tyStr)
-    | EmittedVoid ->
-        state', SVoid
-    | NotSupported msg ->
-        let state'' = ScribeState.emit (sprintf "// NOT SUPPORTED: %s" msg) state'
-        state'', SVoid
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Value Conversion Helpers
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Parse an SSA string like "%v5" to an SSA value
-let private parseSSA (s: string) : SSA =
-    if s.StartsWith("%arg") then
-        Arg (int (s.Substring(4)))
-    elif s.StartsWith("%v") then
-        V (int (s.Substring(2)))
-    else
-        V 0 // Fallback
-
-/// Parse an MLIR type string to a Ty
-let private parseTy (s: string) : Ty =
-    match s with
-    | "i1" -> Int I1
-    | "i8" -> Int I8
-    | "i16" -> Int I16
-    | "i32" -> Int I32
-    | "i64" -> Int I64
-    | "f32" -> Float F32
-    | "f64" -> Float F64
-    | "!llvm.ptr" -> Ptr
-    | "index" -> Index
-    | "()" -> Unit
-    | _ -> Ptr // Fallback for complex types
-
-/// Convert a ScribeResult to a Val (for passing to Bindings)
-let scribeResultToVal (result: ScribeResult) : Val option =
-    match result with
-    | SValue (ssaStr, tyStr) ->
-        Some { SSA = parseSSA ssaStr; Type = parseTy tyStr }
-    | SVoid | SError _ -> None
-
-// ═══════════════════════════════════════════════════════════════════════════
-// PSG Node Helpers
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Extract string content from a Const:String node
-let private extractStringConst (node: PSGNode) : string option =
-    if node.SyntaxKind.StartsWith("Const:String") then
-        // SyntaxKind is like: Const:String ("Hello, World!", Regular, (10,18--10,33))
-        let sk = node.SyntaxKind
-        let start = sk.IndexOf("(\"")
-        if start >= 0 then
-            let afterQuote = start + 2
-            let endQuote = sk.IndexOf("\",", afterQuote)
-            if endQuote > afterQuote then
-                Some (sk.Substring(afterQuote, endQuote - afterQuote))
-            else None
-        else None
-    else None
-
-/// Extract int value from a Const:Int32 node
-let private extractIntConst (node: PSGNode) : int option =
-    if node.SyntaxKind.StartsWith("Const:Int32") then
-        // SyntaxKind is like: Const:Int32 0
-        let parts = node.SyntaxKind.Split(' ')
-        if parts.Length >= 2 then
-            match System.Int32.TryParse(parts.[1]) with
-            | true, v -> Some v
-            | _ -> None
-        else None
-    else None
 
 /// Check if a symbol has DllImport("__fidelity") attribute
 let private hasFidelityDllImport (sym: FSharpSymbol) : bool =
@@ -230,7 +74,6 @@ let private getExternEntryPoint (sym: FSharpSymbol) : string option =
         mfv.Attributes
         |> Seq.tryPick (fun attr ->
             if attr.AttributeType.FullName = "System.Runtime.InteropServices.DllImportAttribute" then
-                // Look for EntryPoint named argument
                 attr.NamedArguments
                 |> Seq.tryPick (fun (_, name, _, value) ->
                     if name = "EntryPoint" then
@@ -238,580 +81,592 @@ let private getExternEntryPoint (sym: FSharpSymbol) : string option =
                         | :? string as s -> Some s
                         | _ -> None
                     else None)
-                |> Option.orElse (Some mfv.DisplayName) // Default to function name
+                |> Option.orElse (Some mfv.DisplayName)
             else None)
     | _ -> None
 
-/// Check if a PSG node represents an extern primitive (has DllImport("__fidelity"))
-let private isExternPrimitive (psg: ProgramSemanticGraph) (node: PSGNode) : bool =
-    match node.Symbol with
-    | Some sym -> hasFidelityDllImport sym
-    | None -> false
-
-/// Follow SymbolUse edges to find the definition of a function
-/// Returns the definition node if found
-let private findFunctionDefinition (psg: ProgramSemanticGraph) (funcNode: PSGNode) : PSGNode option =
-    // Find SymbolUse edge from this node
-    psg.Edges
-    |> List.tryFind (fun edge -> edge.Source = funcNode.Id && edge.Kind = EdgeKind.SymbolUse)
-    |> Option.bind (fun edge -> Map.tryFind edge.Target.Value psg.Nodes)
-
-/// Check if a function call ultimately resolves to an extern primitive
-/// by following the call graph until we find a DllImport("__fidelity")
-let rec private resolveToExternPrimitive (psg: ProgramSemanticGraph) (funcNode: PSGNode) (visited: Set<string>) : (PSGNode * FSharpSymbol) option =
-    if visited.Contains funcNode.Id.Value then
-        None // Prevent infinite loops
-    else
-        let visited' = visited.Add funcNode.Id.Value
-
-        match funcNode.Symbol with
-        | Some sym when hasFidelityDllImport sym ->
-            // Found extern primitive
-            Some (funcNode, sym)
-        | Some sym ->
-            // Follow to definition and check its body
-            match findFunctionDefinition psg funcNode with
-            | Some defNode ->
-                // Look at the definition's children for function calls
-                let children = ChildrenStateHelpers.getChildrenList defNode
-                            |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
-
-                // Find any function calls in the body and recursively check
-                children
-                |> List.tryPick (fun child ->
-                    if child.SyntaxKind.StartsWith("App:FunctionCall") then
-                        let funcChildren = ChildrenStateHelpers.getChildrenList child
-                                        |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
-                        funcChildren
-                        |> List.tryFind (fun c -> c.SyntaxKind.StartsWith("LongIdent") || c.SyntaxKind.StartsWith("Ident:"))
-                        |> Option.bind (fun fc -> resolveToExternPrimitive psg fc visited')
-                    else None)
-            | None -> None
-        | None -> None
-
 // ═══════════════════════════════════════════════════════════════════════════
-// Core Transcription - Recursive PSG traversal
+// Scribe Context - Shared mutable state for MLIR emission
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Transcribe a PSG node to MLIR, returning the result and updated state
-let rec transcribe (psg: ProgramSemanticGraph) (node: PSGNode) (state: ScribeState) : ScribeState * ScribeResult =
-    let children =
-        ChildrenStateHelpers.getChildrenList node
-        |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
+/// Shared context for the entire emission pass
+/// This is passed through all emission functions to accumulate MLIR output
+type ScribeContext = {
+    Graph: ProgramSemanticGraph
+    mutable Output: StringBuilder
+    mutable StringLiterals: (string * string) list
+}
 
-    match node.SyntaxKind with
-    // ─────────────────────────────────────────────────────────────────────
-    // Constants
-    // ─────────────────────────────────────────────────────────────────────
-    | sk when sk.StartsWith("Const:String") ->
-        match extractStringConst node with
-        | Some content ->
-            let state', globalName = ScribeState.registerString content state
-            let state'', ssa = ScribeState.nextSSA state'
-            // Get pointer to string data
-            let len = content.Length
-            let state''' =
-                state''
-                |> ScribeState.emit (sprintf "%s = llvm.mlir.addressof %s : !llvm.ptr" ssa globalName)
-            state''', SValue (ssa, "!llvm.ptr")
+module ScribeContext =
+    let create (psg: ProgramSemanticGraph) = {
+        Graph = psg
+        Output = StringBuilder()
+        StringLiterals = []
+    }
+
+    let emit (ctx: ScribeContext) (line: string) =
+        ctx.Output.AppendLine("    " + line) |> ignore
+
+    let emitNoIndent (ctx: ScribeContext) (line: string) =
+        ctx.Output.AppendLine(line) |> ignore
+
+    let registerString (ctx: ScribeContext) (content: string) : string =
+        match ctx.StringLiterals |> List.tryFind (fun (c, _) -> c = content) with
+        | Some (_, name) -> name
         | None ->
-            state, SError "Could not extract string content"
+            let name = sprintf "@str%d" (List.length ctx.StringLiterals)
+            ctx.StringLiterals <- (content, name) :: ctx.StringLiterals
+            name
 
-    | sk when sk.StartsWith("Const:Int32") ->
-        match extractIntConst node with
-        | Some value ->
-            let state', ssa = ScribeState.nextSSA state
-            let state'' =
-                state'
-                |> ScribeState.emit (sprintf "%s = arith.constant %d : i32" ssa value)
-            state'', SValue (ssa, "i32")
-        | None ->
-            state, SError "Could not extract int constant"
+/// Carry context through the traversal
+let mutable private currentContext : ScribeContext option = None
 
-    | "Const:Unit" ->
-        state, SVoid
+let private emit (line: string) =
+    match currentContext with
+    | Some ctx -> ScribeContext.emit ctx line
+    | None -> failwith "No active ScribeContext"
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Sequential expressions
-    // ─────────────────────────────────────────────────────────────────────
-    | "Sequential" ->
-        // Execute all children in order, return last result
-        let rec transcribeSeq state' children' =
-            match children' with
-            | [] -> state', SVoid
-            | [last] -> transcribe psg last state'
-            | first :: rest ->
-                let state'', _ = transcribe psg first state'
-                transcribeSeq state'' rest
-        transcribeSeq state children
+let private registerString (content: string) : string =
+    match currentContext with
+    | Some ctx -> ScribeContext.registerString ctx content
+    | None -> failwith "No active ScribeContext"
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Function applications
-    // ─────────────────────────────────────────────────────────────────────
-    | sk when sk.StartsWith("App:FunctionCall") || sk.StartsWith("App") ->
-        // Check if operation was classified by nanopass
-        match node.Operation with
-        | Some (Console consoleOp) ->
-            transcribeConsoleOp psg node consoleOp children state
-        | Some (Time timeOp) ->
-            transcribeTimeOp psg node timeOp children state
-        | Some (NativePtr ptrOp) ->
-            transcribeNativePtrOp psg node ptrOp children state
-        | Some (Core coreOp) ->
-            transcribeCoreOp psg node coreOp children state
-        | Some (Arithmetic arithOp) ->
-            transcribeArithmeticOp psg node arithOp children state
-        | Some (Comparison cmpOp) ->
-            transcribeComparisonOp psg node cmpOp children state
-        | Some (Conversion convOp) ->
-            transcribeConversionOp psg node convOp children state
-        | Some (RegularCall info) ->
-            transcribeRegularCallInfo psg node info children state
-        | _ ->
-            // Unclassified - transcribe children and return last result
-            let funcNode = children |> List.tryFind (fun c -> c.SyntaxKind.StartsWith("LongIdent"))
-            let argNodes = children |> List.filter (fun c -> not (c.SyntaxKind.StartsWith("LongIdent")))
+// ═══════════════════════════════════════════════════════════════════════════
+// Zipper-Based Traversal Helpers
+// ═══════════════════════════════════════════════════════════════════════════
 
-            match funcNode with
-            | Some fn ->
-                // Try to follow call graph for non-classified functions
-                transcribeRegularCall psg fn argNodes state
+/// Find a node's body by following ChildOf edges (for bindings)
+let private findBody (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode option =
+    let childEdges = psg.Edges |> List.filter (fun e ->
+        e.Source = node.Id && e.Kind = EdgeKind.ChildOf)
+    childEdges |> List.tryPick (fun e ->
+        match Map.tryFind e.Target.Value psg.Nodes with
+        | Some n when not (n.SyntaxKind.StartsWith("Pattern:")) -> Some n
+        | _ -> None)
+
+/// Follow SymbolUse edge to find definition
+let private findDefinition (psg: ProgramSemanticGraph) (useNode: PSGNode) : PSGNode option =
+    let edge = psg.Edges |> List.tryFind (fun e -> e.Source = useNode.Id && e.Kind = EdgeKind.SymbolUse)
+    eprintfn "[SCRIBE] findDefinition for %s (id=%A): edge=%A" useNode.SyntaxKind useNode.Id (edge |> Option.map (fun e -> e.Target))
+    edge |> Option.bind (fun e -> Map.tryFind e.Target.Value psg.Nodes)
+
+/// Check if a node is an extern primitive
+let private isExtern (node: PSGNode) : bool =
+    node.Symbol |> Option.map hasFidelityDllImport |> Option.defaultValue false
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Core Emission Functions - Zipper-based traversal with XParsec patterns
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Emit a node - main dispatch based on typed Kind
+let rec private emitNode (zipper: PSGZipper) : PSGZipper * ExprResult =
+    let node = zipper.Focus
+    eprintfn "[SCRIBE] emitNode: %s (Kind: %A, Operation: %A)" node.SyntaxKind node.Kind node.Operation
+
+    // Dispatch based on typed Kind field
+    match node.Kind with
+    | SKExpr EConst -> emitConst zipper node
+    | SKExpr EApp -> emitApp zipper node
+    | SKExpr ETypeApp -> emitTypeApp zipper node
+    | SKExpr EIdent -> emitIdent zipper node
+    | SKExpr ELongIdent -> emitIdent zipper node
+    | SKExpr ELetOrUse -> emitLetOrUse zipper node
+    | SKExpr ESequential -> emitSequential zipper node
+    | SKExpr EMutableSet -> emitMutableSet zipper node
+    | SKExpr EWhileLoop -> emitWhileLoop zipper node
+    | SKExpr EForLoop -> emitForLoop zipper node
+    | SKExpr EAddressOf -> emitAddressOf zipper node
+    | SKBinding _ -> emitBinding zipper node
+    | SKPattern _ -> zipper, Void  // Patterns are structural, don't emit
+    | SKDecl _ -> zipper, Void     // Declarations handled separately
+    | SKUnknown -> emitUnknown zipper node
+    | _ -> zipper, EmitError (sprintf "Unhandled Kind: %A for node %s" node.Kind node.Id.Value)
+
+/// Emit a constant
+and private emitConst (zipper: PSGZipper) (node: PSGNode) : PSGZipper * ExprResult =
+    match node.ConstantValue with
+    | Some (StringValue s) ->
+        let globalName = registerString s
+        let newState, ssa = EmissionState.nextSSA zipper.State
+        emit (sprintf "%s = llvm.mlir.addressof %s : !llvm.ptr" ssa globalName)
+        { zipper with State = newState }, Value (ssa, "!llvm.ptr")
+
+    | Some (Int32Value v) ->
+        let newState, ssa = EmissionState.nextSSA zipper.State
+        emit (sprintf "%s = arith.constant %d : i32" ssa v)
+        { zipper with State = newState }, Value (ssa, "i32")
+
+    | Some (Int64Value v) ->
+        let newState, ssa = EmissionState.nextSSA zipper.State
+        emit (sprintf "%s = arith.constant %d : i64" ssa v)
+        { zipper with State = newState }, Value (ssa, "i64")
+
+    | Some (ByteValue v) ->
+        let newState, ssa = EmissionState.nextSSA zipper.State
+        emit (sprintf "%s = arith.constant %d : i8" ssa (int v))
+        { zipper with State = newState }, Value (ssa, "i8")
+
+    | Some (BoolValue v) ->
+        let newState, ssa = EmissionState.nextSSA zipper.State
+        let mlirVal = if v then 1 else 0
+        emit (sprintf "%s = arith.constant %d : i1" ssa mlirVal)
+        { zipper with State = newState }, Value (ssa, "i1")
+
+    | Some UnitValue -> zipper, Void
+
+    | None ->
+        // Fallback: try to parse from SyntaxKind
+        zipper, EmitError (sprintf "Const node %s has no ConstantValue" node.Id.Value)
+
+    | _ -> zipper, EmitError (sprintf "Unhandled ConstantValue in node %s" node.Id.Value)
+
+/// Emit an identifier reference - look up via def-use edges
+and private emitIdent (zipper: PSGZipper) (node: PSGNode) : PSGZipper * ExprResult =
+    // First check if we have this node's SSA already
+    match EmissionState.lookupNodeSSA node.Id zipper.State with
+    | Some (ssa, ty) -> zipper, Value (ssa, ty)
+    | None ->
+        // Follow SymbolUse edge to find definition
+        let defEdge = zipper.Graph.Edges |> List.tryFind (fun e ->
+            e.Source = node.Id && e.Kind = EdgeKind.SymbolUse)
+        match defEdge with
+        | Some edge ->
+            match EmissionState.lookupNodeSSA edge.Target zipper.State with
+            | Some (ssa, ty) -> zipper, Value (ssa, ty)
             | None ->
-                // No function identifier - just transcribe children
-                transcribeChildren psg children state
+                // Definition not yet emitted - this might be a function reference
+                zipper, Void
+        | None -> zipper, Void
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Bindings (let expressions)
-    // ─────────────────────────────────────────────────────────────────────
-    | sk when sk.StartsWith("Binding:") ->
-        // Children are: Pattern, then body expression
-        let bodyNodes = children |> List.filter (fun c ->
-            not (c.SyntaxKind.StartsWith("Pattern:")))
-        match bodyNodes with
-        | [body] -> transcribe psg body state
-        | [] -> state, SVoid
-        | _ ->
-            // Multiple body expressions - treat as sequential
-            let rec transcribeSeq state' nodes =
-                match nodes with
-                | [] -> state', SVoid
-                | [last] -> transcribe psg last state'
-                | first :: rest ->
-                    let state'', _ = transcribe psg first state'
-                    transcribeSeq state'' rest
-            transcribeSeq state bodyNodes
+/// Emit a let binding - traverse children with proper state threading
+and private emitLetOrUse (zipper: PSGZipper) (node: PSGNode) : PSGZipper * ExprResult =
+    // LetOrUse children: Binding nodes followed by body expression
+    // Traverse children sequentially, threading state
+    let children = PSGZipper.childNodes zipper
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Identifiers / Value references
-    // ─────────────────────────────────────────────────────────────────────
-    | sk when sk.StartsWith("LongIdent:") || sk.StartsWith("Ident:") ->
-        // Look up the SSA value for this reference
-        match ScribeState.lookupNodeSSA node.Id state with
-        | Some (ssa, ty) -> state, SValue (ssa, ty)
-        | None ->
-            // This might be a function reference, not a value
-            state, SVoid
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Fallback
-    // ─────────────────────────────────────────────────────────────────────
-    | _ ->
-        // For unhandled nodes, try to transcribe children
-        if children.IsEmpty then
-            state, SVoid
-        else
-            let rec transcribeSeq state' children' =
-                match children' with
-                | [] -> state', SVoid
-                | [last] -> transcribe psg last state'
-                | first :: rest ->
-                    let state'', _ = transcribe psg first state'
-                    transcribeSeq state'' rest
-            transcribeSeq state children
-
-/// Helper to transcribe children and return the last result
-and private transcribeChildren (psg: ProgramSemanticGraph) (children: PSGNode list) (state: ScribeState) : ScribeState * ScribeResult =
-    let rec transcribeSeq state' children' =
+    let rec emitChildren z result children' =
         match children' with
-        | [] -> state', SVoid
-        | [last] -> transcribe psg last state'
-        | first :: rest ->
-            let state'', _ = transcribe psg first state'
-            transcribeSeq state'' rest
-    transcribeSeq state children
+        | [] -> z, result
+        | [last] ->
+            // Last child is the result
+            match PSGZipper.downTo (List.length children - 1) z with
+            | NavOk childZ ->
+                let z', r = emitNode childZ
+                // Go back up
+                match PSGZipper.up z' with
+                | NavOk parentZ -> parentZ, r
+                | NavFail _ -> z', r
+            | NavFail msg -> z, EmitError msg
+        | child :: rest ->
+            // Emit this child, threading state
+            let idx = List.length children - List.length children'
+            match PSGZipper.downTo idx z with
+            | NavOk childZ ->
+                let z', _ = emitNode childZ
+                match PSGZipper.up z' with
+                | NavOk parentZ -> emitChildren parentZ result rest
+                | NavFail _ -> emitChildren z' result rest
+            | NavFail msg -> z, EmitError msg
 
-/// Transcribe a Console operation via Bindings
-/// This dispatches to platform-specific bindings via ExternDispatch
-and private transcribeConsoleOp
-    (psg: ProgramSemanticGraph)
-    (node: PSGNode)
-    (consoleOp: ConsoleOp)
-    (children: PSGNode list)
-    (state: ScribeState) : ScribeState * ScribeResult =
+    emitChildren zipper Void children
 
-    // Transcribe argument children (filter out function identifiers)
+/// Emit a sequential expression - emit children in order, return last result
+and private emitSequential (zipper: PSGZipper) (node: PSGNode) : PSGZipper * ExprResult =
+    let children = PSGZipper.childNodes zipper
+
+    let rec emitSeq z lastResult idx =
+        if idx >= List.length children then
+            z, lastResult
+        else
+            match PSGZipper.downTo idx z with
+            | NavOk childZ ->
+                let z', result = emitNode childZ
+                match PSGZipper.up z' with
+                | NavOk parentZ -> emitSeq parentZ result (idx + 1)
+                | NavFail _ -> emitSeq z' result (idx + 1)
+            | NavFail msg -> z, EmitError msg
+
+    emitSeq zipper Void 0
+
+/// Emit a binding - evaluate body and record SSA for this binding
+and private emitBinding (zipper: PSGZipper) (node: PSGNode) : PSGZipper * ExprResult =
+    // Find body child (non-pattern)
+    let children = PSGZipper.childNodes zipper
+    let bodyIdx = children |> List.tryFindIndex (fun c ->
+        not (c.SyntaxKind.StartsWith("Pattern:")))
+
+    match bodyIdx with
+    | Some idx ->
+        match PSGZipper.downTo idx zipper with
+        | NavOk childZ ->
+            let z', result = emitNode childZ
+            // Record this binding's SSA value
+            let z'' =
+                match result with
+                | Value (ssa, ty) ->
+                    PSGZipper.recordNodeSSA node.Id ssa ty z'
+                | _ -> z'
+            match PSGZipper.up z'' with
+            | NavOk parentZ -> parentZ, result
+            | NavFail _ -> z'', result
+        | NavFail msg -> zipper, EmitError msg
+    | None -> zipper, Void
+
+/// Emit an application (function call)
+and private emitApp (zipper: PSGZipper) (node: PSGNode) : PSGZipper * ExprResult =
+    // Check Operation field for classified operations
+    match node.Operation with
+    | Some op -> emitClassifiedOp zipper node op
+    | None -> emitRegularCall zipper node
+
+/// Emit a classified operation (Console, NativePtr, etc.)
+and private emitClassifiedOp (zipper: PSGZipper) (node: PSGNode) (op: OperationKind) : PSGZipper * ExprResult =
+    match op with
+    | Console consoleOp -> emitConsoleOp zipper node consoleOp
+    | NativePtr ptrOp -> emitNativePtrOp zipper node ptrOp
+    | Arithmetic arithOp -> emitArithOp zipper node arithOp
+    | Core coreOp -> emitCoreOp zipper node coreOp
+    | Memory memOp -> emitMemoryOp zipper node memOp
+    | _ -> zipper, EmitError (sprintf "Unhandled operation kind: %A" op)
+
+/// Emit console operations
+and private emitConsoleOp (zipper: PSGZipper) (node: PSGNode) (op: ConsoleOp) : PSGZipper * ExprResult =
+    let children = PSGZipper.childNodes zipper
+    // Filter out function identifiers to get argument nodes
     let argNodes = children |> List.filter (fun c ->
-        not (c.SyntaxKind.StartsWith("LongIdent")) && not (c.SyntaxKind.StartsWith("Ident:")))
+        not (c.SyntaxKind.StartsWith("LongIdent")) &&
+        not (c.SyntaxKind.StartsWith("Ident:")) &&
+        not (c.SyntaxKind.StartsWith("TypeApp")))
 
-    let state', argResults =
-        argNodes
-        |> List.fold (fun (st, results) arg ->
-            let st', result = transcribe psg arg st
-            st', results @ [result]
-        ) (state, [])
-
-    // Dispatch to platform-specific bindings via fidelity_write_bytes extern
-    match consoleOp with
+    match op with
     | ConsoleWrite | ConsoleWriteln ->
-        match argResults with
-        | [SValue (strPtr, "!llvm.ptr")] ->
-            // Emit fd=1 (stdout) via MLIR builder
-            let fdBinding = mlir {
-                let! fd = arith.constant 1L I32
-                return fd
-            }
-            let state'', fdVal = ScribeState.runMLIR fdBinding state'
+        // Find function definition and inline it
+        eprintfn "[SCRIBE] ConsoleWrite/Writeln - children: %A" (children |> List.map (fun c -> c.SyntaxKind))
+        let funcNode = children |> List.tryFind (fun c ->
+            c.SyntaxKind.StartsWith("LongIdent") || c.SyntaxKind.StartsWith("Ident:"))
+        eprintfn "[SCRIBE] funcNode: %A" (funcNode |> Option.map (fun n -> n.SyntaxKind))
+        match funcNode with
+        | Some fn ->
+            let defNode = findDefinition zipper.Graph fn
+            eprintfn "[SCRIBE] defNode: %A" (defNode |> Option.map (fun n -> n.SyntaxKind))
+            match defNode with
+            | Some defNode ->
+                let bodyNode = findBody zipper.Graph defNode
+                eprintfn "[SCRIBE] bodyNode: %A" (bodyNode |> Option.map (fun n -> n.SyntaxKind))
+                match bodyNode with
+                | Some body ->
+                    // Create zipper focused on body and emit
+                    let bodyZ = PSGZipper.createWithState zipper.Graph body zipper.State
+                    let z', result = emitNode bodyZ
+                    eprintfn "[SCRIBE] Console body emit result: %A" result
+                    // Merge state back
+                    { zipper with State = z'.State }, result
+                | None -> zipper, EmitError "No body found for Console function"
+            | None -> zipper, EmitError "No definition found for Console function"
+        | None -> zipper, EmitError "No function identifier in Console call"
 
-            // Get string length from registry (fallback to 13 for "Hello, World!")
-            // TODO: Properly track string lengths through the compilation
-            let strLen = 13 // Placeholder until we track lengths properly
+    | ConsoleWriteBytes ->
+        // writeBytes(fd, ptr, count) -> syscall
+        if argNodes.Length >= 3 then
+            // Emit args
+            let z1, fdResult = emitArgAt zipper argNodes 0
+            let z2, ptrResult = emitArgAt z1 argNodes 1
+            let z3, countResult = emitArgAt z2 argNodes 2
 
-            // Emit count constant via MLIR builder
-            let countBinding = mlir {
-                let! count = arith.constant (int64 strLen) I32
-                return count
-            }
-            let state''', countVal = ScribeState.runMLIR countBinding state''
+            match fdResult, ptrResult, countResult with
+            | Value (fdSSA, _), Value (ptrSSA, _), Value (countSSA, _) ->
+                // Emit write syscall
+                let newState, resultSSA = EmissionState.nextSSA z3.State
+                emit (sprintf "// write(%s, %s, %s)" fdSSA ptrSSA countSSA)
+                emit (sprintf "%s = llvm.call @fidelity_write_bytes(%s, %s, %s) : (i32, !llvm.ptr, i32) -> i32"
+                    resultSSA fdSSA ptrSSA countSSA)
+                { z3 with State = newState }, Value (resultSSA, "i32")
+            | _ -> z3, EmitError "Failed to emit writeBytes arguments"
+        else
+            zipper, EmitError (sprintf "writeBytes expects 3 args, got %d" argNodes.Length)
 
-            // Convert string pointer to Val
-            let bufVal = { SSA = parseSSA strPtr; Type = Ptr }
+    | ConsoleNewLine ->
+        // Inline newLine function body
+        let funcNode = children |> List.tryFind (fun c ->
+            c.SyntaxKind.StartsWith("LongIdent") || c.SyntaxKind.StartsWith("Ident:"))
+        match funcNode with
+        | Some fn ->
+            match findDefinition zipper.Graph fn with
+            | Some defNode ->
+                match findBody zipper.Graph defNode with
+                | Some body ->
+                    let bodyZ = PSGZipper.createWithState zipper.Graph body zipper.State
+                    let z', result = emitNode bodyZ
+                    { zipper with State = z'.State }, result
+                | None -> zipper, EmitError "No body for newLine"
+            | None -> zipper, EmitError "No definition for newLine"
+        | None -> zipper, EmitError "No function in newLine call"
 
-            // Create ExternPrimitive for fidelity_write_bytes(fd, buf, count)
-            let prim : ExternPrimitive = {
-                EntryPoint = "fidelity_write_bytes"
-                Library = "__fidelity"
-                CallingConvention = "Cdecl"
-                Args = [fdVal; bufVal; countVal]
-                ReturnType = Int I32
-            }
+    | _ -> zipper, EmitError (sprintf "Unhandled console op: %A" op)
 
-            // Dispatch to platform-specific binding
-            let state4, result = runBinding (ExternDispatch.dispatch prim) state'''
+/// Emit an argument at index
+and private emitArgAt (zipper: PSGZipper) (args: PSGNode list) (idx: int) : PSGZipper * ExprResult =
+    if idx >= List.length args then
+        zipper, EmitError (sprintf "Arg index %d out of range" idx)
+    else
+        let argNode = args.[idx]
+        let argZ = PSGZipper.createWithState zipper.Graph argNode zipper.State
+        let z', result = emitNode argZ
+        { zipper with State = z'.State }, result
 
-            // If WriteLine, also emit newline via binding
-            if consoleOp = ConsoleWriteln then
-                // Emit newline: write(1, "\n", 1)
-                // For now, just add a comment - proper implementation would register '\n' as a global
-                let state5 = state4 |> ScribeState.emit "// TODO: newline for WriteLine via binding"
-                state5, SVoid
-            else
-                state4, SVoid
+/// Emit NativePtr operations
+and private emitNativePtrOp (zipper: PSGZipper) (node: PSGNode) (op: NativePtrOp) : PSGZipper * ExprResult =
+    let children = PSGZipper.childNodes zipper
+    let argNodes = children |> List.filter (fun c ->
+        not (c.SyntaxKind.StartsWith("LongIdent")) &&
+        not (c.SyntaxKind.StartsWith("Ident:")) &&
+        not (c.SyntaxKind.StartsWith("TypeApp")))
 
+    match op with
+    | PtrToVoidPtr | PtrOfVoidPtr | PtrToNativeInt | PtrOfNativeInt ->
+        // These are essentially casts - emit the argument and return it
+        if argNodes.Length >= 1 then
+            emitArgAt zipper argNodes 0
+        else
+            zipper, EmitError (sprintf "%A expects at least 1 arg" op)
+
+    | PtrStackAlloc ->
+        // Stack allocation
+        let newState, ssa = EmissionState.nextSSA zipper.State
+        emit (sprintf "%s = llvm.alloca 256 x i8 : (i64) -> !llvm.ptr" ssa)
+        { zipper with State = newState }, Value (ssa, "!llvm.ptr")
+
+    | _ -> zipper, EmitError (sprintf "Unhandled NativePtr op: %A" op)
+
+/// Emit type application
+and private emitTypeApp (zipper: PSGZipper) (node: PSGNode) : PSGZipper * ExprResult =
+    match node.Operation with
+    | Some (NativePtr op) -> emitNativePtrOp zipper node op
+    | Some op -> emitClassifiedOp zipper node op
+    | None ->
+        // Unclassified TypeApp - try to emit the inner expression
+        let children = PSGZipper.childNodes zipper
+        match children with
+        | [inner] ->
+            let innerZ = PSGZipper.createWithState zipper.Graph inner zipper.State
+            let z', result = emitNode innerZ
+            { zipper with State = z'.State }, result
+        | _ -> zipper, Void
+
+/// Emit a regular (non-classified) function call
+and private emitRegularCall (zipper: PSGZipper) (node: PSGNode) : PSGZipper * ExprResult =
+    let children = PSGZipper.childNodes zipper
+    let funcNode = children |> List.tryFind (fun c ->
+        c.SyntaxKind.StartsWith("LongIdent") || c.SyntaxKind.StartsWith("Ident:"))
+
+    match funcNode with
+    | Some fn ->
+        // Check if extern primitive
+        match fn.Symbol with
+        | Some sym when hasFidelityDllImport sym ->
+            // Emit extern call
+            emitExternCall zipper node fn sym
         | _ ->
-            // Fallback - emit comment
-            let state'' = state' |> ScribeState.emit (sprintf "// Console.%s with %d args (unhandled)" (if consoleOp = ConsoleWrite then "Write" else "WriteLine") argResults.Length)
-            state'', SVoid
-
-    | _ ->
-        // Other console ops - emit placeholder
-        let state'' = state' |> ScribeState.emit (sprintf "// Console.%A with %d args" consoleOp argResults.Length)
-        state'', SVoid
-
-/// Placeholder for Time operations
-and private transcribeTimeOp
-    (psg: ProgramSemanticGraph)
-    (node: PSGNode)
-    (timeOp: TimeOp)
-    (children: PSGNode list)
-    (state: ScribeState) : ScribeState * ScribeResult =
-    let state' = state |> ScribeState.emit (sprintf "// Time.%A - not yet implemented" timeOp)
-    state', SVoid
-
-/// Placeholder for NativePtr operations
-and private transcribeNativePtrOp
-    (psg: ProgramSemanticGraph)
-    (node: PSGNode)
-    (ptrOp: NativePtrOp)
-    (children: PSGNode list)
-    (state: ScribeState) : ScribeState * ScribeResult =
-    let state' = state |> ScribeState.emit (sprintf "// NativePtr.%A - not yet implemented" ptrOp)
-    state', SVoid
-
-/// Placeholder for Core operations
-and private transcribeCoreOp
-    (psg: ProgramSemanticGraph)
-    (node: PSGNode)
-    (coreOp: CoreOp)
-    (children: PSGNode list)
-    (state: ScribeState) : ScribeState * ScribeResult =
-    match coreOp with
-    | Ignore ->
-        // Ignore just returns unit after evaluating argument
-        transcribeChildren psg children state |> fun (st, _) -> st, SVoid
-    | _ ->
-        let state' = state |> ScribeState.emit (sprintf "// Core.%A - not yet implemented" coreOp)
-        state', SVoid
-
-/// Placeholder for Arithmetic operations
-and private transcribeArithmeticOp
-    (psg: ProgramSemanticGraph)
-    (node: PSGNode)
-    (arithOp: ArithmeticOp)
-    (children: PSGNode list)
-    (state: ScribeState) : ScribeState * ScribeResult =
-    let state' = state |> ScribeState.emit (sprintf "// Arithmetic.%A - not yet implemented" arithOp)
-    state', SVoid
-
-/// Placeholder for Comparison operations
-and private transcribeComparisonOp
-    (psg: ProgramSemanticGraph)
-    (node: PSGNode)
-    (cmpOp: ComparisonOp)
-    (children: PSGNode list)
-    (state: ScribeState) : ScribeState * ScribeResult =
-    let state' = state |> ScribeState.emit (sprintf "// Comparison.%A - not yet implemented" cmpOp)
-    state', SVoid
-
-/// Placeholder for Conversion operations
-and private transcribeConversionOp
-    (psg: ProgramSemanticGraph)
-    (node: PSGNode)
-    (convOp: ConversionOp)
-    (children: PSGNode list)
-    (state: ScribeState) : ScribeState * ScribeResult =
-    let state' = state |> ScribeState.emit (sprintf "// Conversion.%A - not yet implemented" convOp)
-    state', SVoid
-
-/// Transcribe a regular call using RegularCallInfo
-and private transcribeRegularCallInfo
-    (psg: ProgramSemanticGraph)
-    (node: PSGNode)
-    (info: RegularCallInfo)
-    (children: PSGNode list)
-    (state: ScribeState) : ScribeState * ScribeResult =
-    // Transcribe children first
-    let state', _ = transcribeChildren psg children state
-    let state'' = state' |> ScribeState.emit (sprintf "// call: %s with %d args" info.FunctionName info.ArgumentCount)
-    state'', SVoid
-
-/// Transcribe an extern primitive call via Bindings
-and private transcribeExternCall
-    (psg: ProgramSemanticGraph)
-    (funcNode: PSGNode)
-    (argNodes: PSGNode list)
-    (state: ScribeState) : ScribeState * ScribeResult =
-
-    match funcNode.Symbol with
-    | Some sym ->
-        match getExternEntryPoint sym with
-        | Some entryPoint ->
-            // Transcribe arguments first
-            let state', argResults =
-                argNodes
-                |> List.fold (fun (st, results) arg ->
-                    let st', result = transcribe psg arg st
-                    st', results @ [result]
-                ) (state, [])
-
-            // Build args for potential dispatch (simplified for now)
-            let argCount =
-                argResults
-                |> List.filter (fun r -> match r with SValue _ -> true | _ -> false)
-                |> List.length
-
-            // For now, emit a placeholder comment
-            // TODO: Actually dispatch via ExternDispatch
-            let state'' =
-                state'
-                |> ScribeState.emit (sprintf "// extern call: %s with %d args" entryPoint argCount)
-
-            state'', SVoid
-        | None ->
-            state, SError "Extern primitive has no entry point"
+            // Follow call graph - inline the function
+            match findDefinition zipper.Graph fn with
+            | Some defNode ->
+                match findBody zipper.Graph defNode with
+                | Some body ->
+                    let bodyZ = PSGZipper.createWithState zipper.Graph body zipper.State
+                    let z', result = emitNode bodyZ
+                    { zipper with State = z'.State }, result
+                | None -> zipper, Void
+            | None -> zipper, Void
     | None ->
-        state, SError "Extern function has no symbol"
+        // No function identifier - emit children
+        emitSequential zipper node
 
-/// Transcribe a regular (non-extern) function call
-/// This follows the call graph to find extern primitives and dispatches to Bindings
-and private transcribeRegularCall
-    (psg: ProgramSemanticGraph)
-    (funcNode: PSGNode)
-    (argNodes: PSGNode list)
-    (state: ScribeState) : ScribeState * ScribeResult =
+/// Emit extern primitive call
+and private emitExternCall (zipper: PSGZipper) (node: PSGNode) (funcNode: PSGNode) (sym: FSharpSymbol) : PSGZipper * ExprResult =
+    let entryPoint = getExternEntryPoint sym |> Option.defaultValue "unknown"
+    let children = PSGZipper.childNodes zipper
+    let argNodes = children |> List.filter (fun c ->
+        not (c.SyntaxKind.StartsWith("LongIdent")) &&
+        not (c.SyntaxKind.StartsWith("Ident:")) &&
+        not (c.SyntaxKind.StartsWith("TypeApp")))
 
-    // Check if this call ultimately resolves to an extern primitive
-    match resolveToExternPrimitive psg funcNode Set.empty with
-    | Some (externNode, externSym) ->
-        // Found an extern primitive - dispatch to Bindings
-        match getExternEntryPoint externSym with
-        | Some entryPoint ->
-            // Transcribe arguments first
-            let state', argResults =
-                argNodes
-                |> List.fold (fun (st, results) arg ->
-                    let st', result = transcribe psg arg st
-                    st', results @ [result]
-                ) (state, [])
+    // Emit all arguments
+    let mutable z = zipper
+    let mutable argResults = []
+    for i in 0 .. argNodes.Length - 1 do
+        let z', result = emitArgAt z argNodes i
+        z <- { z with State = z'.State }
+        argResults <- argResults @ [result]
 
-            // Convert ScribeState SSA string to MLIRBuilder SSA type
-            // e.g., "%v5" -> V 5
-            let parseSSA (ssaStr: string) : SSA option =
-                if ssaStr.StartsWith("%v") then
-                    match System.Int32.TryParse(ssaStr.Substring(2)) with
-                    | true, n -> Some (V n)
-                    | _ -> None
-                elif ssaStr.StartsWith("%arg") then
-                    match System.Int32.TryParse(ssaStr.Substring(4)) with
-                    | true, n -> Some (Arg n)
-                    | _ -> None
-                else None
+    // Build extern call
+    let argSSAs = argResults |> List.choose (function Value (s, _) -> Some s | _ -> None)
+    let argsStr = String.concat ", " argSSAs
 
-            // Build Val list for ExternDispatch
-            let args =
-                argResults
-                |> List.choose (fun r ->
-                    match r with
-                    | SValue (ssaStr, ty) ->
-                        let mlirTy =
-                            match ty with
-                            | "i32" -> Int I32
-                            | "i64" -> Int I64
-                            | "!llvm.ptr" -> Ptr
-                            | _ -> Int I64
-                        parseSSA ssaStr
-                        |> Option.map (fun ssa -> { SSA = ssa; Type = mlirTy })
-                    | _ -> None)
+    let newState, resultSSA = EmissionState.nextSSA z.State
+    emit (sprintf "%s = llvm.call @%s(%s) : (...) -> i32" resultSSA entryPoint argsStr)
+    { z with State = newState }, Value (resultSSA, "i32")
 
-            // Create ExternPrimitive and dispatch
-            let prim = {
-                Library = "__fidelity"
-                EntryPoint = entryPoint
-                CallingConvention = "cdecl"
-                Args = args
-                ReturnType = Int I32 // TODO: Get from symbol
-            }
+/// Emit mutable set
+and private emitMutableSet (zipper: PSGZipper) (node: PSGNode) : PSGZipper * ExprResult =
+    zipper, EmitError "MutableSet not yet implemented"
 
-            // Run ExternDispatch to get MLIR
-            let mlirResult = ExternDispatch.dispatch prim
-            let (mlirOutput, emissionResult) = run mlirResult
+/// Emit while loop
+and private emitWhileLoop (zipper: PSGZipper) (node: PSGNode) : PSGZipper * ExprResult =
+    zipper, EmitError "WhileLoop not yet implemented"
 
-            match emissionResult with
-            | Emitted resultVal ->
-                // Emit the MLIR operations
-                let state'' = state' |> ScribeState.emit mlirOutput
-                state'', SValue (resultVal.SSA.Name, "i32")
-            | EmittedVoid ->
-                let state'' = state' |> ScribeState.emit mlirOutput
-                state'', SVoid
-            | NotSupported msg ->
-                let state'' = state' |> ScribeState.emit (sprintf "// extern %s not supported: %s" entryPoint msg)
-                state'', SVoid
-        | None ->
-            let state' = state |> ScribeState.emit "// extern has no entry point"
-            state', SVoid
+/// Emit for loop
+and private emitForLoop (zipper: PSGZipper) (node: PSGNode) : PSGZipper * ExprResult =
+    zipper, EmitError "ForLoop not yet implemented"
 
-    | None ->
-        // Not an extern - transcribe as regular call (inline or skip for now)
-        let state', argResults =
-            argNodes
-            |> List.fold (fun (st, results) arg ->
-                let st', result = transcribe psg arg st
-                st', results @ [result]
-            ) (state, [])
+/// Emit AddressOf (&&expr)
+and private emitAddressOf (zipper: PSGZipper) (node: PSGNode) : PSGZipper * ExprResult =
+    let children = PSGZipper.childNodes zipper
+    match children with
+    | [inner] ->
+        // Emit inner expression
+        let innerZ = PSGZipper.createWithState zipper.Graph inner zipper.State
+        let z', result = emitNode innerZ
 
-        let funcName =
-            match funcNode.Symbol with
-            | Some sym -> sym.DisplayName
-            | None -> funcNode.SyntaxKind
-
-        // For now, emit a comment for non-extern calls
-        // Full implementation would inline the function body or emit a call
-        let state'' =
-            state'
-            |> ScribeState.emit (sprintf "// call: %s (not extern, %d args)" funcName argResults.Length)
-
-        state'', SVoid
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Entry Point Transcription
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Transcribe an entry point function to MLIR
-let transcribeEntryPoint (psg: ProgramSemanticGraph) (entryNode: PSGNode) : string =
-    let state = ScribeState.empty ()
-
-    // Emit module header
-    let state = state |> ScribeState.emit "module {"
-    let state = state |> ScribeState.pushIndent
-
-    // Emit main function
-    let state = state |> ScribeState.emit "func.func @main() -> i32 {"
-    let state = state |> ScribeState.pushIndent
-    let state = state |> ScribeState.emit "^entry:"
-
-    // Transcribe the entry point body
-    let state, result = transcribe psg entryNode state
-
-    // For freestanding binaries, call exit via platform binding instead of returning
-    // The binding handles platform-specific exit syscall (60 on Linux, 0x2000001 on macOS)
-    let state =
         match result with
-        | SValue (ssa, "i32") ->
-            // Use the exit code from the result
-            let exitCodeVal = { SSA = parseSSA ssa; Type = Int I32 }
-
-            // Create ExternPrimitive for fidelity_exit(exitCode)
-            let prim : ExternPrimitive = {
-                EntryPoint = "fidelity_exit"
-                Library = "__fidelity"
-                CallingConvention = "Cdecl"
-                Args = [exitCodeVal]
-                ReturnType = Unit // exit doesn't return
-            }
-
-            // Dispatch to platform-specific binding
-            let state', _ = runBinding (ExternDispatch.dispatch prim) state
-            state'
-
+        | Value (valueSSA, valueType) ->
+            // Allocate stack space for the value
+            let state1, ptrSSA = EmissionState.nextSSA z'.State
+            emit (sprintf "%s = llvm.alloca 1 x %s : (i64) -> !llvm.ptr" ptrSSA valueType)
+            // Store the value
+            emit (sprintf "llvm.store %s, %s : %s, !llvm.ptr" valueSSA ptrSSA valueType)
+            { zipper with State = state1 }, Value (ptrSSA, "!llvm.ptr")
         | _ ->
-            // Default: exit with code 0
-            let zeroBinding = mlir {
-                let! zero = arith.constant 0L I32
-                return zero
-            }
-            let state', zeroVal = ScribeState.runMLIR zeroBinding state
+            { zipper with State = z'.State }, EmitError "AddressOf inner returned no value"
+    | _ ->
+        zipper, EmitError (sprintf "AddressOf expects 1 child, got %d" (List.length children))
 
-            // Create ExternPrimitive for fidelity_exit(0)
-            let prim : ExternPrimitive = {
-                EntryPoint = "fidelity_exit"
-                Library = "__fidelity"
-                CallingConvention = "Cdecl"
-                Args = [zeroVal]
-                ReturnType = Unit
-            }
+/// Emit arithmetic operation
+and private emitArithOp (zipper: PSGZipper) (node: PSGNode) (op: ArithmeticOp) : PSGZipper * ExprResult =
+    zipper, EmitError (sprintf "ArithOp %A not yet implemented" op)
 
-            // Dispatch to platform-specific binding
-            let state'', _ = runBinding (ExternDispatch.dispatch prim) state'
-            state''
+/// Emit core operation
+and private emitCoreOp (zipper: PSGZipper) (node: PSGNode) (op: CoreOp) : PSGZipper * ExprResult =
+    match op with
+    | Ignore ->
+        // Evaluate argument and discard
+        let children = PSGZipper.childNodes zipper
+        let argNodes = children |> List.filter (fun c ->
+            not (c.SyntaxKind.StartsWith("LongIdent")) &&
+            not (c.SyntaxKind.StartsWith("Ident:")))
+        if argNodes.Length >= 1 then
+            let z', _ = emitArgAt zipper argNodes 0
+            z', Void
+        else
+            zipper, Void
+    | _ -> zipper, EmitError (sprintf "CoreOp %A not yet implemented" op)
 
-    let state = state |> ScribeState.popIndent
-    let state = state |> ScribeState.emit "}"
+/// Emit memory operation
+and private emitMemoryOp (zipper: PSGZipper) (node: PSGNode) (op: MemoryOp) : PSGZipper * ExprResult =
+    zipper, EmitError (sprintf "MemoryOp %A not yet implemented" op)
 
-    // Emit string literals as globals (before closing the module)
-    let state =
-        state.StringLiterals
-        |> List.fold (fun st (content, name) ->
-            let escaped = content.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\0A")
-            let len = content.Length + 1 // +1 for null terminator
-            // name already has @ prefix (e.g., @str0)
-            st |> ScribeState.emit (sprintf "llvm.mlir.global private constant %s(\"%s\\00\") : !llvm.array<%d x i8>" name escaped len)
-        ) state
+/// Handle unknown node kinds - fallback to string matching for migration
+and private emitUnknown (zipper: PSGZipper) (node: PSGNode) : PSGZipper * ExprResult =
+    // Fallback for nodes not yet converted to typed Kind
+    let sk = node.SyntaxKind
 
-    let state = state |> ScribeState.popIndent
-    let state = state |> ScribeState.emit "}"
+    if sk.StartsWith("Const:") then
+        emitConst zipper node
+    elif sk.StartsWith("LetOrUse:") then
+        emitLetOrUse zipper node
+    elif sk.StartsWith("Sequential") then
+        emitSequential zipper node
+    elif sk.StartsWith("Binding:") then
+        emitBinding zipper node
+    elif sk.StartsWith("App") then
+        emitApp zipper node
+    elif sk.StartsWith("TypeApp") then
+        emitTypeApp zipper node
+    elif sk.StartsWith("LongIdent") || sk.StartsWith("Ident:") then
+        emitIdent zipper node
+    elif sk.StartsWith("AddressOf") then
+        emitAddressOf zipper node
+    elif sk.StartsWith("Pattern:") then
+        zipper, Void
+    else
+        // Try traversing children
+        let children = PSGZipper.childNodes zipper
+        if children.IsEmpty then
+            zipper, Void
+        else
+            emitSequential zipper node
 
-    state.Output.ToString()
+// ═══════════════════════════════════════════════════════════════════════════
+// Entry Point Emission
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Transcribe a PSG entry point to MLIR
+let private transcribeEntryPoint (psg: ProgramSemanticGraph) (entryNode: PSGNode) : string =
+    // Create shared context for the entire emission
+    let ctx = ScribeContext.create psg
+    currentContext <- Some ctx
+
+    let output = StringBuilder()
+    let emitTop (s: string) = output.AppendLine(s) |> ignore
+
+    // Module header
+    emitTop "module {"
+    emitTop ""
+
+    // Extern declarations
+    emitTop "  // Extern declarations for Fidelity primitives"
+    emitTop "  llvm.func @fidelity_write_bytes(i32, !llvm.ptr, i32) -> i32"
+    emitTop "  llvm.func @fidelity_read_bytes(i32, !llvm.ptr, i32) -> i32"
+    emitTop "  llvm.func @fidelity_exit(i32)"
+    emitTop "  llvm.func @fidelity_sleep_ms(i32)"
+    emitTop ""
+
+    // Main function
+    emitTop "  llvm.func @main() -> i32 {"
+
+    // Find body of entry point
+    let bodyNode = findBody psg entryNode
+    eprintfn "[SCRIBE] Entry node: %s" entryNode.SyntaxKind
+    eprintfn "[SCRIBE] Body node: %A" (bodyNode |> Option.map (fun n -> n.SyntaxKind))
+
+    let zipper =
+        match bodyNode with
+        | Some body ->
+            eprintfn "[SCRIBE] Starting emission from body: %s" body.SyntaxKind
+            PSGZipper.create psg body
+        | None ->
+            eprintfn "[SCRIBE] No body found, emitting entry node"
+            PSGZipper.create psg entryNode
+
+    let zipper', result = emitNode zipper
+    eprintfn "[SCRIBE] Emission result: %A" result
+
+    // Append the body MLIR that was emitted during traversal
+    output.Append(ctx.Output.ToString()) |> ignore
+
+    // Exit handling
+    match result with
+    | Value (ssa, "i32") ->
+        emitTop (sprintf "    llvm.call @fidelity_exit(%s) : (i32) -> ()" ssa)
+    | _ ->
+        emitTop "    %exit_code = arith.constant 0 : i32"
+        emitTop "    llvm.call @fidelity_exit(%exit_code) : (i32) -> ()"
+
+    emitTop "    %zero = arith.constant 0 : i32"
+    emitTop "    llvm.return %zero : i32"
+    emitTop "  }"
+
+    // String literals
+    for (content, name) in ctx.StringLiterals do
+        let escaped = content.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\0A")
+        let len = content.Length + 1
+        emitTop (sprintf "  llvm.mlir.global private constant %s(\"%s\\00\") : !llvm.array<%d x i8>" name escaped len)
+
+    emitTop "}"
+
+    // Clean up context
+    currentContext <- None
+
+    output.ToString()
 
 /// Find entry point node in PSG and transcribe
 let transcribePSG (psg: ProgramSemanticGraph) : string =

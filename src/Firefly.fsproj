@@ -48,6 +48,7 @@
       <Compile Include="Core/PSG/Nanopass/IntermediateEmission.fs" />
       <Compile Include="Core/PSG/Nanopass/FlattenApplications.fs" />
       <Compile Include="Core/PSG/Nanopass/ReducePipeOperators.fs" />
+      <Compile Include="Core/PSG/Nanopass/ReduceAlloyOperators.fs" />
       <Compile Include="Core/PSG/Nanopass/DefUseEdges.fs" />
       <Compile Include="Core/PSG/Nanopass/ParameterAnnotation.fs" />
       <Compile Include="Core/PSG/Nanopass/ClassifyOperations.fs" />

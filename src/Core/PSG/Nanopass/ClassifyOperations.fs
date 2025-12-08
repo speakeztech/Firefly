@@ -317,13 +317,37 @@ let private classifyAppNode (psg: ProgramSemanticGraph) (node: PSGNode) : Operat
                     else
                         None
 
-/// Classify a single node (only processes App nodes)
+/// Classify a TypeApp node based on its symbol
+/// TypeApp nodes represent generic type applications like NativePtr.stackalloc<byte>
+let private classifyTypeAppNode (node: PSGNode) : OperationKind option =
+    match node.Symbol with
+    | Some symbol ->
+        let fullName = getFullName symbol
+        let displayName = getDisplayName symbol
+
+        // NativePtr operations (generic like stackalloc<T>)
+        if fullName.Contains("NativePtr.") || fullName.Contains("NativeInterop.") then
+            classifyNativePtrOp displayName |> Option.map NativePtr
+        // Memory operations (generic like stackBuffer<T>)
+        elif fullName.StartsWith("Alloy.Memory.") then
+            classifyMemoryOp displayName |> Option.map Memory
+        else
+            None
+    | None ->
+        None
+
+/// Classify a single node (processes App and TypeApp nodes)
 let private classifyNode (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode =
     if node.SyntaxKind.StartsWith("App") && node.Operation.IsNone then
         let result = classifyAppNode psg node
         // Debug Console operations
         if node.SyntaxKind.Contains("Console") || (node.Symbol |> Option.exists (fun s -> s.FullName.Contains("Console"))) then
             printfn "[CLASSIFY NODE] App node: %s result=%A" node.SyntaxKind result
+        match result with
+        | Some op -> { node with Operation = Some op }
+        | None -> node
+    elif node.SyntaxKind.StartsWith("TypeApp") && node.Operation.IsNone then
+        let result = classifyTypeAppNode node
         match result with
         | Some op -> { node with Operation = Some op }
         | None -> node
@@ -334,9 +358,9 @@ let private classifyNode (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode =
 // Nanopass Entry Point
 // ═══════════════════════════════════════════════════════════════════
 
-/// Classify all App nodes in the PSG
+/// Classify all App and TypeApp nodes in the PSG
 let classifyOperations (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
-    printfn "[NANOPASS] ClassifyOperations: Classifying App nodes..."
+    printfn "[NANOPASS] ClassifyOperations: Classifying App and TypeApp nodes..."
 
     let mutable classified = 0
     let mutable unclassified = 0
@@ -347,10 +371,10 @@ let classifyOperations (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
             let result = classifyNode psg node
             if result.Operation.IsSome && node.Operation.IsNone then
                 classified <- classified + 1
-            elif node.SyntaxKind.StartsWith("App") && result.Operation.IsNone then
+            elif (node.SyntaxKind.StartsWith("App") || node.SyntaxKind.StartsWith("TypeApp")) && result.Operation.IsNone then
                 unclassified <- unclassified + 1
             result)
 
-    printfn "[NANOPASS] ClassifyOperations: Classified %d App nodes, %d remain unclassified" classified unclassified
+    printfn "[NANOPASS] ClassifyOperations: Classified %d nodes, %d remain unclassified" classified unclassified
 
     { psg with Nodes = newNodes }

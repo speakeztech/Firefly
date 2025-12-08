@@ -103,7 +103,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
 
         let genericSymbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
 
-        let typeAppNode = createNode syntaxKind range fileName genericSymbol parentId
+        let typeAppNode = createNodeWithKind syntaxKind (SKExpr ETypeApp) range fileName genericSymbol parentId
         let graph' = { graph with Nodes = Map.add typeAppNode.Id.Value typeAppNode graph.Nodes }
         let graph'' = addChildToParent typeAppNode.Id parentId graph'
 
@@ -166,7 +166,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
             // Normal function application
             let syntaxKind = "App:FunctionCall"
             let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
-            let appNode = createNode syntaxKind range fileName symbol parentId
+            let appNode = createNodeWithKind syntaxKind (SKExpr EApp) range fileName symbol parentId
 
             let graph' = { graph with Nodes = Map.add appNode.Id.Value appNode graph.Nodes }
             let graph'' = addChildToParent appNode.Id parentId graph'
@@ -200,7 +200,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
 
     // ENHANCED: Match expressions with union case detection
     | SynExpr.Match(_, expr, clauses, range, _) ->
-        let matchNode = createNode "Match" range fileName None parentId
+        let matchNode = createNodeWithKind "Match" (SKExpr EMatch) range fileName None parentId
         let graph' = { graph with Nodes = Map.add matchNode.Id.Value matchNode graph.Nodes }
         let graph'' = addChildToParent matchNode.Id parentId graph'
 
@@ -228,7 +228,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
     | SynExpr.Ident ident ->
         let syntaxKind = sprintf "Ident:%s" ident.idText
         let symbol = tryCorrelateSymbolWithContext ident.idRange fileName syntaxKind context.CorrelationContext
-        let identNode = createNode syntaxKind ident.idRange fileName symbol parentId
+        let identNode = createNodeWithKind syntaxKind (SKExpr EIdent) ident.idRange fileName symbol parentId
 
         let graph' = { graph with Nodes = Map.add identNode.Id.Value identNode graph.Nodes }
         let graph'' = addChildToParent identNode.Id parentId graph'
@@ -316,7 +316,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
     | SynExpr.LetOrUse(isUse, _, bindings, body, range, _) ->
         let syntaxKind = if isUse then "LetOrUse:Use" else "LetOrUse:Let"
         let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
-        let letNode = createNode syntaxKind range fileName symbol parentId
+        let letNode = createNodeWithKind syntaxKind (SKExpr ELetOrUse) range fileName symbol parentId
 
         let graph' = { graph with Nodes = Map.add letNode.Id.Value letNode graph.Nodes }
         let graph'' = addChildToParent letNode.Id parentId graph'
@@ -340,16 +340,31 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
 
     | SynExpr.Sequential(_, _, expr1, expr2, range, _) ->
         // Create a Sequential node to wrap the sequence of expressions
-        let seqNode = createNode "Sequential" range fileName None parentId
+        let seqNode = createNodeWithKind "Sequential" (SKExpr ESequential) range fileName None parentId
         let graph' = { graph with Nodes = Map.add seqNode.Id.Value seqNode graph.Nodes }
         let graph'' = addChildToParent seqNode.Id parentId graph'
         let graph''' = processExpression expr1 (Some seqNode.Id) fileName context graph''
         processExpression expr2 (Some seqNode.Id) fileName context graph'''
 
     | SynExpr.Const(constant, range) ->
-        let constNode = createNode (sprintf "Const:%A" constant) range fileName None parentId
-        let graph' = { graph with Nodes = Map.add constNode.Id.Value constNode graph.Nodes }
-        let graph'' = addChildToParent constNode.Id parentId graph'
+        // Extract the constant value and create a clean SyntaxKind
+        let syntaxKind, constValue =
+            match constant with
+            | SynConst.String(text, _, _) -> "Const:String", Some (StringValue text)
+            | SynConst.Int32 i -> sprintf "Const:Int32 %d" i, Some (Int32Value i)
+            | SynConst.Int64 i -> sprintf "Const:Int64 %d" i, Some (Int64Value i)
+            | SynConst.Double d -> sprintf "Const:Float %f" d, Some (FloatValue d)
+            | SynConst.Bool b -> sprintf "Const:Bool %b" b, Some (BoolValue b)
+            | SynConst.Char c -> sprintf "Const:Char '%c'" c, Some (CharValue c)
+            | SynConst.Byte b -> sprintf "Const:Byte %duy" b, Some (ByteValue b)
+            | SynConst.Unit -> "Const:Unit", Some UnitValue
+            | other -> sprintf "Const:%A" other, None  // Fallback for uncommon cases
+
+        let constNode = createNodeWithKind syntaxKind (SKExpr EConst) range fileName None parentId
+        // Set the ConstantValue on the node
+        let constNodeWithValue = { constNode with ConstantValue = constValue }
+        let graph' = { graph with Nodes = Map.add constNodeWithValue.Id.Value constNodeWithValue graph.Nodes }
+        let graph'' = addChildToParent constNodeWithValue.Id parentId graph'
 
         // Register string literals in the PSG for later emission as globals
         match constant with
@@ -421,7 +436,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
 
     // While loops
     | SynExpr.While(_, condExpr, bodyExpr, range) ->
-        let whileNode = createNode "WhileLoop" range fileName None parentId
+        let whileNode = createNodeWithKind "WhileLoop" (SKExpr EWhileLoop) range fileName None parentId
         let graph' = { graph with Nodes = Map.add whileNode.Id.Value whileNode graph.Nodes }
         let graph'' = addChildToParent whileNode.Id parentId graph'
 
@@ -434,7 +449,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
         let syntaxKind = sprintf "MutableSet:%s" varName
         // Look up the symbol from the symbol table to enable def-use edge creation
         let symbol = Map.tryFind varName graph.SymbolTable
-        let setNode = createNode syntaxKind range fileName symbol parentId
+        let setNode = createNodeWithKind syntaxKind (SKExpr EMutableSet) range fileName symbol parentId
         let graph' = { graph with Nodes = Map.add setNode.Id.Value setNode graph.Nodes }
         let graph'' = addChildToParent setNode.Id parentId graph'
         processExpression rhsExpr (Some setNode.Id) fileName context graph''
@@ -442,7 +457,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
     // For loops (for i = start to end do ...)
     | SynExpr.For(_, _, ident, _, startExpr, _, endExpr, bodyExpr, range) ->
         let syntaxKind = sprintf "ForLoop:%s" ident.idText
-        let forNode = createNode syntaxKind range fileName None parentId
+        let forNode = createNodeWithKind syntaxKind (SKExpr EForLoop) range fileName None parentId
         let graph' = { graph with Nodes = Map.add forNode.Id.Value forNode graph.Nodes }
         let graph'' = addChildToParent forNode.Id parentId graph'
         let graph''' = processExpression startExpr (Some forNode.Id) fileName context graph''

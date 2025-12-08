@@ -12,12 +12,15 @@ An emitter sits between PSG and MLIR and makes interpretation decisions. This is
 ## The Correct Architecture
 
 ```
-PSG (full semantic graph from FCS) 
+PSG (built via true nanopass pipeline, with typed tree overlay)
     → Zipper (XParsec pattern matching on PSG structure)
         → Bindings (platform-specific MLIR generation)
             → MLIR (may include target triple)
                 → LLVM → Native binary
 ```
+
+**CRITICAL**: The PSG must include typed tree overlay (Phase 4) for SRTP resolution.
+See `docs/PSG_Nanopass_Architecture_v2.md` and `docs/TypedTree_Zipper_Design.md`.
 
 ### Why Alloy CANNOT Know About Targets
 
