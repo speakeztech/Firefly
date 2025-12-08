@@ -306,6 +306,144 @@ let childSymbolEndsWith (suffix: string) : PSGChildParser<PSGNode> =
         | None -> false)
 
 // ═══════════════════════════════════════════════════════════════════
+// XParsec Combinator Wrappers - Composable parsing for PSG children
+// ═══════════════════════════════════════════════════════════════════
+// NOTE: XParsec uses struct tuples and ImmutableArray for performance.
+// These wrappers expose XParsec's native types directly to avoid allocation.
+
+open System.Collections.Immutable
+
+/// Map over parser result
+let pMap (f: 'a -> 'b) (p: PSGChildParser<'a>) : PSGChildParser<'b> =
+    Combinators.(|>>) p f
+
+/// Bind parser - sequence with dependent result
+let pBind (f: 'a -> PSGChildParser<'b>) (p: PSGChildParser<'a>) : PSGChildParser<'b> =
+    Combinators.(>>=) p f
+
+/// Sequence two parsers, keep left result
+let pLeft (p1: PSGChildParser<'a>) (p2: PSGChildParser<'b>) : PSGChildParser<'a> =
+    Combinators.(.>>) p1 p2
+
+/// Sequence two parsers, keep right result
+let pRight (p1: PSGChildParser<'a>) (p2: PSGChildParser<'b>) : PSGChildParser<'b> =
+    Combinators.(>>.) p1 p2
+
+/// Sequence two parsers, keep both results as struct tuple
+let pAnd (p1: PSGChildParser<'a>) (p2: PSGChildParser<'b>) : PSGChildParser<struct ('a * 'b)> =
+    Combinators.(.>>.) p1 p2
+
+/// Alternative - try first parser, if it fails try second
+let pOr (p1: PSGChildParser<'a>) (p2: PSGChildParser<'a>) : PSGChildParser<'a> =
+    Combinators.(<|>) p1 p2
+
+/// Parse zero or more occurrences, returns ImmutableArray
+let pMany (p: PSGChildParser<'a>) : PSGChildParser<ImmutableArray<'a>> =
+    Combinators.many p
+
+/// Parse one or more occurrences, returns ImmutableArray
+let pMany1 (p: PSGChildParser<'a>) : PSGChildParser<ImmutableArray<'a>> =
+    Combinators.many1 p
+
+/// Try parser choices in order, returning first success
+let pChoice (ps: PSGChildParser<'a> seq) : PSGChildParser<'a> =
+    Combinators.choice ps
+
+/// Try parser choices with label for better error messages
+let pChoiceL (ps: PSGChildParser<'a> seq) (label: string) : PSGChildParser<'a> =
+    Combinators.choiceL ps label
+
+/// Optional parser - succeeds with ValueNone if parser fails
+let pOpt (p: PSGChildParser<'a>) : PSGChildParser<'a voption> =
+    fun reader ->
+        let pos = reader.Position
+        match p reader with
+        | Ok success -> Parsers.preturn (ValueSome success.Parsed) reader
+        | Error _ ->
+            reader.Position <- pos
+            Parsers.preturn ValueNone reader
+
+/// Skip parser - runs parser but discards result
+let pSkip (p: PSGChildParser<'a>) : PSGChildParser<unit> =
+    Combinators.optional p
+
+/// Parse items separated by separator, returns struct tuple of (items, separators)
+let pSepBy (p: PSGChildParser<'a>) (sep: PSGChildParser<'b>) : PSGChildParser<struct (ImmutableArray<'a> * ImmutableArray<'b>)> =
+    Combinators.sepBy p sep
+
+/// Parse one or more items separated by separator
+let pSepBy1 (p: PSGChildParser<'a>) (sep: PSGChildParser<'b>) : PSGChildParser<struct (ImmutableArray<'a> * ImmutableArray<'b>)> =
+    Combinators.sepBy1 p sep
+
+/// Parse content between left and right delimiters
+let pBetween (pOpen: PSGChildParser<'l>) (pClose: PSGChildParser<'r>) (p: PSGChildParser<'a>) : PSGChildParser<'a> =
+    Combinators.between pOpen pClose p
+
+/// Look ahead without consuming input
+let pLookAhead (p: PSGChildParser<'a>) : PSGChildParser<'a> =
+    Combinators.lookAhead p
+
+/// Succeed only if parser fails (consumes no input)
+let pNotFollowedBy (p: PSGChildParser<'a>) : PSGChildParser<unit> =
+    Combinators.notFollowedBy p
+
+/// Skip zero or more occurrences
+let pSkipMany (p: PSGChildParser<'a>) : PSGChildParser<unit> =
+    Combinators.skipMany p
+
+/// Skip one or more occurrences
+let pSkipMany1 (p: PSGChildParser<'a>) : PSGChildParser<unit> =
+    Combinators.skipMany1 p
+
+/// Tuple2 - parse two items and combine into struct tuple
+let pTuple2 (p1: PSGChildParser<'a>) (p2: PSGChildParser<'b>) : PSGChildParser<struct ('a * 'b)> =
+    Combinators.tuple2 p1 p2
+
+/// Tuple3 - parse three items and combine into struct tuple
+let pTuple3 (p1: PSGChildParser<'a>) (p2: PSGChildParser<'b>) (p3: PSGChildParser<'c>) : PSGChildParser<struct ('a * 'b * 'c)> =
+    Combinators.tuple3 p1 p2 p3
+
+/// Tuple4 - parse four items and combine into struct tuple
+let pTuple4 (p1: PSGChildParser<'a>) (p2: PSGChildParser<'b>) (p3: PSGChildParser<'c>) (p4: PSGChildParser<'d>) : PSGChildParser<struct ('a * 'b * 'c * 'd)> =
+    Combinators.tuple4 p1 p2 p3 p4
+
+/// Tuple5 - parse five items and combine into struct tuple
+let pTuple5 (p1: PSGChildParser<'a>) (p2: PSGChildParser<'b>) (p3: PSGChildParser<'c>) (p4: PSGChildParser<'d>) (p5: PSGChildParser<'e>) : PSGChildParser<struct ('a * 'b * 'c * 'd * 'e)> =
+    Combinators.tuple5 p1 p2 p3 p4 p5
+
+/// Pipe2 - parse two items and apply function
+let pPipe2 (p1: PSGChildParser<'a>) (p2: PSGChildParser<'b>) (f: 'a -> 'b -> 'c) : PSGChildParser<'c> =
+    Combinators.pipe2 p1 p2 f
+
+/// Pipe3 - parse three items and apply function
+let pPipe3 (p1: PSGChildParser<'a>) (p2: PSGChildParser<'b>) (p3: PSGChildParser<'c>) (f: 'a -> 'b -> 'c -> 'd) : PSGChildParser<'d> =
+    Combinators.pipe3 p1 p2 p3 f
+
+/// Pipe4 - parse four items and apply function
+let pPipe4 (p1: PSGChildParser<'a>) (p2: PSGChildParser<'b>) (p3: PSGChildParser<'c>) (p4: PSGChildParser<'d>) (f: 'a -> 'b -> 'c -> 'd -> 'e) : PSGChildParser<'e> =
+    Combinators.pipe4 p1 p2 p3 p4 f
+
+/// Pipe5 - parse five items and apply function
+let pPipe5 (p1: PSGChildParser<'a>) (p2: PSGChildParser<'b>) (p3: PSGChildParser<'c>) (p4: PSGChildParser<'d>) (p5: PSGChildParser<'e>) (f: 'a -> 'b -> 'c -> 'd -> 'e -> 'f) : PSGChildParser<'f> =
+    Combinators.pipe5 p1 p2 p3 p4 p5 f
+
+// NOTE: manyTill, chainl1, chainr1 are not wrapped because they require equality
+// on the token type, and PSGNode contains FSharpSymbol which doesn't support equality.
+// If needed, implement custom versions that track position instead of token equality.
+
+/// Return a value without consuming input
+let pReturn (x: 'a) : PSGChildParser<'a> =
+    Parsers.preturn x
+
+/// Fail with message
+let pFail (msg: string) : PSGChildParser<'a> =
+    Parsers.fail (Message msg)
+
+/// Add label to parser for better error messages
+let pLabel (label: string) (p: PSGChildParser<'a>) : PSGChildParser<'a> =
+    Combinators.(<?>) p label
+
+// ═══════════════════════════════════════════════════════════════════
 // Convenience Parsers - Common patterns
 // ═══════════════════════════════════════════════════════════════════
 

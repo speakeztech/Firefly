@@ -12,7 +12,7 @@ let displayTimeLoop (iterations: int) =
     WriteLine ""
 
     let mutable counter = 0
-    while counter < iterations do
+    while counter < iterations doWell
         // BCL-compatible: DateTime.Now
         let now = DateTime.Now
 

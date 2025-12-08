@@ -1,5 +1,94 @@
 # Firefly Compiler - Claude Context
 
+## CRITICAL: Deliberate, Didactic Approach Required
+
+> **SLOW DOWN. Be deliberate. Be didactic. Use agents prolifically to gather context before acting.**
+
+This is a sophisticated compiler project with deep architectural constraints. Fast, intuitive fixes are almost always wrong. The correct approach requires:
+
+1. **Use Agents Before Acting** - Before making any change, spawn multiple agents to explore relevant reference materials, documentation, and related codebases. Do not rely solely on the files immediately visible.
+
+2. **Confirm Intent** - When encountering ambiguity or when the path forward isn't crystal clear, stop and confirm with the user rather than making assumptions.
+
+3. **Trace Full Pipeline** - Every issue must be traced through the complete compilation pipeline before proposing a fix. Symptoms rarely appear where root causes exist.
+
+4. **Understand Before Implementing** - Read all relevant documentation, explore reference implementations, and understand the architectural constraints before writing code.
+
+### Anti-Pattern: "Going Too Fast"
+
+The following behavior is WRONG:
+- Seeing an error and immediately patching where it manifests
+- Adding stub implementations to "make it work"
+- Using BCL/runtime dependencies when native implementations exist
+- Making changes without exploring reference materials first
+
+The correct behavior:
+- Pause and spawn agents to explore context
+- Understand WHY something works a certain way before changing it
+- Look at how similar problems are solved in reference implementations
+- Recognize when Alloy should provide native implementations (like `voption` under `Some/None`)
+
+---
+
+## Primary Reference Resources
+
+These resources are ESSENTIAL for understanding the project architecture and making correct decisions. **Use agents prolifically to explore these resources before making changes.**
+
+### Language & Compiler References
+
+| Resource | Path | Purpose |
+|----------|------|---------|
+| **F# Compiler Source** | `~/repos/fsharp` | F# compiler implementation, FSharp.Compiler.Service internals, AST structures |
+| **F# Language Specification** | `~/repos/fslang-spec` | Authoritative F# language semantics, type system, evaluation rules |
+
+### MLIR & Code Generation References
+
+| Resource | Path | Purpose |
+|----------|------|---------|
+| **Triton CPU** | `~/triton-cpu` | Production MLIR implementation, dialect patterns, optimization passes |
+| **MLIR Haskell Bindings** | `~/repos/mlir-hs` | Alternative MLIR binding approach, type-safe IR construction |
+
+### Fidelity Ecosystem
+
+| Resource | Path | Purpose |
+|----------|------|---------|
+| **Alloy** | `~/repos/Alloy` | Native F# library - ACTIVE TARGET. BCL-sympathetic API, native types, extern primitives |
+| **BAREWire** | `~/repos/BAREWire` | Binary serialization - FUTURE. Memory-efficient wire protocol |
+| **Farscape** | `~/repos/Farscape` | Distributed compute - FUTURE. Native F# distributed processing |
+
+### Documentation
+
+| Resource | Path | Purpose |
+|----------|------|---------|
+| **Firefly Docs** | `/docs/` | PRIMARY: Architecture, design decisions, PSG, Alex, lessons learned |
+| **SpeakEZ Blog** | `~/repos/SpeakEZ/hugo/content/blog` | SECONDARY: Articles explaining design philosophy, architectural thinking |
+
+### When to Use Each Resource
+
+- **Encountering F# AST/syntax issues**: Explore `~/repos/fsharp` for FCS implementation details
+- **Type system questions**: Reference `~/repos/fslang-spec` for language semantics
+- **MLIR dialect patterns**: Look at `~/triton-cpu` for production examples
+- **Native type implementation**: Study `~/repos/Alloy` - this is the pattern library
+- **Architectural decisions**: Read `/docs/Architecture_Canonical.md` first
+- **Understanding "why"**: Check `~/repos/SpeakEZ/hugo/content/blog` for philosophy
+
+### Agent Usage Protocol
+
+Before making any non-trivial change:
+
+1. **Spawn an Explore agent** to understand the codebase area being modified
+2. **Spawn reference agents** to explore relevant reference materials (e.g., how does FCS handle this? How does Alloy implement similar functionality?)
+3. **Read documentation** in `/docs/` related to the area of change
+4. **Synthesize understanding** before proposing changes
+
+Example agent tasks:
+- "Explore how Alloy handles native string encoding in Text.UTF8"
+- "Search ~/repos/fsharp for how FCS represents extern declarations"
+- "Find examples of syscall bindings in ~/triton-cpu"
+- "Look up the F# spec section on statically resolved type parameters"
+
+---
+
 ## Project Overview
 
 Firefly is an ahead-of-time (AOT) compiler for F# targeting native binary output without the .NET runtime. The project compiles F# source code through MLIR to LLVM IR and finally to native executables.
