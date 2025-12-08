@@ -1,5 +1,5 @@
-/// TimeLoop - Demonstrates getting current time and displaying as datetime
-/// The forcing function: Get system time, convert to human-readable datetime, output to console
+/// TimeLoop - Demonstrates BCL-compatible DateTime and Thread.Sleep
+/// Forcing function: Platform-specific time retrieval and sleep via Alex bindings
 module TimeLoop
 
 open Alloy
@@ -8,18 +8,19 @@ open Alloy.Console
 /// Display current datetime in a loop
 /// Goal: Print the current datetime 5 times, once per second
 let displayTimeLoop (iterations: int) =
-    let mutable counter = 0
-
     WriteLine "TimeLoop - Current DateTime Demo"
     WriteLine ""
 
+    let mutable counter = 0
     while counter < iterations do
-        // Get current datetime as string and print it
-        let now = currentDateTimeString()
-        WriteLine now
+        // BCL-compatible: DateTime.Now
+        let now = DateTime.Now
 
-        // Sleep for 1 second
-        sleep 1000
+        // BCL-compatible: DateTime.ToString()
+        WriteLine (now.ToString())
+
+        // BCL-compatible: Thread.Sleep
+        Threading.Thread.Sleep 1000
 
         counter <- counter + 1
 

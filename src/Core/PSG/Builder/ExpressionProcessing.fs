@@ -596,6 +596,58 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
                 processExpression fillExpr (Some fillNode.Id) fileName context graphAcc''
         ) graph''
 
+    // Record expressions ({ Field1 = value1; Field2 = value2 } or { existingRecord with Field = newValue })
+    | SynExpr.Record(baseInfo, copyInfo, recordFields, range) ->
+        // Determine if this is a copy-update expression or a new record
+        let syntaxKind =
+            match copyInfo with
+            | Some _ -> "Record:CopyUpdate"
+            | None -> "Record:New"
+
+        let recordNode = createNode syntaxKind range fileName None parentId
+        let graph' = { graph with Nodes = Map.add recordNode.Id.Value recordNode graph.Nodes }
+        let graph'' = addChildToParent recordNode.Id parentId graph'
+
+        // Process copy source if this is a copy-update expression
+        let graph''' =
+            match copyInfo with
+            | Some (copyExpr, _) ->
+                processExpression copyExpr (Some recordNode.Id) fileName context graph''
+            | None -> graph''
+
+        // Process each field assignment
+        // FCS 43.9.300: SynExprRecordField has 4 fields: fieldName, equalsRange, expr, blockSeparator
+        // RecordFieldName = SynLongIdent * bool
+        let graph'''' =
+            recordFields
+            |> List.fold (fun graphAcc (SynExprRecordField(fieldName, _equalsRange, exprOpt, _blockSep)) ->
+                // Extract field name from RecordFieldName (which is SynLongIdent * bool)
+                let (fieldIdent, _) = fieldName
+                let fieldNameStr =
+                    fieldIdent.LongIdent
+                    |> List.map (fun id -> id.idText)
+                    |> String.concat "."
+
+                // Use the field identifier's range for the node
+                let fieldRange = fieldIdent.Range
+
+                // Create a node for the field assignment
+                let fieldKind = sprintf "RecordField:%s" fieldNameStr
+                let fieldNode = createNode fieldKind fieldRange fileName None (Some recordNode.Id)
+                let graphAcc' = { graphAcc with Nodes = Map.add fieldNode.Id.Value fieldNode graphAcc.Nodes }
+                let graphAcc'' = addChildToParent fieldNode.Id (Some recordNode.Id) graphAcc'
+
+                // Process the field value expression if present
+                match exprOpt with
+                | Some fieldExpr ->
+                    processExpression fieldExpr (Some fieldNode.Id) fileName context graphAcc''
+                | None ->
+                    // Field without expression (shorthand syntax: { Name } instead of { Name = Name })
+                    graphAcc''
+            ) graph'''
+
+        graph''''
+
     // Hard stop on unhandled expressions
     | other ->
         let exprTypeName = other.GetType().Name
