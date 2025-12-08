@@ -28,6 +28,7 @@ type ResolvedFidproj = {
     MaxStackSize: int option
     OutputName: string
     OutputKind: OutputKind
+    BuildDir: string  // Build output directory, default "target"
 }
 
 /// Parse dependency table from TOML content
@@ -154,6 +155,7 @@ let loadFidproj (filePath: string) : Result<ResolvedFidproj, string> =
             let name = getString tomlMap "package.name" "unnamed"
             let version = getString tomlMap "package.version" "0.1.0"
             let outputName = getString tomlMap "build.output" name
+            let buildDir = getString tomlMap "build.build_dir" "target"
             let memoryModel = getString tomlMap "compilation.memory_model" "mixed"
             let maxStackSize = getInt tomlMap "compilation.max_stack_size"
             let target =
@@ -220,6 +222,7 @@ let loadFidproj (filePath: string) : Result<ResolvedFidproj, string> =
                 MaxStackSize = maxStackSize
                 OutputName = outputName
                 OutputKind = outputKind
+                BuildDir = buildDir
             }
     with ex ->
         Error (sprintf "Error loading project file: %s" ex.Message)

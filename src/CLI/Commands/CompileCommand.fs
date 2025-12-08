@@ -203,9 +203,13 @@ let execute (args: ParseResults<CompileArgs>) =
             |> Option.orElse resolved.Target
             |> Option.defaultValue (getDefaultTarget())
 
+        // Build directory (default "target", configurable via build.build_dir)
+        let buildDir = Path.Combine(resolved.ProjectDir, resolved.BuildDir)
+        Directory.CreateDirectory(buildDir) |> ignore
+
         let outputPath =
             args.TryGetResult(Output)
-            |> Option.defaultValue (Path.Combine(resolved.ProjectDir, resolved.OutputName))
+            |> Option.defaultValue (Path.Combine(buildDir, resolved.OutputName))
 
         printfn "Project: %s" resolved.Name
         printfn "Sources: %d files (%d from dependencies)"
@@ -218,7 +222,7 @@ let execute (args: ParseResults<CompileArgs>) =
         // Create intermediates directory if needed
         let intermediatesDir =
             if keepIntermediates || emitMLIR || emitLLVM then
-                let dir = Path.Combine(resolved.ProjectDir, "build", "intermediates")
+                let dir = Path.Combine(buildDir, "intermediates")
                 Directory.CreateDirectory(dir) |> ignore
                 Some dir
             else
