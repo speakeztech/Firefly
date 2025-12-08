@@ -182,7 +182,7 @@ This architecture enables the optimization strategies described in [Cache-Consci
 
 > "The Firefly compiler's sophisticated cache analysis will become possible through BAREWire's deterministic memory layouts. Where traditional compilers must make conservative assumptions about memory access patterns, Firefly is designed to operate with complete knowledge of data placement."
 
-### Stage 4: MLIR Emission
+### Stage 4: MLIR MLIR Generation
 
 The final MLIR output reflects the target-aware decision. For x86_64 with a small copy:
 
@@ -323,7 +323,7 @@ type ComputationPattern =
 ### Alex Architecture (Already Exists)
 
 Alex's multi-target design already supports the pattern:
-- `Bindings/` contains target-aware emission patterns
+- `Bindings/` contains target-aware MLIR generation patterns
 - `Patterns/` contains semantic pattern recognition
 - `CodeGeneration/TypeMapping.fs` maps F# types to target representations
 
@@ -347,8 +347,8 @@ The Fidelity HelloWorld samples should progress as follows:
 | TimeLoop | **Explicit control flow loops**, timing, I/O | Emitted as control flow |
 
 This progression ensures:
-1. Simple samples don't require loop emission infrastructure
-2. Loop emission is tested where loops ARE the semantic intent
+1. Simple samples don't require loop MLIR generation infrastructure
+2. Loop MLIR generation is tested where loops ARE the semantic intent
 3. Developer experience remains clean and F#-idiomatic
 4. Target-aware optimization is possible for memory operations
 
@@ -359,7 +359,7 @@ The distinction between **semantic primitives** (bounded memory operations) and 
 1. **Target-aware optimization**: ARM loops, x86 SIMD, GPU parallelism
 2. **Clean developer experience**: F# idioms without exposing low-level details
 3. **Proper coeffect analysis**: Pure operations can be optimized aggressively
-4. **Maintainable compiler**: Loop emission deferred to samples where it's the point
+4. **Maintainable compiler**: Loop MLIR generation deferred to samples where it's the point
 
 This aligns with the broader Fidelity vision articulated in the SpeakEZ blog corpus:
 

@@ -95,11 +95,13 @@ let buildDefinitionIndex (psg: ProgramSemanticGraph) : SymbolDefinitionIndex =
 // Nanopass 3b: Create Def-Use Edges
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Check if a node is a variable use (Ident, Value, LongIdent)
+/// Check if a node is a variable use (Ident, Value, LongIdent, MutableSet)
+/// MutableSet is included because it references a mutable variable for assignment
 let private isVariableUse (node: PSGNode) : bool =
     node.SyntaxKind.StartsWith("Ident:") ||
     node.SyntaxKind.StartsWith("Value:") ||
-    node.SyntaxKind.StartsWith("LongIdent:")
+    node.SyntaxKind.StartsWith("LongIdent:") ||
+    node.SyntaxKind.StartsWith("MutableSet:")
 
 /// Create def-use edges for all variable uses in the PSG.
 /// This is Nanopass 3b - transforms PSG by adding SymbolUse edges.

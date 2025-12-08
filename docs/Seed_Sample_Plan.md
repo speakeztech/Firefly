@@ -43,7 +43,7 @@ HelloWorld.fs
 HelloWorld.typed.ast (in memory)
     ↓ PSG construction (existing code)
 HelloWorld.psg (in memory)
-    ↓ MLIR emission (existing code, needs completion)
+    ↓ MLIR MLIR generation (existing code, needs completion)
 HelloWorld.mlir
     ↓ mlir-opt (external tool)
 HelloWorld.llvm.mlir
@@ -55,7 +55,7 @@ hello (executable)
 
 ### Specific Tasks
 
-1. **Complete MLIR emission for console output**
+1. **Complete MLIR MLIR generation for console output**
    - `Alloy.Console.WriteLine` must emit to MLIR's `llvm.call` to libc `puts`
    - This is string literal → syscall, nothing fancy
 
@@ -381,7 +381,7 @@ Everything built for seed samples becomes foundation for production:
 |-----------|------------------|
 | PSG with FSharpSymbol identity | Becomes hyperedge endpoints in PHG |
 | Tombstone soft-delete | Enables temporal projections |
-| Basic MLIR emission | Adds DCont dialect operations |
+| Basic MLIR MLIR generation | Adds DCont dialect operations |
 | `--target` flag | Expands to all LLVM targets |
 | GPIO memory-mapped I/O | Becomes peripheral HAL pattern |
 | Stack allocation | Adds arena allocation alongside |

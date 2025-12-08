@@ -87,7 +87,7 @@ For HelloWorld to work, the following must all be correct:
 - All Alloy functions called must be marked reachable
 - The entire call chain must be preserved
 
-### 4. Emission
+### 4. MLIR Generation
 - `stackBuffer` → `llvm.alloca`
 - `readInto` → `read` syscall with buffer
 - Match expression → conditional branches
@@ -120,5 +120,5 @@ The second output shows the program:
 1. **Decide**: Use FidelityHelloWorld Alloy lib or fix formal Alloy lib
 2. **Verify**: FCS correctly ingests chosen Alloy library
 3. **Verify**: PSG captures complete program structure including reads
-4. **Fix**: Emission to handle all required operations
+4. **Fix**: MLIR Generation to handle all required operations
 5. **Test**: Interactive execution with actual user input

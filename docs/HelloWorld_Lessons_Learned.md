@@ -46,7 +46,7 @@ MLIR uses C++-style comments:
 ```
 
 ### Code Change
-In `Emitter.fs`, all comment generation was updated:
+In `Zipper/Bindings.fs`, all comment generation was updated:
 ```fsharp
 // Before
 MLIRBuilder.line builder (sprintf "; Comment here")
@@ -77,7 +77,7 @@ Add `has_side_effects` attribute to all inline assembly:
 ```
 
 ### Code Change
-In `Emitter.fs`:
+In `Zipper/Bindings.fs`:
 ```fsharp
 let emitSyscallWrite builder ctx fd buf len =
     let result = SSAContext.nextValue ctx
@@ -151,7 +151,7 @@ Configuration in `HelloWorld.fidproj`:
 output_kind = "freestanding"
 ```
 
-For freestanding binaries, the emitter generates a `_start` wrapper:
+For freestanding binaries, the Zipper/Bindings generates a `_start` wrapper:
 ```mlir
 func.func @_start() attributes {llvm.emit_c_interface} {
     %argc = arith.constant 0 : i32
@@ -185,7 +185,7 @@ Tried to use literal values inline:
 ```
 
 ### Code Change
-In `Emitter.fs`:
+In `Zipper/Bindings.fs`:
 ```fsharp
 // Emit stack allocation
 // llvm.alloca requires SSA value for count, not inline literal
@@ -412,7 +412,7 @@ module {
 
 ## 12. Files Modified
 
-- `/src/Core/MLIR/Emitter.fs` - Main MLIR emission logic
+- `/src/Core/MLIR/Zipper/Bindings.fs` - Main MLIR MLIR generation logic
 - `/src/Core/Types/MLIRTypes.fs` - Added OutputKind type
 - `/src/CLI/Configurations/FidprojLoader.fs` - Parse output_kind from fidproj
 - `/samples/console/HelloWorld/HelloWorld.fidproj` - Added output_kind configuration
@@ -618,9 +618,9 @@ ld -nostdlib -static HelloWorld_main.o -o hello
 
 ---
 
-## 18. Emitter Updates for FidelityHelloWorld
+## 18. Zipper/Bindings Updates for FidelityHelloWorld
 
-Added support for FidelityHelloWorld Console operations in `/src/Core/MLIR/Emitter.fs`:
+Added support for FidelityHelloWorld Console operations in `/src/Core/MLIR/Zipper/Bindings.fs`:
 
 ```fsharp
 | "WriteLine" -> // FidelityHelloWorld pattern

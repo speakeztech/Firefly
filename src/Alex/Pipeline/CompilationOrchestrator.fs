@@ -9,8 +9,8 @@ open Core.FCS.ProjectContext
 open Core.Utilities.IntermediateWriter
 open Core.PSG.Types
 open Alex.Pipeline.CompilationTypes
-open Alex.Emission.FunctionEmitter
 open Alex.Bindings.BindingTypes
+open Alex.CodeGeneration.MLIRBuilder
 
 // ===================================================================
 // Pipeline Integration Types
@@ -130,6 +130,15 @@ type MLIRGenerationResult = {
     HasErrors: bool
 }
 
+/// Collect emission errors during MLIR generation
+module EmissionErrors =
+    let mutable private errors : CompilerError list = []
+
+    let reset () = errors <- []
+    let add (err: CompilerError) = errors <- err :: errors
+    let toCompilerErrors () = errors |> List.rev
+    let hasErrors () = not (List.isEmpty errors)
+
 /// Generate MLIR from PSG using the Alex emission infrastructure
 /// Returns the generated MLIR and any errors that occurred
 let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targetTriple: string) : MLIRGenerationResult =
@@ -137,17 +146,24 @@ let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targe
     EmissionErrors.reset()
 
     // Register all platform bindings
-    // Register which Alloy library functions are handled by inline emission
-    Alex.Bindings.Time.TimeBindings.registerAllBindings ()
-    Alex.Bindings.Console.ConsoleBindings.registerAll ()
+    Alex.Bindings.Time.TimeBindings.registerBindings ()
+    Alex.Bindings.Console.ConsoleBindings.registerBindings ()
 
     // Set target platform from triple
     match TargetPlatform.parseTriple targetTriple with
-    | Some platform -> BindingRegistry.setTargetPlatform platform
+    | Some platform -> ExternDispatch.setTargetPlatform platform
     | None -> ()  // Use default (auto-detect)
 
-    // Use Alex FunctionEmitter to generate MLIR
-    let mlirContent = emitProgram psg
+    // TODO: Implement full PSG traversal and MLIR generation
+    // For now, generate a minimal placeholder MLIR module
+    let mlirContent =
+        let sb = System.Text.StringBuilder()
+        sb.AppendLine("module {") |> ignore
+        sb.AppendLine("  // TODO: Full MLIR generation from PSG") |> ignore
+        sb.AppendLine(sprintf "  // PSG has %d nodes, %d edges" psg.Nodes.Count psg.Edges.Length) |> ignore
+        sb.AppendLine(sprintf "  // Entry points: %d" psg.EntryPoints.Length) |> ignore
+        sb.AppendLine("}") |> ignore
+        sb.ToString()
 
     // Wrap with module header comments
     let header =

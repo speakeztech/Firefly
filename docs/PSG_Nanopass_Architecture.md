@@ -8,11 +8,12 @@ This document describes the nanopass architecture for PSG (Program Semantic Grap
 
 ## Motivation
 
-The current PSG construction creates nodes with symbol information but doesn't create explicit def-use edges. This forces the emitter to do scope tracking at emission time (`bindLocal`, `lookupLocal`, `SymbolSSAContext`), which:
+The PSG must be the single source of truth for all downstream stages. Each nanopass enriches the PSG with additional information (edges, classifications) so that MLIR generation can simply traverse the enriched structure.
 
-1. **Violates PSG as single source of truth** - The emitter rebuilds information that should be in the PSG
-2. **Breaks composability** - Imperative scope tracking can't be composed with XParsec transformations
-3. **Creates coupling** - Emitter logic is tightly coupled to binding semantics
+Key principles:
+1. **PSG as single source of truth** - All information needed for MLIR generation should be in the PSG
+2. **Composability** - XParsec transformations compose with nanopass outputs
+3. **No coupling** - MLIR generation is decoupled from binding semantics
 
 ## Nanopass Principles Applied to PSG
 
@@ -32,27 +33,17 @@ Inspired by Appel's CPS work and the nanopass framework: make data flow explicit
 
 ## Nanopass Pipeline Design
 
-### Current Pipeline
+### Pipeline
 
 ```
 Phase 1: Structural Construction (syntax → nodes + ChildOf edges)
 Phase 2: Type Integration (FCS types → node.Type field)
-Phase 3: Finalization (finalize children, update context)
-→ Reachability Analysis (mark reachable nodes)
-→ Emission (PSG → MLIR)
-```
-
-### New Pipeline with Nanopasses
-
-```
-Phase 1: Structural Construction (unchanged)
-Phase 2: Type Integration (unchanged)
-Phase 3: Def-Use Edge Construction (NEW - nanopass)
+Phase 3: Def-Use Edge Construction (nanopass)
   - Nanopass 3a: Build symbol definition index
   - Nanopass 3b: Create SymbolUse edges from uses to definitions
-Phase 4: Finalization (existing Phase 3)
-→ Reachability Analysis (unchanged, but now has def-use edges)
-→ Emission (simplified - just follow edges)
+Phase 4: Finalization (finalize children, update context)
+→ Reachability Analysis (mark reachable nodes)
+→ Alex/Zipper + Bindings (PSG → MLIR)
 ```
 
 ## Phase 3: Def-Use Edge Construction (Nanopass)
@@ -103,41 +94,19 @@ let symbolKey (sym: FSharpSymbol) : string =
 
 ## Impact on Downstream Components
 
-### Emitter Simplification
+### MLIR Generation Simplification
 
-Before (imperative scope tracking):
+With def-use edges in PSG:
+
 ```fsharp
-// At binding site
-bindSymbolSSA symbol nodeId ssa typ
-bindLocal symbol.DisplayName ssa typ
-
-// At use site
-lookupSymbolSSA sym >>= fun symbolOpt ->
-match symbolOpt with
-| Some ssaInfo -> emit (Value(ssaInfo.Value, ssaInfo.Type))
-| None -> lookupLocal name >>= ...  // Fallback
-```
-
-After (edge following):
-```fsharp
-// At binding site - just emit, PSG already has the connection
-emitBinding node  // Returns SSA value, recorded in node→SSA map
+// At binding site - just generate MLIR, PSG already has the connection
+generateBinding node  // Returns SSA value, recorded in node→SSA map
 
 // At use site - follow edge to definition
 let defNode = followSymbolUseEdge node
 let ssaValue = nodeSSAMap[defNode.Id]
-emit (Value(ssaValue, ...))
+generate (Value(ssaValue, ...))
 ```
-
-### Code to Remove from Emitter
-
-Once def-use edges exist in PSG:
-
-1. `SymbolSSAContext` - No longer needed, edges provide def-use info
-2. `bindLocal` / `lookupLocal` - String-based scope tracking eliminated
-3. `bindSymbolSSA` / `lookupSymbolSSA` - Symbol-based tracking eliminated
-4. `Locals`, `LocalTypes` in `EmissionState` - Removed
-5. `MutableSlots` handling - Can be simplified (mutable vars still need stack slots, but finding them is via edges)
 
 ### Reachability Benefits
 
@@ -146,13 +115,25 @@ With explicit def-use edges, reachability analysis becomes more precise:
 - Uses naturally follow from their definitions
 - No need to guess at scope relationships
 
-## Implementation Plan
+## Implementation Status
 
-1. **Create `Core/PSG/Nanopass/DefUseEdges.fs`** - Nanopass implementation
-2. **Modify `Core/PSG/Builder/Main.fs`** - Insert Phase 3 nanopasses
-3. **Add edge query helpers** - `followSymbolUseEdge`, `getDefiningNode`
-4. **Update emitter** - Use edges instead of scope tracking
-5. **Remove bloat** - Delete unused scope tracking code
+### Completed
+
+1. **`Core/PSG/Nanopass/DefUseEdges.fs`** - Nanopass implementation ✓
+   - `buildDefinitionIndex`: Indexes Binding nodes and parameter Pattern:Named nodes
+   - `createDefUseEdges`: Creates SymbolUse edges from Ident/Value/LongIdent to definitions
+   - `findDefiningNode`: Query helper to follow SymbolUse edge from use to definition
+   - `findUses`: Query helper to find all uses of a definition
+
+2. **Other nanopasses implemented:**
+   - `Core/PSG/Nanopass/ReducePipeOperators.fs` - Transforms pipe operators
+   - `Core/PSG/Nanopass/FlattenApplications.fs` - Flattens curried applications
+
+### Remaining Work
+
+3. **MutableSet handling via def-use edges**
+   - `isVariableUse` in DefUseEdges.fs should check MutableSet
+   - MutableSet nodes need edges to their defining Binding:Mutable nodes
 
 ## Testing Strategy
 
@@ -164,6 +145,10 @@ With explicit def-use edges, reachability analysis becomes more precise:
    - Verify `greeting` binding has SymbolUse edge from `greeting |> Console.writeln`
    - Verify no "Variable not found" errors in MLIR
 
+3. **TimeLoop sample** (forcing function for mutable state)
+   - Verify MutableSet:counter has edge to Binding:Mutable [counter]
+   - Verify Zipper/Bindings follow edge for stack locations
+
 ## Future Nanopasses
 
 The nanopass architecture enables future transformations as additional small passes:
@@ -174,7 +159,7 @@ The nanopass architecture enables future transformations as additional small pas
 - **Generic instantiation** - Resolve generic types to concrete types
 - **Tail call detection** - Mark tail-recursive calls
 
-Each is a separate nanopass that enriches the PSG with explicit information, keeping downstream passes (like emission) simple and XParsec transformations composable.
+Each is a separate nanopass that enriches the PSG with explicit information, keeping downstream Zipper traversal and XParsec transformations composable.
 
 ## Nanopass Framework Principles
 
@@ -191,16 +176,16 @@ For Firefly/PSG:
 - XParsec provides composable pattern matching
 - Each pass can be tested in isolation
 
-## Intermediate Emission
+## Intermediate Output
 
-Each nanopass phase emits a labeled PSG intermediate to enable analysis of individual transformations. When `--verbose` or `-k` (keep intermediates) is specified, the following files are generated in the intermediates directory:
+Each nanopass phase outputs a labeled PSG intermediate to enable analysis of individual transformations. When `--verbose` or `-k` (keep intermediates) is specified, the following files are generated in the intermediates directory:
 
 - `psg_phase_1_structural.json` - After Phase 1 (structural construction)
 - `psg_phase_2_type_integration.json` - After Phase 2 (FCS type integration)
 - `psg_phase_3_def_use_edges.json` - After Phase 3 (def-use edge nanopass)
 - `psg_phase_4_finalized.json` - After Phase 4 (finalization)
 
-Additionally, diff files are emitted showing what changed between phases:
+Additionally, diff files show what changed between phases:
 
 - `psg_diff_1_structural_to_2_type_integration.json`
 - `psg_diff_2_type_integration_to_3_def_use_edges.json`
@@ -307,12 +292,12 @@ type TemporalProgramHypergraph = {
 }
 ```
 
-Each nanopass intermediate we emit today becomes training data for the learning PHG of tomorrow. This is why labeled intermediate emission matters—we're building the dataset for future optimization learning.
+Each nanopass intermediate we output today becomes training data for the learning PHG of tomorrow. This is why labeled intermediate output matters—we're building the dataset for future optimization learning.
 
 ## Roadmap
 
 1. **Current**: Nanopass architecture with binary edges (implemented)
-2. **Near-term**: Edge query helpers for emitter simplification
+2. **Near-term**: Edge query helpers for Zipper traversal
 3. **Mid-term**: Hyperedge promotion for multi-way relationships
 4. **Long-term**: Temporal PHG with compilation learning
 

@@ -2,13 +2,13 @@
 
 ## Problem Statement
 
-The Firefly compiler currently has three parallel combinator infrastructures:
+The Firefly compiler needs a principled approach to PSG traversal and MLIR generation. The solution is:
 
 1. **XParsec** (`XParsec` package) - The canonical parser combinator library
-2. **PSGPatterns** (`Alex/Patterns/PSGPatterns.fs`) - Reimplements `>>=`, `|>>`, `.>>`, `.>>.`, `<|>` for tree pattern matching
-3. **EmissionMonad** (`Alex/CodeGeneration/EmissionMonad.fs`) - Reimplements the same operators for emission
+2. **PSGZipper** - Bidirectional tree traversal with context
+3. **Bindings** - Platform-specific MLIR generation
 
-This violates the principle of compositional design. The user directive is clear:
+The user directive is clear:
 > "I REALLY REALLY REALLY want to standardize on XParsec... If there needs to be a more sophisticated tree traversing parser it should be compositionally built up from XParsec primitives."
 
 ## The Zipper: Non-Negotiable Core Component
@@ -28,10 +28,10 @@ The zipper provides:
 - **Focus**: The current node being examined
 - **Path**: The trail of "breadcrumbs" back to root (parent chain with sibling context)
 - **Graph Context**: Access to the full PSG for node lookups
-- **Emission State**: SSA counter, locals, types - threaded through traversal
+- **Generation State**: SSA counter, locals, types - threaded through traversal
 - **Bidirectional Navigation**: up/down/left/right movement with context preservation
 
-### Current PSGZipper Structure
+### PSGZipper Structure
 
 ```fsharp
 type PSGPath =
@@ -46,7 +46,7 @@ type PSGZipper = {
     Focus: PSGNode
     Path: PSGPath
     Graph: ProgramSemanticGraph
-    State: EmissionState
+    State: GenerationState
 }
 ```
 
@@ -75,7 +75,7 @@ XParsec is designed for sequential input parsing. The PSG is a tree. But **at ea
 3. Composing these matches monadically
 4. Threading state and handling failure/backtracking
 
-## Proposed Architecture: XParsec Layered on Zipper
+## Architecture: XParsec Layered on Zipper
 
 ### Layer 1: XParsec Integration Types
 
@@ -99,7 +99,7 @@ type PSGChildSlice(nodes: PSGNode array, start: int, length: int) =
 type PSGParseState = {
     /// The zipper provides navigation context
     Zipper: PSGZipper
-    /// Emission state is already in zipper, but we may extend
+    /// Additional context for generation
     AdditionalContext: Map<string, obj>
 }
 
@@ -136,13 +136,6 @@ module PSGXParsec =
     /// Match child with specific syntax kind prefix
     let childKind (prefix: string) : PSGChildParser<PSGNode> =
         satisfyChild (fun n -> n.SyntaxKind.StartsWith(prefix))
-
-    /// Match child with specific symbol name
-    let childSymbol (name: string) : PSGChildParser<PSGNode> =
-        satisfyChild (fun n ->
-            match n.Symbol with
-            | Some s -> s.FullName = name || s.DisplayName = name
-            | None -> false)
 
     /// Skip a child and continue
     let skipChild : PSGChildParser<unit> =
@@ -211,54 +204,54 @@ module FocusPattern =
             | Error msg -> fail msg z
 ```
 
-### Layer 4: Emission Uses XParsec State Threading
+### Layer 4: MLIR Generation Uses XParsec State Threading
 
 ```fsharp
-/// Emission is now a PSG parser that produces MLIR fragments
-type Emission<'T> = PSGChildParser<'T>
+/// MLIR generation is now a PSG parser that produces MLIR fragments
+type MLIRGen<'T> = PSGChildParser<'T>
 
-module Emit =
+module MLIRGen =
     open XParsec
     open XParsec.Parsers
     open XParsec.Combinators
 
     /// Access the zipper from parse state
-    let getZipper : Emission<PSGZipper> =
+    let getZipper : MLIRGen<PSGZipper> =
         fun reader -> preturn reader.State.Zipper reader
 
-    /// Update emission state in zipper
-    let updateState (f: EmissionState -> EmissionState) : Emission<unit> =
+    /// Update generation state in zipper
+    let updateState (f: GenerationState -> GenerationState) : MLIRGen<unit> =
         fun reader ->
             let newZipper = PSGZipper.mapState f reader.State.Zipper
             reader.State <- { reader.State with Zipper = newZipper }
             preturn () reader
 
     /// Generate fresh SSA name
-    let freshSSA : Emission<string> =
+    let freshSSA : MLIRGen<string> =
         fun reader ->
             let z = reader.State.Zipper
             let newZ, name = PSGZipper.nextSSA z
             reader.State <- { reader.State with Zipper = newZ }
             preturn name reader
 
-    /// Emit MLIR line (side effect through builder in state)
-    let line (text: string) : Emission<unit> =
+    /// Generate MLIR line (side effect through builder in state)
+    let line (text: string) : MLIRGen<unit> =
         fun reader ->
-            // Actual emission would go through MLIRBuilder
+            // Actual generation goes through MLIRBuilder
             preturn () reader
 ```
 
-### Layer 5: Expression Emission as XParsec Parser
+### Layer 5: Expression Processing as XParsec Parser
 
 ```fsharp
-/// Main expression emission - an XParsec parser over PSG children
-let rec pExpr : Emission<ExprResult> =
+/// Main expression processing - an XParsec parser over PSG children
+let rec pExpr : MLIRGen<ExprResult> =
     // Use XParsec's choice combinator
     XParsec.Combinators.choiceL [
-        // Console.Write: App with Console.Write function child
-        pConsoleWrite
+        // Function calls - dispatch to bindings
+        pFunctionCall
 
-        // Arithmetic: curried binary op pattern
+        // Arithmetic expressions
         pArithmetic
 
         // Constants
@@ -274,25 +267,31 @@ let rec pExpr : Emission<ExprResult> =
         pUnhandled
     ] "Expected expression"
 
-and pConsoleWrite : Emission<ExprResult> =
-    // Match: first child is Console.Write function symbol
-    PSGXParsec.childSymbol "Alloy.Console.Write" >>.
-    PSGXParsec.remainingChildren >>= fun args ->
-    emitConsoleWrite args
-
-and pArithmetic : Emission<ExprResult> =
-    // Match curried binary op: App[App[op, left], right]
-    // First child is inner App
-    PSGXParsec.childKind "App" >>= fun innerApp ->
-    // ... pattern continues
-    Emit.getZipper >>= fun z ->
-    // Navigate into innerApp and match
+and pFunctionCall : MLIRGen<ExprResult> =
+    // Match: App node with function and arguments
+    PSGXParsec.childKind "App" >>= fun appNode ->
+    // ... pattern continues - dispatch to platform bindings
+    MLIRGen.getZipper >>= fun z ->
+    // Navigate into app and process
     match PSGZipper.downTo 0 z with
     | NavOk innerZ ->
         // Use XParsec on inner's children
+        PSGXParsec.parseChildren pCallTarget innerZ
+        |> function
+        | Ok callInfo -> processCall callInfo  // Dispatches to Bindings
+        | Error _ -> XParsec.Parsers.pzero
+    | NavFail _ -> XParsec.Parsers.pzero
+
+and pArithmetic : MLIRGen<ExprResult> =
+    // Match curried binary op: App[App[op, left], right]
+    PSGXParsec.childKind "App" >>= fun innerApp ->
+    // ... pattern continues
+    MLIRGen.getZipper >>= fun z ->
+    match PSGZipper.downTo 0 z with
+    | NavOk innerZ ->
         PSGXParsec.parseChildren pBinaryOp innerZ
         |> function
-        | Ok opInfo -> emitBinaryOp opInfo
+        | Ok opInfo -> generateBinaryOp opInfo
         | Error _ -> XParsec.Parsers.pzero
     | NavFail _ -> XParsec.Parsers.pzero
 ```
@@ -302,7 +301,7 @@ and pArithmetic : Emission<ExprResult> =
 1. **PSGZipper** - Tree navigation, context preservation, state threading
    - Moves through the PSG: up, down, left, right
    - Preserves path context for backtracking
-   - Carries emission state (SSA counter, locals, etc.)
+   - Carries generation state (SSA counter, locals, etc.)
 
 2. **XParsec** - Sequential combinators over child lists
    - Provides `>>=`, `|>>`, `<|>`, `many`, `choice`, etc.
@@ -314,6 +313,11 @@ and pArithmetic : Emission<ExprResult> =
    - Uses zipper for focus access
    - Bridges to child parsing via `withChildren`
 
+4. **Bindings** - Platform-specific MLIR generation
+   - Looked up by PSG node structure (not library names)
+   - Organized by platform (Linux_x86_64, etc.)
+   - Generate MLIR for syscalls, memory operations, etc.
+
 ## Migration Path
 
 ### Phase 1: Create XParsec Bridge Types
@@ -323,7 +327,7 @@ and pArithmetic : Emission<ExprResult> =
 
 ### Phase 2: Create Bridge Combinators
 1. `PSGXParsec.parseChildren` - Run XParsec on zipper's children
-2. Basic child matchers: `childKind`, `childSymbol`, `satisfyChild`
+2. Basic child matchers: `childKind`, `satisfyChild`
 3. `remainingChildren`, `skipChild`, etc.
 
 ### Phase 3: Rebuild FocusPattern on XParsec Results
@@ -336,40 +340,44 @@ and pArithmetic : Emission<ExprResult> =
 2. Import XParsec operators
 3. Rewrite patterns to use XParsec primitives
 
-### Phase 5: Integrate Emission with XParsec
-1. `Emission<'T>` becomes `PSGChildParser<'T>`
-2. Emission helpers use XParsec state access
-3. Remove duplicate operators from EmissionMonad
+### Phase 5: Create Binding Infrastructure
+1. `Alex/Bindings/BindingTypes.fs` - Core binding abstractions
+2. `Alex/Bindings/PlatformRegistry.fs` - Platform detection & selection
+3. Platform-specific bindings (Console, Time, Memory, etc.)
 
-### Phase 6: Rebuild ExpressionEmitter
+### Phase 6: Integrate Zipper + XParsec + Bindings
 1. Main dispatcher uses `XParsec.choice`
 2. Handlers use XParsec combinators
 3. Zipper navigation for tree traversal
-4. XParsec for child sequence matching
+4. Bindings for platform-specific MLIR generation
 
-## Files to Modify
+## Files to Create/Modify
 
 1. **New**: `Alex/Traversal/PSGXParsec.fs` - XParsec bridge for PSG
 2. **Rewrite**: `Alex/Patterns/PSGPatterns.fs` - Remove duplicate operators, use XParsec
 3. **Rewrite**: `Alex/Patterns/AlloyPatterns.fs` - Use XParsec-based patterns
-4. **Rewrite**: `Alex/CodeGeneration/EmissionMonad.fs` - Integrate with XParsec
-5. **Rewrite**: `Alex/Emission/ExpressionEmitter.fs` - Use XParsec combinators
+4. **New**: `Alex/Bindings/BindingTypes.fs` - Binding abstractions
+5. **New**: `Alex/Bindings/PlatformRegistry.fs` - Platform selection
+6. **New**: `Alex/Bindings/Console/Linux.fs` - Linux console bindings
+7. **New**: `Alex/Bindings/Time/Linux.fs` - Linux time bindings
 
 ## What This Achieves
 
 1. **Single Combinator Infrastructure**: All `>>=`, `|>>`, `<|>` come from XParsec
 2. **Zipper Preserved**: Tree navigation remains zipper-based
 3. **Sequential Parsing via XParsec**: Child sequences parsed with XParsec
-4. **Composability**: New patterns built from XParsec primitives
-5. **Type Safety**: XParsec's type system ensures correctness
-6. **Backtracking**: XParsec handles position save/restore
-7. **Error Messages**: XParsec's error infrastructure
+4. **Platform Bindings**: MLIR generation is platform-aware
+5. **Composability**: New patterns built from XParsec primitives
+6. **Type Safety**: XParsec's type system ensures correctness
+7. **Backtracking**: XParsec handles position save/restore
+8. **Error Messages**: XParsec's error infrastructure
 
 ## Conclusion
 
-The zipper traverses the tree. XParsec parses the child sequences at each zipper position. This is the principled separation of concerns:
+The zipper traverses the tree. XParsec parses the child sequences at each zipper position. Bindings generate platform-specific MLIR. This is the principled separation of concerns:
 
 - **Zipper** = tree navigation with context
 - **XParsec** = sequential combinators with backtracking
+- **Bindings** = platform-specific MLIR generation
 
 By building PSG pattern matching on XParsec primitives (not reimplementing them), we eliminate architectural debt while preserving the essential bidirectional zipper navigation that the blog posts describe as critical for proof-aware, context-preserving compilation.

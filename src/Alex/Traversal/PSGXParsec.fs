@@ -74,7 +74,7 @@ let createSliceFromList (nodes: PSGNode list) : PSGChildSlice =
 // ═══════════════════════════════════════════════════════════════════
 
 open System.Text
-open Alex.CodeGeneration.EmissionContext
+open Alex.CodeGeneration.MLIRBuilder
 
 /// Mutable emission context - holds state that shouldn't be in XParsec's equality-based state.
 /// Access through reference in PSGParseState.
@@ -83,8 +83,8 @@ open Alex.CodeGeneration.EmissionContext
 type EmitContext(graph: ProgramSemanticGraph) =
     /// The full PSG for edge lookups (def-use resolution)
     member _.Graph = graph
-    /// MLIR output builder
-    member val Builder = MLIRBuilder.create () with get
+    /// MLIR output builder state
+    member val Builder = BuilderState.create () with get
     /// Map from NodeId to emitted SSA value (for variable resolution via def-use edges)
     member val NodeSSA : Map<string, string * string> = Map.empty with get, set
     /// Accumulated string literals: content -> global name
@@ -116,11 +116,11 @@ module EmitContext =
 
     /// Emit a line of MLIR
     let emitLine (ctx: EmitContext) (text: string) : unit =
-        MLIRBuilder.line ctx.Builder text
+        BuilderState.emit ctx.Builder text
 
     /// Get output string
     let getOutput (ctx: EmitContext) : string =
-        MLIRBuilder.toString ctx.Builder
+        ctx.Builder.Output.ToString()
 
 // ═══════════════════════════════════════════════════════════════════
 // PSGParseState - Minimal state for XParsec (supports equality)
@@ -467,7 +467,7 @@ let pushIndent : PSGChildParser<unit> =
     fun reader ->
         match reader.State.EmitCtx with
         | Some ctx ->
-            MLIRBuilder.push ctx.Builder
+            BuilderState.pushIndent ctx.Builder
             Parsers.preturn () reader
         | None -> Parsers.preturn () reader
 
@@ -476,7 +476,7 @@ let popIndent : PSGChildParser<unit> =
     fun reader ->
         match reader.State.EmitCtx with
         | Some ctx ->
-            MLIRBuilder.pop ctx.Builder
+            BuilderState.popIndent ctx.Builder
             Parsers.preturn () reader
         | None -> Parsers.preturn () reader
 

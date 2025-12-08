@@ -432,7 +432,9 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
     | SynExpr.LongIdentSet(longDotId, rhsExpr, range) ->
         let varName = longDotId.LongIdent |> List.map (fun id -> id.idText) |> String.concat "."
         let syntaxKind = sprintf "MutableSet:%s" varName
-        let setNode = createNode syntaxKind range fileName None parentId
+        // Look up the symbol from the symbol table to enable def-use edge creation
+        let symbol = Map.tryFind varName graph.SymbolTable
+        let setNode = createNode syntaxKind range fileName symbol parentId
         let graph' = { graph with Nodes = Map.add setNode.Id.Value setNode graph.Nodes }
         let graph'' = addChildToParent setNode.Id parentId graph'
         processExpression rhsExpr (Some setNode.Id) fileName context graph''

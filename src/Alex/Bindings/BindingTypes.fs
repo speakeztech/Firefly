@@ -1,7 +1,7 @@
 module Alex.Bindings.BindingTypes
 
 open Core.PSG.Types
-open Alex.CodeGeneration.EmissionContext
+open Alex.CodeGeneration.MLIRBuilder
 
 // ===================================================================
 // Target Platform Identification
@@ -106,15 +106,28 @@ module TargetPlatform =
         { OS = os; Arch = arch; Triple = triple; Features = Set.empty }
 
 // ===================================================================
-// Binding Emission Types
+// Extern Primitive Types
 // ===================================================================
+
+/// Represents an extern primitive call extracted from PSG
+type ExternPrimitive = {
+    /// The entry point name (e.g., "fidelity_write_bytes")
+    EntryPoint: string
+    /// The library name (e.g., "__fidelity")
+    Library: string
+    /// Calling convention
+    CallingConvention: string
+    /// Argument values (already evaluated)
+    Args: Val list
+    /// Return type
+    ReturnType: Ty
+}
 
 /// Result of attempting to emit a binding
 type EmissionResult =
-    | Emitted of resultSSA: string
+    | Emitted of resultVal: Val
     | EmittedVoid
     | NotSupported of reason: string
-    | DeferToGeneric
 
 /// External function declaration needed by a binding
 type ExternalDeclaration = {
@@ -123,35 +136,36 @@ type ExternalDeclaration = {
     Library: string option
 }
 
-/// A binding that can match and emit platform-specific code
-type PlatformBinding = {
-    /// Unique name for this binding
-    Name: string
-    /// Symbol patterns this binding handles (e.g., "Alloy.Time.currentTicks")
-    SymbolPatterns: string list
-    /// Platforms this binding supports
-    SupportedPlatforms: TargetPlatform list
-    /// Check if this binding matches a given PSG node
-    Matches: PSGNode -> bool
-    /// Emit MLIR for this binding (returns SSA value or None)
-    Emit: TargetPlatform -> MLIRBuilder -> SSAContext
-          -> ProgramSemanticGraph -> PSGNode -> EmissionResult
-    /// Get external declarations needed by this binding
-    GetExternalDeclarations: TargetPlatform -> ExternalDeclaration list
-}
-
 // ===================================================================
-// Binding Registry
+// Binding Function Signature
 // ===================================================================
 
-/// Global registry for platform bindings
-module BindingRegistry =
-    let mutable private bindings: PlatformBinding list = []
+/// A binding is a function that takes an extern primitive and returns MLIR
+/// The MLIR<Val> monad handles all state threading
+type ExternBinding = ExternPrimitive -> MLIR<EmissionResult>
+
+// ===================================================================
+// Extern Dispatch Registry
+// ===================================================================
+
+/// Registry for extern primitive bindings
+/// Dispatches based on (platform, entry_point) to platform-specific MLIR generators
+module ExternDispatch =
+
+    /// Binding registration: (platform, entry_point) -> binding function
+    let mutable private bindings: Map<(OSFamily * Architecture * string), ExternBinding> = Map.empty
     let mutable private currentPlatform: TargetPlatform option = None
 
-    /// Register a binding
-    let register (binding: PlatformBinding) =
-        bindings <- binding :: bindings
+    /// Register a binding for a specific platform and entry point
+    let register (os: OSFamily) (arch: Architecture) (entryPoint: string) (binding: ExternBinding) =
+        let key = (os, arch, entryPoint)
+        bindings <- Map.add key binding bindings
+
+    /// Register a binding for all architectures of an OS
+    let registerForOS (os: OSFamily) (entryPoint: string) (binding: ExternBinding) =
+        // Register for common architectures
+        register os X86_64 entryPoint binding
+        register os ARM64 entryPoint binding
 
     /// Set the current target platform
     let setTargetPlatform (platform: TargetPlatform) =
@@ -161,52 +175,38 @@ module BindingRegistry =
     let getTargetPlatform () =
         currentPlatform |> Option.defaultValue (TargetPlatform.detectHost())
 
-    /// Find a binding that matches a PSG node for the current platform
-    let findBinding (node: PSGNode) : PlatformBinding option =
+    /// Dispatch an extern primitive to its platform binding
+    let dispatch (prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
         let platform = getTargetPlatform()
-        bindings
-        |> List.tryFind (fun b ->
-            b.Matches node &&
-            b.SupportedPlatforms |> List.exists (fun p -> p.OS = platform.OS && p.Arch = platform.Arch))
-
-    /// Try to emit using a platform binding
-    let tryEmit (node: PSGNode) (builder: MLIRBuilder)
-                (ctx: SSAContext) (psg: ProgramSemanticGraph)
-                : string option =
-        let platform = getTargetPlatform()
-        match findBinding node with
+        let key = (platform.OS, platform.Arch, prim.EntryPoint)
+        match Map.tryFind key bindings with
         | Some binding ->
-            match binding.Emit platform builder ctx psg node with
-            | Emitted result -> Some result
-            | EmittedVoid -> Some ""  // Void return, no SSA value
-            | NotSupported _ | DeferToGeneric -> None
-        | None -> None
+            return! binding prim
+        | None ->
+            // Try without architecture specificity (OS-level binding)
+            let fallbackKey = (platform.OS, X86_64, prim.EntryPoint)
+            match Map.tryFind fallbackKey bindings with
+            | Some binding -> return! binding prim
+            | None -> return NotSupported $"No binding for {prim.EntryPoint} on {platform.OS}/{platform.Arch}"
+    }
 
-    /// Get all external declarations needed for current platform
-    let getAllExternalDeclarations () : ExternalDeclaration list =
+    /// Check if an entry point has a registered binding
+    let hasBinding (entryPoint: string) : bool =
         let platform = getTargetPlatform()
-        bindings
-        |> List.filter (fun b ->
-            b.SupportedPlatforms |> List.exists (fun p -> p.OS = platform.OS && p.Arch = platform.Arch))
-        |> List.collect (fun b -> b.GetExternalDeclarations platform)
-        |> List.distinctBy (fun d -> d.Name)
+        let key = (platform.OS, platform.Arch, entryPoint)
+        Map.containsKey key bindings ||
+        Map.containsKey (platform.OS, X86_64, entryPoint) bindings
 
     /// Clear all registered bindings (for testing)
     let clear () =
-        bindings <- []
+        bindings <- Map.empty
         currentPlatform <- None
 
-    /// Check if a symbol name is handled by any registered binding
-    /// This is used to determine if a function definition should be emitted
-    /// or if the binding handles it at call sites (inline emission)
-    let isHandledByBinding (symbolFullName: string) : bool =
+    /// Get all registered entry points for current platform
+    let getRegisteredEntryPoints () : string list =
+        let platform = getTargetPlatform()
         bindings
-        |> List.exists (fun b ->
-            b.SymbolPatterns |> List.exists (fun pattern ->
-                symbolFullName = pattern || symbolFullName.EndsWith("." + pattern)))
-
-    /// Get all symbol patterns that are handled by bindings
-    let getAllHandledPatterns () : string list =
-        bindings
-        |> List.collect (fun b -> b.SymbolPatterns)
+        |> Map.toList
+        |> List.filter (fun ((os, arch, _), _) -> os = platform.OS && (arch = platform.Arch || arch = X86_64))
+        |> List.map (fun ((_, _, ep), _) -> ep)
         |> List.distinct

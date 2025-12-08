@@ -679,4 +679,4 @@ This architecture provides a clear path from F# source code to efficient native 
 
 ### See Also
 - **Alex_Architecture_Overview.md**: Directory structure and integration points
-- **Emitter.fs Technical Debt**: Current spaghetti implementation to be refactored into principled Alex components
+- **Zipper/Bindings.fs Technical Debt**: Current spaghetti implementation to be refactored into principled Alex components

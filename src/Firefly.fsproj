@@ -76,22 +76,14 @@
       <!-- FCS Ingestion Pipeline (new) -->
       <Compile Include="Core/IngestionPipeline.fs" />
 
-      <!-- MLIR Generation -->
-      <Compile Include="Core/MLIR/Emitter.fs" />
-
       <!-- Alex CodeGeneration -->
       <Compile Include="Alex/CodeGeneration/MLIRBuilder.fs" />
-      <Compile Include="Alex/CodeGeneration/EmissionContext.fs" />
       <Compile Include="Alex/CodeGeneration/TypeMapping.fs" />
 
-      <!-- Alex Bindings -->
+      <!-- Alex Bindings (consolidated - platform as data, not separate files) -->
       <Compile Include="Alex/Bindings/BindingTypes.fs" />
-      <Compile Include="Alex/Bindings/Time/Linux.fs" />
-      <Compile Include="Alex/Bindings/Time/MacOS.fs" />
-      <Compile Include="Alex/Bindings/Time/Windows.fs" />
-      <Compile Include="Alex/Bindings/Time/TimeBindings.fs" />
-      <Compile Include="Alex/Bindings/Console/Linux.fs" />
       <Compile Include="Alex/Bindings/Console/ConsoleBindings.fs" />
+      <Compile Include="Alex/Bindings/Time/TimeBindings.fs" />
 
       <!-- Alex Traversal -->
       <Compile Include="Alex/Traversal/PSGZipper.fs" />
@@ -100,16 +92,8 @@
       <!-- Alex Patterns -->
       <Compile Include="Alex/Patterns/PSGPatterns.fs" />
 
-      <!-- Alex CodeGeneration (depends on Traversal) -->
-      <Compile Include="Alex/CodeGeneration/EmissionMonad.fs" />
-
-      <!-- Alex Pipeline Types (needed by Emission for error collection) -->
+      <!-- Alex Pipeline Types -->
       <Compile Include="Alex/Pipeline/CompilationTypes.fs" />
-
-      <!-- Alex Emission -->
-      <Compile Include="Alex/Emission/ExpressionEmitter.fs" />
-      <Compile Include="Alex/Emission/PSGEmitter.fs" />
-      <Compile Include="Alex/Emission/FunctionEmitter.fs" />
 
       <!-- Alex Pipeline Orchestration -->
       <Compile Include="Alex/Pipeline/CompilationOrchestrator.fs" />

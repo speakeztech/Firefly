@@ -162,6 +162,64 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
         let graph' = { graph with Nodes = Map.add nullNode.Id.Value nullNode graph.Nodes }
         addChildToParent nullNode.Id parentId graph'
 
+    // Attributed pattern (pattern with attributes, e.g., extern arg with [<MarshalAs(...)>])
+    | SynPat.Attrib(innerPat, attributes, range) ->
+        // Create a node for the attributed pattern, then process inner
+        let attribNode = createNode "Pattern:Attrib" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add attribNode.Id.Value attribNode graph.Nodes }
+        let graph'' = addChildToParent attribNode.Id parentId graph'
+        processPattern innerPat (Some attribNode.Id) fileName context graph''
+
+    // Or pattern (pat1 | pat2)
+    | SynPat.Or(lhsPat, rhsPat, range, trivia) ->
+        let orNode = createNode "Pattern:Or" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add orNode.Id.Value orNode graph.Nodes }
+        let graph'' = addChildToParent orNode.Id parentId graph'
+        let graph''' = processPattern lhsPat (Some orNode.Id) fileName context graph''
+        processPattern rhsPat (Some orNode.Id) fileName context graph'''
+
+    // And patterns ([<...>] pat1 & pat2)
+    | SynPat.Ands(pats, range) ->
+        let andsNode = createNode "Pattern:Ands" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add andsNode.Id.Value andsNode graph.Nodes }
+        let graph'' = addChildToParent andsNode.Id parentId graph'
+        pats |> List.fold (fun g pat ->
+            processPattern pat (Some andsNode.Id) fileName context g
+        ) graph''
+
+    // Record pattern ({ field1 = pat1; ... })
+    | SynPat.Record(fieldPats, range) ->
+        let recordNode = createNode "Pattern:Record" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add recordNode.Id.Value recordNode graph.Nodes }
+        let graph'' = addChildToParent recordNode.Id parentId graph'
+        fieldPats |> List.fold (fun g ((_, _), _, pat) ->
+            processPattern pat (Some recordNode.Id) fileName context g
+        ) graph''
+
+    // Optional value pattern (?x)
+    | SynPat.OptionalVal(ident, range) ->
+        let optNode = createNode (sprintf "Pattern:OptionalVal:%s" ident.idText) range fileName None parentId
+        let graph' = { graph with Nodes = Map.add optNode.Id.Value optNode graph.Nodes }
+        addChildToParent optNode.Id parentId graph'
+
+    // Quote expression pattern (<@ ... @>)
+    | SynPat.QuoteExpr(expr, range) ->
+        let quoteNode = createNode "Pattern:QuoteExpr" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add quoteNode.Id.Value quoteNode graph.Nodes }
+        addChildToParent quoteNode.Id parentId graph'
+
+    // From parse error (recovery pattern)
+    | SynPat.FromParseError(innerPat, range) ->
+        // Process inner pattern, but mark this as a parse error recovery
+        processPattern innerPat parentId fileName context graph
+
+    // Instance member pattern (this.Member)
+    | SynPat.InstanceMember(thisId, memberId, _, _, range) ->
+        let memberName = sprintf "%s.%s" thisId.idText memberId.idText
+        let memberNode = createNode (sprintf "Pattern:InstanceMember:%s" memberName) range fileName None parentId
+        let graph' = { graph with Nodes = Map.add memberNode.Id.Value memberNode graph.Nodes }
+        addChildToParent memberNode.Id parentId graph'
+
     // Hard stop on unhandled patterns
     | other ->
         let patTypeName = other.GetType().Name
