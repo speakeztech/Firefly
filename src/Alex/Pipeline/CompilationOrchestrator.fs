@@ -139,7 +139,7 @@ module EmissionErrors =
     let toCompilerErrors () = errors |> List.rev
     let hasErrors () = not (List.isEmpty errors)
 
-/// Generate MLIR from PSG using the Alex emission infrastructure
+/// Generate MLIR from PSG using the Alex Scribe infrastructure
 /// Returns the generated MLIR and any errors that occurred
 let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targetTriple: string) : MLIRGenerationResult =
     // Reset error collector for this compilation
@@ -154,20 +154,12 @@ let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targe
     | Some platform -> ExternDispatch.setTargetPlatform platform
     | None -> ()  // Use default (auto-detect)
 
-    // TODO: Implement full PSG traversal and MLIR generation
-    // For now, generate a minimal placeholder MLIR module
-    let mlirContent =
-        let sb = System.Text.StringBuilder()
-        sb.AppendLine("module {") |> ignore
-        sb.AppendLine("  // TODO: Full MLIR generation from PSG") |> ignore
-        sb.AppendLine(sprintf "  // PSG has %d nodes, %d edges" psg.Nodes.Count psg.Edges.Length) |> ignore
-        sb.AppendLine(sprintf "  // Entry points: %d" psg.EntryPoints.Length) |> ignore
-        sb.AppendLine("}") |> ignore
-        sb.ToString()
+    // Use PSGScribe to transcribe PSG to MLIR
+    let mlirContent = Alex.Traversal.PSGScribe.transcribePSG psg
 
     // Wrap with module header comments
     let header =
-        sprintf "// Firefly-generated MLIR for %s (via Alex)\n// Target: %s\n// PSG: %d nodes, %d edges, %d entry points\n\n"
+        sprintf "// Firefly-generated MLIR for %s (via Alex/Scribe)\n// Target: %s\n// PSG: %d nodes, %d edges, %d entry points\n\n"
             projectName targetTriple psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length
 
     // Collect any emission errors

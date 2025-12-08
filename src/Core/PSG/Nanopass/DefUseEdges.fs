@@ -25,8 +25,13 @@ let symbolKey (sym: FSharpSymbol) : string =
     match sym with
     | :? FSharpMemberOrFunctionOrValue as mfv ->
         // Use declaration location for stable identity
-        let loc = mfv.DeclarationLocation
-        sprintf "%s@%s:%d:%d" mfv.DisplayName loc.FileName loc.StartLine loc.StartColumn
+        // Some symbols (e.g., BCL types) may not have DeclarationLocation available
+        try
+            let loc = mfv.DeclarationLocation
+            sprintf "%s@%s:%d:%d" mfv.DisplayName loc.FileName loc.StartLine loc.StartColumn
+        with _ ->
+            // Fallback: use display name + hash for symbols without declaration location
+            sprintf "%s_%d" mfv.DisplayName (mfv.GetHashCode())
     | :? FSharpEntity as entity ->
         // For types, use full name
         sprintf "type:%s" entity.FullName

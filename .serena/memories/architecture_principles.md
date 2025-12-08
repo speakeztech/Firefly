@@ -48,6 +48,18 @@ This is a sophisticated compiler project with deep architectural constraints. Fa
 | **Bindings** | Platform-specific MLIR generation | Know about F# syntax or Alloy namespaces |
 | **MLIR/LLVM** | Lower and optimize IR | Know about F# or Alloy |
 
+## ANTIPATTERN: Emitter Layer
+
+> **NEVER create an "emitter" abstraction between PSG and MLIR.**
+
+The emitter is an antipattern because:
+1. It sits between PSG and MLIR making interpretation decisions
+2. It would need Alloy awareness (violates layer separation)
+3. It circumvents the compositional XParsec + Bindings architecture
+4. It accumulates special cases and coupling
+
+See `docs/Emitter_Removal_Rebuild_Plan.md` for why it was removed.
+
 ## The Zipper + Bindings Architecture
 
 **Alex generates MLIR through Zipper traversal and platform Bindings.**

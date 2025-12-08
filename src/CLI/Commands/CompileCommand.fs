@@ -123,7 +123,8 @@ let private compileLLVMToNative (llvmPath: string) (outputPath: string) (targetT
         let objPath = Path.ChangeExtension(llvmPath, ".o")
 
         // Step 1: llc to compile LLVM IR to object file
-        let llcArgs = sprintf "-filetype=obj %s -o %s" llvmPath objPath
+        // Use -O0 to prevent optimizations that might interfere with inline asm
+        let llcArgs = sprintf "-O0 -filetype=obj %s -o %s" llvmPath objPath
         let llcProcess = new System.Diagnostics.Process()
         llcProcess.StartInfo.FileName <- "llc"
         llcProcess.StartInfo.Arguments <- llcArgs
