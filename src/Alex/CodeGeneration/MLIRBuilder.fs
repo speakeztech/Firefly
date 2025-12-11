@@ -18,20 +18,21 @@ open System.Text
 // Core Types
 // ═══════════════════════════════════════════════════════════════════
 
-/// MLIR integer types
-type IntTy = I1 | I8 | I16 | I32 | I64
+/// MLIR integer bit widths
+type IntegerBitWidth = I1 | I8 | I16 | I32 | I64
 
-/// MLIR float types
-type FloatTy = F32 | F64
+/// MLIR floating point precision
+type FloatPrecision = F32 | F64
 
-/// MLIR types
-type Ty =
-    | Int of IntTy
-    | Float of FloatTy
-    | Ptr
-    | Struct of Ty list
-    | Array of int * Ty
-    | Func of Ty list * Ty
+/// MLIR types - the structured representation used throughout Alex
+/// String serialization happens only in Serialize module during MLIR text emission
+type MLIRType =
+    | Integer of IntegerBitWidth
+    | Float of FloatPrecision
+    | Pointer
+    | Struct of MLIRType list
+    | Array of int * MLIRType
+    | Function of MLIRType list * MLIRType
     | Unit
     | Index
 
@@ -46,7 +47,7 @@ type SSA =
         | Arg n -> sprintf "%%arg%d" n
 
 /// A typed SSA value
-type Val = { SSA: SSA; Type: Ty }
+type Val = { SSA: SSA; Type: MLIRType }
 
 /// Global symbol reference
 type Global =
@@ -111,22 +112,22 @@ module BuilderState =
 // ═══════════════════════════════════════════════════════════════════
 
 module Serialize =
-    let intTy = function
+    let integerBitWidth = function
         | I1 -> "i1" | I8 -> "i8" | I16 -> "i16" | I32 -> "i32" | I64 -> "i64"
 
-    let floatTy = function F32 -> "f32" | F64 -> "f64"
+    let floatPrecision = function F32 -> "f32" | F64 -> "f64"
 
-    let rec ty = function
-        | Int it -> intTy it
-        | Float ft -> floatTy ft
-        | Ptr -> "!llvm.ptr"
+    let rec mlirType = function
+        | Integer bitWidth -> integerBitWidth bitWidth
+        | Float precision -> floatPrecision precision
+        | Pointer -> "!llvm.ptr"
         | Struct fields ->
-            let fs = fields |> List.map ty |> String.concat ", "
-            sprintf "!llvm.struct<(%s)>" fs
-        | Array (n, elem) -> sprintf "!llvm.array<%d x %s>" n (ty elem)
-        | Func (args, ret) ->
-            let argStr = args |> List.map ty |> String.concat ", "
-            sprintf "(%s) -> %s" argStr (ty ret)
+            let fieldTypes = fields |> List.map mlirType |> String.concat ", "
+            sprintf "!llvm.struct<(%s)>" fieldTypes
+        | Array (count, elementType) -> sprintf "!llvm.array<%d x %s>" count (mlirType elementType)
+        | Function (parameterTypes, returnType) ->
+            let parameterString = parameterTypes |> List.map mlirType |> String.concat ", "
+            sprintf "(%s) -> %s" parameterString (mlirType returnType)
         | Unit -> "()"
         | Index -> "index"
 
@@ -212,7 +213,7 @@ module cf =
     let br (target: string) (args: Val list) : MLIR<unit> = mlir {
         let argStr =
             if args.IsEmpty then ""
-            else "(" + (args |> List.map (fun a -> sprintf "%s : %s" a.SSA.Name (Serialize.ty a.Type)) |> String.concat ", ") + ")"
+            else "(" + (args |> List.map (fun a -> sprintf "%s : %s" a.SSA.Name (Serialize.mlirType a.Type)) |> String.concat ", ") + ")"
         do! emitLine (sprintf "llvm.br ^%s%s" target argStr)
     }
 
@@ -220,24 +221,24 @@ module cf =
     let condBr (cond: Val) (trueTarget: string) (trueArgs: Val list) (falseTarget: string) (falseArgs: Val list) : MLIR<unit> = mlir {
         let trueArgStr =
             if trueArgs.IsEmpty then ""
-            else "(" + (trueArgs |> List.map (fun a -> sprintf "%s : %s" a.SSA.Name (Serialize.ty a.Type)) |> String.concat ", ") + ")"
+            else "(" + (trueArgs |> List.map (fun a -> sprintf "%s : %s" a.SSA.Name (Serialize.mlirType a.Type)) |> String.concat ", ") + ")"
         let falseArgStr =
             if falseArgs.IsEmpty then ""
-            else "(" + (falseArgs |> List.map (fun a -> sprintf "%s : %s" a.SSA.Name (Serialize.ty a.Type)) |> String.concat ", ") + ")"
+            else "(" + (falseArgs |> List.map (fun a -> sprintf "%s : %s" a.SSA.Name (Serialize.mlirType a.Type)) |> String.concat ", ") + ")"
         do! emitLine (sprintf "llvm.cond_br %s, ^%s%s, ^%s%s" cond.SSA.Name trueTarget trueArgStr falseTarget falseArgStr)
     }
 
 /// Emit a block label with optional arguments
-let emitBlockLabel (label: string) (args: (string * Ty) list) : MLIR<unit> = mlir {
+let emitBlockLabel (label: string) (args: (string * MLIRType) list) : MLIR<unit> = mlir {
     let argStr =
         if args.IsEmpty then ""
-        else "(" + (args |> List.map (fun (n, t) -> sprintf "%s: %s" n (Serialize.ty t)) |> String.concat ", ") + ")"
+        else "(" + (args |> List.map (fun (n, t) -> sprintf "%s: %s" n (Serialize.mlirType t)) |> String.concat ", ") + ")"
     do! emitLine (sprintf "^%s%s:" label argStr)
 }
 
 /// Get a block argument by index (creates a placeholder Val)
 let getBlockArg (index: int) : MLIR<Val> = fun st ->
-    { SSA = Arg index; Type = Int I1 }  // Caller should know the actual type
+    { SSA = Arg index; Type = Integer I1 }  // Caller should know the actual type
 
 // ═══════════════════════════════════════════════════════════════════
 // Additional Arith Operations (type-inferring versions)
@@ -245,11 +246,11 @@ let getBlockArg (index: int) : MLIR<Val> = fun st ->
 
 module arith =
     /// arith.constant with integer value
-    let constant (value: int64) (ty: IntTy) : MLIR<Val> = mlir {
+    let constant (value: int64) (ty: IntegerBitWidth) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        let tyStr = Serialize.intTy ty
+        let tyStr = Serialize.integerBitWidth ty
         do! emitLine (sprintf "%s = arith.constant %d : %s" ssa.Name value tyStr)
-        return { SSA = ssa; Type = Int ty }
+        return { SSA = ssa; Type = Integer ty }
     }
 
     /// arith.constant with bool
@@ -257,13 +258,13 @@ module arith =
         let! ssa = freshSSA
         let v = if value then "true" else "false"
         do! emitLine (sprintf "%s = arith.constant %s" ssa.Name v)
-        return { SSA = ssa; Type = Int I1 }
+        return { SSA = ssa; Type = Integer I1 }
     }
 
     /// arith.addi - infers type from operands
     let addi (lhs: Val) (rhs: Val) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        let tyStr = Serialize.ty lhs.Type
+        let tyStr = Serialize.mlirType lhs.Type
         do! emitLine (sprintf "%s = arith.addi %s, %s : %s" ssa.Name lhs.SSA.Name rhs.SSA.Name tyStr)
         return { SSA = ssa; Type = lhs.Type }
     }
@@ -271,7 +272,7 @@ module arith =
     /// arith.subi - infers type from operands
     let subi (lhs: Val) (rhs: Val) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        let tyStr = Serialize.ty lhs.Type
+        let tyStr = Serialize.mlirType lhs.Type
         do! emitLine (sprintf "%s = arith.subi %s, %s : %s" ssa.Name lhs.SSA.Name rhs.SSA.Name tyStr)
         return { SSA = ssa; Type = lhs.Type }
     }
@@ -279,7 +280,7 @@ module arith =
     /// arith.muli - infers type from operands
     let muli (lhs: Val) (rhs: Val) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        let tyStr = Serialize.ty lhs.Type
+        let tyStr = Serialize.mlirType lhs.Type
         do! emitLine (sprintf "%s = arith.muli %s, %s : %s" ssa.Name lhs.SSA.Name rhs.SSA.Name tyStr)
         return { SSA = ssa; Type = lhs.Type }
     }
@@ -287,7 +288,7 @@ module arith =
     /// arith.divsi (signed division) - infers type from operands
     let divsi (lhs: Val) (rhs: Val) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        let tyStr = Serialize.ty lhs.Type
+        let tyStr = Serialize.mlirType lhs.Type
         do! emitLine (sprintf "%s = arith.divsi %s, %s : %s" ssa.Name lhs.SSA.Name rhs.SSA.Name tyStr)
         return { SSA = ssa; Type = lhs.Type }
     }
@@ -295,7 +296,7 @@ module arith =
     /// arith.remsi (signed remainder) - infers type from operands
     let remsi (lhs: Val) (rhs: Val) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        let tyStr = Serialize.ty lhs.Type
+        let tyStr = Serialize.mlirType lhs.Type
         do! emitLine (sprintf "%s = arith.remsi %s, %s : %s" ssa.Name lhs.SSA.Name rhs.SSA.Name tyStr)
         return { SSA = ssa; Type = lhs.Type }
     }
@@ -303,15 +304,15 @@ module arith =
     /// arith.cmpi with string predicate
     let cmpi (pred: string) (lhs: Val) (rhs: Val) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        let tyStr = Serialize.ty lhs.Type
+        let tyStr = Serialize.mlirType lhs.Type
         do! emitLine (sprintf "%s = arith.cmpi %s, %s, %s : %s" ssa.Name pred lhs.SSA.Name rhs.SSA.Name tyStr)
-        return { SSA = ssa; Type = Int I1 }
+        return { SSA = ssa; Type = Integer I1 }
     }
 
     /// arith.xori - infers type from operands
     let xori (lhs: Val) (rhs: Val) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        let tyStr = Serialize.ty lhs.Type
+        let tyStr = Serialize.mlirType lhs.Type
         do! emitLine (sprintf "%s = arith.xori %s, %s : %s" ssa.Name lhs.SSA.Name rhs.SSA.Name tyStr)
         return { SSA = ssa; Type = lhs.Type }
     }
@@ -319,7 +320,7 @@ module arith =
     /// arith.andi - infers type from operands
     let andi (lhs: Val) (rhs: Val) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        let tyStr = Serialize.ty lhs.Type
+        let tyStr = Serialize.mlirType lhs.Type
         do! emitLine (sprintf "%s = arith.andi %s, %s : %s" ssa.Name lhs.SSA.Name rhs.SSA.Name tyStr)
         return { SSA = ssa; Type = lhs.Type }
     }
@@ -327,27 +328,27 @@ module arith =
     /// arith.ori - infers type from operands
     let ori (lhs: Val) (rhs: Val) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        let tyStr = Serialize.ty lhs.Type
+        let tyStr = Serialize.mlirType lhs.Type
         do! emitLine (sprintf "%s = arith.ori %s, %s : %s" ssa.Name lhs.SSA.Name rhs.SSA.Name tyStr)
         return { SSA = ssa; Type = lhs.Type }
     }
 
     /// arith.extsi (sign extend)
-    let extsi (value: Val) (toTy: IntTy) : MLIR<Val> = mlir {
+    let extsi (value: Val) (toTy: IntegerBitWidth) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        let fromTyStr = Serialize.ty value.Type
-        let toTyStr = Serialize.intTy toTy
+        let fromTyStr = Serialize.mlirType value.Type
+        let toTyStr = Serialize.integerBitWidth toTy
         do! emitLine (sprintf "%s = arith.extsi %s : %s to %s" ssa.Name value.SSA.Name fromTyStr toTyStr)
-        return { SSA = ssa; Type = Int toTy }
+        return { SSA = ssa; Type = Integer toTy }
     }
 
     /// arith.trunci (truncate)
-    let trunci (value: Val) (toTy: IntTy) : MLIR<Val> = mlir {
+    let trunci (value: Val) (toTy: IntegerBitWidth) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        let fromTyStr = Serialize.ty value.Type
-        let toTyStr = Serialize.intTy toTy
+        let fromTyStr = Serialize.mlirType value.Type
+        let toTyStr = Serialize.integerBitWidth toTy
         do! emitLine (sprintf "%s = arith.trunci %s : %s to %s" ssa.Name value.SSA.Name fromTyStr toTyStr)
-        return { SSA = ssa; Type = Int toTy }
+        return { SSA = ssa; Type = Integer toTy }
     }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -359,82 +360,82 @@ module llvm =
     let addressof (sym: Global) : MLIR<Val> = mlir {
         let! ssa = freshSSA
         do! emitLine (sprintf "%s = llvm.mlir.addressof %s : !llvm.ptr" ssa.Name (Serialize.global_ sym))
-        return { SSA = ssa; Type = Ptr }
+        return { SSA = ssa; Type = Pointer }
     }
 
     /// llvm.alloca
-    let alloca (size: Val) (elemTy: Ty) : MLIR<Val> = mlir {
+    let alloca (size: Val) (elemTy: MLIRType) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        do! emitLine (sprintf "%s = llvm.alloca %s x %s : (i64) -> !llvm.ptr" ssa.Name size.SSA.Name (Serialize.ty elemTy))
-        return { SSA = ssa; Type = Ptr }
+        do! emitLine (sprintf "%s = llvm.alloca %s x %s : (i64) -> !llvm.ptr" ssa.Name size.SSA.Name (Serialize.mlirType elemTy))
+        return { SSA = ssa; Type = Pointer }
     }
 
     /// llvm.load with type argument
-    let load (resultTy: Ty) (ptr: Val) : MLIR<Val> = mlir {
+    let load (resultTy: MLIRType) (ptr: Val) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        do! emitLine (sprintf "%s = llvm.load %s : !llvm.ptr -> %s" ssa.Name ptr.SSA.Name (Serialize.ty resultTy))
+        do! emitLine (sprintf "%s = llvm.load %s : !llvm.ptr -> %s" ssa.Name ptr.SSA.Name (Serialize.mlirType resultTy))
         return { SSA = ssa; Type = resultTy }
     }
 
     /// llvm.store
     let store (value: Val) (ptr: Val) : MLIR<unit> = mlir {
-        do! emitLine (sprintf "llvm.store %s, %s : %s, !llvm.ptr" value.SSA.Name ptr.SSA.Name (Serialize.ty value.Type))
+        do! emitLine (sprintf "llvm.store %s, %s : %s, !llvm.ptr" value.SSA.Name ptr.SSA.Name (Serialize.mlirType value.Type))
     }
 
     /// llvm.getelementptr with single index
-    let getelementptr (base_: Val) (elemTy: Ty) (indices: Val list) : MLIR<Val> = mlir {
+    let getelementptr (base_: Val) (elemTy: MLIRType) (indices: Val list) : MLIR<Val> = mlir {
         let! ssa = freshSSA
         let indexStr = indices |> List.map (fun i -> i.SSA.Name) |> String.concat ", "
-        let indexTypes = indices |> List.map (fun i -> Serialize.ty i.Type) |> String.concat ", "
+        let indexTypes = indices |> List.map (fun i -> Serialize.mlirType i.Type) |> String.concat ", "
         do! emitLine (sprintf "%s = llvm.getelementptr %s[%s] : (!llvm.ptr, %s) -> !llvm.ptr, %s"
-            ssa.Name base_.SSA.Name indexStr indexTypes (Serialize.ty elemTy))
-        return { SSA = ssa; Type = Ptr }
+            ssa.Name base_.SSA.Name indexStr indexTypes (Serialize.mlirType elemTy))
+        return { SSA = ssa; Type = Pointer }
     }
 
     /// llvm.insertvalue
-    let insertvalue (container: Val) (value: Val) (index: int) (containerTy: Ty) : MLIR<Val> = mlir {
+    let insertvalue (container: Val) (value: Val) (index: int) (containerTy: MLIRType) : MLIR<Val> = mlir {
         let! ssa = freshSSA
         do! emitLine (sprintf "%s = llvm.insertvalue %s, %s[%d] : %s"
-            ssa.Name value.SSA.Name container.SSA.Name index (Serialize.ty containerTy))
+            ssa.Name value.SSA.Name container.SSA.Name index (Serialize.mlirType containerTy))
         return { SSA = ssa; Type = containerTy }
     }
 
     /// llvm.extractvalue
-    let extractvalue (container: Val) (index: int) (containerTy: Ty) (resultTy: Ty) : MLIR<Val> = mlir {
+    let extractvalue (container: Val) (index: int) (containerTy: MLIRType) (resultTy: MLIRType) : MLIR<Val> = mlir {
         let! ssa = freshSSA
         do! emitLine (sprintf "%s = llvm.extractvalue %s[%d] : %s"
-            ssa.Name container.SSA.Name index (Serialize.ty containerTy))
+            ssa.Name container.SSA.Name index (Serialize.mlirType containerTy))
         return { SSA = ssa; Type = resultTy }
     }
 
     /// llvm.mlir.undef
-    let undef (ty: Ty) : MLIR<Val> = mlir {
+    let undef (ty: MLIRType) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        do! emitLine (sprintf "%s = llvm.mlir.undef : %s" ssa.Name (Serialize.ty ty))
+        do! emitLine (sprintf "%s = llvm.mlir.undef : %s" ssa.Name (Serialize.mlirType ty))
         return { SSA = ssa; Type = ty }
     }
 
     /// llvm.mlir.zero
-    let zero (ty: Ty) : MLIR<Val> = mlir {
+    let zero (ty: MLIRType) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        do! emitLine (sprintf "%s = llvm.mlir.zero : %s" ssa.Name (Serialize.ty ty))
+        do! emitLine (sprintf "%s = llvm.mlir.zero : %s" ssa.Name (Serialize.mlirType ty))
         return { SSA = ssa; Type = ty }
     }
 
     /// llvm.inline_asm
-    let inlineAsm (asm: string) (constraints: string) (args: Val list) (resultTy: Ty) : MLIR<Val> = mlir {
+    let inlineAsm (asm: string) (constraints: string) (args: Val list) (resultTy: MLIRType) : MLIR<Val> = mlir {
         let! ssa = freshSSA
         let argNames = args |> List.map (fun a -> a.SSA.Name) |> String.concat ", "
-        let argTypes = args |> List.map (fun a -> Serialize.ty a.Type) |> String.concat ", "
+        let argTypes = args |> List.map (fun a -> Serialize.mlirType a.Type) |> String.concat ", "
         do! emitLine (sprintf "%s = llvm.inline_asm has_side_effects \"%s\", \"%s\" %s : (%s) -> %s"
-            ssa.Name asm constraints argNames argTypes (Serialize.ty resultTy))
+            ssa.Name asm constraints argNames argTypes (Serialize.mlirType resultTy))
         return { SSA = ssa; Type = resultTy }
     }
 
     /// llvm.select - conditional select
     let select (cond: Val) (trueVal: Val) (falseVal: Val) : MLIR<Val> = mlir {
         let! ssa = freshSSA
-        let tyStr = Serialize.ty trueVal.Type
+        let tyStr = Serialize.mlirType trueVal.Type
         do! emitLine (sprintf "%s = llvm.select %s, %s, %s : i1, %s"
             ssa.Name cond.SSA.Name trueVal.SSA.Name falseVal.SSA.Name tyStr)
         return { SSA = ssa; Type = trueVal.Type }
@@ -451,25 +452,25 @@ module llvm =
 
 module func =
     /// func.call with result
-    let call (callee: string) (args: Val list) (argTypes: Ty list) (resultTy: Ty) : MLIR<Val> = mlir {
+    let call (callee: string) (args: Val list) (argTypes: MLIRType list) (resultTy: MLIRType) : MLIR<Val> = mlir {
         let! ssa = freshSSA
         let argNames = args |> List.map (fun a -> a.SSA.Name) |> String.concat ", "
-        let typeStrs = argTypes |> List.map Serialize.ty |> String.concat ", "
+        let typeStrs = argTypes |> List.map Serialize.mlirType |> String.concat ", "
         do! emitLine (sprintf "%s = func.call @%s(%s) : (%s) -> %s"
-            ssa.Name callee argNames typeStrs (Serialize.ty resultTy))
+            ssa.Name callee argNames typeStrs (Serialize.mlirType resultTy))
         return { SSA = ssa; Type = resultTy }
     }
 
     /// func.call void (no result)
-    let callVoid (callee: string) (args: Val list) (argTypes: Ty list) : MLIR<unit> = mlir {
+    let callVoid (callee: string) (args: Val list) (argTypes: MLIRType list) : MLIR<unit> = mlir {
         let argNames = args |> List.map (fun a -> a.SSA.Name) |> String.concat ", "
-        let typeStrs = argTypes |> List.map Serialize.ty |> String.concat ", "
+        let typeStrs = argTypes |> List.map Serialize.mlirType |> String.concat ", "
         do! emitLine (sprintf "func.call @%s(%s) : (%s) -> ()" callee argNames typeStrs)
     }
 
     /// func.return with value
     let ret (value: Val) : MLIR<unit> = mlir {
-        do! emitLine (sprintf "func.return %s : %s" value.SSA.Name (Serialize.ty value.Type))
+        do! emitLine (sprintf "func.return %s : %s" value.SSA.Name (Serialize.mlirType value.Type))
     }
 
     /// func.return void
@@ -478,12 +479,12 @@ module func =
     }
 
     /// func.func declaration header (opens function body)
-    let funcHeader (name: string) (parameters: (string * Ty) list) (returnTy: Ty) : MLIR<unit> = mlir {
+    let funcHeader (name: string) (parameters: (string * MLIRType) list) (returnTy: MLIRType) : MLIR<unit> = mlir {
         let paramStr =
             parameters
-            |> List.map (fun (n, t) -> sprintf "%s: %s" n (Serialize.ty t))
+            |> List.map (fun (n, t) -> sprintf "%s: %s" n (Serialize.mlirType t))
             |> String.concat ", "
-        do! emitLine (sprintf "func.func @%s(%s) -> %s {" name paramStr (Serialize.ty returnTy))
+        do! emitLine (sprintf "func.func @%s(%s) -> %s {" name paramStr (Serialize.mlirType returnTy))
     }
 
     /// Close function body
@@ -516,31 +517,31 @@ let emitStringGlobal (hash: uint32) (content: string) : MLIR<unit> = mlir {
 // NativeStr Helper (ptr + i64 struct)
 // ═══════════════════════════════════════════════════════════════════
 
-let nativeStrTy = Struct [Ptr; Int I64]
+let nativeStringType = Struct [Pointer; Integer I64]
 
 /// Build a NativeStr from a string constant
 let buildNativeStr (content: string) : MLIR<Val> = mlir {
     let! sym = registerString content
     let! ptr = llvm.addressof sym
     let! len = arith.constant (int64 content.Length) I64
-    let! undef = llvm.undef nativeStrTy
-    let! v1 = llvm.insertvalue undef ptr 0 nativeStrTy
-    let! v2 = llvm.insertvalue v1 len 1 nativeStrTy
+    let! undef = llvm.undef nativeStringType
+    let! v1 = llvm.insertvalue undef ptr 0 nativeStringType
+    let! v2 = llvm.insertvalue v1 len 1 nativeStringType
     return v2
 }
 
 /// Extract pointer and length from NativeStr
 let extractNativeStr (str: Val) : MLIR<Val * Val> = mlir {
-    let! ptr = llvm.extractvalue str 0 nativeStrTy Ptr
-    let! len = llvm.extractvalue str 1 nativeStrTy (Int I64)
+    let! ptr = llvm.extractvalue str 0 nativeStringType Pointer
+    let! len = llvm.extractvalue str 1 nativeStringType (Integer I64)
     return (ptr, len)
 }
 
 /// Build a NativeStr from runtime values (ptr and len)
 let buildNativeStrFromValues (ptr: Val) (len: Val) : MLIR<Val> = mlir {
-    let! undef = llvm.undef nativeStrTy
-    let! v1 = llvm.insertvalue undef ptr 0 nativeStrTy
-    let! v2 = llvm.insertvalue v1 len 1 nativeStrTy
+    let! undef = llvm.undef nativeStringType
+    let! v1 = llvm.insertvalue undef ptr 0 nativeStringType
+    let! v2 = llvm.insertvalue v1 len 1 nativeStringType
     return v2
 }
 

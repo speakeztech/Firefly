@@ -11,6 +11,8 @@ module Alex.Patterns.PSGPatterns
 
 open Core.PSG.Types
 open FSharp.Compiler.Symbols
+open Alex.Bindings.BindingTypes
+open Alex.CodeGeneration.MLIRBuilder
 
 // ═══════════════════════════════════════════════════════════════════
 // Safe Symbol Helpers
@@ -245,3 +247,164 @@ type BinaryOpInfo = {
     LeftOperand: PSGNode
     RightOperand: PSGNode
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Extern Primitive Detection
+// ═══════════════════════════════════════════════════════════════════
+
+/// Map F# type to MLIRType (simplified mapping for extern primitives)
+let private mapFSharpTypeToMLIRType (ftype: FSharpType) : MLIRType =
+    try
+        if ftype.HasTypeDefinition then
+            match ftype.TypeDefinition.TryFullName with
+            | Some "System.Int32" -> Integer I32
+            | Some "System.Int64" -> Integer I64
+            | Some "System.Int16" -> Integer I16
+            | Some "System.Byte" | Some "System.SByte" -> Integer I8
+            | Some "System.UInt32" -> Integer I32
+            | Some "System.UInt64" -> Integer I64
+            | Some "System.UInt16" -> Integer I16
+            | Some "System.Boolean" -> Integer I1
+            | Some "System.Single" -> Float F32
+            | Some "System.Double" -> Float F64
+            | Some "System.Void" | Some "Microsoft.FSharp.Core.unit" -> Unit
+            | Some "System.IntPtr" | Some "System.UIntPtr" -> Pointer
+            | Some name when name.Contains("nativeptr") -> Pointer
+            | _ -> Integer I32
+        elif ftype.IsGenericParameter then
+            Pointer  // SRTP type variables often represent pointer-like types
+        else
+            Integer I32
+    with _ -> Integer I32
+
+/// Information extracted from a DllImport attribute (before Args are available)
+type ExternPrimitiveInfo = {
+    EntryPoint: string
+    Library: string
+    CallingConvention: string
+    ReturnType: MLIRType
+}
+
+/// Check if a PSG node represents an extern primitive (DllImport)
+let isExternPrimitive (node: PSGNode) : bool =
+    match node.Symbol with
+    | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+        mfv.Attributes
+        |> Seq.exists (fun attr ->
+            let fullName = attr.AttributeType.FullName
+            fullName = "System.Runtime.InteropServices.DllImportAttribute" ||
+            fullName.EndsWith("DllImportAttribute"))
+    | _ -> false
+
+/// FSharp.NativeInterop intrinsics - these are compiler primitives, not user functions
+/// They map directly to LLVM/MLIR operations and should NOT be inlined
+let private nativeInteropIntrinsics = Set.ofList [
+    "Microsoft.FSharp.NativeInterop.NativePtr.get"
+    "Microsoft.FSharp.NativeInterop.NativePtr.set"
+    "Microsoft.FSharp.NativeInterop.NativePtr.read"
+    "Microsoft.FSharp.NativeInterop.NativePtr.write"
+    "Microsoft.FSharp.NativeInterop.NativePtr.add"
+    "Microsoft.FSharp.NativeInterop.NativePtr.toNativeInt"
+    "Microsoft.FSharp.NativeInterop.NativePtr.ofNativeInt"
+    "Microsoft.FSharp.NativeInterop.NativePtr.toVoidPtr"
+    "Microsoft.FSharp.NativeInterop.NativePtr.ofVoidPtr"
+    "Microsoft.FSharp.NativeInterop.NativePtr.stackalloc"
+    "Microsoft.FSharp.NativeInterop.NativePtr.nullPtr"
+]
+
+/// Check if a PSG node represents an FSharp.NativeInterop intrinsic
+let isNativeInteropIntrinsic (node: PSGNode) : bool =
+    match node.Symbol with
+    | Some sym ->
+        try
+            let fullName = sym.FullName
+            Set.contains fullName nativeInteropIntrinsics ||
+            fullName.StartsWith("Microsoft.FSharp.NativeInterop.NativePtr.")
+        with _ -> false
+    | None -> false
+
+/// Get the intrinsic name from a PSG node (e.g., "toNativeInt" from NativePtr.toNativeInt)
+let getNativeInteropIntrinsicName (node: PSGNode) : string option =
+    match node.Symbol with
+    | Some sym ->
+        try
+            let fullName = sym.FullName
+            if fullName.StartsWith("Microsoft.FSharp.NativeInterop.NativePtr.") then
+                Some (fullName.Substring("Microsoft.FSharp.NativeInterop.NativePtr.".Length))
+            else
+                None
+        with _ -> None
+    | None -> None
+
+/// Extract DllImport attribute information from an FSharpMemberOrFunctionOrValue
+let private tryExtractDllImportInfo (mfv: FSharpMemberOrFunctionOrValue) : ExternPrimitiveInfo option =
+    mfv.Attributes
+    |> Seq.tryFind (fun attr ->
+        let fullName = attr.AttributeType.FullName
+        fullName = "System.Runtime.InteropServices.DllImportAttribute" ||
+        fullName.EndsWith("DllImportAttribute"))
+    |> Option.bind (fun attr ->
+        // The first constructor argument is the library name
+        let libraryName =
+            attr.ConstructorArguments
+            |> Seq.tryHead
+            |> Option.bind (fun (_, value) ->
+                match value with
+                | :? string as s -> Some s
+                | _ -> None)
+            |> Option.defaultValue "__fidelity"
+
+        // Named arguments contain EntryPoint and CallingConvention
+        let entryPoint =
+            attr.NamedArguments
+            |> Seq.tryFind (fun (_, name, _, _) -> name = "EntryPoint")
+            |> Option.bind (fun (_, _, _, value) ->
+                match value with
+                | :? string as s -> Some s
+                | _ -> None)
+            |> Option.defaultValue mfv.LogicalName
+
+        let callingConv =
+            attr.NamedArguments
+            |> Seq.tryFind (fun (_, name, _, _) -> name = "CallingConvention")
+            |> Option.bind (fun (_, _, _, value) ->
+                match value with
+                | :? int as i ->
+                    // CallingConvention enum values
+                    match i with
+                    | 1 -> Some "Winapi"
+                    | 2 -> Some "Cdecl"
+                    | 3 -> Some "StdCall"
+                    | 4 -> Some "ThisCall"
+                    | 5 -> Some "FastCall"
+                    | _ -> Some "Cdecl"
+                | _ -> None)
+            |> Option.defaultValue "Cdecl"
+
+        // Get return type from the member
+        let returnType = mapFSharpTypeToMLIRType mfv.ReturnParameter.Type
+
+        Some {
+            EntryPoint = entryPoint
+            Library = libraryName
+            CallingConvention = callingConv
+            ReturnType = returnType
+        })
+
+/// Extract extern primitive info from a PSG node (without args - those come from emission context)
+let tryExtractExternPrimitiveInfo (node: PSGNode) : ExternPrimitiveInfo option =
+    match node.Symbol with
+    | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+        tryExtractDllImportInfo mfv
+    | _ -> None
+
+/// Create a full ExternPrimitive by combining info with evaluated args
+let createExternPrimitive (info: ExternPrimitiveInfo) (args: Val list) (strategy: BindingStrategy) : ExternPrimitive =
+    {
+        EntryPoint = info.EntryPoint
+        Library = info.Library
+        CallingConvention = info.CallingConvention
+        Args = args
+        ReturnType = info.ReturnType
+        BindingStrategy = strategy
+    }

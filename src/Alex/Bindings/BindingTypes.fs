@@ -131,7 +131,7 @@ type ExternPrimitive = {
     /// Argument values (already evaluated)
     Args: Val list
     /// Return type
-    ReturnType: Ty
+    ReturnType: MLIRType
     /// Binding strategy (from project configuration)
     BindingStrategy: BindingStrategy
 }

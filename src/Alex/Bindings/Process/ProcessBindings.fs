@@ -35,7 +35,7 @@ let emitUnixExitSyscall (syscallNum: int64) (exitCode: Val) : MLIR<unit> = mlir 
     // Extend exit code to i64 if needed
     let! codeExt =
         match exitCode.Type with
-        | Int I32 -> arith.extsi exitCode I64
+        | Integer I32 -> arith.extsi exitCode I64
         | _ -> mlir { return exitCode }
 
     // Syscall number
@@ -44,8 +44,8 @@ let emitUnixExitSyscall (syscallNum: int64) (exitCode: Val) : MLIR<unit> = mlir 
     // Execute syscall: exit(code)
     // rax = syscall number, rdi = exit code
     let! _ = llvm.inlineAsm "syscall" "=r,{rax},{rdi},~{rcx},~{r11},~{memory}"
-                [{ SSA = sysNum.SSA; Type = Int I64 }
-                 codeExt] (Int I64)
+                [{ SSA = sysNum.SSA; Type = Integer I64 }
+                 codeExt] (Integer I64)
 
     // Mark as unreachable (exit never returns)
     do! llvm.unreachable

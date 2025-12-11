@@ -25,7 +25,7 @@ module SyscallData =
 // Common Types
 // ===================================================================
 
-let timespecTy = Struct [Int I64; Int I64]  // { tv_sec: i64, tv_nsec: i64 }
+let timespecType = Struct [Integer I64; Integer I64]  // { tv_sec: i64, tv_nsec: i64 }
 
 // ===================================================================
 // Linux Time Implementation
@@ -35,7 +35,7 @@ let timespecTy = Struct [Int I64; Int I64]  // { tv_sec: i64, tv_nsec: i64 }
 let emitLinuxClockGettime (clockId: int64) : MLIR<Val> = mlir {
     // Allocate timespec on stack
     let! one = arith.constant 1L I64
-    let! timespec = llvm.alloca one timespecTy
+    let! timespec = llvm.alloca one timespecType
 
     // Prepare syscall arguments
     let! clockIdVal = arith.constant clockId I64
@@ -43,17 +43,17 @@ let emitLinuxClockGettime (clockId: int64) : MLIR<Val> = mlir {
 
     // Execute syscall
     let! _result = llvm.inlineAsm "syscall" "={rax},{rax},{rdi},{rsi},~{rcx},~{r11},~{memory}"
-                    [{ SSA = syscallNum.SSA; Type = Int I64 }
-                     { SSA = clockIdVal.SSA; Type = Int I64 }
-                     timespec] (Int I64)
+                    [{ SSA = syscallNum.SSA; Type = Integer I64 }
+                     { SSA = clockIdVal.SSA; Type = Integer I64 }
+                     timespec] (Integer I64)
 
     // Extract seconds and nanoseconds
     let! zeroIdx = arith.constant 0L I64
     let! oneIdx = arith.constant 1L I64
-    let! secPtr = llvm.getelementptr timespec timespecTy [zeroIdx; zeroIdx]
-    let! nsecPtr = llvm.getelementptr timespec timespecTy [zeroIdx; oneIdx]
-    let! sec = llvm.load (Int I64) secPtr
-    let! nsec = llvm.load (Int I64) nsecPtr
+    let! secPtr = llvm.getelementptr timespec timespecType [zeroIdx; zeroIdx]
+    let! nsecPtr = llvm.getelementptr timespec timespecType [zeroIdx; oneIdx]
+    let! sec = llvm.load (Integer I64) secPtr
+    let! nsec = llvm.load (Integer I64) nsecPtr
 
     // Convert to 100-nanosecond ticks
     let! ticksPerSec = arith.constant 10000000L I64
@@ -73,7 +73,7 @@ let emitLinuxNanosleep (milliseconds: Val) : MLIR<unit> = mlir {
 
     let! msExtended =
         match milliseconds.Type with
-        | Int I32 -> arith.extsi milliseconds I64
+        | Integer I32 -> arith.extsi milliseconds I64
         | _ -> mlir { return milliseconds }
 
     let! seconds = arith.divsi msExtended thousand
@@ -82,23 +82,23 @@ let emitLinuxNanosleep (milliseconds: Val) : MLIR<unit> = mlir {
 
     // Allocate timespec structs
     let! one = arith.constant 1L I64
-    let! reqTimespec = llvm.alloca one timespecTy
-    let! remTimespec = llvm.alloca one timespecTy
+    let! reqTimespec = llvm.alloca one timespecType
+    let! remTimespec = llvm.alloca one timespecType
 
     // Store seconds and nanoseconds
     let! zeroIdx = arith.constant 0L I64
     let! oneIdx = arith.constant 1L I64
-    let! secPtr = llvm.getelementptr reqTimespec timespecTy [zeroIdx; zeroIdx]
-    let! nsecPtr = llvm.getelementptr reqTimespec timespecTy [zeroIdx; oneIdx]
+    let! secPtr = llvm.getelementptr reqTimespec timespecType [zeroIdx; zeroIdx]
+    let! nsecPtr = llvm.getelementptr reqTimespec timespecType [zeroIdx; oneIdx]
     do! llvm.store seconds secPtr
     do! llvm.store nanoseconds nsecPtr
 
     // Call nanosleep syscall
     let! syscallNum = arith.constant 35L I64  // nanosleep
     let! _result = llvm.inlineAsm "syscall" "={rax},{rax},{rdi},{rsi},~{rcx},~{r11},~{memory}"
-                    [{ SSA = syscallNum.SSA; Type = Int I64 }
+                    [{ SSA = syscallNum.SSA; Type = Integer I64 }
                      reqTimespec
-                     remTimespec] (Int I64)
+                     remTimespec] (Integer I64)
     return ()
 }
 

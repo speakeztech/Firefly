@@ -35,13 +35,13 @@ let emitUnixWriteSyscall (syscallNum: int64) (fd: Val) (buf: Val) (count: Val) :
     // Extend fd from i32 to i64 if needed
     let! fdExt =
         match fd.Type with
-        | Int I32 -> arith.extsi fd I64
+        | Integer I32 -> arith.extsi fd I64
         | _ -> mlir { return fd }
 
     // Extend count to i64 if needed
     let! countExt =
         match count.Type with
-        | Int I32 -> arith.extsi count I64
+        | Integer I32 -> arith.extsi count I64
         | _ -> mlir { return count }
 
     // Syscall number
@@ -50,10 +50,10 @@ let emitUnixWriteSyscall (syscallNum: int64) (fd: Val) (buf: Val) (count: Val) :
     // Execute syscall: write(fd, buf, count)
     // rax = syscall number, rdi = fd, rsi = buf, rdx = count
     let! result = llvm.inlineAsm "syscall" "={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}"
-                    [{ SSA = sysNum.SSA; Type = Int I64 }
+                    [{ SSA = sysNum.SSA; Type = Integer I64 }
                      fdExt
                      buf
-                     countExt] (Int I64)
+                     countExt] (Integer I64)
 
     return result
 }
@@ -63,13 +63,13 @@ let emitUnixReadSyscall (syscallNum: int64) (fd: Val) (buf: Val) (count: Val) : 
     // Extend fd from i32 to i64 if needed
     let! fdExt =
         match fd.Type with
-        | Int I32 -> arith.extsi fd I64
+        | Integer I32 -> arith.extsi fd I64
         | _ -> mlir { return fd }
 
     // Extend count to i64 if needed
     let! countExt =
         match count.Type with
-        | Int I32 -> arith.extsi count I64
+        | Integer I32 -> arith.extsi count I64
         | _ -> mlir { return count }
 
     // Syscall number
@@ -77,10 +77,10 @@ let emitUnixReadSyscall (syscallNum: int64) (fd: Val) (buf: Val) (count: Val) : 
 
     // Execute syscall: read(fd, buf, count)
     let! result = llvm.inlineAsm "syscall" "={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}"
-                    [{ SSA = sysNum.SSA; Type = Int I64 }
+                    [{ SSA = sysNum.SSA; Type = Integer I64 }
                      fdExt
                      buf
-                     countExt] (Int I64)
+                     countExt] (Integer I64)
 
     return result
 }

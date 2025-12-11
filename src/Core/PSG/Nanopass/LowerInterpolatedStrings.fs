@@ -58,6 +58,7 @@ let private createNode (syntaxKind: string) (range: range) (fileName: string) (p
         Operation = operation
         ConstantValue = None
         Kind = SKExpr EApp  // Lowered interpolated strings become App nodes
+        SRTPResolution = None
     }
 
 // ═══════════════════════════════════════════════════════════════════════════

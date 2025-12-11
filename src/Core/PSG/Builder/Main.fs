@@ -147,16 +147,27 @@ let buildProgramSemanticGraph
         emitNanopassIntermediate typeEnhancedGraph "2_type_integration" nanopassOutputDir
         emitNanopassDiff structuralGraph typeEnhancedGraph "1_structural" "2_type_integration" nanopassOutputDir
 
+    // Phase 2a: Nanopass - Resolve SRTP constraints
+    // Extracts SRTP resolution from FCS internals via reflection.
+    // This captures which concrete implementation was selected for trait calls.
+    printfn "[BUILDER] Phase 2a: Running SRTP resolution nanopass"
+    let srtpResolvedGraph = Core.PSG.Nanopass.ResolveSRTP.run typeEnhancedGraph checkResults
+
+    // Emit Phase 2a intermediate
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediate srtpResolvedGraph "2a_srtp_resolved" nanopassOutputDir
+        emitNanopassDiff typeEnhancedGraph srtpResolvedGraph "2_type_integration" "2a_srtp_resolved" nanopassOutputDir
+
     // Phase 2b: Nanopass - Flatten curried applications
     // Normalizes nested App nodes from curried calls into flat structure.
     // Must run BEFORE def-use edges so edges are built on flattened structure.
     printfn "[BUILDER] Phase 2b: Running application flattening nanopass"
-    let flattenedGraph = flattenApplications typeEnhancedGraph
+    let flattenedGraph = flattenApplications srtpResolvedGraph
 
     // Emit Phase 2b intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
         emitNanopassIntermediate flattenedGraph "2b_flattened_apps" nanopassOutputDir
-        emitNanopassDiff typeEnhancedGraph flattenedGraph "2_type_integration" "2b_flattened_apps" nanopassOutputDir
+        emitNanopassDiff srtpResolvedGraph flattenedGraph "2a_srtp_resolved" "2b_flattened_apps" nanopassOutputDir
 
     // Phase 2c: Nanopass - Reduce pipe operators
     // Beta-reduces |> and <| to direct function application.

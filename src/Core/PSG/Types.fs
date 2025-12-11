@@ -309,6 +309,39 @@ type OperationKind =
     // Note: Pipe operators (|>, <|) are reduced by ReducePipeOperators nanopass
     // and should never appear as OperationKind
 
+/// Represents a single overload candidate for SRTP resolution.
+/// Contains all information needed to select the correct overload at emission time.
+/// All type information is serialized as strings to avoid FCS type dependencies downstream.
+type SRTPOverloadCandidate = {
+    /// Full name of the target method (e.g., "Alloy.Console.writeSystemString")
+    TargetMethodFullName: string
+    /// Parameter type names for matching (e.g., ["Alloy.Console.WritableString"; "Microsoft.FSharp.Core.string"])
+    ParameterTypeNames: string list
+    /// Return type name
+    ReturnTypeName: string
+}
+
+/// SRTP (Statically Resolved Type Parameter) resolution information.
+/// Captured from FCS internal TraitConstraintInfo.Solution via reflection.
+/// This represents the resolved concrete implementation of a trait constraint.
+type SRTPResolution =
+    /// Resolved to an F# method: (declaringType, methodRef, methodTypeInstantiation)
+    | FSMethod of declaringType: FSharpType * methodRef: FSharpMemberOrFunctionOrValue * methodTypeArgs: FSharpType list
+    /// Resolved to an F# method by name (from FCS internals via reflection)
+    /// Used when we can extract the method name but not the full FSharpMemberOrFunctionOrValue
+    | FSMethodByName of methodFullName: string
+    /// Multiple overloads available - selection deferred to emission based on argument types.
+    /// Contains full signature information for each candidate so emission can match without FCS.
+    | MultipleOverloads of traitName: string * candidates: SRTPOverloadCandidate list
+    /// Resolved to an F# record field
+    | FSRecordField of fieldType: FSharpType * fieldName: string * isSetProperty: bool
+    /// Resolved to an anonymous record field
+    | FSAnonRecordField of recordType: FSharpType * fieldIndex: int
+    /// Resolved to a built-in operator (no explicit implementation needed)
+    | BuiltIn
+    /// Resolution not available (generic code or reflection failure)
+    | Unresolved of reason: string
+
 /// PSG node with soft-delete support added to existing structure
 type PSGNode = {
     // EXISTING FIELDS - DO NOT CHANGE
@@ -341,6 +374,10 @@ type PSGNode = {
     // NEW FIELD - Typed syntax kind for type-driven dispatch (set by PSG Builder)
     // Use this instead of parsing SyntaxKind string
     Kind: SyntaxKindT
+
+    // NEW FIELD - SRTP resolution (set by ResolveSRTP nanopass)
+    // For TraitCall expressions, this contains the resolved concrete implementation
+    SRTPResolution: SRTPResolution option
 }
 
 /// Complete Program Semantic Graph
@@ -410,6 +447,9 @@ module ChildrenStateHelpers =
 
         // Initialize typed syntax kind (Unknown during migration)
         Kind = SKUnknown
+
+        // Initialize SRTP resolution
+        SRTPResolution = None
     }
 
     /// Create a new node with typed syntax kind
@@ -442,8 +482,11 @@ module ChildrenStateHelpers =
 
         // Set typed syntax kind
         Kind = kind
+
+        // Initialize SRTP resolution
+        SRTPResolution = None
     }
-    
+
     /// Add a child to a node (appends to maintain source order)
     let addChild childId node =
         match node.Children with
