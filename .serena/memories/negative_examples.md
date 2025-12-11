@@ -58,9 +58,32 @@ type GenerationContext = {
 
 **Why this is wrong**: Mutable variable handling should be resolved in the PSG via nanopasses. Code generation should just follow edges to find values.
 
-## Mistake 5: String-based parsing in XParsec
+## Mistake 5: Creating a Central Dispatch/Emitter/Scribe
 
-**DO NOT fall back to string-based parsing or pattern matching on stringified representations.**
+```fsharp
+// WRONG - Central dispatch registry
+module PSGEmitter =
+    let handlers = Dictionary<string, NodeHandler>()
+
+    let registerHandler prefix handler =
+        handlers.[prefix] <- handler
+
+    let emit node =
+        let prefix = getKindPrefix node.SyntaxKind
+        match handlers.TryGetValue(prefix) with
+        | true, handler -> handler node
+        | _ -> defaultHandler node
+```
+
+**Why this is wrong**:
+- This antipattern was removed TWICE (PSGEmitter, then PSGScribe)
+- It collects "special case" routing too early in the pipeline
+- It inevitably attracts library-aware logic ("if ConsoleWrite then...")
+- The centralization belongs at OUTPUT (MLIR Builder), not at DISPATCH
+
+**The fix**: NO central dispatcher. The Zipper folds over PSG structure. XParsec matches locally at each node. Bindings are looked up by extern primitive entry point. MLIR Builder accumulates the output.
+
+## Mistake 6: String-based parsing or name matching
 
 ```fsharp
 // WRONG - String matching on symbol names
@@ -73,8 +96,16 @@ if symbolName.Contains("Console.Write") then ...
 match node.SyntaxKind with
 | "App:FunctionCall" -> processCall zipper bindings
 | "WhileLoop" -> processWhileLoop zipper bindings
-| "Binding:Mutable" -> processMutableBinding zipper bindings
 ```
+
+## Mistake 7: Premature Centralization
+
+Pooling decision-making logic too early in the pipeline.
+
+**Wrong**: Creating a router/dispatcher that decides what to do with each node kind
+**Right**: Let PSG structure drive emission; centralization only at MLIR output
+
+The PSG, enriched by nanopasses, carries enough information that emission is deterministic. No routing decisions needed.
 
 ## The Acid Test
 
@@ -83,3 +114,7 @@ Before committing any change, ask:
 > "If someone deleted all the comments and looked only at what this code DOES, would they see library-specific logic in MLIR generation?"
 
 If yes, you have violated the layer separation principle. Revert and fix upstream.
+
+> "Am I creating a central dispatch mechanism?"
+
+If yes, STOP. This is the antipattern that was removed twice.

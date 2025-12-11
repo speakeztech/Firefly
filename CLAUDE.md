@@ -1,18 +1,40 @@
 # Firefly Compiler - Claude Context
 
+## CRITICAL: Consult Serena Memories at Architectural Decision Points
+
+> **When encountering issues "downstream" in the pipeline, ALWAYS consult Serena memories on architecture BEFORE attempting fixes.**
+
+The Serena MCP server maintains authoritative memories about architectural decisions, negative examples, and design principles. At any decision point where you're tempted to:
+- Add special-case logic for specific functions or libraries
+- Create a central dispatch/routing mechanism
+- Pattern-match on symbol names rather than PSG structure
+- Work around a PSG deficiency in code generation
+
+**STOP and consult these Serena memories:**
+- `architecture_principles` - Core architectural constraints
+- `alex_zipper_architecture` - The correct Zipper + XParsec + Bindings model
+- `negative_examples` - Real mistakes to avoid repeating
+- `native_binding_architecture` - How extern primitives flow to platform bindings
+
+Use `mcp__serena__read_memory` to review relevant memories before proceeding.
+
+---
+
 ## CRITICAL: Deliberate, Didactic Approach Required
 
 > **SLOW DOWN. Be deliberate. Be didactic. Use agents prolifically to gather context before acting.**
 
 This is a sophisticated compiler project with deep architectural constraints. Fast, intuitive fixes are almost always wrong. The correct approach requires:
 
-1. **Use Agents Before Acting** - Before making any change, spawn multiple agents to explore relevant reference materials, documentation, and related codebases. Do not rely solely on the files immediately visible.
+1. **Consult Serena Memories First** - Before any architectural decision, read relevant memories. The memories encode lessons learned from past mistakes.
 
-2. **Confirm Intent** - When encountering ambiguity or when the path forward isn't crystal clear, stop and confirm with the user rather than making assumptions.
+2. **Use Agents Before Acting** - Before making any change, spawn multiple agents to explore relevant reference materials, documentation, and related codebases. Do not rely solely on the files immediately visible.
 
-3. **Trace Full Pipeline** - Every issue must be traced through the complete compilation pipeline before proposing a fix. Symptoms rarely appear where root causes exist.
+3. **Confirm Intent** - When encountering ambiguity or when the path forward isn't crystal clear, stop and confirm with the user rather than making assumptions.
 
-4. **Understand Before Implementing** - Read all relevant documentation, explore reference implementations, and understand the architectural constraints before writing code.
+4. **Trace Full Pipeline** - Every issue must be traced through the complete compilation pipeline before proposing a fix. Symptoms rarely appear where root causes exist.
+
+5. **Understand Before Implementing** - Read all relevant documentation, explore reference implementations, and understand the architectural constraints before writing code.
 
 ### Anti-Pattern: "Going Too Fast"
 
@@ -219,27 +241,60 @@ The typed tree zipper captures this resolution INTO the PSG. Downstream passes (
 | **Bindings** | Platform-specific MLIR generation | Know about F# syntax or Alloy namespaces |
 | **MLIR/LLVM** | Lower and optimize IR | Know about F# or Alloy |
 
-### The Zipper + Bindings Architecture
+### The Zipper + Bindings Architecture (Non-Dispatch Model)
 
-**Alex generates MLIR through Zipper traversal and platform Bindings.**
+**Alex generates MLIR through Zipper traversal and platform Bindings. There is NO central dispatch hub.**
 
-The Zipper:
+> **Key Insight: Centralization belongs at the OUTPUT (MLIR Builder), not at DISPATCH (traversal logic).**
+
+The antipattern is a central handler registry that routes based on node kinds. This collects special-case knowledge too early and becomes a dumping ground for library-aware logic.
+
+The correct model:
+
+```
+PSG Entry Point
+    ↓
+Zipper.create(psg, entryNode)
+    ↓
+Fold over structure (pre-order or post-order)
+    ↓
+At each node: XParsec pattern → MLIR emission
+    ↓
+Extern primitive? → ExternDispatch.dispatch(primitive)
+    ↓
+MLIR Builder accumulates
+    ↓
+Output: Complete MLIR module
+```
+
+**The Zipper:**
 - Traverses the PSG structure bidirectionally
-- Carries context (path, state) through traversal
-- Provides focus on current node
-- Does NOT contain MLIR generation logic
+- Provides "attention" - focus on current node with context
+- Is purely navigational - no routing or dispatch logic
+- Carries state through traversal (SSA counters, emitted blocks)
 
-The Bindings:
+**XParsec Combinators:**
+- Match PSG node structure at each position
+- Composable patterns, not a routing table
+- Local decision-making based on node data
+
+**The Bindings:**
 - Contain platform-specific MLIR generation
-- Are looked up by PSG node structure (not library names)
-- Handle syscalls, memory operations, etc.
-- Are organized by platform (Linux_x86_64, ARM, etc.)
+- Looked up by extern primitive entry point (e.g., `"fidelity_write_bytes"`)
+- Are DATA (syscall numbers, calling conventions), not routing logic
+- Organized by `(OSFamily, Architecture, EntryPoint)`
+
+**MLIR Builder:**
+- The natural "pool" where emissions accumulate
+- This is where centralization correctly occurs
+- Type-safe MLIR construction via computation expression
 
 **MLIR generation should NEVER:**
 - Pattern-match on function names like "Alloy.Console.Write"
 - Have special cases for specific libraries
 - Contain conditional logic based on symbol names
 - "Know" what Alloy is
+- Create a central dispatch/routing mechanism
 
 ## NEGATIVE EXAMPLES: What NOT To Do
 
@@ -300,6 +355,31 @@ type GenerationContext = {
 ```
 
 **Why this is wrong**: Mutable variable handling should be resolved in the PSG via nanopasses. Code generation should just follow edges to find values.
+
+### Mistake 5: Creating a central "Emitter" or "Scribe" dispatch hub
+
+```fsharp
+// WRONG - Central dispatch that routes based on node kinds
+module PSGEmitter =
+    let handlers = Dictionary<string, NodeHandler>()
+
+    let registerHandler prefix handler =
+        handlers.[prefix] <- handler
+
+    let emit node =
+        let prefix = getKindPrefix node.SyntaxKind
+        match handlers.TryGetValue(prefix) with
+        | true, handler -> handler node
+        | _ -> defaultHandler node
+```
+
+**Why this is wrong**:
+- This is the antipattern that was removed twice (PSGEmitter, then PSGScribe)
+- It collects "special case" routing too early in the pipeline
+- It inevitably attracts library-aware logic ("if ConsoleWrite then...")
+- The centralization belongs at the OUTPUT (MLIR Builder), not at DISPATCH
+
+**The fix**: No central dispatcher. The Zipper folds over PSG structure. XParsec matches locally at each node. Bindings are looked up by extern primitive entry point. MLIR Builder accumulates the output.
 
 ## The Extern Primitive Surface
 
@@ -565,6 +645,10 @@ Firefly compile HelloWorld.fidproj -k
 7. **Hard-Delete Reachability**: Physically removing unreachable nodes breaks the typed tree zipper. Use soft-delete (mark IsReachable = false) to preserve structure for correlation.
 
 8. **Wrong Nanopass Scope**: Different operator classes need different nanopasses. Pipe operators (`|>`, `<|`) are reduced by `ReducePipeOperators`. Alloy operators (like `$`) are a separate class. Don't mix concerns.
+
+9. **Central Dispatch/Emitter**: Creating a handler registry that routes based on node kinds. This antipattern (PSGEmitter, PSGScribe) was removed twice. The Zipper folds, XParsec matches locally, Bindings provide extern implementations, MLIR Builder accumulates. NO routing table.
+
+10. **Premature Centralization**: Pooling decision-making logic too early. Centralization is natural and correct at the OUTPUT (MLIR text), but wrong at DISPATCH (traversal logic). The PSG structure drives emission; there's no router.
 
 ## Project Configuration
 

@@ -42,32 +42,56 @@ let inline write (s: NativeStr) = writeBytes STDOUT s.Pointer s.Length |> ignore
 - Have platform-specific directories
 - Make syscalls directly
 
-## Alex: What It Is
+## Alex: The Non-Dispatch Model
 
-Alex routes extern primitives to platform-specific MLIR generation:
+> **Key Insight: Centralization belongs at the OUTPUT (MLIR Builder), not at DISPATCH (traversal logic).**
 
-```fsharp
-// Dispatch by (entry_point, platform) -> MLIR generator
-let dispatch (entryPoint: string) (platform: Platform) (args: Val list) : MLIR<Val> =
-    match entryPoint, platform.OS with
-    | "fidelity_write_bytes", Linux -> emitLinuxWriteSyscall args
-    | "fidelity_write_bytes", Windows -> emitWindowsWriteFile args
-    | "fidelity_write_bytes", MacOS -> emitMacOSWriteSyscall args
-    | ...
+Alex generates MLIR through Zipper traversal and platform Bindings. There is **NO central dispatch hub**.
+
+```
+PSG Entry Point
+    ↓
+Zipper.create(psg, entryNode)     -- provides "attention"
+    ↓
+Fold over structure (pre-order/post-order)
+    ↓
+At each node: XParsec matches locally → MLIR emission
+    ↓
+Extern primitive? → ExternDispatch.dispatch(primitive)
+    ↓
+MLIR Builder accumulates           -- correct centralization
+    ↓
+Output: Complete MLIR module
 ```
 
-**Platform differences are DATA:**
+**Component Roles:**
+
+- **Zipper**: Purely navigational - provides focus with context, carries state (SSA counters)
+- **XParsec**: Local pattern matching - composable patterns, NOT a routing table
+- **Bindings**: Platform-specific MLIR - looked up by extern entry point, are DATA not routing
+- **MLIR Builder**: Where centralization correctly occurs - the single accumulation point
+
+**Bindings are DATA, not routing logic:**
 
 ```fsharp
-// Syscall numbers as data, not separate files
-let syscallNumbers = Map [
-    (Linux, "write"), 1L
-    (Linux, "read"), 0L
-    (Linux, "clock_gettime"), 228L
-    (MacOS, "write"), 0x2000004L  // with BSD offset
-    ...
-]
+// Syscall numbers as data
+module SyscallData =
+    let linuxSyscalls = Map [
+        "write", 1L
+        "read", 0L
+        "clock_gettime", 228L
+    ]
+    let macosSyscalls = Map [
+        "write", 0x2000004L  // BSD offset
+        "read", 0x2000003L
+    ]
+
+// Bindings registered by (OS, Arch, EntryPoint)
+ExternDispatch.register Linux X86_64 "fidelity_write_bytes"
+    (fun ext -> bindWriteBytes TargetPlatform.linux_x86_64 ext)
 ```
+
+**NO central dispatch match statement. Bindings are looked up by entry point.**
 
 ## The Fidelity Mission
 
@@ -101,13 +125,24 @@ Alloy/src/
 └── ...                # NO platform directories
 
 Firefly/src/Alex/
+├── Traversal/
+│   ├── PSGZipper.fs       # Bidirectional traversal (attention)
+│   └── PSGXParsec.fs      # Local pattern matching combinators
 ├── Bindings/
-│   ├── BindingTypes.fs    # Platform enum, dispatch types
-│   ├── ExternDispatch.fs  # Central dispatch table
-│   ├── ConsoleBindings.fs # MLIR for console externs (all platforms)
-│   └── TimeBindings.fs    # MLIR for time externs (all platforms)
-└── ...
+│   ├── BindingTypes.fs    # ExternDispatch registry, platform types
+│   ├── Console/ConsoleBindings.fs  # Console extern bindings (data)
+│   ├── Time/TimeBindings.fs        # Time extern bindings (data)
+│   └── Process/ProcessBindings.fs  # Process extern bindings (data)
+├── CodeGeneration/
+│   ├── MLIRBuilder.fs     # MLIR accumulation (correct centralization)
+│   └── TypeMapping.fs     # F# → MLIR type mapping
+├── Patterns/
+│   └── PSGPatterns.fs     # Predicates and extractors
+└── Pipeline/
+    └── CompilationOrchestrator.fs  # Entry point
 ```
+
+**Note:** PSGEmitter.fs and PSGScribe.fs were removed - they were antipatterns.
 
 ## Anti-Patterns (DO NOT DO)
 
@@ -128,7 +163,23 @@ match symbolName with
 
 // WRONG: Alloy functions that are stubs expecting compiler magic
 let Write (s: string) = ()  // placeholder
+
+// WRONG: Central dispatch hub (the "emitter" or "scribe" antipattern)
+module PSGEmitter =
+    let handlers = Dictionary<string, NodeHandler>()
+    let emit node =
+        match handlers.TryGetValue(getPrefix node) with
+        | true, h -> h node
+        | _ -> default node
+// This was removed TWICE. Centralization belongs at MLIR Builder output,
+// not at traversal dispatch.
 ```
+
+**The correct model has NO central dispatch:**
+- Zipper provides attention (focus + context)
+- XParsec provides local pattern matching
+- Bindings are looked up by extern entry point
+- MLIR Builder accumulates (correct centralization point)
 
 ## PSG Construction: True Nanopass Pipeline
 

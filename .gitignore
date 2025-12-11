@@ -69,3 +69,4 @@ src/.claude/settings.local.json
 **/build**
 **/target
 **/helpers
+.serena

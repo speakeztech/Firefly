@@ -139,8 +139,26 @@ module EmissionErrors =
     let toCompilerErrors () = errors |> List.rev
     let hasErrors () = not (List.isEmpty errors)
 
-/// Generate MLIR from PSG using the Alex Scribe infrastructure
-/// Returns the generated MLIR and any errors that occurred
+/// Generate MLIR from PSG using proper layered architecture
+///
+/// ARCHITECTURE (correct flow):
+///   PSG → Zipper (traversal) → XParsec (pattern match) → Bindings (MLIR generation)
+///
+/// The Zipper provides bidirectional traversal with context preservation.
+/// XParsec provides composable pattern matching on PSG node children.
+/// Bindings dispatch extern primitives to platform-specific MLIR generators.
+///
+/// PSGScribe was removed because it violated layer separation by:
+/// - Doing ad-hoc traversal instead of using the Zipper
+/// - Matching on operation names (Alloy awareness in wrong layer)
+/// - Generating MLIR strings directly instead of using Bindings
+///
+/// TODO: Implement proper Zipper-based traversal that:
+/// 1. Walks the PSG from entry points using PSGZipper
+/// 2. Uses XParsec combinators to match node patterns
+/// 3. Dispatches extern primitives via ExternDispatch.dispatch
+/// 4. Uses MLIR monad (MLIRBuilder) for code generation
+///
 let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targetTriple: string) : MLIRGenerationResult =
     // Reset error collector for this compilation
     EmissionErrors.reset()
@@ -155,13 +173,37 @@ let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targe
     | Some platform -> ExternDispatch.setTargetPlatform platform
     | None -> ()  // Use default (auto-detect)
 
-    // Use PSGScribe to transcribe PSG to MLIR
-    let mlirContent = Alex.Traversal.PSGScribe.transcribePSG psg
+    // TODO: Replace with proper Zipper + XParsec + Bindings traversal
+    // For now, emit a placeholder that documents the architectural requirement
+    let mlirContent =
+        String.concat "\n" [
+            "// MLIR generation pending - PSGScribe removed for architectural cleanup"
+            "//"
+            "// The correct implementation requires:"
+            "// 1. PSGZipper traversal from entry points"
+            "// 2. XParsec pattern matching at each node"
+            "// 3. ExternDispatch for extern primitive binding"
+            "// 4. MLIR monad for type-safe code generation"
+            "//"
+            "// See: docs/Native_Library_Binding_Architecture.md"
+            "// See: Alex/Traversal/PSGZipper.fs"
+            "// See: Alex/Traversal/PSGXParsec.fs"
+            "// See: Alex/Bindings/BindingTypes.fs"
+            ""
+            "module {"
+            sprintf "  // Placeholder - proper MLIR generation not yet implemented"
+            sprintf "  // PSG has %d nodes, %d edges, %d entry points" psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length
+            "  llvm.func @main() -> i32 {"
+            "    %zero = arith.constant 0 : i32"
+            "    llvm.return %zero : i32"
+            "  }"
+            "}"
+        ]
 
     // Wrap with module header comments
     let header =
-        sprintf "// Firefly-generated MLIR for %s (via Alex/Scribe)\n// Target: %s\n// PSG: %d nodes, %d edges, %d entry points\n\n"
-            projectName targetTriple psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length
+        sprintf "// Firefly-generated MLIR for %s\n// Target: %s\n// Status: Architectural rebuild in progress\n\n"
+            projectName targetTriple
 
     // Collect any emission errors
     let emissionErrors = EmissionErrors.toCompilerErrors()

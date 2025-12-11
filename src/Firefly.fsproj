@@ -90,7 +90,7 @@
       <!-- Alex Traversal -->
       <Compile Include="Alex/Traversal/PSGZipper.fs" />
       <Compile Include="Alex/Traversal/PSGXParsec.fs" />
-      <Compile Include="Alex/Traversal/PSGScribe.fs" />
+      <!-- PSGScribe removed - violated layer separation (see docs/Native_Library_Binding_Architecture.md) -->
 
       <!-- Alex Patterns -->
       <Compile Include="Alex/Patterns/PSGPatterns.fs" />

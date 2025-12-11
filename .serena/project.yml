@@ -2,6 +2,7 @@ name: Firefly Compiler
 languages:
 - fsharp
 - mlir
+- cpp
 ignored_paths: []
 excluded_tools: []
 included_optional_tools: []

@@ -106,6 +106,17 @@ module TargetPlatform =
         { OS = os; Arch = arch; Triple = triple; Features = Set.empty }
 
 // ===================================================================
+// Binding Strategy (Static vs Dynamic)
+// ===================================================================
+
+/// How a library binding should be linked
+/// Static: library code merged into binary at link time (unikernel, embedded, security-critical)
+/// Dynamic: symbol reference resolved at runtime by dynamic linker (desktop, server, plugins)
+type BindingStrategy =
+    | Static   // Link library code directly into binary (no runtime dependency)
+    | Dynamic  // Record symbol reference, resolve via PLT/GOT at runtime
+
+// ===================================================================
 // Extern Primitive Types
 // ===================================================================
 
@@ -121,6 +132,8 @@ type ExternPrimitive = {
     Args: Val list
     /// Return type
     ReturnType: Ty
+    /// Binding strategy (from project configuration)
+    BindingStrategy: BindingStrategy
 }
 
 /// Result of attempting to emit a binding
