@@ -6,10 +6,38 @@
 ├── src/                    # Main compiler source
 ├── docs/                   # Architecture documentation
 ├── samples/                # Example projects
+├── helpers/                # Synced dependency repos (LOCAL COPIES)
+│   ├── Alloy/              # Native F# library (has shadow .fsproj for LSP)
+│   ├── Farscape/           # Distributed compute library
+│   ├── XParsec/            # Parser combinator library
+│   └── sync.sh             # Script to resync from source repos
+├── tools/                  # Developer tooling
+│   └── serena-mlir-patch/  # MLIR LSP integration for Serena
 ├── CLAUDE.md               # AI assistant context
 ├── README.md               # Project readme
 └── LICENSE                 # Dual Apache 2.0 / Commercial
 ```
+
+## Helper Repos (helpers/)
+
+These are LOCAL COPIES of dependency repos, synced for Serena indexing.
+Run `./helpers/sync.sh` to update from source repos.
+
+**Alloy** (`helpers/Alloy/src/`) - Native F# standard library
+- Core.fs, Math.fs, Memory.fs, Text.fs, Utf8.fs
+- Primitives.fs (extern declarations for `__fidelity`)
+- Console.fs, Time.fs (I/O using primitives)
+- NativeTypes/ (NativeInt, NativePtr, NativeSpan, NativeArray, NativeString)
+- Has shadow Alloy.fsproj for F# LSP indexing
+
+**XParsec** (`helpers/XParsec/src/XParsec/`) - Parser combinators
+- Types.fs, Combinators.fs, Parsers.fs
+- CharParsers.fs, ByteParsers.fs
+- ErrorFormatting.fs, OperatorParsing.fs
+
+**Farscape** (`helpers/Farscape/src/`) - Distributed compute (FUTURE)
+- Farscape.Core/ (Types, CodeGenerator, CppParser, TypeMapper)
+- Farscape.Cli/
 
 ## Source Code (/src/)
 ```

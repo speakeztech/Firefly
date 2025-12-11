@@ -29,9 +29,14 @@ These resources are ESSENTIAL for understanding the project architecture and mak
 
 | Resource | Path | Purpose |
 |----------|------|---------|
-| **Alloy** | `~/repos/Alloy` | Native F# library - ACTIVE TARGET. BCL-sympathetic API, native types, extern primitives |
-| **BAREWire** | `~/repos/BAREWire` | Binary serialization - FUTURE. Memory-efficient wire protocol |
-| **Farscape** | `~/repos/Farscape` | Distributed compute - FUTURE. Native F# distributed processing |
+| **Alloy** | `helpers/Alloy/` | **LOCAL COPY** - Native F# library. Use Serena's symbolic tools directly! |
+| **XParsec** | `helpers/XParsec/` | **LOCAL COPY** - Parser combinators. Use Serena's symbolic tools directly! |
+| **Farscape** | `helpers/Farscape/` | **LOCAL COPY** - Distributed compute (FUTURE). Use Serena's symbolic tools! |
+| **BAREWire** | `~/repos/BAREWire` | Binary serialization - FUTURE. (Not yet synced to helpers/) |
+
+**NOTE:** Alloy, XParsec, and Farscape are now LOCAL COPIES in `helpers/`.
+Serena can use symbolic tools (find_symbol, get_symbols_overview) on these directly!
+Run `./helpers/sync.sh` to update from source repos.
 
 ## Secondary Documentation
 

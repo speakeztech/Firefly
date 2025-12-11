@@ -1,2 +1,12 @@
 name: Firefly Compiler
-language: fsharp
+languages:
+- fsharp
+- mlir
+ignored_paths: []
+excluded_tools: []
+included_optional_tools: []
+read_only: false
+ignore_all_files_in_gitignore: true
+initial_prompt: ''
+encoding: utf-8
+project_name: Firefly

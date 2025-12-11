@@ -67,4 +67,5 @@ src/.claude/settings.local.json
 .claude/settings.local.json
 .claude/**
 **/build**
-**/target/
+**/target
+**/helpers
