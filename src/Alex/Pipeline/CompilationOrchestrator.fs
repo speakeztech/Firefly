@@ -6,6 +6,7 @@ open System.Text
 open FSharp.Compiler.CodeAnalysis
 open FSharp.Compiler.Text
 open FSharp.Compiler.Symbols
+open FSharp.Compiler.Symbols.FSharpExprPatterns
 open Core.IngestionPipeline
 open Core.FCS.ProjectContext
 open Core.Utilities.IntermediateWriter
@@ -170,6 +171,9 @@ type EmissionContext = {
     /// Baker member body mappings (Phase 4: post-reachability type resolution)
     /// Used to find function bodies for inlining when PSG symbol correlation fails
     MemberBodies: Map<string, Baker.Types.MemberBodyMapping>
+    /// Parameter bindings for inlined functions - maps parameter names to (ssa, type)
+    /// When inlining, arguments are bound to parameters before emitting the body
+    ParameterBindings: Map<string, string * MLIRType>
 }
 
 module EmissionContext =
@@ -186,6 +190,7 @@ module EmissionContext =
         InliningDepth = 0
         TypeSubstitutions = Map.empty
         MemberBodies = memberBodies
+        ParameterBindings = Map.empty
     }
 
     /// Add type substitutions for inlining a generic function with concrete arguments
@@ -221,6 +226,27 @@ module EmissionContext =
     /// Pop a function from the inlining stack
     let popInlining (funcName: string) (ctx: EmissionContext) : EmissionContext =
         { ctx with InliningStack = Set.remove funcName ctx.InliningStack; InliningDepth = ctx.InliningDepth - 1 }
+
+    /// Bind parameter names to argument values for function inlining
+    /// Returns a new context with the parameter bindings added
+    let withParameterBindings (paramNames: string list) (argVals: (string * MLIRType) list) (ctx: EmissionContext) : EmissionContext =
+        let bindings =
+            List.zip paramNames argVals
+            |> List.fold (fun acc (name, (ssa, ty)) ->
+                if ssa <> "" then
+                    printfn "[EMIT] Binding parameter '%s' to %s" name ssa
+                    Map.add name (ssa, ty) acc
+                else
+                    acc) ctx.ParameterBindings
+        { ctx with ParameterBindings = bindings }
+
+    /// Clear parameter bindings when exiting an inlined scope
+    let clearParameterBindings (ctx: EmissionContext) : EmissionContext =
+        { ctx with ParameterBindings = Map.empty }
+
+    /// Look up a parameter by name
+    let lookupParameter (name: string) (ctx: EmissionContext) =
+        Map.tryFind name ctx.ParameterBindings
 
     let indent (ctx: EmissionContext) =
         String.replicate ctx.IndentLevel "  "
@@ -359,6 +385,16 @@ let buildTypeSubstitutions (funcNode: PSGNode) (argNodes: PSGNode list) : Map<st
             |> Map.ofList
     | _ -> Map.empty
 
+/// Get parameter names from a function node for binding during inlining
+let getParameterNames (funcNode: PSGNode) : string list =
+    match funcNode.Symbol with
+    | Some (:? FSharp.Compiler.Symbols.FSharpMemberOrFunctionOrValue as mfv) ->
+        mfv.CurriedParameterGroups
+        |> Seq.collect id
+        |> Seq.choose (fun param -> param.Name)
+        |> Seq.toList
+    | _ -> []
+
 /// Map F# type to MLIR type
 let mapFSharpType (ftype: FSharpType option) : MLIRType =
     match ftype with
@@ -394,6 +430,19 @@ let mapFSharpType (ftype: FSharpType option) : MLIRType =
 let getAllChildren (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode list =
     ChildrenStateHelpers.getChildrenList node
     |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
+
+/// Flatten tuple arguments for function calls
+/// In F#, tuple-style calls like f(a, b, c) produce a single Tuple node containing the args
+/// Curried calls like f a b c produce multiple separate argument nodes
+/// This function normalizes both cases to a flat list of argument nodes
+let flattenTupleArgs (psg: ProgramSemanticGraph) (argNodes: PSGNode list) : PSGNode list =
+    match argNodes with
+    | [single] when single.SyntaxKind = "Tuple" ->
+        // Single tuple node - expand its children to get actual arguments
+        getAllChildren psg single
+    | _ ->
+        // Already flat (curried style or empty)
+        argNodes
 
 /// Emit a constant value
 let emitConstant (node: PSGNode) (ctx: EmissionContext) : string * MLIRType * EmissionContext =
@@ -454,15 +503,30 @@ let rec emitNode (psg: ProgramSemanticGraph) (node: PSGNode) (ctx: EmissionConte
         | k when k.StartsWith("Const:") ->
             emitConstant node ctx
 
-        // Identifiers - look up in node values
+        // Identifiers - look up in node values or parameter bindings
         | k when k.StartsWith("Ident:") || k.StartsWith("LongIdent:") ->
             // Try to find the value this identifier refers to
-            // For now, just record we've seen it
+            // First check node values (let bindings), then parameter bindings (inlined function args)
             match EmissionContext.lookupNodeValue node.Id.Value ctx with
             | Some (ssa, ty) -> ssa, ty, ctx
             | None ->
-                // Not yet computed - may be a function reference
-                "", mapFSharpType node.Type, ctx
+                // Not found by node ID - try looking up by identifier name (for inlined parameters)
+                let identName =
+                    if k.StartsWith("Ident:") then k.Substring(6)
+                    elif k.StartsWith("LongIdent:") then
+                        let fullName = k.Substring(10)
+                        // Get the last part for simple parameter lookup
+                        match fullName.LastIndexOf('.') with
+                        | -1 -> fullName
+                        | i -> fullName.Substring(i + 1)
+                    else ""
+                match EmissionContext.lookupParameter identName ctx with
+                | Some (ssa, ty) ->
+                    printfn "[EMIT] Found parameter binding for '%s' -> %s" identName ssa
+                    ssa, ty, ctx
+                | None ->
+                    // Not yet computed - may be a function reference
+                    "", mapFSharpType node.Type, ctx
 
         // Sequential expressions - emit each in order, return last value
         | "Sequential" ->
@@ -477,21 +541,118 @@ let rec emitNode (psg: ProgramSemanticGraph) (node: PSGNode) (ctx: EmissionConte
                 result
             children |> List.fold folder ("", Unit, ctx)
 
-        // Let bindings - emit value, record binding
+        // Let bindings - emit value, record binding, then continuation
         | k when k.StartsWith("LetOrUse:") || k.StartsWith("Binding:") || k.StartsWith("Binding") ->
             let children = getAllChildren psg node
-            match children with
-            | [pattern; value] ->
+            printfn "[EMIT] LetOrUse: %s has %d children" k children.Length
+            for i, c in List.indexed children do
+                printfn "[EMIT]   child[%d]: %s" i c.SyntaxKind
+            // F# let bindings have 3 children: [pattern; value; continuation]
+            // Simple bindings may have 2 children: [pattern; value]
+            // For mutable bindings, we need to allocate stack space and store the value
+            let processMutableBinding pattern value (continuation: PSGNode option) ctx =
+                // Emit the value
+                let valueSsa, valueTy, ctx' = emitNode psg value ctx
+                // First emit a constant for the allocation size
+                let sizeSsa, ctx'' = EmissionContext.nextSSA ctx'
+                let ctx'' = EmissionContext.emitLine (sprintf "%s = arith.constant 1 : i64" sizeSsa) ctx''
+                // Allocate stack space for the mutable variable
+                let allocSsa, ctx''' = EmissionContext.nextSSA ctx''
+                let mlirType =
+                    match valueTy with
+                    | Integer I8 -> "i8"
+                    | Integer I16 -> "i16"
+                    | Integer I32 -> "i32"
+                    | Integer I64 -> "i64"
+                    | Float F32 -> "f32"
+                    | Float F64 -> "f64"
+                    | Pointer -> "!llvm.ptr"
+                    | _ -> "i32"
+                let allocLine = sprintf "%s = llvm.alloca %s x %s : (i64) -> !llvm.ptr" allocSsa sizeSsa mlirType
+                let ctx4 = EmissionContext.emitLine allocLine ctx'''
+                // Store the value into the allocation (if we have a value)
+                let ctx5 =
+                    if valueSsa <> "" then
+                        let storeLine = sprintf "llvm.store %s, %s : %s, !llvm.ptr" valueSsa allocSsa mlirType
+                        EmissionContext.emitLine storeLine ctx4
+                    else ctx4
+                // Record the binding - use the ALLOCATION address, not the value
+                let patternName =
+                    if pattern.SyntaxKind.StartsWith("Pattern:Named:") then
+                        Some (pattern.SyntaxKind.Substring(14))
+                    elif pattern.SyntaxKind.StartsWith("Pattern:LongIdent:") then
+                        let fullName = pattern.SyntaxKind.Substring(18)
+                        match fullName.LastIndexOf('.') with
+                        | -1 -> Some fullName
+                        | i -> Some (fullName.Substring(i + 1))
+                    else None
+                let ctx6 =
+                    match patternName with
+                    | Some name ->
+                        printfn "[EMIT] Recording mutable binding '%s' = %s (alloc at %s)" name valueSsa allocSsa
+                        // Record the allocation address as a Pointer type
+                        let ctx6 = EmissionContext.recordNodeValue node.Id.Value allocSsa Pointer ctx5
+                        EmissionContext.withParameterBindings [name] [(allocSsa, Pointer)] ctx6
+                    | None -> ctx5
+                // If there's a continuation, emit it
+                match continuation with
+                | Some cont -> emitNode psg cont ctx6
+                | None -> allocSsa, Pointer, ctx6
+
+            let processBinding pattern value (continuation: PSGNode option) ctx =
                 // Emit the value
                 let ssa, ty, ctx' = emitNode psg value ctx
-                // Record the binding (use pattern's ID or extract name)
-                if ssa <> "" then
-                    let ctx'' = EmissionContext.recordNodeValue node.Id.Value ssa ty ctx'
-                    ssa, ty, ctx''
+                // Record the binding by node ID and also by pattern name
+                let ctx'' =
+                    if ssa <> "" then
+                        let ctx'' = EmissionContext.recordNodeValue node.Id.Value ssa ty ctx'
+                        // Also record by pattern name if it's a simple identifier pattern
+                        let patternName =
+                            if pattern.SyntaxKind.StartsWith("Pattern:Named:") then
+                                Some (pattern.SyntaxKind.Substring(14))
+                            elif pattern.SyntaxKind.StartsWith("Pattern:LongIdent:") then
+                                let fullName = pattern.SyntaxKind.Substring(18)
+                                match fullName.LastIndexOf('.') with
+                                | -1 -> Some fullName
+                                | i -> Some (fullName.Substring(i + 1))
+                            else None
+                        match patternName with
+                        | Some name ->
+                            printfn "[EMIT] Recording let binding '%s' = %s" name ssa
+                            EmissionContext.withParameterBindings [name] [(ssa, ty)] ctx''
+                        | None -> ctx''
+                    else ctx'
+                // If there's a continuation, emit it
+                match continuation with
+                | Some cont -> emitNode psg cont ctx''
+                | None -> ssa, ty, ctx''
+
+            match children with
+            // PSG LetOrUse structure: [Binding, continuation] where Binding has [Pattern, Value]
+            | [bindingNode; continuation] when bindingNode.SyntaxKind.StartsWith("Binding") ->
+                let bindingChildren = getAllChildren psg bindingNode
+                let isMutable = bindingNode.SyntaxKind.Contains("Mutable")
+                match bindingChildren with
+                | [pattern; value] ->
+                    if isMutable then
+                        processMutableBinding pattern value (Some continuation) ctx
+                    else
+                        processBinding pattern value (Some continuation) ctx
+                | _ ->
+                    // Malformed binding - emit continuation
+                    emitNode psg continuation ctx
+            // PSG Binding structure: [Pattern, Value] (no continuation)
+            | [pattern; value] when node.SyntaxKind.StartsWith("Binding") ->
+                let isMutable = node.SyntaxKind.Contains("Mutable")
+                if isMutable then
+                    processMutableBinding pattern value None ctx
                 else
-                    "", ty, ctx'
+                    processBinding pattern value None ctx
+            // Legacy 3-child structure: [pattern; value; continuation]
+            | [pattern; value; continuation] ->
+                processBinding pattern value (Some continuation) ctx
             | value :: _ when children.Length >= 1 ->
-                // Just emit value and continue
+                // Fallback - just emit value
                 emitNode psg value ctx
             | _ ->
                 "", Unit, ctx
@@ -546,13 +707,15 @@ let rec emitNode (psg: ProgramSemanticGraph) (node: PSGNode) (ctx: EmissionConte
 /// Emit an FSharp.NativeInterop intrinsic as a compiler primitive
 and emitNativeInteropIntrinsic (psg: ProgramSemanticGraph) (funcNode: PSGNode) (argNodes: PSGNode list) (ctx: EmissionContext) : string * MLIRType * EmissionContext =
     let intrinsicName = getNativeInteropIntrinsicName funcNode |> Option.defaultValue "unknown"
-    printfn "[EMIT] NativeInterop intrinsic: %s with %d args" intrinsicName argNodes.Length
+    // Flatten tuple arguments for tuple-style calls
+    let flatArgs = flattenTupleArgs psg argNodes
+    printfn "[EMIT] NativeInterop intrinsic: %s with %d args" intrinsicName flatArgs.Length
 
     // Emit all arguments first
     let emitArg (argVals, ctx') argNode =
         let ssa, ty, ctx'' = emitNode psg argNode ctx'
         ((ssa, ty) :: argVals, ctx'')
-    let argVals, ctx' = argNodes |> List.fold emitArg ([], ctx)
+    let argVals, ctx' = flatArgs |> List.fold emitArg ([], ctx)
     let argVals = List.rev argVals
 
     // Generate MLIR for the intrinsic based on its name
@@ -750,11 +913,28 @@ and emitFunctionApp (psg: ProgramSemanticGraph) (node: PSGNode) (ctx: EmissionCo
                             printfn "[EMIT] App: Inlining with type substitutions: %A" (Map.toList typeSubs)
                             EmissionContext.withTypeSubstitutions typeSubs ctx'
 
+                    // Get parameter names from the function symbol
+                    let paramNames = getParameterNames funcNode
+                    printfn "[EMIT] App: Function %s has parameters: %A" funcName paramNames
+                    printfn "[EMIT] App: argNodes count: %d" argNodes.Length
+                    for i, arg in List.indexed argNodes do
+                        printfn "[EMIT] App:   arg[%d]: %s (SyntaxKind: %s)" i arg.Id.Value arg.SyntaxKind
+
                     // First emit ALL arguments for their side effects
                     let emitArg (argVals, ctxAcc) argNode =
                         let ssa, ty, ctxAcc' = emitNode psg argNode ctxAcc
+                        printfn "[EMIT] App:   emitted arg: ssa='%s' type=%A" ssa ty
                         ((ssa, ty) :: argVals, ctxAcc')
                     let argVals, ctx'' = argNodes |> List.fold emitArg ([], ctx')
+                    let argVals = List.rev argVals  // Reverse to match parameter order
+
+                    // Bind parameter names to argument values
+                    let ctx'' =
+                        if List.length paramNames = List.length argVals then
+                            EmissionContext.withParameterBindings paramNames argVals ctx''
+                        else
+                            printfn "[EMIT] WARNING: Parameter count mismatch - params=%d args=%d" paramNames.Length argVals.Length
+                            ctx''
 
                     // Inline the function body (arguments already emitted above for side effects)
                     let result, ty, ctx''' = emitNode psg bodyNode ctx''
@@ -875,6 +1055,10 @@ and emitExternCall (psg: ProgramSemanticGraph) (funcNode: PSGNode) (argNodes: PS
         }
         "", Unit, ctx
     | Some info ->
+        // Flatten tuple arguments - F# tuple-style calls f(a, b, c) produce a single Tuple node
+        let flatArgs = flattenTupleArgs psg argNodes
+        printfn "[EMIT] ExternCall: %s with %d args (after flattening from %d)" info.EntryPoint flatArgs.Length argNodes.Length
+
         // Emit all arguments first
         let emitArg (argVals, ctx') argNode =
             let ssa, ty, ctx'' = emitNode psg argNode ctx'
@@ -889,7 +1073,7 @@ and emitExternCall (psg: ProgramSemanticGraph) (funcNode: PSGNode) (argNodes: PS
                 ({ SSA = ssaNum; Type = ty } :: argVals, ctx'')
             else
                 (argVals, ctx'')
-        let argVals, ctx' = argNodes |> List.fold emitArg ([], ctx)
+        let argVals, ctx' = flatArgs |> List.fold emitArg ([], ctx)
         let argVals = List.rev argVals
 
         // Create extern primitive and dispatch
