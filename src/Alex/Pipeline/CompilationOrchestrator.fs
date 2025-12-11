@@ -167,10 +167,13 @@ type EmissionContext = {
     /// Type substitution map for generic instantiation during inlining
     /// Maps type parameter names (e.g., "^a") to concrete type names (e.g., "Microsoft.FSharp.Core.string")
     TypeSubstitutions: Map<string, string>
+    /// Baker member body mappings (Phase 4: post-reachability type resolution)
+    /// Used to find function bodies for inlining when PSG symbol correlation fails
+    MemberBodies: Map<string, Baker.Types.MemberBodyMapping>
 }
 
 module EmissionContext =
-    let create (psg: ProgramSemanticGraph) = {
+    let create (psg: ProgramSemanticGraph) (memberBodies: Map<string, Baker.Types.MemberBodyMapping>) = {
         Builder = StringBuilder()
         SSACounter = 0
         LabelCounter = 0
@@ -182,6 +185,7 @@ module EmissionContext =
         InliningStack = Set.empty
         InliningDepth = 0
         TypeSubstitutions = Map.empty
+        MemberBodies = memberBodies
     }
 
     /// Add type substitutions for inlining a generic function with concrete arguments
@@ -688,18 +692,18 @@ and emitFunctionApp (psg: ProgramSemanticGraph) (node: PSGNode) (ctx: EmissionCo
                 | Some (FSMethod (_, methodRef, _)) ->
                     // Use the resolved method to find the body
                     printfn "[EMIT] App: SRTP resolved to %s" methodRef.FullName
-                    tryGetCalledFunctionBodyByName psg methodRef.FullName
+                    tryGetCalledFunctionBodyByName psg ctx.MemberBodies methodRef.FullName
                 | Some (FSMethodByName methodName) ->
                     // SRTP resolved to a specific method by name (extracted from FCS internals)
                     printfn "[EMIT] App: SRTP resolved to method: %s" methodName
-                    tryGetCalledFunctionBodyByName psg methodName
+                    tryGetCalledFunctionBodyByName psg ctx.MemberBodies methodName
                 | Some BuiltIn ->
                     // Built-in operator, no body to look up
                     printfn "[EMIT] App: SRTP resolved to BuiltIn operator"
                     None
                 | Some (Unresolved reason) ->
                     printfn "[EMIT] App: SRTP unresolved: %s" reason
-                    tryGetCalledFunctionBody psg funcNode
+                    tryGetCalledFunctionBody psg ctx.MemberBodies funcNode
                 | Some (MultipleOverloads (traitName, candidates)) ->
                     // Multiple overloads - select based on argument types from PSG
                     // Uses type substitution from context to resolve generic parameters
@@ -707,16 +711,16 @@ and emitFunctionApp (psg: ProgramSemanticGraph) (node: PSGNode) (ctx: EmissionCo
                     match selectOverload candidates argNodes ctx with
                     | Some selected ->
                         printfn "[EMIT] App: Selected overload: %s" selected.TargetMethodFullName
-                        tryGetCalledFunctionBodyByName psg selected.TargetMethodFullName
+                        tryGetCalledFunctionBodyByName psg ctx.MemberBodies selected.TargetMethodFullName
                     | None ->
                         printfn "[EMIT] App: No matching overload found, falling back to normal lookup"
-                        tryGetCalledFunctionBody psg funcNode
+                        tryGetCalledFunctionBody psg ctx.MemberBodies funcNode
                 | Some (FSRecordField _) | Some (FSAnonRecordField _) ->
                     // Record field access - use normal lookup
-                    tryGetCalledFunctionBody psg funcNode
+                    tryGetCalledFunctionBody psg ctx.MemberBodies funcNode
                 | None ->
                     // No SRTP resolution on funcNode, use normal body lookup
-                    tryGetCalledFunctionBody psg funcNode
+                    tryGetCalledFunctionBody psg ctx.MemberBodies funcNode
 
             // Get function name for tracking
             let funcName =
@@ -770,7 +774,7 @@ and emitFunctionApp (psg: ProgramSemanticGraph) (node: PSGNode) (ctx: EmissionCo
                 "", returnType, ctx'
 
 /// Try to find the body of a called function in the PSG
-and tryGetCalledFunctionBody (psg: ProgramSemanticGraph) (funcNode: PSGNode) : PSGNode option =
+and tryGetCalledFunctionBody (psg: ProgramSemanticGraph) (memberBodies: Map<string, Baker.Types.MemberBodyMapping>) (funcNode: PSGNode) : PSGNode option =
     // Look for a matching function definition in the PSG
     // The function's binding should be reachable
     match funcNode.Symbol with
@@ -781,14 +785,15 @@ and tryGetCalledFunctionBody (psg: ProgramSemanticGraph) (funcNode: PSGNode) : P
                 try Some sym.DisplayName
                 with _ -> None
         match targetName with
-        | Some name -> tryGetCalledFunctionBodyByName psg name
+        | Some name -> tryGetCalledFunctionBodyByName psg memberBodies name
         | None -> None
     | None -> None
 
 /// Try to find the body of a function by its full name
 /// Note: Does NOT require the binding to be marked reachable - SRTP-resolved methods
 /// may not be in the call graph since SRTP dispatch is implicit
-and tryGetCalledFunctionBodyByName (psg: ProgramSemanticGraph) (name: string) : PSGNode option =
+/// Uses Baker member bodies as fallback when PSG symbol correlation fails
+and tryGetCalledFunctionBodyByName (psg: ProgramSemanticGraph) (memberBodies: Map<string, Baker.Types.MemberBodyMapping>) (name: string) : PSGNode option =
     // Find binding with this name - EXACT symbol matching only
     // For static members like WritableString.($), also try op_Dollar format
     let namesToTry = [
@@ -797,7 +802,7 @@ and tryGetCalledFunctionBodyByName (psg: ProgramSemanticGraph) (name: string) : 
         name.Replace("($)", "op_Dollar")
     ]
 
-    // Symbol-based lookup ONLY - no fallbacks
+    // Step 1: Symbol-based lookup in PSG
     let bySymbol =
         psg.Nodes
         |> Map.toSeq
@@ -813,16 +818,50 @@ and tryGetCalledFunctionBodyByName (psg: ProgramSemanticGraph) (name: string) : 
                 with _ -> false
             | None -> false)
 
-    bySymbol
-    |> Option.bind (fun (_, bindingNode) ->
-        // Get the body - use all children, not just reachable ones (SRTP target may not be reachable)
-        match bindingNode.Children with
-        | Parent childIds ->
-            let children = childIds |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
-            match children with
-            | _ :: body :: _ -> Some body
-            | _ -> None
-        | _ -> None)
+    let psgResult =
+        bySymbol
+        |> Option.bind (fun (_, bindingNode) ->
+            // Get the body - use all children, not just reachable ones (SRTP target may not be reachable)
+            match bindingNode.Children with
+            | Parent childIds ->
+                let children = childIds |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
+                match children with
+                | _ :: body :: _ -> Some body
+                | _ -> None
+            | _ -> None)
+
+    // Step 2: If PSG lookup failed, try Baker member bodies
+    // Baker has correlated member bodies with PSG bindings via range matching
+    match psgResult with
+    | Some _ -> psgResult
+    | None ->
+        // Try each name variant in Baker's member bodies
+        namesToTry
+        |> List.tryPick (fun targetName ->
+            match Map.tryFind targetName memberBodies with
+            | Some mapping ->
+                // Baker found this member. Use its PSGBindingId to find the PSG body node.
+                match mapping.PSGBindingId with
+                | Some bindingId ->
+                    // Find the binding node and return its body
+                    match Map.tryFind bindingId.Value psg.Nodes with
+                    | Some bindingNode ->
+                        match bindingNode.Children with
+                        | Parent childIds ->
+                            let children = childIds |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
+                            match children with
+                            | _ :: body :: _ ->
+                                printfn "[BAKER] Found body for %s via Baker correlation" targetName
+                                Some body
+                            | _ -> None
+                        | _ -> None
+                    | None -> None
+                | None ->
+                    // Baker has the FSharpExpr body but no PSG correlation
+                    // We can't emit FSharpExpr directly, need PSG node
+                    printfn "[BAKER] Warning: Found member body for %s but no PSG binding correlation" targetName
+                    None
+            | None -> None)
 
 /// Emit an extern primitive call via ExternDispatch
 and emitExternCall (psg: ProgramSemanticGraph) (funcNode: PSGNode) (argNodes: PSGNode list) (ctx: EmissionContext) : string * MLIRType * EmissionContext =
@@ -911,7 +950,7 @@ let emitStringLiterals (ctx: EmissionContext) : EmissionContext =
 /// determines the emission. Extern primitives dispatch to platform bindings.
 /// MLIR accumulates in the builder (correct centralization point).
 ///
-let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targetTriple: string) : MLIRGenerationResult =
+let generateMLIRViaAlex (psg: ProgramSemanticGraph) (memberBodies: Map<string, Baker.Types.MemberBodyMapping>) (projectName: string) (targetTriple: string) : MLIRGenerationResult =
     // Reset error collector for this compilation
     EmissionErrors.reset()
 
@@ -925,8 +964,8 @@ let generateMLIRViaAlex (psg: ProgramSemanticGraph) (projectName: string) (targe
     | Some platform -> ExternDispatch.setTargetPlatform platform
     | None -> ()  // Use default (auto-detect)
 
-    // Initialize emission context
-    let ctx = EmissionContext.create psg
+    // Initialize emission context with Baker member bodies
+    let ctx = EmissionContext.create psg memberBodies
 
     // Emit module header
     let ctx = EmissionContext.emitLineRaw (sprintf "// Firefly-generated MLIR for %s" projectName) ctx

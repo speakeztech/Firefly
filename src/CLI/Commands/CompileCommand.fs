@@ -69,9 +69,9 @@ let private findEntryPointFunctionName (psg: Core.PSG.Types.ProgramSemanticGraph
 
 /// Generate MLIR from PSG using Alex emission pipeline
 /// Returns the MLIR content and any emission errors
-let private generateMLIRFromPSG (psg: Core.PSG.Types.ProgramSemanticGraph) (projectName: string) (targetTriple: string) (_outputKind: Core.Types.MLIRTypes.OutputKind) : Alex.Pipeline.CompilationOrchestrator.MLIRGenerationResult =
+let private generateMLIRFromPSG (psg: Core.PSG.Types.ProgramSemanticGraph) (memberBodies: Map<string, Baker.Types.MemberBodyMapping>) (projectName: string) (targetTriple: string) (_outputKind: Core.Types.MLIRTypes.OutputKind) : Alex.Pipeline.CompilationOrchestrator.MLIRGenerationResult =
     // Use Alex.Pipeline.CompilationOrchestrator.generateMLIRViaAlex
-    generateMLIRViaAlex psg projectName targetTriple
+    generateMLIRViaAlex psg memberBodies projectName targetTriple
 
 /// Lower MLIR to LLVM IR using mlir-opt and mlir-translate
 /// This is MLIR's job - PSG is done at this point
@@ -267,12 +267,24 @@ let execute (args: ParseResults<CompileArgs>) =
              else 0.0)
 
         // =========================================================================
-        // PHASE 4: MLIR Generation
+        // PHASE 4: Baker Enrichment (post-reachability type resolution)
+        // =========================================================================
+
+        report verbose "BAKER" "Running Baker enrichment..."
+
+        let bakerResult = Baker.Baker.enrich reachabilityResult.MarkedPSG checkResults
+
+        printfn "[BAKER] %d member bodies extracted, %d correlated with PSG"
+            bakerResult.Statistics.MembersWithBodies
+            bakerResult.Statistics.MembersCorrelatedWithPSG
+
+        // =========================================================================
+        // PHASE 5: MLIR Generation
         // =========================================================================
 
         report verbose "MLIR" "Generating MLIR..."
 
-        let mlirResult = generateMLIRFromPSG reachabilityResult.MarkedPSG resolved.Name targetTriple resolved.OutputKind
+        let mlirResult = generateMLIRFromPSG reachabilityResult.MarkedPSG bakerResult.MemberBodies resolved.Name targetTriple resolved.OutputKind
 
         // Report emission errors
         if mlirResult.HasErrors then

@@ -1,6 +1,6 @@
 # Firefly Architecture: Canonical Reference
 
-## The Two-Layer Model
+## The Pipeline Model
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -11,16 +11,46 @@
 │  - ZERO platform knowledge                              │
 └─────────────────────────────────────────────────────────┘
                           │
-                          │ PSG captures extern metadata
+                          │ FCS parses & type-checks
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│  PSG Construction: Phases 1-3                           │
+│  - Phase 1: Structural (full library)                   │
+│  - Phase 2: Symbol correlation (full library)           │
+│  - Phase 3: Reachability (NARROWS to application scope) │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          │ Narrowed compute graph
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│  Baker (Type Resolution Layer) [Phase 4]                │
+│  - Operates on NARROWED graph (post-reachability)       │
+│  - Correlates typed tree with PSG structure             │
+│  - Extracts SRTP resolutions (TraitCall → member)       │
+│  - Maps static member bodies for inlining               │
+│  - Overlays resolved types onto PSG nodes               │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          │ Enriched PSG (narrowed scope)
                           ▼
 ┌─────────────────────────────────────────────────────────┐
 │  Alex (Compiler Targeting Layer)                        │
-│  - Consumes PSG with semantic proofs                    │
+│  - Consumes NARROWED, ENRICHED PSG                      │
+│  - Same scope as Baker - zipper coherence               │
 │  - Dispatches externs by (entry_point, platform)        │
 │  - Platform differences are DATA, not separate files    │
 │  - Generates platform-optimized MLIR                    │
 └─────────────────────────────────────────────────────────┘
 ```
+
+**Symmetric Component Libraries:** Baker and Alex are consolidation component libraries on opposite sides of the enriched PSG:
+- **Baker**: Consolidates type-level transforms, focuses IN on narrowed application graph
+- **Alex**: Consolidates code-level transforms, fans OUT to platform targets
+
+**Zipper Coherence:** Both Baker and Alex use zippers to traverse the same narrowed graph:
+- Baker's TypedTreeZipper correlates FSharpExpr with PSG nodes
+- Alex's PSGZipper traverses enriched PSG to emit MLIR
+- Same narrowed scope ensures no mismatch between type resolution and code generation
 
 ## Alloy: What It Is
 
@@ -124,6 +154,14 @@ Alloy/src/
 ├── Time.fs            # Decomposes to Primitives
 └── ...                # NO platform directories
 
+Firefly/src/Baker/
+├── Baker.fs               # Main entry point, orchestration
+├── Types.fs               # Baker-specific types (SRTPResolution, etc.)
+├── TypedTreeZipper.fs     # Two-tree zipper (FSharpExpr ↔ PSGNode)
+├── SRTPResolver.fs        # TraitCall → resolved member extraction
+├── MemberBodyMapper.fs    # Static member → body mapping
+└── TypeOverlay.fs         # Resolved types → PSG nodes
+
 Firefly/src/Alex/
 ├── Traversal/
 │   ├── PSGZipper.fs       # Bidirectional traversal (attention)
@@ -184,6 +222,7 @@ module PSGEmitter =
 ## PSG Construction: True Nanopass Pipeline
 
 **See: `docs/PSG_Nanopass_Architecture.md` for complete details.**
+**See: `docs/Baker_Architecture.md` for Phase 4 details.**
 
 PSG construction is a **nanopass pipeline**, not a monolithic operation. Each phase does ONE thing:
 
@@ -191,7 +230,7 @@ PSG construction is a **nanopass pipeline**, not a monolithic operation. Each ph
 Phase 1: Structural Construction    SynExpr → PSG with nodes + ChildOf edges
 Phase 2: Symbol Correlation         + FSharpSymbol attachments (via FCS)
 Phase 3: Soft-Delete Reachability   + IsReachable marks (structure preserved!)
-Phase 4: Typed Tree Overlay         + Type, Constraints, SRTP resolution (Zipper)
+Phase 4: Typed Tree Overlay [BAKER] + Type, Constraints, SRTP resolution, member bodies
 Phase 5+: Enrichment Nanopasses     + def-use edges, operation classification, etc.
 ```
 

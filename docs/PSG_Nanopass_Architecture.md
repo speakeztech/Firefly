@@ -13,6 +13,7 @@ This document defines a fundamental architectural shift in Firefly's PSG (Progra
 - **Key Papers**:
   - Sarkar et al. "A Nanopass Infrastructure for Compiler Education" (ICFP 2004)
   - Keep "A Nanopass Framework for Commercial Compiler Development" (ICFP 2013)
+- **Baker Architecture**: `docs/Baker_Architecture.md` - Details Phase 4 implementation
 
 ## Core Nanopass Principles
 
@@ -53,19 +54,47 @@ The "Monolithic PSG Builder" was doing too much:
 
 ```
 FCS Parse → PSG₀ (Pure Syntax)
-              ↓ Pass 1: Structural Construction
+              ↓ Pass 1: Structural Construction (FULL LIBRARY)
             PSG₁ (Nodes + ChildOf edges)
-              ↓ Pass 2: Symbol Correlation
+              ↓ Pass 2: Symbol Correlation (FULL LIBRARY)
             PSG₂ (+ FSharpSymbol attachments)
-              ↓ Pass 3: Reachability (SOFT DELETE)
+              ↓ Pass 3: Reachability (SOFT DELETE - NARROWS SCOPE)
             PSG₃ (+ IsReachable marks, structure intact)
-              ↓ Pass 4: Typed Tree Overlay (Zipper)
-            PSG₄ (+ Type, Constraints, SRTP resolution)
-              ↓ Pass 5+: Enrichment Nanopasses
+              │
+              │ *** GRAPH NOW NARROWED TO APPLICATION SCOPE ***
+              │
+              ↓ Pass 4: Typed Tree Overlay [BAKER] (NARROWED GRAPH ONLY)
+            PSG₄ (+ Type, Constraints, SRTP resolution, member bodies)
+              ↓ Pass 5+: Enrichment Nanopasses (NARROWED GRAPH ONLY)
             PSG_n (+ def-use edges, classifications, etc.)
               ↓
-            Alex/Zipper → MLIR
+            Alex/Zipper → MLIR (NARROWED, ENRICHED GRAPH)
 ```
+
+**Critical Transition at Phase 3**: Reachability analysis narrows the compute graph to application scope. Phases 4+ (Baker, enrichment nanopasses, Alex) all operate on this narrowed graph. This ensures:
+- Performance: Expensive type correlation only on reachable code
+- Zipper coherence: Baker and Alex see the same narrowed scope
+- Semantic correctness: Only code that will be compiled gets enriched
+
+### Pass Ordering and Dependencies
+
+The nanopass framework allows for **dependency ordering** between passes. This isn't arbitrary coupling - it reflects semantic dependencies in the compilation process:
+
+```
+Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5+
+                      ↓
+              SCOPE NARROWING
+                      ↓
+            Baker depends on this
+```
+
+**Phase 3 (Reachability) is a scope-narrowing pass.** All subsequent passes (Baker, enrichment, Alex) depend on this narrowing. This is proper nanopass design:
+
+1. **Explicit dependency**: Baker's precondition is "reachability complete"
+2. **Focused scaffolding**: Work remains focused on the right part of the graph
+3. **Composability preserved**: Passes can still be reordered within their dependency constraints
+
+The nanopass framework paper (Keep 2013) discusses this: passes may have ordering constraints when one pass's output is another's precondition. This is not tight coupling - it's semantic dependency made explicit.
 
 ## The Typed Tree Zipper
 

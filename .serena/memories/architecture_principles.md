@@ -63,14 +63,45 @@ These were removed twice (PSGEmitter, PSGScribe). They collect routing logic too
 PSG construction is a true nanopass pipeline:
 
 ```
-Phase 1: Structural Construction    SynExpr → PSG nodes + ChildOf edges
-Phase 2: Symbol Correlation         + FSharpSymbol attachments
-Phase 3: Soft-Delete Reachability   + IsReachable marks (preserve structure!)
-Phase 4: Typed Tree Overlay         + Type, Constraints, SRTP resolution
-Phase 5+: Enrichment Nanopasses     + def-use edges, classifications, etc.
+Phase 1: Structural Construction    SynExpr → PSG nodes + ChildOf edges (FULL)
+Phase 2: Symbol Correlation         + FSharpSymbol attachments (FULL)
+Phase 3: Soft-Delete Reachability   + IsReachable marks *** NARROWS SCOPE ***
+Phase 4: Typed Tree Overlay         + Type, Constraints, SRTP [BAKER] (NARROWED)
+Phase 5+: Enrichment Nanopasses     + def-use edges, classifications (NARROWED)
 ```
 
 **Soft-delete** is critical - the typed tree zipper needs full structure.
+
+**Pass Ordering Dependencies**: Phase 3 is a scope-narrowing pass. Phases 4+ (Baker, enrichment, Alex) depend on this narrowing. This is proper nanopass design - semantic dependency made explicit, not arbitrary coupling. The dependency keeps work focused on the right part of the scaffolding.
+
+## Baker Component Library
+
+**Baker** is the symmetric **consolidation component library** to Alex, handling Phase 4 (typed tree overlay):
+
+```
+FCS Output → [PSG Phase 1-3] → [BAKER] → [PSG Enriched] → [ALEX] → MLIR
+                                  ↑
+                    Operates on NARROWED graph (post-reachability)
+```
+
+**CRITICAL**: Baker operates **AFTER reachability** (Phase 3). It only processes the narrowed compute graph - nodes marked `IsReachable = true`.
+
+**Components:**
+- `TypedTreeZipper` - correlates FSharpExpr with PSGNode by range
+- `SRTPResolver` - extracts TraitCall → resolved member mappings
+- `MemberBodyMapper` - maps static members to their typed expression bodies
+- `TypeOverlay` - applies resolved types to PSG nodes
+
+**Key Principles:**
+1. Post-reachability only - narrowed graph scope
+2. Zipper coherence - Baker's zipper and Alex's zipper operate on same narrowed scope
+3. Consolidation - all type-level transforms in one place
+
+**Symmetric Design:** 
+- Baker consolidates type-level transforms (focuses IN on application graph)
+- Alex consolidates code-level transforms (fans OUT to platform targets)
+
+See `docs/Baker_Architecture.md` for full design.
 
 ## The Extern Primitive Surface
 

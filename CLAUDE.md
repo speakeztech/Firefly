@@ -13,6 +13,7 @@ The Serena MCP server maintains authoritative memories about architectural decis
 **STOP and consult these Serena memories:**
 - `architecture_principles` - Core architectural constraints
 - `alex_zipper_architecture` - The correct Zipper + XParsec + Bindings model
+- `baker_component` - Type resolution layer (Phase 4), SRTP handling
 - `negative_examples` - Real mistakes to avoid repeating
 - `native_binding_architecture` - How extern primitives flow to platform bindings
 

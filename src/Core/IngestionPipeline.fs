@@ -40,6 +40,8 @@ type PipelineResult = {
     ProjectResults: ProjectResults option
     ProgramSemanticGraph: ProgramSemanticGraph option
     ReachabilityAnalysis: LibraryAwareReachability option
+    /// Baker enrichment result (Phase 4: member body mappings)
+    BakerResult: Baker.Baker.BakerEnrichmentResult option
     Diagnostics: Diagnostic list
 }
 
@@ -257,6 +259,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                 ProjectResults = Some projectResults
                 ProgramSemanticGraph = None
                 ReachabilityAnalysis = None
+                BakerResult = None
                 Diagnostics = List.ofSeq diagnostics
             }
         else
@@ -291,6 +294,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                     ProjectResults = Some projectResults
                     ProgramSemanticGraph = None
                     ReachabilityAnalysis = None
+                    BakerResult = None
                     Diagnostics = List.ofSeq diagnostics
                 }
             else
@@ -349,13 +353,21 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                     writeJsonAsset config.IntermediatesDir.Value "library.boundaries.json" libraryBoundaryData
                     
                     printfn "[Pipeline] Pruned PSG debug assets written successfully"
-                
+
+                // Step 8: Run Baker enrichment (Phase 4: post-reachability type resolution)
+                // CRITICAL: Baker operates on the narrowed graph (reachability.MarkedPSG)
+                printfn "[Pipeline] Running Baker enrichment (Phase 4)..."
+                let bakerResult = Baker.Baker.enrich reachabilityResult.MarkedPSG projectResults.CheckResults
+                printfn "[Pipeline] Baker enrichment complete: %d member bodies extracted"
+                    bakerResult.Statistics.MembersWithBodies
+
                 // Return successful pipeline result
                 return {
                     Success = true
                     ProjectResults = Some projectResults
                     ProgramSemanticGraph = Some psg
                     ReachabilityAnalysis = Some reachabilityResult
+                    BakerResult = Some bakerResult
                     Diagnostics = List.ofSeq diagnostics
                 }
             
@@ -370,6 +382,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
             ProjectResults = None
             ProgramSemanticGraph = None
             ReachabilityAnalysis = None
+            BakerResult = None
             Diagnostics = List.ofSeq diagnostics
         }
 }

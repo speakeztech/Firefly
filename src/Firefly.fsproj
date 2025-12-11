@@ -74,8 +74,15 @@
       <!-- Platform Templates (new) -->
       <Compile Include="Core/Templates/TemplateTypes.fs" />
       <Compile Include="Core/Templates/TemplateLoader.fs" />
-      
-      <!-- FCS Ingestion Pipeline (new) -->
+
+      <!-- Baker - Post-Reachability Type Resolution (Phase 4) -->
+      <!-- MUST be compiled before IngestionPipeline which uses Baker -->
+      <Compile Include="Baker/Types.fs" />
+      <Compile Include="Baker/TypedTreeZipper.fs" />
+      <Compile Include="Baker/MemberBodyMapper.fs" />
+      <Compile Include="Baker/Baker.fs" />
+
+      <!-- FCS Ingestion Pipeline (uses Baker) -->
       <Compile Include="Core/IngestionPipeline.fs" />
 
       <!-- Alex CodeGeneration -->
