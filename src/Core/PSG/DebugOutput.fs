@@ -171,12 +171,7 @@ let generateSymbolCorrelationAnalysis (psg: ProgramSemanticGraph) (reachableSymb
         
         let correlationPath = Path.Combine(outputDir, "symbol_correlation_analysis.json")
         File.WriteAllText(correlationPath, JsonSerializer.Serialize(correlationAnalysis, jsonOptions))
-        
-        printfn "Symbol correlation analysis written to: %s" correlationPath
-        
-    with
-    | ex -> 
-        printfn "Error generating symbol correlation analysis: %s" ex.Message
+    with _ -> ()
 
 /// Generate complete PSG debug output with enhanced symbol tracking
 let generatePSGDebugOutput (psg: ProgramSemanticGraph) (outputDir: string) =
@@ -270,26 +265,7 @@ let generatePSGDebugOutput (psg: ProgramSemanticGraph) (outputDir: string) =
         
         let summaryPath = Path.Combine(outputDir, "psg.summary.json")
         File.WriteAllText(summaryPath, JsonSerializer.Serialize(psgSummary, jsonOptions))
-        
-        printfn "Enhanced PSG debug output generated successfully in: %s" outputDir
-        printfn "Files created:"
-        printfn "  - psg_nodes.json (%d nodes)" nodes.Length
-        printfn "  - psg_edges.json (%d edges)" edges.Length
-        printfn "  - reachability_analysis.json (enhanced soft-delete analysis)"
-        printfn "  - psg.summary.json (PSG structure summary)"
-        printfn "Reachability: %d reachable, %d unreachable (%.1f%% eliminated)" 
-            reachabilityAnalysis.ReachableNodes 
-            reachabilityAnalysis.UnreachableNodes 
-            reachabilityAnalysis.EliminationRate
-        
-        // Show symbol correlation warning if needed
-        if reachabilityAnalysis.SymbolCorrelationStats.ReachableWithSymbols < 5 then
-            printfn "⚠️  WARNING: Very few nodes with symbols marked as reachable (%d)" reachabilityAnalysis.SymbolCorrelationStats.ReachableWithSymbols
-            printfn "   This suggests symbol correlation issues between reachability analysis and PSG nodes"
-        
-    with
-    | ex -> 
-        printfn "Error generating enhanced PSG debug output: %s" ex.Message
+    with _ -> ()
 
 /// Generate enhanced correlation debug output
 let generateCorrelationDebugOutput (correlations: (range * FSharpSymbol)[]) (outputDir: string) =
@@ -335,13 +311,7 @@ let generateCorrelationDebugOutput (correlations: (range * FSharpSymbol)[]) (out
         
         let correlationsPath = Path.Combine(outputDir, "psg_correlations.json")
         File.WriteAllText(correlationsPath, JsonSerializer.Serialize(correlationData, jsonOptions))
-        
-        printfn "Enhanced correlation debug output generated: %s" correlationsPath
-        printfn "Total correlations: %d" correlationData.Length
-        
-    with
-    | ex -> 
-        printfn "Error generating correlation debug output: %s" ex.Message
+    with _ -> ()
 
 /// Generate reachability analysis debug output with symbol correlation
 let generateReachabilityDebugOutput (result: LibraryAwareReachability) (outputDir: string) =
@@ -382,12 +352,7 @@ let generateReachabilityDebugOutput (result: LibraryAwareReachability) (outputDi
         
         let reachabilityPath = Path.Combine(outputDir, "reachability.analysis.json")
         File.WriteAllText(reachabilityPath, JsonSerializer.Serialize(reachabilityData, jsonOptions))
-        
-        printfn "Reachability analysis debug output generated: %s" reachabilityPath
-        
-    with
-    | ex -> 
-        printfn "Error generating reachability debug output: %s" ex.Message
+    with _ -> ()
 
 /// Enhanced debug output generation with symbol correlation analysis
 let generateDebugOutputs 
@@ -441,17 +406,6 @@ let generateDebugOutputs
     
     let summaryPath = Path.Combine(outputDir, "debug_summary.json")
     File.WriteAllText(summaryPath, JsonSerializer.Serialize(summaryStats, jsonOptions))
-    
-    printfn "Enhanced debug outputs generated in: %s" outputDir
-    
-    // Provide actionable feedback
-    if summaryStats.SymbolCorrelationIssues.CorrelationGap then
-        printfn ""
-        printfn "🔍 SYMBOL CORRELATION ISSUE DETECTED:"
-        printfn "   - Reachability analysis found %d reachable symbols" (Set.count reachableSymbols)
-        printfn "   - But 0 PSG nodes were marked as reachable"
-        printfn "   - Check symbol_correlation_analysis.json for detailed matching analysis"
-        printfn "   - This indicates symbol name mismatches between analysis phases"
 
 /// Generate all debug outputs (alternative API)
 let generateCompleteDebugOutput (psg: ProgramSemanticGraph) (correlations: (range * FSharpSymbol)[]) (outputDir: string) =

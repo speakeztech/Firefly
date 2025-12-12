@@ -150,11 +150,8 @@ let flattenApplications (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
         |> List.filter (isCurriedApp psg)
 
     if List.isEmpty curriedNodes then
-        printfn "[NANOPASS] FlattenApplications: No curried applications to flatten"
         psg
     else
-        printfn "[NANOPASS] FlattenApplications: Found %d curried applications to flatten" (List.length curriedNodes)
-
         // Flatten each curried node
         let flattenedNodes =
             curriedNodes
@@ -172,7 +169,4 @@ let flattenApplications (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
         let psgWithFlatNodes = { psg with Nodes = updatedNodes }
 
         // Update parent IDs to reflect new structure
-        let finalPsg = updateParentIds psgWithFlatNodes
-
-        printfn "[NANOPASS] FlattenApplications: Flattening complete"
-        finalPsg
+        updateParentIds psgWithFlatNodes

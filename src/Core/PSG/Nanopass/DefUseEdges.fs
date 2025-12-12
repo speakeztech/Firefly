@@ -150,19 +150,7 @@ let createDefUseEdges (defIndex: SymbolDefinitionIndex) (psg: ProgramSemanticGra
 /// This is the main entry point for the def-use edge nanopass.
 let addDefUseEdges (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
     let defIndex = buildDefinitionIndex psg
-
-    printfn "[NANOPASS] DefUse: Built definition index with %d entries" (Map.count defIndex)
-
-    let enrichedPsg = createDefUseEdges defIndex psg
-
-    let defUseEdgeCount =
-        enrichedPsg.Edges
-        |> List.filter (fun e -> e.Kind = SymbolUse)
-        |> List.length
-
-    printfn "[NANOPASS] DefUse: Created %d def-use edges" defUseEdgeCount
-
-    enrichedPsg
+    createDefUseEdges defIndex psg
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Edge Query Helpers (for downstream use)

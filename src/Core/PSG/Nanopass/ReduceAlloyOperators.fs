@@ -119,11 +119,8 @@ let reduceAlloyOperators (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
         |> List.filter (isDollarApp psg)
 
     if List.isEmpty dollarApps then
-        printfn "[NANOPASS] ReduceAlloyOperators: No $ applications found"
         psg
     else
-        printfn "[NANOPASS] ReduceAlloyOperators: Reducing %d $ applications" (List.length dollarApps)
-
         // Reduce each $ application
         let reducedNodes =
             dollarApps
@@ -141,7 +138,4 @@ let reduceAlloyOperators (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
         let psgWithReductions = { psg with Nodes = updatedNodes }
 
         // Ensure parent references are consistent
-        let finalPsg = rebuildParentRefs psgWithReductions
-
-        printfn "[NANOPASS] ReduceAlloyOperators: Reduction complete"
-        finalPsg
+        rebuildParentRefs psgWithReductions

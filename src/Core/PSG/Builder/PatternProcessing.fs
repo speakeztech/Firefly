@@ -92,7 +92,6 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
             else
                 { graph''' with SymbolTable = updatedSymbolTable }
         | None ->
-            printfn "[BUILDER] Warning: Pattern '%s' at %s has no symbol correlation" identText (range.ToString())
             graph'''
 
     // Parenthesized patterns - transparent, process inner

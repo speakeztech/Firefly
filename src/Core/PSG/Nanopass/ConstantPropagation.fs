@@ -58,10 +58,7 @@ let private propagateStringLength (psg: ProgramSemanticGraph) : ProgramSemanticG
                     match resolveConstantValue psg receiver with
                     | Some (StringValue s) ->
                         // String literal! Fold the length at compile time
-                        let length = s.Length
-                        printfn "[NANOPASS] ConstantProp: Folding '%s'.Length = %d"
-                            (if s.Length > 20 then s.Substring(0, 20) + "..." else s) length
-                        { node with ConstantValue = Some (Int32Value length) }
+                        { node with ConstantValue = Some (Int32Value s.Length) }
                     | _ -> node  // Not a constant string
                 | _ -> node  // Multiple or no children
             else
@@ -70,18 +67,4 @@ let private propagateStringLength (psg: ProgramSemanticGraph) : ProgramSemanticG
 
 /// Main entry point for the ConstantPropagation nanopass
 let propagateConstants (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
-    printfn "[NANOPASS] ConstantProp: Starting constant propagation"
-
-    let result = propagateStringLength psg
-
-    // Count how many nodes got constant values set
-    let propagatedCount =
-        result.Nodes
-        |> Map.filter (fun id node ->
-            match psg.Nodes |> Map.tryFind id with
-            | Some original -> original.ConstantValue.IsNone && node.ConstantValue.IsSome
-            | None -> false)
-        |> Map.count
-
-    printfn "[NANOPASS] ConstantProp: Propagated %d constant values" propagatedCount
-    result
+    propagateStringLength psg

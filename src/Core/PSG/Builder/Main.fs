@@ -26,28 +26,8 @@ let mutable emitNanopassIntermediates = false
 /// Output directory for nanopass intermediates
 let mutable nanopassOutputDir = ""
 
-/// Symbol validation helper
-let private validateSymbolCapture (graph: ProgramSemanticGraph) =
-    let expectedSymbols = [
-        "stackBuffer"; "AsReadOnlySpan"; "spanToString";
-        "readInto"; "sprintf"; "Ok"; "Error"; "Write"; "WriteLine"
-    ]
-
-    printfn "[VALIDATION] === Symbol Capture Validation ==="
-    expectedSymbols |> List.iter (fun expected ->
-        let found =
-            graph.SymbolTable
-            |> Map.exists (fun _ symbol ->
-                symbol.DisplayName.Contains(expected) ||
-                symbol.FullName.Contains(expected))
-
-        if found then
-            printfn "[VALIDATION] ✓ Found expected symbol: %s" expected
-        else
-            printfn "[VALIDATION] ✗ Missing expected symbol: %s" expected
-    )
-
-    printfn "[VALIDATION] Total symbols captured: %d" graph.SymbolTable.Count
+/// Symbol validation helper (no-op in production)
+let private validateSymbolCapture (_graph: ProgramSemanticGraph) = ()
 
 /// Build complete PSG from project results with ENHANCED symbol correlation (FCS 43.9.300 compatible)
 let buildProgramSemanticGraph
@@ -55,10 +35,7 @@ let buildProgramSemanticGraph
     (parseResults: FSharpParseFileResults[]) : ProgramSemanticGraph =
 
     // Force initialization of BindingProcessing module to register the circular dependency handler
-    // This must happen before any expression processing occurs
     Core.PSG.Construction.BindingProcessing.ensureInitialized ()
-
-    printfn "[BUILDER] Starting ENHANCED PSG construction (FCS 43.9.300 compatible)"
 
     let correlationContext = createContext checkResults
 
@@ -79,8 +56,6 @@ let buildProgramSemanticGraph
         CorrelationContext = correlationContext
         SourceFiles = sourceFiles
     }
-
-    printfn "[BUILDER] Phase 1: Building structural nodes with enhanced correlation from %d files" parseResults.Length
 
     // Process each file and merge results
     let graphs =
@@ -130,9 +105,6 @@ let buildProgramSemanticGraph
                 }
             )
 
-    printfn "[BUILDER] Phase 1 complete: Enhanced PSG built with %d nodes, %d entry points"
-        structuralGraph.Nodes.Count structuralGraph.EntryPoints.Length
-
     // Emit Phase 1 intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
         emitNanopassIntermediate structuralGraph "1_structural" nanopassOutputDir
@@ -141,7 +113,6 @@ let buildProgramSemanticGraph
     validateSymbolCapture structuralGraph
 
     // Phase 2: Apply FCS constraint resolution
-    printfn "[BUILDER] Phase 2: Applying FCS constraint resolution"
     let typeEnhancedGraph = integrateTypesWithCheckResults structuralGraph checkResults
 
     // Emit Phase 2 intermediate
@@ -150,9 +121,6 @@ let buildProgramSemanticGraph
         emitNanopassDiff structuralGraph typeEnhancedGraph "1_structural" "2_type_integration" nanopassOutputDir
 
     // Phase 2a: Nanopass - Resolve SRTP constraints
-    // Extracts SRTP resolution from FCS internals via reflection.
-    // This captures which concrete implementation was selected for trait calls.
-    printfn "[BUILDER] Phase 2a: Running SRTP resolution nanopass"
     let srtpResolvedGraph = Core.PSG.Nanopass.ResolveSRTP.run typeEnhancedGraph checkResults
 
     // Emit Phase 2a intermediate
@@ -161,9 +129,6 @@ let buildProgramSemanticGraph
         emitNanopassDiff typeEnhancedGraph srtpResolvedGraph "2_type_integration" "2a_srtp_resolved" nanopassOutputDir
 
     // Phase 2b: Nanopass - Flatten curried applications
-    // Normalizes nested App nodes from curried calls into flat structure.
-    // Must run BEFORE def-use edges so edges are built on flattened structure.
-    printfn "[BUILDER] Phase 2b: Running application flattening nanopass"
     let flattenedGraph = flattenApplications srtpResolvedGraph
 
     // Emit Phase 2b intermediate
@@ -172,9 +137,6 @@ let buildProgramSemanticGraph
         emitNanopassDiff srtpResolvedGraph flattenedGraph "2a_srtp_resolved" "2b_flattened_apps" nanopassOutputDir
 
     // Phase 2c: Nanopass - Reduce pipe operators
-    // Beta-reduces |> and <| to direct function application.
-    // Arithmetic/comparison operators are preserved for Alex to handle with type context.
-    printfn "[BUILDER] Phase 2c: Running pipe operator reduction nanopass"
     let pipeReducedGraph = reducePipeOperators flattenedGraph
 
     // Emit Phase 2c intermediate
@@ -182,15 +144,8 @@ let buildProgramSemanticGraph
         emitNanopassIntermediate pipeReducedGraph "2c_pipe_reduced" nanopassOutputDir
         emitNanopassDiff flattenedGraph pipeReducedGraph "2b_flattened_apps" "2c_pipe_reduced" nanopassOutputDir
 
-    // Phase 2d: Nanopass - Reduce Alloy operators
-    // Beta-reduces Alloy's ($) operator to direct function application.
-    // The $ operator is defined as: let inline ($) f x = f x
-    // NOTE: SRTP-resolved operators (like WritableString.$) are NOT reduced
-    // because they require SRTP dispatch, not simple beta reduction.
-    printfn "[BUILDER] Phase 2d: Running Alloy operator reduction nanopass"
-    // DISABLED - WritableString $ s uses SRTP, not global $
-    // let alloyReducedGraph = reduceAlloyOperators pipeReducedGraph
-    let alloyReducedGraph = pipeReducedGraph  // Skip for now
+    // Phase 2d: Nanopass - Reduce Alloy operators (currently disabled)
+    let alloyReducedGraph = pipeReducedGraph
 
     // Emit Phase 2d intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
@@ -198,9 +153,6 @@ let buildProgramSemanticGraph
         emitNanopassDiff pipeReducedGraph alloyReducedGraph "2c_pipe_reduced" "2d_alloy_reduced" nanopassOutputDir
 
     // Phase 3: Nanopass - Add def-use edges
-    // This makes variable binding relationships explicit in the PSG structure,
-    // eliminating the need for scope tracking in the emitter.
-    printfn "[BUILDER] Phase 3: Running def-use nanopass"
     let defUseGraph = addDefUseEdges alloyReducedGraph
 
     // Emit Phase 3 intermediate
@@ -209,9 +161,6 @@ let buildProgramSemanticGraph
         emitNanopassDiff typeEnhancedGraph defUseGraph "2_type_integration" "3_def_use_edges" nanopassOutputDir
 
     // Phase 3a: Nanopass - Constant propagation
-    // Evaluates compile-time constant expressions (e.g., "literal".Length)
-    // Critical for freestanding compilation without libc strlen
-    printfn "[BUILDER] Phase 3a: Running constant propagation nanopass"
     let constPropGraph = propagateConstants defUseGraph
 
     // Emit Phase 3a intermediate
@@ -220,8 +169,6 @@ let buildProgramSemanticGraph
         emitNanopassDiff defUseGraph constPropGraph "3_def_use_edges" "3a_const_prop" nanopassOutputDir
 
     // Phase 3a2: Nanopass - Lower string length
-    // Transforms remaining PropertyAccess:Length (not constant-folded) to SemanticPrimitive:fidelity_strlen
-    printfn "[BUILDER] Phase 3a2: Running string length lowering nanopass"
     let strlenLoweredGraph = lowerStringLength constPropGraph
 
     // Emit Phase 3a2 intermediate
@@ -230,13 +177,9 @@ let buildProgramSemanticGraph
         emitNanopassDiff constPropGraph strlenLoweredGraph "3a_const_prop" "3a2_strlen_lowered" nanopassOutputDir
 
     // Phase 3b: Nanopass - Annotate function parameters
-    // Marks Pattern:Named nodes that are function parameters with their index
-    printfn "[BUILDER] Phase 3b: Running parameter annotation nanopass"
     let paramAnnotatedGraph = annotateParameters strlenLoweredGraph
 
     // Phase 3c: Nanopass - Classify operations
-    // Sets Operation field on App nodes based on symbol analysis
-    printfn "[BUILDER] Phase 3c: Running operation classification nanopass"
     let classifiedGraph = classifyOperations paramAnnotatedGraph
 
     // Emit Phase 3c intermediate
@@ -245,8 +188,6 @@ let buildProgramSemanticGraph
         emitNanopassDiff paramAnnotatedGraph classifiedGraph "3b_param_annotated" "3c_classified_ops" nanopassOutputDir
 
     // Phase 3d: Nanopass - Lower interpolated strings
-    // Transforms InterpolatedString nodes to NativeStr.concat* semantic primitives
-    printfn "[BUILDER] Phase 3d: Running interpolated string lowering nanopass"
     let loweredGraph = lowerInterpolatedStrings classifiedGraph
 
     // Emit Phase 3d intermediate
@@ -255,7 +196,6 @@ let buildProgramSemanticGraph
         emitNanopassDiff classifiedGraph loweredGraph "3c_classified_ops" "3d_lowered_interp_strings" nanopassOutputDir
 
     // Phase 4: Finalize nodes and analyze context
-    printfn "[BUILDER] Phase 4: Finalizing PSG nodes and analyzing context"
     let finalNodes =
         loweredGraph.Nodes
         |> Map.map (fun _ node ->
@@ -274,11 +214,5 @@ let buildProgramSemanticGraph
         emitNanopassIntermediate finalGraph "4_finalized" nanopassOutputDir
         emitNanopassDiff loweredGraph finalGraph "3d_lowered_interp_strings" "4_finalized" nanopassOutputDir
 
-    printfn "[BUILDER] ENHANCED PSG construction complete (FCS 43.9.300 compatible)"
-    printfn "[BUILDER] Final PSG: %d nodes, %d edges, %d entry points, %d symbols"
-        finalGraph.Nodes.Count finalGraph.Edges.Length finalGraph.EntryPoints.Length finalGraph.SymbolTable.Count
-
-    // Final validation
     validateSymbolCapture finalGraph
-
     finalGraph

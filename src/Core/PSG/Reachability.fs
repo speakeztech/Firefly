@@ -111,8 +111,6 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
 
         result
 
-    printfn "[CALLGRAPH] nodeToFunction has %d entries" (Map.count nodeToFunction)
-    
     // Helper: Check if a symbol represents a callable function/method (not a parameter or local)
     // Key insight: Parameters and local bindings are NOT module-level values/members
     let isCallableSymbol (sym: FSharpSymbol) : bool =
@@ -191,17 +189,6 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
             | None -> ()
         | _ -> ()
     
-    // Debug: print what main calls
-    match Map.tryFind "Examples.HelloWorldDirect.main" callGraph with
-    | Some calls -> printfn "[CALLGRAPH] main calls: %A" calls
-    | None -> printfn "[CALLGRAPH] main not found in call graph"
-
-    // Debug: print what Console.Write and WriteLine call
-    for funcName in ["Alloy.Console.Write"; "Alloy.Console.WriteLine"] do
-        match Map.tryFind funcName callGraph with
-        | Some calls -> printfn "[CALLGRAPH] %s calls: %A" funcName calls
-        | None -> printfn "[CALLGRAPH] %s not in call graph" funcName
-
     callGraph
 
 /// Compute reachable symbols using semantic analysis
@@ -214,7 +201,6 @@ let private computeSemanticReachability
 
     // Start with entry points
     for ep in entryPoints do
-        printfn "[REACH-TRACE] Entry point: %s" ep.FullName
         reachable <- Set.add ep.FullName reachable
         toProcess <- ep.FullName :: toProcess
 
@@ -229,13 +215,11 @@ let private computeSemanticReachability
             | Some callees ->
                 for callee in callees do
                     if not (Set.contains callee reachable) then
-                        printfn "[REACH-TRACE] %s -> %s" current callee
                         reachable <- Set.add callee reachable
                         toProcess <- callee :: toProcess
             | None -> ()
         | [] -> ()
 
-    printfn "[REACH-TRACE] Total from call graph traversal: %d" (Set.count reachable)
     reachable
 
 /// Mark PSG nodes based on semantic reachability
@@ -250,8 +234,6 @@ let private computeSemanticReachability
 let private markNodesForSemanticReachability
     (psg: ProgramSemanticGraph)
     (reachableSymbols: Set<string>) : ProgramSemanticGraph =
-
-    printfn "[SEMANTIC] Marking nodes for %d reachable symbols" (Set.count reachableSymbols)
 
     // Step 1: Find all binding nodes for reachable symbols
     let reachableBindingNodeIds =
@@ -323,20 +305,12 @@ let private markNodesForSemanticReachability
                 EliminationPass = if isReachable then None else Some 1 }
         )
 
-    let reachableNodeCount = Set.count reachableNodeIds
-
-    printfn "[SEMANTIC] Marked %d nodes as reachable (%.1f%% of %d total)"
-        reachableNodeCount
-        (float reachableNodeCount / float (Map.count finalNodes) * 100.0)
-        (Map.count finalNodes)
-
     { psg with Nodes = finalNodes }
 
 /// Perform semantic reachability analysis
 let analyzeReachability (psg: ProgramSemanticGraph) : LibraryAwareReachability =
     let startTime = DateTime.UtcNow
-    printfn "[REACHABILITY] Starting semantic reachability analysis"
-    
+
     // Find entry points
     let entryPoints = 
         psg.SymbolTable
@@ -357,18 +331,12 @@ let analyzeReachability (psg: ProgramSemanticGraph) : LibraryAwareReachability =
         |> Option.toList
     
     let allEntryPoints = entryPoints @ entryPointAttribute
-    
-    printfn "[REACHABILITY] Found %d entry points: %A" 
-        allEntryPoints.Length 
-        (allEntryPoints |> List.map (fun ep -> ep.DisplayName))
-    
+
     // Build semantic call graph
     let callGraph = buildSemanticCallGraph psg
-    printfn "[REACHABILITY] Built call graph with %d entries" (Map.count callGraph)
-    
+
     // Compute semantic reachability
     let reachableSymbols = computeSemanticReachability allEntryPoints callGraph
-    printfn "[REACHABILITY] Found %d semantically reachable symbols" (Set.count reachableSymbols)
     
     // All symbols in the PSG
     let allSymbols = 
@@ -406,12 +374,7 @@ let analyzeReachability (psg: ProgramSemanticGraph) : LibraryAwareReachability =
         UnreachableSymbols = unreachableSymbols
         CallGraph = callGraph
     }
-    
-    printfn "[REACHABILITY] Semantic analysis complete: %d/%d symbols reachable (%.1f%% eliminated)"
-        stats.ReachableSymbols
-        stats.TotalSymbols
-        (float stats.EliminatedSymbols / float stats.TotalSymbols * 100.0)
-    
+
     {
         BasicResult = result
         LibraryCategories = libraryCategories

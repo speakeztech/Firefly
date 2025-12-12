@@ -143,11 +143,8 @@ let lowerInterpolatedStrings (psg: ProgramSemanticGraph) : ProgramSemanticGraph 
         |> List.filter isInterpolatedString
 
     if List.isEmpty interpStrings then
-        printfn "[NANOPASS] LowerInterpolatedStrings: No interpolated strings found"
         psg
     else
-        printfn "[NANOPASS] LowerInterpolatedStrings: Lowering %d interpolated strings" (List.length interpStrings)
-
         // Transform each interpolated string
         let transformations =
             interpStrings
@@ -164,7 +161,4 @@ let lowerInterpolatedStrings (psg: ProgramSemanticGraph) : ProgramSemanticGraph 
                 Map.fold (fun acc k v -> Map.add k v acc) nodes' additional
             ) psg.Nodes
 
-        let finalPsg = { psg with Nodes = updatedNodes }
-
-        printfn "[NANOPASS] LowerInterpolatedStrings: Lowering complete"
-        finalPsg
+        { psg with Nodes = updatedNodes }

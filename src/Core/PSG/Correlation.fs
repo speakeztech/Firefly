@@ -33,13 +33,7 @@ let rangesOverlap (r1: range) (r2: range) =
 /// Create correlation context from FCS results
 let createContext (checkResults: FSharpCheckProjectResults) =
     let allSymbolUses = checkResults.GetAllUsesOfAllSymbols() |> Array.ofSeq
-    
-    printfn "[Correlation] Found %d total symbol uses" allSymbolUses.Length
-    printfn "[Correlation] Definition count: %d" 
-        (allSymbolUses |> Array.filter (fun su -> su.IsFromDefinition) |> Array.length)
-    printfn "[Correlation] Use count: %d" 
-        (allSymbolUses |> Array.filter (fun su -> su.IsFromUse) |> Array.length)
-    
+
     let positionIndex = 
         allSymbolUses
         |> Array.map (fun symbolUse ->
@@ -60,39 +54,8 @@ let createContext (checkResults: FSharpCheckProjectResults) =
         FileIndex = fileIndex
     }
 
-/// Enhanced correlation debugging for specific missing symbols
-let debugMissingSymbols (context: CorrelationContext) (fileName: string) =
-    let fileUses = Map.tryFind fileName context.FileIndex |> Option.defaultValue [||]
-    
-    printfn "[CORRELATION DEBUG] === Missing Symbol Analysis for %s ===" (System.IO.Path.GetFileName fileName)
-    printfn "[CORRELATION DEBUG] Total symbols in file: %d" fileUses.Length
-    
-    // Look for specific missing symbols
-    let missingTargets = [
-        "AsReadOnlySpan"; "spanToString"; "stackBuffer"; "sprintf"; 
-        "readInto"; "Write"; "WriteLine"; "Ok"; "Error"
-    ]
-    
-    for target in missingTargets do
-        let matches = 
-            fileUses
-            |> Array.filter (fun symbolUse ->
-                symbolUse.Symbol.DisplayName.Contains(target) ||
-                symbolUse.Symbol.FullName.Contains(target))
-        
-        if matches.Length > 0 then
-            printfn "[CORRELATION DEBUG] ✓ Found '%s': %d matches" target matches.Length
-            matches |> Array.take (min 3 matches.Length) |> Array.iter (fun su ->
-                printfn "    %s at %s" su.Symbol.FullName (su.Range.ToString()))
-        else
-            printfn "[CORRELATION DEBUG] ✗ Missing '%s': No matches found" target
-    
-    // Show sample of available symbols for comparison
-    printfn "[CORRELATION DEBUG] Sample available symbols:"
-    fileUses 
-    |> Array.take (min 10 fileUses.Length)
-    |> Array.iter (fun su ->
-        printfn "    %s (%s) at %s" su.Symbol.DisplayName (su.Symbol.GetType().Name) (su.Range.ToString()))
+/// Enhanced correlation debugging for specific missing symbols (no-op in production)
+let debugMissingSymbols (_context: CorrelationContext) (_fileName: string) = ()
 
 /// Enhanced symbol correlation with syntax context and specialized matching
 let tryCorrelateSymbolEnhanced (range: range) (fileName: string) (syntaxKind: string) (context: CorrelationContext) : FSharpSymbol option =

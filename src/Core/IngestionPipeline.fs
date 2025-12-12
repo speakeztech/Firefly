@@ -13,6 +13,7 @@ open Core.PSG.DebugOutput
 open Core.PSG.Reachability
 open Core.Utilities.IntermediateWriter
 open Core.Utilities.RemoveIntermediates
+open Core.PSG.Nanopass.ValidateNativeTypes
 
 /// Configure JSON serialization with F# support
 let private createJsonOptions() =
@@ -70,7 +71,6 @@ let private writeSymbolicAst (parseResults: FSharpParseFileResults[]) (intermedi
         let baseName = Path.GetFileNameWithoutExtension(pr.FileName)
         let astPath = Path.Combine(intermediatesDir, $"{baseName}.sym.ast")
         File.WriteAllText(astPath, sprintf "%A" pr.ParseTree)
-        printfn "  Wrote %s (%d bytes)" (Path.GetFileName astPath) (FileInfo(astPath).Length)
     )
 
 /// Write project analysis summary
@@ -84,7 +84,6 @@ let private writeProjectSummary (projectResults: ProjectResults) (intermediatesD
     let typeCheckJson = JsonSerializer.Serialize(typeCheckData, jsonOptions)
     let typeCheckPath = Path.Combine(intermediatesDir, "project.analysis.json")
     writeFileToPath typeCheckPath typeCheckJson
-    printfn "  Wrote %s (%d bytes)" (Path.GetFileName typeCheckPath) typeCheckJson.Length
 
 /// Write PSG summary information
 let private writePSGSummary (psg: ProgramSemanticGraph) (intermediatesDir: string) =
@@ -98,7 +97,6 @@ let private writePSGSummary (psg: ProgramSemanticGraph) (intermediatesDir: strin
     |}
     let psgSummaryPath = Path.Combine(intermediatesDir, "psg.summary.json")
     writeFileToPath psgSummaryPath (JsonSerializer.Serialize(psgSummary, jsonOptions))
-    printfn "  Wrote PSG summary (%d nodes, %d edges)" psg.Nodes.Count psg.Edges.Length
 
 /// Generate pruned symbol data from PSG and reachability results
 let private generatePrunedSymbolData (psg: ProgramSemanticGraph) (result: LibraryAwareReachability) =
@@ -237,14 +235,10 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
     try
         // Step 1: Prepare intermediate outputs
         if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-            printfn "[Pipeline] Preparing intermediates directory..."
             prepareIntermediatesDirectory config.IntermediatesDir
-        
+
         // Step 2: Load and analyze project with FCS
-        printfn "[Pipeline] Loading project: %s" projectPath
         let! ctx = loadProject projectPath config.CacheStrategy
-        
-        printfn "[Pipeline] Analyzing project with FCS..."
         let! projectResults = getProjectResults ctx
         
         // Validate project compilation
@@ -265,12 +259,10 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
         else
             // Step 3: Generate initial intermediate outputs
             if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-                printfn "[Pipeline] Writing project analysis intermediates..."
                 writeSymbolicAst projectResults.ParseResults config.IntermediatesDir.Value
                 writeProjectSummary projectResults config.IntermediatesDir.Value
-            
+
             // Step 4: Build Program Semantic Graph
-            printfn "[Pipeline] Building Program Semantic Graph..."
 
             // Enable nanopass intermediate emission if outputting intermediates
             if config.OutputIntermediates && config.IntermediatesDir.IsSome then
@@ -306,13 +298,8 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                         Location = None
                     }
                 
-                printfn "[Pipeline] PSG construction complete: %d nodes, %d edges, %d entry points" 
-                    psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length
-                
                 // Step 5: Generate initial PSG debug outputs (before reachability)
                 if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-                    printfn "[Pipeline] Writing initial PSG debug outputs..."
-                    
                     let correlationContext = createContext projectResults.CheckResults
                     let correlations = 
                         projectResults.ParseResults
@@ -324,17 +311,10 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                     writePSGSummary psg config.IntermediatesDir.Value
                 
                 // Step 6: Perform reachability analysis
-                printfn "[Pipeline] Performing PSG-based reachability analysis..."
                 let reachabilityResult = performReachabilityAnalysis psg
-                
-                printfn "[Pipeline] Reachability analysis complete: %d/%d symbols reachable (%.1f%% eliminated)" 
-                    reachabilityResult.PruningStatistics.ReachableSymbols
-                    reachabilityResult.PruningStatistics.TotalSymbols
-                    ((float reachabilityResult.PruningStatistics.EliminatedSymbols / float reachabilityResult.PruningStatistics.TotalSymbols) * 100.0)
-                
+
                 // Step 7: Generate pruned PSG debug assets
                 if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-                    printfn "[Pipeline] Writing pruned PSG debug assets..."
                     
                     // Use the marked PSG from reachability analysis
                     let markedPSG = reachabilityResult.MarkedPSG
@@ -351,25 +331,40 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                     writeJsonAsset config.IntermediatesDir.Value "reachability.analysis.json" comparisonData
                     writeJsonAsset config.IntermediatesDir.Value "psg.callgraph.pruned.json" callGraphData
                     writeJsonAsset config.IntermediatesDir.Value "library.boundaries.json" libraryBoundaryData
-                    
-                    printfn "[Pipeline] Pruned PSG debug assets written successfully"
 
-                // Step 8: Run Baker enrichment (Phase 4: post-reachability type resolution)
-                // CRITICAL: Baker operates on the narrowed graph (reachability.MarkedPSG)
-                printfn "[Pipeline] Running Baker enrichment (Phase 4)..."
-                let bakerResult = Baker.Baker.enrich reachabilityResult.MarkedPSG projectResults.CheckResults
-                printfn "[Pipeline] Baker enrichment complete: %d member bodies extracted"
-                    bakerResult.Statistics.MembersWithBodies
+                // Step 7.5: Validate native types (halt on non-native BCL types)
+                let nativeValidation = validateReachable reachabilityResult.MarkedPSG
 
-                // Return successful pipeline result
-                return {
-                    Success = true
-                    ProjectResults = Some projectResults
-                    ProgramSemanticGraph = Some psg
-                    ReachabilityAnalysis = Some reachabilityResult
-                    BakerResult = Some bakerResult
-                    Diagnostics = List.ofSeq diagnostics
-                }
+                if nativeValidation.HasErrors then
+                    // Add all native type errors as diagnostics
+                    nativeValidation.Errors |> List.iter (fun err ->
+                        diagnostics.Add {
+                            Severity = Error
+                            Message = err.Message
+                            Location = Some (sprintf "Node %s (%s)" err.NodeId err.SyntaxKind)
+                        })
+
+                    return {
+                        Success = false
+                        ProjectResults = Some projectResults
+                        ProgramSemanticGraph = Some psg
+                        ReachabilityAnalysis = Some reachabilityResult
+                        BakerResult = None
+                        Diagnostics = List.ofSeq diagnostics
+                    }
+                else
+                    // Step 8: Run Baker enrichment (Phase 4)
+                    let bakerResult = Baker.Baker.enrich reachabilityResult.MarkedPSG projectResults.CheckResults
+
+                    // Return successful pipeline result
+                    return {
+                        Success = true
+                        ProjectResults = Some projectResults
+                        ProgramSemanticGraph = Some psg
+                        ReachabilityAnalysis = Some reachabilityResult
+                        BakerResult = Some bakerResult
+                        Diagnostics = List.ofSeq diagnostics
+                    }
             
     with ex ->
         diagnostics.Add {

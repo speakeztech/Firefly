@@ -28,7 +28,6 @@ let private lowerStringLengthNodes (psg: ProgramSemanticGraph) : ProgramSemantic
             if node.SyntaxKind = "PropertyAccess:Length" &&
                node.ConstantValue.IsNone &&
                isStringLengthSymbol node then
-                printfn "[NANOPASS] LowerStringLength: Lowering node %A to SemanticPrimitive:fidelity_strlen" node.Id
                 { node with SyntaxKind = "SemanticPrimitive:fidelity_strlen" }
             else
                 node)
@@ -36,20 +35,4 @@ let private lowerStringLengthNodes (psg: ProgramSemanticGraph) : ProgramSemantic
 
 /// Main entry point for the LowerStringLength nanopass
 let lowerStringLength (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
-    printfn "[NANOPASS] LowerStringLength: Starting string length lowering"
-
-    let result = lowerStringLengthNodes psg
-
-    // Count how many nodes were lowered
-    let loweredCount =
-        result.Nodes
-        |> Map.filter (fun id node ->
-            match psg.Nodes |> Map.tryFind id with
-            | Some original ->
-                original.SyntaxKind = "PropertyAccess:Length" &&
-                node.SyntaxKind = "SemanticPrimitive:fidelity_strlen"
-            | None -> false)
-        |> Map.count
-
-    printfn "[NANOPASS] LowerStringLength: Lowered %d PropertyAccess:Length nodes" loweredCount
-    result
+    lowerStringLengthNodes psg

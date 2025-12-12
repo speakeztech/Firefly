@@ -97,6 +97,8 @@ type EmitContext(graph: ProgramSemanticGraph) =
     member val LabelCounter : int = 0 with get, set
     /// External function declarations needed (e.g., "strlen")
     member val ExternalFuncs : Set<string> = Set.empty with get, set
+    /// Accumulated errors during emission
+    member val Errors : string list = [] with get, set
 
 module EmitContext =
     /// Create emission context from a PSG
@@ -147,6 +149,18 @@ module EmitContext =
     /// Emit a formatted line of MLIR
     let emitLinef (ctx: EmitContext) fmt =
         Printf.ksprintf (fun s -> emitLine ctx s) fmt
+
+    /// Record an error during emission
+    let recordError (ctx: EmitContext) (msg: string) : unit =
+        ctx.Errors <- msg :: ctx.Errors
+
+    /// Get all recorded errors
+    let getErrors (ctx: EmitContext) : string list =
+        ctx.Errors |> List.rev
+
+    /// Check if any errors were recorded
+    let hasErrors (ctx: EmitContext) : bool =
+        not (List.isEmpty ctx.Errors)
 
 // ═══════════════════════════════════════════════════════════════════
 // PSGParseState - Minimal state for XParsec (supports equality)

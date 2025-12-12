@@ -15,7 +15,7 @@ open Alex.Pipeline.CompilationTypes
 open Alex.Bindings.BindingTypes
 open Alex.CodeGeneration.MLIRBuilder
 open Alex.Traversal.PSGZipper
-open Alex.Traversal.PSGGeneration
+open Alex.Generation.MLIRGeneration
 open Alex.Patterns.PSGPatterns
 
 // ===================================================================
@@ -170,17 +170,19 @@ let generateMLIRViaAlex (psg: ProgramSemanticGraph) (memberBodies: Map<string, B
     | Some platform -> ExternDispatch.setTargetPlatform platform
     | None -> ()  // Use default (auto-detect)
 
-    // Use PSGGeneration module (proper EmitContext + def-use edge architecture)
+    // Use MLIRGeneration module (proper EmitContext + def-use edge architecture)
     // This uses PSGXParsec.EmitContext with NodeSSA tracking and def-use edge resolution
-    let mlirContent = Alex.Traversal.PSGGeneration.generateMLIR psg targetTriple
+    let result = Alex.Generation.MLIRGeneration.generateMLIR psg targetTriple
 
-    // Collect any errors
-    let errors = EmissionErrors.toCompilerErrors()
+    // Convert errors to CompilerError format
+    let errors =
+        result.Errors
+        |> List.map (fun msg -> { Phase = "MLIR Generation"; Message = msg; Location = None; Severity = Error })
 
     {
-        Content = mlirContent
+        Content = result.Content
         Errors = errors
-        HasErrors = EmissionErrors.hasErrors()
+        HasErrors = result.HasErrors
     }
 
 // ===================================================================

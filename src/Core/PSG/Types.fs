@@ -662,9 +662,7 @@ module ReachabilityHelpers =
             { node with
                 ContextRequirement = node.ContextRequirement |> Option.orElse (analyzeContextRequirement node)
                 ComputationPattern = node.ComputationPattern |> Option.orElse (analyzeComputationPattern node) }
-        with ex ->
-            printfn "[CONTEXT] Error analyzing node %s (kind: %s): %s" node.Id.Value node.SyntaxKind ex.Message
-            node
+        with _ -> node
 
 /// Helper functions for operation classification and MLIR emission
 module OperationHelpers =

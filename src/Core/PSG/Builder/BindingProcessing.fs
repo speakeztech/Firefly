@@ -59,7 +59,6 @@ let rec processBindingWithUseFlag binding parentId fileName (context: BuildConte
                 // Add to entry points if this is an entry point
                 let updatedEntryPoints =
                     if hasEntryPointAttr || isMainFunc then
-                        printfn "[BUILDER] Found entry point during construction: %s" sym.FullName
                         bindingNode.Id :: graph''.EntryPoints
                     else
                         graph''.EntryPoints
@@ -68,7 +67,6 @@ let rec processBindingWithUseFlag binding parentId fileName (context: BuildConte
                     SymbolTable = updatedSymbolTable
                     EntryPoints = updatedEntryPoints }
             | None ->
-                printfn "[BUILDER] Warning: No symbol correlation for binding at %s" (range.ToString())
                 graph''
 
         let graph'''' = processPattern pat (Some bindingNode.Id) fileName context graph'''

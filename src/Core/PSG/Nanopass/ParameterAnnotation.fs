@@ -56,8 +56,6 @@ let private annotateParameter (node: PSGNode) (index: int) : PSGNode =
 let annotateParameters (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
     let parameterNodes = findParameterNodes psg
 
-    printfn "[NANOPASS] ParameterAnnotation: Found %d parameter nodes" (List.length parameterNodes)
-
     // Build a map of node ID -> annotated node
     let annotations =
         parameterNodes

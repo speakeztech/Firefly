@@ -81,7 +81,6 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
                     SymbolTable = updatedSymbolTable
                     Edges = methodRefEdge :: graph''.Edges }
             | None ->
-                printfn "[BUILDER] Warning: Method call '%s' at %s has no symbol correlation" methodName (range.ToString())
                 graph''
 
         processExpression expr (Some methodCallNode.Id) fileName context graph'''
@@ -120,7 +119,6 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
                     SymbolTable = updatedSymbolTable
                     Edges = typeInstEdge :: graph''.Edges }
             | None ->
-                printfn "[BUILDER] Warning: Generic type application at %s has no symbol correlation" (range.ToString())
                 graph''
 
         processExpression expr (Some typeAppNode.Id) fileName context graph'''
@@ -291,7 +289,6 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
                     }
                     { graph'''' with SymbolTable = st; Edges = methodRefEdge :: graph''''.Edges }
                 | None ->
-                    printfn "[BUILDER] Warning: Property access '%s' at %s has no symbol correlation" identText (range.ToString())
                     graph''''
 
             match receiverSymbol with

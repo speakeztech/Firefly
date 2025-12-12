@@ -49,8 +49,7 @@ let private extractResolvedConstraints (fsharpType: FSharpType) : IList<FSharpGe
         else
             ResizeArray<FSharpGenericParameterConstraint>() :> IList<FSharpGenericParameterConstraint>
     with
-    | ex ->
-        printfn "[TYPE INTEGRATION] Warning: Resolved constraint extraction failed: %s" ex.Message
+    | _ ->
         ResizeArray<FSharpGenericParameterConstraint>() :> IList<FSharpGenericParameterConstraint>
 
 /// Build resolved type index from COMPLETED FCS constraint resolution results
@@ -61,7 +60,6 @@ let buildResolvedTypeIndex (checkResults: FSharpCheckProjectResults) : ResolvedT
     try
         /// CANONICAL Strategy 1: Symbol Uses with COMPLETED Constraint Resolution
         /// Access constraint information that's already been resolved at usage sites
-        printfn "[TYPE INTEGRATION] Extracting COMPLETED constraint resolution from symbol uses"
         let allSymbolUses = checkResults.GetAllUsesOfAllSymbols()
         
         for symbolUse in allSymbolUses do
@@ -112,13 +110,12 @@ let buildResolvedTypeIndex (checkResults: FSharpCheckProjectResults) : ResolvedT
                         
                     | _ -> ()
             with
-            | ex ->
-                // Individual symbol processing failures are acceptable - log and continue
-                printfn "[TYPE INTEGRATION] Note: Symbol use processing skipped for %A: %s" symbolUse.Range ex.Message
-        
-        /// CANONICAL Strategy 2: Assembly Signature Analysis  
+            | _ ->
+                // Individual symbol processing failures are acceptable - continue
+                ()
+
+        /// CANONICAL Strategy 2: Assembly Signature Analysis
         /// Access fully resolved member signatures with COMPLETED constraint resolution
-        printfn "[TYPE INTEGRATION] Extracting COMPLETED constraint resolution from assembly signatures"
         let assemblyContents = checkResults.AssemblyContents
         
         for implFile in assemblyContents.ImplementationFiles do
@@ -210,18 +207,17 @@ let buildResolvedTypeIndex (checkResults: FSharpCheckProjectResults) : ResolvedT
 
                         walkExpr expr
                 with
-                | ex ->
-                    printfn "[TYPE INTEGRATION] Note: Declaration processing skipped: %s" ex.Message
-            
+                | _ ->
+                    // Declaration processing skipped
+                    ()
+
             implFile.Declarations |> List.iter processResolvedDeclaration
-        
+
     with
-    | ex ->
-        printfn "[TYPE INTEGRATION] Warning: Resolved type index construction encountered error: %s" ex.Message
-    
-    printfn "[TYPE INTEGRATION] CANONICAL resolved type index built: %d range mappings, %d symbol mappings" 
-        (Map.count rangeToTypeInfo) (Map.count symbolToTypeInfo)
-    
+    | _ ->
+        // Resolved type index construction encountered error - continue with partial results
+        ()
+
     {
         RangeToTypeInfo = rangeToTypeInfo
         SymbolToTypeInfo = symbolToTypeInfo
@@ -277,18 +273,12 @@ let correlateNodeWithResolvedTypes (node: PSGNode) (resolvedIndex: ResolvedTypeI
                         else None
                     )
     with
-    | ex ->
-        printfn "[TYPE INTEGRATION] Warning: Type correlation failed for node %s: %s" node.Id.Value ex.Message
+    | _ ->
         None
 
 /// CANONICAL integration using COMPLETED FCS constraint resolution results
 let integrateTypesWithCheckResults (psg: ProgramSemanticGraph) (checkResults: FSharpCheckProjectResults) : ProgramSemanticGraph =
-    printfn "[TYPE INTEGRATION] Starting CANONICAL FCS constraint resolution integration"
-    printfn "[TYPE INTEGRATION] Building resolved type index from COMPLETED constraint resolution"
-    
     let resolvedIndex = buildResolvedTypeIndex checkResults
-    
-    printfn "[TYPE INTEGRATION] Correlating RESOLVED type information with %d PSG nodes" (Map.count psg.Nodes)
     
     let mutable typeCorrelationCount = 0
     let mutable constraintCorrelationCount = 0
@@ -310,28 +300,16 @@ let integrateTypesWithCheckResults (psg: ProgramSemanticGraph) (checkResults: FS
             | None ->
                 node
         )
-    
-    printfn "[TYPE INTEGRATION] CANONICAL correlation complete: %d/%d nodes updated with type information" 
-        typeCorrelationCount psg.Nodes.Count
-    printfn "[TYPE INTEGRATION] CANONICAL constraint correlation complete: %d/%d nodes updated with constraint information" 
-        constraintCorrelationCount psg.Nodes.Count
-    
+
     // Return updated PSG with RESOLVED type and constraint information
     { psg with Nodes = updatedNodes }
 
 /// Extract typed AST from check results for type integration (preserved interface from original)
 let extractTypedAST (checkResults: FSharpCheckProjectResults) : FSharpImplementationFileContents list =
-    let assemblyContents = checkResults.AssemblyContents
-    printfn "[TYPE INTEGRATION] Extracting typed AST from assembly contents with %d implementation files" 
-        assemblyContents.ImplementationFiles.Length
-    assemblyContents.ImplementationFiles
+    checkResults.AssemblyContents.ImplementationFiles
 
 /// LEGACY integration point maintained for backwards compatibility - now uses CANONICAL approach
 let integrateTypesIntoPSG (psg: ProgramSemanticGraph) (typedFiles: FSharpImplementationFileContents list) : ProgramSemanticGraph =
-    printfn "[TYPE INTEGRATION] Legacy integration called - redirecting to CANONICAL FCS constraint resolution"
-    printfn "[TYPE INTEGRATION] NOTE: This legacy interface cannot access completed constraint resolution"
-    printfn "[TYPE INTEGRATION] Use integrateTypesWithCheckResults for full CANONICAL FCS constraint resolution"
-    
     // Cannot perform canonical constraint resolution without FSharpCheckProjectResults
     // Return PSG unchanged to maintain interface compatibility
     psg

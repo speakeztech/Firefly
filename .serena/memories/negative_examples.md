@@ -107,6 +107,49 @@ Pooling decision-making logic too early in the pipeline.
 
 The PSG, enriched by nanopasses, carries enough information that emission is deterministic. No routing decisions needed.
 
+## Mistake 8: Silent Failures in Code Generation (CRITICAL)
+
+```fsharp
+// WRONG - Silently return Void when function not found
+and emitInlinedCall (ctx: EmitContext) (funcNode: PSGNode) (argNodes: PSGNode list) : ExprResult =
+    // ...
+    match funcBinding with
+    | Some binding -> // ... emit code
+    | None ->
+        printfn "[GEN] Function not found in PSG: %s" name  // Just prints!
+        Void  // *** SILENT FAILURE - continues compilation ***
+```
+
+**What happened**: During HelloWorldDirect compilation, the output showed:
+```
+[GEN] Function not found in PSG: System.Object.ReferenceEquals
+[GEN] Function not found in PSG: Microsoft.FSharp.Core.Operators.``not``
+```
+
+The code printed warnings but returned `Void` and continued. The result:
+- Conditional check silently failed
+- Only a newline was written (not "Hello, World!")
+- Binary segfaulted on `ret` instruction
+
+**Why this is wrong**: 
+- Compilers exist to surface errors. Silent failures hide bugs behind more bugs.
+- The root cause (unresolved function) manifested as a symptom (segfault)
+- Hours were spent chasing the segfault instead of fixing the real issue
+
+**The fix**:
+```fsharp
+// RIGHT - Return EmitError and propagate it
+| None ->
+    EmitError (sprintf "Function not found in PSG: %s - cannot generate code" name)
+    // Caller MUST handle EmitError and fail compilation
+```
+
+**The principle**: When code generation cannot proceed, it MUST emit an error that halts compilation. Never swallow failures with `printfn` + `Void`.
+
+**When you see this pattern**: STOP EVERYTHING. Do not run the binary. Do not chase symptoms. Fix the error propagation first.
+
+---
+
 ## The Acid Test
 
 Before committing any change, ask:

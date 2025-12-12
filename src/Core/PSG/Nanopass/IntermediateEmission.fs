@@ -98,11 +98,9 @@ let emitNanopassIntermediate (psg: ProgramSemanticGraph) (phaseLabel: string) (o
 
         File.WriteAllText(filepath, JsonSerializer.Serialize(phaseData, jsonOptions))
 
-        printfn "[NANOPASS] Emitted intermediate: %s (%d nodes, %d edges)"
-            filename psg.Nodes.Count psg.Edges.Length
-
-    with ex ->
-        printfn "[NANOPASS] Warning: Failed to emit intermediate for %s: %s" phaseLabel ex.Message
+    with _ ->
+        // Failed to emit intermediate - continue silently
+        ()
 
 /// Emit a diff summary between two PSG phases
 let emitNanopassDiff (before: ProgramSemanticGraph) (after: ProgramSemanticGraph) (fromPhase: string) (toPhase: string) (outputDir: string) =
@@ -171,8 +169,6 @@ let emitNanopassDiff (before: ProgramSemanticGraph) (after: ProgramSemanticGraph
 
         File.WriteAllText(filepath, JsonSerializer.Serialize(diffData, jsonOptions))
 
-        printfn "[NANOPASS] Emitted diff: %s (+%d/-%d edges)"
-            filename addedEdges.Length removedEdges.Length
-
-    with ex ->
-        printfn "[NANOPASS] Warning: Failed to emit diff from %s to %s: %s" fromPhase toPhase ex.Message
+    with _ ->
+        // Failed to emit diff - continue silently
+        ()

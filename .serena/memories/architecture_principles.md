@@ -1,5 +1,42 @@
 # Architecture Principles
 
+## CRITICAL: Silent Failures Are Architectural Violations
+
+> **A compiler's PRIMARY job is to surface errors. Silent failures are the most severe architectural violations.**
+
+When you observe ANY of the following during development or testing:
+- Functions "not found" that don't emit errors
+- Code generation returning `Void` for unhandled cases
+- `printfn` warnings without corresponding error propagation
+- Conditions that fail silently (e.g., null checks that don't work)
+- Missing symbols that don't halt compilation
+
+**STOP EVERYTHING IMMEDIATELY.**
+
+Do NOT:
+- Continue to "see what happens"
+- Run the binary to check output
+- Chase downstream symptoms (segfaults, wrong output)
+- Add workarounds or special cases
+
+Instead:
+1. Recognize this as a ROOT CAUSE, not a symptom
+2. Fix the code generation to EMIT ERRORS, not swallow them
+3. Ensure `EmitError` or equivalent propagates up
+4. Add tests to prevent regression
+5. Update memories if this reveals a pattern
+
+**Example of the violation:**
+```
+[GEN] Function not found in PSG: System.Object.ReferenceEquals
+[GEN] Function not found in PSG: Microsoft.FSharp.Core.Operators.``not``
+```
+This was printed, then ignored. The code returned `Void` and continued. The result was a silent failure that manifested as a segfault downstream. The correct behavior: emit a compilation ERROR and halt.
+
+**The Principle:** Failures are GOOD in a compiler. They are signals. Silent failures are bugs that hide bugs.
+
+---
+
 ## CRITICAL: Consult Memories at Decision Points
 
 When encountering issues "downstream" in the pipeline, ALWAYS consult Serena memories BEFORE attempting fixes. The memories encode lessons learned from past mistakes.

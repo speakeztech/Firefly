@@ -7,47 +7,6 @@ open FSharp.Compiler.Symbols
 open Core.CompilerConfig
 open Core.PSG.Correlation
 
-/// Debug missing critical symbols in correlation context
-let debugCriticalSymbols (context: CorrelationContext) (fileName: string) =
-    let fileUses = Map.tryFind fileName context.FileIndex |> Option.defaultValue [||]
-    let criticalSymbols = ["AsReadOnlySpan"; "spanToString"; "stackBuffer"; "Ok"; "Error"]
-
-    printfn "[DEBUG] === Critical Symbol Search in %s ===" (System.IO.Path.GetFileName fileName)
-
-    for critical in criticalSymbols do
-        let matches =
-            fileUses
-            |> Array.filter (fun symbolUse ->
-                let sym = symbolUse.Symbol
-                sym.DisplayName.Contains(critical) ||
-                sym.FullName.Contains(critical) ||
-                sym.DisplayName = critical)
-
-        if matches.Length > 0 then
-            printfn "[DEBUG] ✓ Found '%s': %d matches" critical matches.Length
-            matches |> Array.take (min 2 matches.Length) |> Array.iter (fun su ->
-                printfn "    %s at %s" su.Symbol.FullName (su.Range.ToString()))
-        else
-            printfn "[DEBUG] ✗ Missing '%s'" critical
-
-    // Also check across ALL files for these critical symbols
-    printfn "[DEBUG] === Cross-File Search ==="
-    for critical in criticalSymbols do
-        let allMatches =
-            context.SymbolUses
-            |> Array.filter (fun symbolUse ->
-                let sym = symbolUse.Symbol
-                sym.DisplayName.Contains(critical) ||
-                sym.FullName.Contains(critical) ||
-                sym.DisplayName = critical)
-
-        if allMatches.Length > 0 then
-            printfn "[DEBUG] ✓ Global '%s': %d matches across all files" critical allMatches.Length
-            allMatches |> Array.take (min 2 allMatches.Length) |> Array.iter (fun su ->
-                printfn "    %s in %s at %s" su.Symbol.FullName (System.IO.Path.GetFileName su.Range.FileName) (su.Range.ToString()))
-        else
-            printfn "[DEBUG] ✗ Global missing '%s'" critical
-
 /// Try to correlate a symbol with the given context using multiple strategies
 let tryCorrelateSymbolWithContext (range: range) (fileName: string) (syntaxKind: string) (context: CorrelationContext) : FSharpSymbol option =
 

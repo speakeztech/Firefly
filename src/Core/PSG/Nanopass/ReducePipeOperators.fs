@@ -145,11 +145,8 @@ let reducePipeOperators (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
         |> List.filter (isPipeApp psg)
 
     if List.isEmpty pipeApps then
-        printfn "[NANOPASS] ReducePipeOperators: No pipe applications found"
         psg
     else
-        printfn "[NANOPASS] ReducePipeOperators: Reducing %d pipe applications" (List.length pipeApps)
-
         // Reduce each pipe application
         let reducedNodes =
             pipeApps
@@ -167,7 +164,4 @@ let reducePipeOperators (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
         let psgWithReductions = { psg with Nodes = updatedNodes }
 
         // Ensure parent references are consistent
-        let finalPsg = rebuildParentRefs psgWithReductions
-
-        printfn "[NANOPASS] ReducePipeOperators: Reduction complete"
-        finalPsg
+        rebuildParentRefs psgWithReductions

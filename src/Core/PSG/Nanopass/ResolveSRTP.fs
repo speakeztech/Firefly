@@ -41,62 +41,20 @@ module private ReflectionCache =
             try
                 // Get the FCS assembly from a known type
                 let fcsAssembly = typeof<FSharpExpr>.Assembly
-                printfn "[SRTP] FCS Assembly: %s" fcsAssembly.FullName
-
-                // Diagnostic: Find all types containing "Trait" to discover correct names
                 let allTypes = fcsAssembly.GetTypes()
-                let traitTypes =
-                    allTypes
-                    |> Array.filter (fun t ->
-                        t.Name.Contains("Trait") ||
-                        t.Name.Contains("TTrait") ||
-                        t.FullName.Contains("TraitConstraint"))
-
-                printfn "[SRTP] Found %d types containing 'Trait':" traitTypes.Length
-                for t in traitTypes do
-                    printfn "[SRTP]   - %s (Name: %s)" t.FullName t.Name
-                    // List properties
-                    let props = t.GetProperties(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
-                    for p in props do
-                        printfn "[SRTP]       Property: %s : %s" p.Name p.PropertyType.Name
 
                 // Find TraitConstraintInfo from FSharp.Compiler.TypedTree
-                // The full name is "FSharp.Compiler.TypedTree+TraitConstraintInfo"
                 traitConstraintInfoType <-
                     allTypes
                     |> Array.tryFind (fun t -> t.FullName = "FSharp.Compiler.TypedTree+TraitConstraintInfo")
 
                 match traitConstraintInfoType with
                 | Some t ->
-                    printfn "[SRTP] Found TraitConstraintInfo type: %s" t.FullName
-                    // List ALL properties including non-public
-                    let allProps = t.GetProperties(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
-                    printfn "[SRTP] Properties on %s:" t.Name
-                    for p in allProps do
-                        printfn "[SRTP]   - %s : %s (CanRead=%b)" p.Name p.PropertyType.Name p.CanRead
-
                     // Get the Solution property - try both public and non-public
                     solutionProperty <-
                         t.GetProperty("Solution", BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
                         |> Option.ofObj
-
-                    if solutionProperty.IsNone then
-                        printfn "[SRTP] Warning: Could not find Solution property on TraitConstraintInfo"
-                    else
-                        printfn "[SRTP] Found Solution property: %s" solutionProperty.Value.PropertyType.FullName
-                | None ->
-                    printfn "[SRTP] Warning: Could not find TraitConstraintInfo type in FCS assembly"
-
-                // Find solution types - look for TraitConstraintSln cases
-                let slnTypes =
-                    allTypes
-                    |> Array.filter (fun t ->
-                        t.Name.Contains("Sln") ||
-                        t.FullName.Contains("TraitConstraintSln"))
-
-                printfn "[SRTP] Found %d types containing 'Sln':" slnTypes.Length
-                for t in slnTypes |> Array.take (min 20 slnTypes.Length) do
-                    printfn "[SRTP]   - %s" t.FullName
+                | None -> ()
 
                 // Solution types are nested in FSharp.Compiler.TypedTree+TraitConstraintSln
                 fsMethSlnType <- allTypes |> Array.tryFind (fun t -> t.FullName = "FSharp.Compiler.TypedTree+TraitConstraintSln+FSMethSln")
@@ -104,16 +62,8 @@ module private ReflectionCache =
                 fsAnonRecdFieldSlnType <- allTypes |> Array.tryFind (fun t -> t.FullName = "FSharp.Compiler.TypedTree+TraitConstraintSln+FSAnonRecdFieldSln")
                 builtInSlnType <- allTypes |> Array.tryFind (fun t -> t.FullName = "FSharp.Compiler.TypedTree+TraitConstraintSln+BuiltInSln")
 
-                printfn "[SRTP] FSMethSln type: %A" (fsMethSlnType |> Option.map (fun t -> t.FullName))
-                printfn "[SRTP] FSRecdFieldSln type: %A" (fsRecdFieldSlnType |> Option.map (fun t -> t.FullName))
-                printfn "[SRTP] FSAnonRecdFieldSln type: %A" (fsAnonRecdFieldSlnType |> Option.map (fun t -> t.FullName))
-                printfn "[SRTP] BuiltInSln type: %A" (builtInSlnType |> Option.map (fun t -> t.FullName))
-
                 initialized <- true
-                printfn "[SRTP] Reflection cache initialized"
-            with ex ->
-                printfn "[SRTP] Error initializing reflection cache: %s" ex.Message
-                printfn "[SRTP] Stack trace: %s" ex.StackTrace
+            with _ ->
                 initialized <- true  // Don't retry on failure
 
     let getTraitConstraintInfoType () =
@@ -134,9 +84,7 @@ let private tryExtractResolution (traitCallExpr: FSharpExpr) : SRTPResolution op
         // The FSharpExpr has an internal E property that holds the expression variant
         let eProperty = traitCallExpr.GetType().GetProperty("E", BindingFlags.Public ||| BindingFlags.Instance)
         match eProperty with
-        | null ->
-            printfn "[SRTP] Could not find E property on FSharpExpr"
-            None
+        | null -> None
         | prop ->
             let eValue = prop.GetValue(traitCallExpr)
             if isNull eValue then None
@@ -146,12 +94,10 @@ let private tryExtractResolution (traitCallExpr: FSharpExpr) : SRTPResolution op
                 if eType.Name.Contains("TraitCall") then
                     // This approach won't work because E.TraitCall doesn't store the internal traitInfo
                     // The conversion from internal Expr to E.TraitCall discards the Solution
-                    // We need to find another way...
                     None
                 else
                     None
-    with ex ->
-        printfn "[SRTP] Error extracting resolution: %s" ex.Message
+    with _ ->
         None
 
 /// Walk FSharpExpr tree looking for TraitCall expressions and extract their resolutions
@@ -182,23 +128,6 @@ let private extractTraitCallResolutions (checkResults: FSharpCheckProjectResults
                 // Check if this is a TraitCall using the pattern matcher
                 match expr with
                 | TraitCall (sourceTypes, traitName, _memberFlags, paramTypes, _retTypes, traitArgs) ->
-                    // Debug: show all info from TraitCall
-                    let sourceTypeNames = sourceTypes |> List.map (fun t -> t.Format(FSharpDisplayContext.Empty))
-                    let paramTypeNames = paramTypes |> List.map (fun t -> t.Format(FSharpDisplayContext.Empty))
-                    let argCount = List.length traitArgs
-                    printfn "[SRTP-TC] TraitCall: %s, sourceTypes: %A, paramTypes: %A, argCount: %d" traitName sourceTypeNames paramTypeNames argCount
-
-                    // Show each argument's type and what kind of expression it is
-                    traitArgs |> List.iteri (fun i arg ->
-                        let argTypeName = arg.Type.Format(FSharpDisplayContext.Empty)
-                        // Check what kind of expression the arg is (Value, Const, etc.)
-                        let exprKind =
-                            match arg with
-                            | Value (valRef) -> sprintf "Value(%s : %s)" valRef.DisplayName (valRef.FullType.Format(FSharpDisplayContext.Empty))
-                            | Const (obj, ty) -> sprintf "Const(%A : %s)" obj (ty.Format(FSharpDisplayContext.Empty))
-                            | _ -> sprintf "Other(%s)" (arg.GetType().Name)
-                        printfn "[SRTP-TC]   arg[%d].Type = %s, expr = %s" i argTypeName exprKind)
-
                     // Attempt to infer resolution from source types
                     // For SRTP, the first source type typically provides the member implementation
                     let inferredResolution =
@@ -221,7 +150,6 @@ let private extractTraitCallResolutions (checkResults: FSharpCheckProjectResults
                                 // so emission can select based on argument types in the PSG
                                 match candidateMembers with
                                 | [single] ->
-                                    printfn "[SRTP] Single overload for %s -> %s.%s" traitName entity.FullName single.LogicalName
                                     FSMethod (firstType, single, [])
                                 | multiple when multiple.Length > 1 ->
                                     // Multiple overloads - capture all candidates with their full signatures
@@ -249,8 +177,6 @@ let private extractTraitCallResolutions (checkResults: FSharpCheckProjectResults
                                                     try m.ReturnParameter.Type.TypeDefinition.FullName
                                                     with _ -> m.ReturnParameter.Type.Format(FSharpDisplayContext.Empty)
 
-                                                printfn "[SRTP]   Overload candidate: %s with params %A" targetFullName paramTypes
-
                                                 Some {
                                                     TargetMethodFullName = targetFullName
                                                     ParameterTypeNames = paramTypes
@@ -259,7 +185,6 @@ let private extractTraitCallResolutions (checkResults: FSharpCheckProjectResults
                                             with _ -> None)
 
                                     if candidates.Length > 0 then
-                                        printfn "[SRTP] Captured %d overload candidates for %s" candidates.Length traitName
                                         MultipleOverloads (traitName, candidates)
                                     else
                                         Unresolved (sprintf "Could not extract signatures for %s overloads" traitName)
@@ -300,7 +225,6 @@ let private extractTraitCallResolutions (checkResults: FSharpCheckProjectResults
 
         implFile.Declarations |> List.iter processDecl
 
-    printfn "[SRTP] Extracted %d TraitCall locations" (Map.count resolutions)
     resolutions
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -453,13 +377,10 @@ let private convertSolution (sln: obj) : SRTPResolution =
                 let vref = vrefProp.GetValue(sln)
                 let methodName = tryGetValRefName vref
                 let fullName = tryGetValRefFullName vref
-                printfn "[SRTP] FSMethSln vref: %A (full: %A)" methodName fullName
-                // Return FSMethodByName with the resolved method name
                 match fullName |> Option.orElse methodName with
                 | Some name -> FSMethodByName name
-                | None -> BuiltIn  // Fallback if we couldn't get the name
+                | None -> BuiltIn
             else
-                printfn "[SRTP] FSMethSln has no vref property"
                 BuiltIn
         elif slnName.Contains("FSRecdFieldSln") then
             BuiltIn
@@ -484,25 +405,17 @@ let private tryExtractTraitSolution (traitInfo: obj) : (range * SRTPResolution) 
             // Get the Solution property (returns FSharpOption<TraitConstraintSln>)
             let solutionProp = infoType.GetProperty("Solution", BindingFlags.Public ||| BindingFlags.Instance)
             if solutionProp = null then
-                printfn "[SRTP] TraitConstraintInfo has no Solution property"
                 None
             else
                 let solutionOpt = solutionProp.GetValue(traitInfo)
                 match getFSharpOptionValue solutionOpt with
-                | Some sln ->
-                    // Get the member name for diagnostics
-                    let memberNameProp = infoType.GetProperty("MemberLogicalName")
-                    let memberName = if memberNameProp <> null then memberNameProp.GetValue(traitInfo) :?> string else "?"
-
-                    printfn "[SRTP] Found resolved TraitConstraintInfo: %s -> %s" memberName (sln.GetType().Name)
-
+                | Some _ ->
                     // We need a range to correlate with PSG nodes
                     // TraitConstraintInfo doesn't have a range, but the enclosing Expr does
-                    // For now, return without range - we'll correlate differently
                     None  // Will need to get range from enclosing Expr
                 | None ->
                     // Solution ref cell might contain the value differently
-                    // Try accessing the underlying solution ref field (try property first, then field)
+                    // Try accessing the underlying solution ref field
                     let refCell =
                         let prop = infoType.GetProperty("solution", BindingFlags.NonPublic ||| BindingFlags.Instance)
                         if prop <> null then
@@ -516,22 +429,12 @@ let private tryExtractTraitSolution (traitInfo: obj) : (range * SRTPResolution) 
                         match getFSharpRefValue refCell with
                         | Some refContents ->
                             match getFSharpOptionValue refContents with
-                            | Some actualSln ->
-                                let memberNameProp = infoType.GetProperty("MemberLogicalName")
-                                let memberName = if memberNameProp <> null then memberNameProp.GetValue(traitInfo) :?> string else "?"
-                                printfn "[SRTP] Found resolved TraitConstraintInfo (via ref): %s -> %s" memberName (actualSln.GetType().Name)
-                                None  // Still need range
-                            | None ->
-                                printfn "[SRTP] TraitConstraintInfo has unresolved solution (ref option is None)"
-                                None
-                        | None ->
-                            printfn "[SRTP] Could not read solution ref cell"
-                            None
+                            | Some _ -> None  // Still need range
+                            | None -> None
+                        | None -> None
                     else
-                        printfn "[SRTP] TraitConstraintInfo solution is None and no ref field found"
                         None
-        with ex ->
-            printfn "[SRTP] Error extracting trait solution: %s" ex.Message
+        with _ ->
             None
 
 /// Walk an internal Expr tree to find TraitCall operations
@@ -542,37 +445,9 @@ let rec private walkInternalExpr (expr: obj) (resolutions: byref<Map<string, SRT
             let exprType = expr.GetType()
             let typeName = exprType.Name
 
-            // Debug: track what expression types we're seeing
-            if typeName = "Lambda" then
-                printfn "[SRTP-EXPR] Found Lambda expression"
-                let allProps = exprType.GetProperties(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
-                for p in allProps do
-                    printfn "[SRTP-EXPR]   Lambda prop: %s : %s" p.Name (p.PropertyType.Name)
-
-            // Check for App expressions that may contain TraitCall operations
-            if typeName = "App" || typeName.EndsWith("+App") then
-                let funcExprProp = exprType.GetProperty("funcExpr", BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
-                if funcExprProp <> null then
-                    let funcExpr = funcExprProp.GetValue(expr)
-                    if not (isNull funcExpr) then
-                        let funcTypeName = funcExpr.GetType().Name
-                        printfn "[SRTP-EXPR] App funcExpr type: %s" funcTypeName
-                        // If funcExpr is Op, check what operation it contains
-                        if funcTypeName = "Op" then
-                            let opProp = funcExpr.GetType().GetProperty("op", BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
-                                        |> Option.ofObj
-                                        |> Option.orElse (funcExpr.GetType().GetProperty("Item1") |> Option.ofObj)
-                            match opProp with
-                            | Some p ->
-                                let opValue = p.GetValue(funcExpr)
-                                if not (isNull opValue) then
-                                    printfn "[SRTP-EXPR] App funcExpr Op type: %s" (opValue.GetType().Name)
-                            | None -> ()
-
             // Check if this is an Op expression with TraitCall
             if typeName = "Op" || exprType.FullName.EndsWith("+Op") then
                 // Expr.Op has: op, typeArgs, args, range
-                // Try to get the op field
                 let opProp = exprType.GetProperty("op", BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
                             |> Option.ofObj
                             |> Option.orElse (exprType.GetProperty("Item1") |> Option.ofObj)
@@ -582,9 +457,7 @@ let rec private walkInternalExpr (expr: obj) (resolutions: byref<Map<string, SRT
                     let op = prop.GetValue(expr)
                     if not (isNull op) then
                         let opType = op.GetType()
-                        printfn "[SRTP-EXPR] Op type: %s" opType.Name
                         if opType.Name.Contains("TraitCall") then
-                            printfn "[SRTP-EXPR] FOUND TraitCall Op!"
                             // Found a TraitCall! Extract the TraitConstraintInfo
                             let traitInfoProp = opType.GetProperty("Item", BindingFlags.Public ||| BindingFlags.Instance)
                                                 |> Option.ofObj
@@ -604,21 +477,14 @@ let rec private walkInternalExpr (expr: obj) (resolutions: byref<Map<string, SRT
                                         let solutionOpt = solutionProp.GetValue(traitInfo)
                                         match getFSharpOptionValue solutionOpt with
                                         | Some sln ->
-                                            let memberNameProp = tiType.GetProperty("MemberLogicalName")
-                                            let memberName = if memberNameProp <> null then memberNameProp.GetValue(traitInfo) :?> string else "?"
-
                                             let resolution = convertSolution sln
                                             let key = sprintf "%s_%d_%d_%d_%d"
                                                         (System.IO.Path.GetFileName range.FileName)
                                                         range.Start.Line range.Start.Column
                                                         range.End.Line range.End.Column
 
-                                            printfn "[SRTP-INTERNAL] Resolved TraitCall: %s at %s -> %A" memberName key resolution
                                             resolutions <- Map.add key resolution resolutions
-                                        | None ->
-                                            let memberNameProp = tiType.GetProperty("MemberLogicalName")
-                                            let memberName = if memberNameProp <> null then memberNameProp.GetValue(traitInfo) :?> string else "?"
-                                            printfn "[SRTP-INTERNAL] Unresolved TraitCall: %s" memberName
+                                        | None -> ()
                                 | None -> ()
                             | None -> ()
                 | None -> ()
@@ -631,7 +497,6 @@ let rec private walkInternalExpr (expr: obj) (resolutions: byref<Map<string, SRT
             if bodyExprProp <> null then
                 let bodyExpr = bodyExprProp.GetValue(expr)
                 if not (isNull bodyExpr) then
-                    printfn "[SRTP-EXPR] Walking bodyExpr of type: %s" (bodyExpr.GetType().Name)
                     walkInternalExpr bodyExpr &resolutions
 
             // Let/LetRec: binding(s) and bodyExpr
@@ -694,7 +559,6 @@ let private walkBinding (binding: obj) (resolutions: byref<Map<string, SRTPResol
     else
         try
             let bindType = binding.GetType()
-            printfn "[SRTP-BIND] Walking binding of type: %s" bindType.Name
             let exprProp = bindType.GetProperty("Expr", BindingFlags.Public ||| BindingFlags.Instance)
                            |> Option.ofObj
                            |> Option.orElse (bindType.GetProperty("expr", BindingFlags.NonPublic ||| BindingFlags.Instance) |> Option.ofObj)
@@ -703,20 +567,9 @@ let private walkBinding (binding: obj) (resolutions: byref<Map<string, SRTPResol
             | Some prop ->
                 let expr = prop.GetValue(binding)
                 if not (isNull expr) then
-                    let exprTypeName = expr.GetType().Name
-                    printfn "[SRTP-BIND] Found Expr of type: %s" exprTypeName
-                    printfn "[SRTP-BIND] Calling walkInternalExpr..."
                     walkInternalExpr expr &resolutions
-                    printfn "[SRTP-BIND] walkInternalExpr returned for %s" exprTypeName
-                else
-                    printfn "[SRTP-BIND] Expr is null"
-            | None ->
-                printfn "[SRTP-BIND] Binding has no Expr property. Available:"
-                let allProps = bindType.GetProperties(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
-                for p in allProps do
-                    printfn "[SRTP-BIND]   - %s : %s" p.Name p.PropertyType.Name
-        with ex ->
-            printfn "[SRTP-BIND] Error walking binding: %s" ex.Message
+            | None -> ()
+        with _ -> ()
 
 /// Walk ModuleOrNamespaceContents to find all expressions
 let rec private walkModuleContents (contents: obj) (resolutions: byref<Map<string, SRTPResolution>>) : unit =
@@ -725,11 +578,9 @@ let rec private walkModuleContents (contents: obj) (resolutions: byref<Map<strin
         try
             let contentsType = contents.GetType()
             let typeName = contentsType.Name
-            printfn "[SRTP-WALK] Walking contents of type: %s" typeName
 
             // TMDefLet: binding
             if typeName.Contains("TMDefLet") then
-                printfn "[SRTP-WALK] Found TMDefLet"
                 let bindingProp = contentsType.GetProperty("binding", BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
                                   |> Option.ofObj
                                   |> Option.orElse (contentsType.GetProperty("Item1") |> Option.ofObj)
@@ -737,15 +588,8 @@ let rec private walkModuleContents (contents: obj) (resolutions: byref<Map<strin
                 | Some prop ->
                     let binding = prop.GetValue(contents)
                     if not (isNull binding) then
-                        printfn "[SRTP-WALK] TMDefLet has binding of type: %s" (binding.GetType().Name)
                         walkBinding binding &resolutions
-                    else
-                        printfn "[SRTP-WALK] TMDefLet binding is null"
-                | None ->
-                    printfn "[SRTP-WALK] TMDefLet has no binding property. Available:"
-                    let allProps = contentsType.GetProperties(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
-                    for p in allProps do
-                        printfn "[SRTP-WALK]   - %s : %s" p.Name p.PropertyType.Name
+                | None -> ()
 
             // TMDefDo: expr
             elif typeName.Contains("TMDefDo") then
@@ -758,33 +602,20 @@ let rec private walkModuleContents (contents: obj) (resolutions: byref<Map<strin
 
             // TMDefRec: bindings list
             elif typeName.Contains("TMDefRec") then
-                printfn "[SRTP-WALK] Found TMDefRec"
                 let bindingsProp = contentsType.GetProperty("bindings", BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
-                match bindingsProp with
-                | null ->
-                    printfn "[SRTP-WALK] TMDefRec has no bindings property. Available:"
-                    let allProps = contentsType.GetProperties(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
-                    for p in allProps do
-                        printfn "[SRTP-WALK]   - %s : %s" p.Name p.PropertyType.Name
-                | prop ->
-                    let bindings = prop.GetValue(contents)
+                if bindingsProp <> null then
+                    let bindings = bindingsProp.GetValue(contents)
                     let bindingList = getFSharpListItems bindings
-                    printfn "[SRTP-WALK] TMDefRec has %d bindings" bindingList.Length
                     for modBinding in bindingList do
                         let mbType = modBinding.GetType()
-                        printfn "[SRTP-WALK] ModuleOrNamespaceBinding type: %s" mbType.Name
-                        // ModuleOrNamespaceBinding.Binding or .Module
                         if mbType.Name.Contains("Binding") then
                             let innerBindProp = mbType.GetProperty("Item", BindingFlags.Public ||| BindingFlags.Instance)
                                                 |> Option.ofObj
                                                 |> Option.orElse (mbType.GetProperty("Item1") |> Option.ofObj)
                             match innerBindProp with
                             | Some p -> walkBinding (p.GetValue(modBinding)) &resolutions
-                            | None ->
-                                printfn "[SRTP-WALK] Binding has no Item property"
+                            | None -> ()
                         elif mbType.Name.Contains("Module") then
-                            printfn "[SRTP-WALK] Processing nested Module"
-                            // Try moduleOrNamespaceContents property (actual name)
                             let subContentsProp = mbType.GetProperty("moduleOrNamespaceContents", BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
                                                   |> Option.ofObj
                                                   |> Option.orElse (mbType.GetProperty("Item2", BindingFlags.Public ||| BindingFlags.Instance) |> Option.ofObj)
@@ -792,16 +623,11 @@ let rec private walkModuleContents (contents: obj) (resolutions: byref<Map<strin
                             | Some prop ->
                                 let subContents = prop.GetValue(modBinding)
                                 if not (isNull subContents) then
-                                    printfn "[SRTP-WALK] Nested module contents type: %s" (subContents.GetType().Name)
                                     walkModuleContents subContents &resolutions
-                                else
-                                    printfn "[SRTP-WALK] Nested module contents is null"
-                            | None ->
-                                printfn "[SRTP-WALK] Module has no moduleOrNamespaceContents property"
+                            | None -> ()
 
             // TMDefs: list of contents
             elif typeName.Contains("TMDefs") then
-                printfn "[SRTP-WALK] Found TMDefs"
                 let defsProp = contentsType.GetProperty("defs", BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
                                |> Option.ofObj
                                |> Option.orElse (contentsType.GetProperty("Item") |> Option.ofObj)
@@ -810,21 +636,15 @@ let rec private walkModuleContents (contents: obj) (resolutions: byref<Map<strin
                 | Some prop ->
                     let defs = prop.GetValue(contents)
                     let defList = getFSharpListItems defs
-                    printfn "[SRTP-WALK] TMDefs has %d items" defList.Length
                     for def in defList do
                         walkModuleContents def &resolutions
-                | None ->
-                    printfn "[SRTP-WALK] TMDefs has no defs property. Available:"
-                    let allProps = contentsType.GetProperties(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
-                    for p in allProps do
-                        printfn "[SRTP-WALK]   - %s : %s" p.Name p.PropertyType.Name
+                | None -> ()
 
             // TMDefOpens: no expressions
             elif typeName.Contains("TMDefOpens") then
                 ()
 
-        with ex ->
-            printfn "[SRTP] Error walking module contents: %s" ex.Message
+        with _ -> ()
 
 /// Walk a CheckedImplFile to find all TraitCall expressions with solutions
 let private walkCheckedImplFile (implFile: obj) (resolutions: byref<Map<string, SRTPResolution>>) : unit =
@@ -832,11 +652,6 @@ let private walkCheckedImplFile (implFile: obj) (resolutions: byref<Map<string, 
     else
         try
             let ifType = implFile.GetType()
-            printfn "[SRTP-INTERNAL] Walking CheckedImplFile of type: %s" ifType.FullName
-
-            // List all properties
-            let props = ifType.GetProperties(BindingFlags.Public ||| BindingFlags.NonPublic ||| BindingFlags.Instance)
-            printfn "[SRTP-INTERNAL] CheckedImplFile has %d properties" props.Length
 
             // CheckedImplFile has Contents property
             let contentsProp = ifType.GetProperty("Contents", BindingFlags.Public ||| BindingFlags.Instance)
@@ -846,43 +661,27 @@ let private walkCheckedImplFile (implFile: obj) (resolutions: byref<Map<string, 
             match contentsProp with
             | Some prop ->
                 let contents = prop.GetValue(implFile)
-                if isNull contents then
-                    printfn "[SRTP-INTERNAL] Contents is null"
-                else
-                    printfn "[SRTP-INTERNAL] Contents type: %s" (contents.GetType().FullName)
+                if not (isNull contents) then
                     walkModuleContents contents &resolutions
-            | None ->
-                printfn "[SRTP] CheckedImplFile has no Contents property. Available properties:"
-                for p in props do
-                    printfn "[SRTP]   - %s : %s" p.Name p.PropertyType.Name
-        with ex ->
-            printfn "[SRTP] Error walking impl file: %s" ex.Message
+            | None -> ()
+        with _ -> ()
 
 /// Access internal CheckedImplFile list and extract SRTP resolutions
 let private extractFromInternalTypedTree (checkResults: FSharpCheckProjectResults) : Map<string, SRTPResolution> =
     let mutable resolutions = Map.empty
 
     try
-        // Get the assembly contents
         let assemblyContents = checkResults.AssemblyContents
         let acType = assemblyContents.GetType()
 
-        // Get internal mimpls field
         let mimplsField = acType.GetField("mimpls", BindingFlags.NonPublic ||| BindingFlags.Instance)
-        if mimplsField = null then
-            printfn "[SRTP] Could not find mimpls field on FSharpAssemblyContents"
-        else
+        if mimplsField <> null then
             let mimplsValue = mimplsField.GetValue(assemblyContents)
             if not (isNull mimplsValue) then
                 let implFiles = getFSharpListItems mimplsValue
-                printfn "[SRTP-INTERNAL] Walking %d internal CheckedImplFile(s)" implFiles.Length
-
                 for implFile in implFiles do
                     walkCheckedImplFile implFile &resolutions
-
-                printfn "[SRTP-INTERNAL] Found %d resolved TraitCalls" (Map.count resolutions)
-    with ex ->
-        printfn "[SRTP] Error accessing internal typed tree: %s" ex.Message
+    with _ -> ()
 
     resolutions
 
@@ -894,9 +693,6 @@ let private extractFromInternalTypedTree (checkResults: FSharpCheckProjectResult
 /// This attempts to extract SRTP resolutions from FCS internals and populate
 /// the SRTPResolution field on corresponding PSG nodes
 let run (psg: ProgramSemanticGraph) (checkResults: FSharpCheckProjectResults) : ProgramSemanticGraph =
-    printfn "[SRTP] Starting SRTP resolution nanopass"
-
-    // Initialize reflection cache (for diagnostics)
     ReflectionCache.initialize ()
 
     // Extract resolutions from the INTERNAL typed tree (has Solution property)
@@ -910,20 +706,16 @@ let run (psg: ProgramSemanticGraph) (checkResults: FSharpCheckProjectResults) : 
         publicResolutions
         |> Map.map (fun key publicRes ->
             match Map.tryFind key internalResolutions with
-            | Some internalRes -> internalRes  // Use internal resolution
-            | None -> publicRes  // Fall back to public (which is Unresolved)
+            | Some internalRes -> internalRes
+            | None -> publicRes
         )
         |> fun m ->
-            // Also add any internal resolutions not in public set
             internalResolutions
             |> Map.fold (fun acc k v -> if Map.containsKey k acc then acc else Map.add k v acc) m
 
     if Map.isEmpty mergedResolutions then
-        printfn "[SRTP] No TraitCall expressions found - PSG unchanged"
         psg
     else
-        printfn "[SRTP] Correlating %d TraitCall resolutions with PSG nodes" (Map.count mergedResolutions)
-
         let rangeToKey (range: range) : string =
             sprintf "%s_%d_%d_%d_%d"
                 (System.IO.Path.GetFileName range.FileName)
@@ -931,27 +723,18 @@ let run (psg: ProgramSemanticGraph) (checkResults: FSharpCheckProjectResults) : 
                 range.End.Line range.End.Column
 
         // Update PSG nodes that match TraitCall locations
-        let mutable updatedCount = 0
-        let mutable resolvedCount = 0
         let updatedNodes =
             psg.Nodes
             |> Map.map (fun nodeId node ->
-                // Check if this node's range matches a TraitCall location
                 let key = rangeToKey node.Range
                 match Map.tryFind key mergedResolutions with
                 | Some resolution ->
-                    updatedCount <- updatedCount + 1
-                    if resolution <> Unresolved "FCS API doesn't expose TraitConstraintInfo.Solution" then
-                        resolvedCount <- resolvedCount + 1
                     { node with SRTPResolution = Some resolution }
                 | None ->
-                    // Also check if this is a TraitCall node by SyntaxKind
                     if node.SyntaxKind.StartsWith("TraitCall") then
-                        printfn "[SRTP] Found TraitCall node %s but no resolution available" nodeId
                         { node with SRTPResolution = Some (Unresolved "No resolution found for TraitCall") }
                     else
                         node
             )
 
-        printfn "[SRTP] Updated %d PSG nodes with SRTP resolution info (%d actually resolved)" updatedCount resolvedCount
         { psg with Nodes = updatedNodes }

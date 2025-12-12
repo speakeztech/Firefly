@@ -7,9 +7,6 @@ open Core.PSG.Types
 
 /// Extract relationships from the existing PSG instead of rebuilding from scratch
 let extractRelationships (psg: ProgramSemanticGraph) : SymbolRelation[] =
-    printfn "[RELATIONSHIP] === Using Existing PSG ==="
-    printfn "[RELATIONSHIP] PSG has %d nodes and %d edges" psg.Nodes.Count psg.Edges.Length
-    
     let relationships = 
         psg.Edges
         |> List.choose (fun edge ->
@@ -41,10 +38,7 @@ let extractRelationships (psg: ProgramSemanticGraph) : SymbolRelation[] =
             | _ -> None
         )
         |> List.toArray
-    
-    printfn "[RELATIONSHIP] Converted %d PSG edges to %d symbol relationships" 
-        psg.Edges.Length relationships.Length
-    
+
     relationships
     
 /// Get all symbols defined in a specific file
@@ -174,42 +168,29 @@ let buildPositionIndex (symbolUses: FSharpSymbolUse[]) =
 
 /// Get all entry point symbols from the project
 let getEntryPointSymbols (symbolUses: FSharpSymbolUse[]) =
-    printfn "[SYMBOL ANALYSIS] === Entry Point Symbol Detection ==="
-    printfn "[SYMBOL ANALYSIS] Analyzing %d symbol uses" symbolUses.Length
-    
-    let entryPointSymbols = 
-        symbolUses
-        |> Array.filter (fun symbolUse ->
-            symbolUse.IsFromDefinition &&
-            match symbolUse.Symbol with
-            | :? FSharpMemberOrFunctionOrValue as mfv ->
-                // Check for EntryPoint attribute
-                let hasEntryPointAttr = 
-                    mfv.Attributes |> Seq.exists (fun attr ->
-                        let displayName = attr.AttributeType.DisplayName
-                        let fullName = attr.AttributeType.FullName
-                        displayName = "EntryPointAttribute" ||
-                        displayName = "EntryPoint" ||
-                        fullName.EndsWith("EntryPointAttribute") ||
-                        fullName.EndsWith("EntryPoint") ||
-                        fullName = "System.EntryPointAttribute"
-                    )
-                
-                // Check for main function pattern
-                let isMainFunc = 
-                    (mfv.DisplayName = "main" || mfv.LogicalName = "main") &&
-                    mfv.IsModuleValueOrMember
-                
-                let isEntryPoint = hasEntryPointAttr || isMainFunc
-                
-                if isEntryPoint then
-                    printfn "[SYMBOL ANALYSIS] Found entry point: %s (Attr: %b, Main: %b)" 
-                        mfv.FullName hasEntryPointAttr isMainFunc
-                
-                isEntryPoint
-            | _ -> false
-        )
-        |> Array.map (fun symbolUse -> symbolUse.Symbol)
-    
-    printfn "[SYMBOL ANALYSIS] Found %d entry point symbols" entryPointSymbols.Length
-    entryPointSymbols
+    symbolUses
+    |> Array.filter (fun symbolUse ->
+        symbolUse.IsFromDefinition &&
+        match symbolUse.Symbol with
+        | :? FSharpMemberOrFunctionOrValue as mfv ->
+            // Check for EntryPoint attribute
+            let hasEntryPointAttr =
+                mfv.Attributes |> Seq.exists (fun attr ->
+                    let displayName = attr.AttributeType.DisplayName
+                    let fullName = attr.AttributeType.FullName
+                    displayName = "EntryPointAttribute" ||
+                    displayName = "EntryPoint" ||
+                    fullName.EndsWith("EntryPointAttribute") ||
+                    fullName.EndsWith("EntryPoint") ||
+                    fullName = "System.EntryPointAttribute"
+                )
+
+            // Check for main function pattern
+            let isMainFunc =
+                (mfv.DisplayName = "main" || mfv.LogicalName = "main") &&
+                mfv.IsModuleValueOrMember
+
+            hasEntryPointAttr || isMainFunc
+        | _ -> false
+    )
+    |> Array.map (fun symbolUse -> symbolUse.Symbol)

@@ -235,13 +235,6 @@ let private classifyAppNode (psg: ProgramSemanticGraph) (node: PSGNode) : Operat
             let funcSymbol = funcNode.Symbol
             let funcKind = funcNode.SyntaxKind
 
-            // Debug: print when we see Console functions
-            if funcKind.Contains("Console") then
-                let symInfo = match funcSymbol with
-                              | Some s -> try sprintf "full=%s display=%s" (getFullName s) (getDisplayName s) with _ -> "error getting name"
-                              | None -> "no symbol"
-                printfn "[CLASSIFY DEBUG] Console function: kind=%s symbol=%s" funcKind symInfo
-
             // Check for operator in function node
             if funcKind.Contains("op_") then
                 classifyOperator funcKind
@@ -340,9 +333,6 @@ let private classifyTypeAppNode (node: PSGNode) : OperationKind option =
 let private classifyNode (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode =
     if node.SyntaxKind.StartsWith("App") && node.Operation.IsNone then
         let result = classifyAppNode psg node
-        // Debug Console operations
-        if node.SyntaxKind.Contains("Console") || (node.Symbol |> Option.exists (fun s -> s.FullName.Contains("Console"))) then
-            printfn "[CLASSIFY NODE] App node: %s result=%A" node.SyntaxKind result
         match result with
         | Some op -> { node with Operation = Some op }
         | None -> node
@@ -360,21 +350,8 @@ let private classifyNode (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode =
 
 /// Classify all App and TypeApp nodes in the PSG
 let classifyOperations (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
-    printfn "[NANOPASS] ClassifyOperations: Classifying App and TypeApp nodes..."
-
-    let mutable classified = 0
-    let mutable unclassified = 0
-
     let newNodes =
         psg.Nodes
-        |> Map.map (fun _ node ->
-            let result = classifyNode psg node
-            if result.Operation.IsSome && node.Operation.IsNone then
-                classified <- classified + 1
-            elif (node.SyntaxKind.StartsWith("App") || node.SyntaxKind.StartsWith("TypeApp")) && result.Operation.IsNone then
-                unclassified <- unclassified + 1
-            result)
-
-    printfn "[NANOPASS] ClassifyOperations: Classified %d nodes, %d remain unclassified" classified unclassified
+        |> Map.map (fun _ node -> classifyNode psg node)
 
     { psg with Nodes = newNodes }
