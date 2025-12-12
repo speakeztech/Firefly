@@ -225,27 +225,12 @@ let compileProject
 
     try
         // Execute the complete ingestion and analysis pipeline
-        printfn "[Compilation] Starting compilation pipeline..."
         let! pipelineResult = runPipeline projectPath pipelineConfig
 
         // Convert diagnostics and generate statistics
         let diagnostics = pipelineResult.Diagnostics |> List.map convertDiagnostic
         let statistics = generateStatistics pipelineResult startTime
         let intermediates = collectIntermediates intermediatesDir
-
-        // Report final results
-        if pipelineResult.Success then
-            printfn "[Compilation] Compilation completed successfully"
-
-            match pipelineResult.ReachabilityAnalysis with
-            | Some analysis ->
-                printfn "[Compilation] Final statistics: %d/%d symbols reachable (%.1f%% eliminated)"
-                    analysis.PruningStatistics.ReachableSymbols
-                    analysis.PruningStatistics.TotalSymbols
-                    ((float analysis.PruningStatistics.EliminatedSymbols / float analysis.PruningStatistics.TotalSymbols) * 100.0)
-            | None -> ()
-        else
-            printfn "[Compilation] Compilation failed"
 
         return {
             Success = pipelineResult.Success
@@ -255,7 +240,6 @@ let compileProject
         }
 
     with ex ->
-        printfn "[Compilation] Compilation failed: %s" ex.Message
         return {
             Success = false
             Diagnostics = [{
@@ -293,13 +277,7 @@ let compile
         let sourceText = SourceText.ofString content
 
         // Get project options from script
-        let! (projectOptions, diagnostics) = checker.GetProjectOptionsFromScript(projectPath, sourceText)
-
-        // Check for critical errors in diagnostics
-        if diagnostics.Length > 0 then
-            printfn "[Compilation] Project loading diagnostics:"
-            for diag in diagnostics do
-                printfn "  %s" diag.Message
+        let! (projectOptions, _diagnostics) = checker.GetProjectOptionsFromScript(projectPath, sourceText)
 
         // Use a default output path
         let outputPath = Path.ChangeExtension(projectPath, ".exe")

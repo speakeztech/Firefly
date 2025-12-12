@@ -27,8 +27,6 @@ let extractWithZipper
     (checkResults: FSharpCheckProjectResults)
     : Map<string, MemberBodyMapping> =
 
-    let startTime = DateTime.UtcNow
-
     // Use the zipper to walk all implementation files
     let implFiles = checkResults.AssemblyContents.ImplementationFiles
     let correlationState = correlateAll implFiles psg
@@ -36,7 +34,7 @@ let extractWithZipper
     // Convert zipper's MemberBodies to our MemberBodyMapping format
     let memberBodies =
         correlationState.MemberBodies
-        |> Map.map (fun fullName (mfv, body) ->
+        |> Map.map (fun _fullName (mfv, body) ->
             // Look up the PSG correlation if available
             let psgBindingId =
                 correlationState.Correlations
@@ -51,8 +49,6 @@ let extractWithZipper
                 Body = body
                 PSGBindingId = psgBindingId
             })
-
-    let elapsed = (DateTime.UtcNow - startTime).TotalMilliseconds
 
     // Also add operator aliases (op_Dollar, etc.)
     let withAliases =
@@ -92,7 +88,6 @@ let extractWithZipper
                 Map.add fullName mapping acc
         ) Map.empty
 
-    printfn "[BAKER] Zipper extracted %d member bodies in %.1fms" withAliases.Count elapsed
     withAliases
 
 /// Filter member bodies to only include those referenced by reachable PSG nodes
@@ -128,14 +123,8 @@ let filterToReachable
         |> Set.ofSeq
 
     // Filter bodies to only those referenced
-    let filtered =
-        allBodies
-        |> Map.filter (fun key _ -> Set.contains key referencedMembers)
-
-    printfn "[BAKER] Filtered to %d member bodies (from %d total) based on reachability"
-        filtered.Count allBodies.Count
-
-    filtered
+    allBodies
+    |> Map.filter (fun key _ -> Set.contains key referencedMembers)
 
 /// Main entry point: Extract and process member bodies using the TypedTreeZipper
 /// CRITICAL: This should be called AFTER reachability analysis (Phase 3)
@@ -144,24 +133,16 @@ let run
     (checkResults: FSharpCheckProjectResults)
     : BakerResult =
 
-    let startTime = DateTime.UtcNow
-
     // Step 1: Extract all member bodies using the zipper
-    // The zipper maintains structural correlation through its path
     let allBodies = extractWithZipper psg checkResults
 
     // Step 2: Filter to only members referenced by reachable nodes
     let reachableBodies = filterToReachable allBodies psg
 
-    let elapsed = (DateTime.UtcNow - startTime).TotalMilliseconds
-
     let correlatedCount =
         reachableBodies
         |> Map.filter (fun _ m -> m.PSGBindingId.IsSome)
         |> Map.count
-
-    printfn "[BAKER] MemberBodyMapper complete: %d bodies, %d correlated, %.1fms"
-        reachableBodies.Count correlatedCount elapsed
 
     {
         MemberBodies = reachableBodies
@@ -169,6 +150,6 @@ let run
             TotalMembers = allBodies.Count
             MembersWithBodies = reachableBodies.Count
             MembersCorrelatedWithPSG = correlatedCount
-            ProcessingTimeMs = elapsed
+            ProcessingTimeMs = 0.0
         }
     }

@@ -10,7 +10,6 @@
 /// This module provides the main entry point for Baker enrichment.
 module Baker.Baker
 
-open System
 open FSharp.Compiler.CodeAnalysis
 open Core.PSG.Types
 open Baker.Types
@@ -37,28 +36,8 @@ let enrich
     (checkResults: FSharpCheckProjectResults)
     : BakerEnrichmentResult =
 
-    let startTime = DateTime.UtcNow
-
-    // Validate precondition: PSG should have reachability marks
-    let reachableCount =
-        psg.Nodes
-        |> Map.filter (fun _ node -> node.IsReachable)
-        |> Map.count
-
-    if reachableCount = 0 then
-        printfn "[BAKER] WARNING: No reachable nodes found. Is reachability analysis complete?"
-
-    printfn "[BAKER] Starting enrichment on PSG with %d nodes (%d reachable)"
-        psg.Nodes.Count reachableCount
-
     // Run MemberBodyMapper to extract and correlate member bodies
     let mapperResult = MemberBodyMapper.run psg checkResults
-
-    let elapsed = (DateTime.UtcNow - startTime).TotalMilliseconds
-
-    printfn "[BAKER] Enrichment complete in %.1fms" elapsed
-    printfn "[BAKER]   Member bodies extracted: %d" mapperResult.Statistics.MembersWithBodies
-    printfn "[BAKER]   Correlated with PSG: %d" mapperResult.Statistics.MembersCorrelatedWithPSG
 
     {
         EnrichedPSG = psg  // PSG structure unchanged; bodies stored separately
