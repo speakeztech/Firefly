@@ -118,7 +118,7 @@ let private lowerMLIRToLLVM (mlirPath: string) (llvmPath: string) : Result<unit,
 
 /// Compile LLVM IR to native binary using llc and clang
 /// This is LLVM's job
-let private compileLLVMToNative (llvmPath: string) (outputPath: string) (targetTriple: string) : Result<unit, string> =
+let private compileLLVMToNative (llvmPath: string) (outputPath: string) (targetTriple: string) (outputKind: Core.Types.MLIRTypes.OutputKind) : Result<unit, string> =
     try
         let objPath = Path.ChangeExtension(llvmPath, ".o")
 
@@ -137,8 +137,22 @@ let private compileLLVMToNative (llvmPath: string) (outputPath: string) (targetT
         if llcProcess.ExitCode <> 0 then
             Error (sprintf "llc failed: %s" llcError)
         else
-            // Step 2: clang to link into executable (freestanding, no stdlib)
-            let clangArgs = sprintf "%s -o %s -nostdlib -static -ffreestanding -Wl,-e,main" objPath outputPath
+            // Step 2: clang to link into executable
+            // Linker flags depend on output kind:
+            // - Console: links against libc for standard library functions
+            // - Freestanding: no stdlib, static, freestanding with custom entry point
+            // Use -O0 to prevent optimizations from clobbering inline asm (syscalls)
+            let clangArgs =
+                match outputKind with
+                | Core.Types.MLIRTypes.Console ->
+                    // Console mode: link with libc for strlen, etc.
+                    sprintf "-O0 %s -o %s -lc" objPath outputPath
+                | Core.Types.MLIRTypes.Freestanding | Core.Types.MLIRTypes.Embedded ->
+                    // Freestanding/embedded: no standard library
+                    sprintf "-O0 %s -o %s -nostdlib -static -ffreestanding -Wl,-e,main" objPath outputPath
+                | Core.Types.MLIRTypes.Library ->
+                    // Library: create shared library
+                    sprintf "-O0 -shared %s -o %s" objPath outputPath
             let clangProcess = new System.Diagnostics.Process()
             clangProcess.StartInfo.FileName <- "clang"
             clangProcess.StartInfo.Arguments <- clangArgs
@@ -454,7 +468,7 @@ let execute (args: ParseResults<CompileArgs>) =
 
                         report verbose "LINK" "Compiling to native executable..."
 
-                        match compileLLVMToNative llPath outputPath targetTriple with
+                        match compileLLVMToNative llPath outputPath targetTriple resolved.OutputKind with
                         | Error msg ->
                             printfn "[LINK] Error: %s" msg
                             1

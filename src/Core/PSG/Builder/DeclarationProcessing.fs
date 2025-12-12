@@ -8,6 +8,7 @@ open Core.PSG.Types
 open Core.PSG.Construction.Types
 open Core.PSG.Construction.SymbolCorrelation
 open Core.PSG.Construction.BindingProcessing
+open Core.PSG.Construction.ExpressionProcessing
 
 /// Process a type definition (type Foo = ...)
 let rec processTypeDefn (typeDefn: SynTypeDefn) parentId fileName (context: BuildContext) graph =
@@ -101,6 +102,31 @@ and processModuleDecl decl parentId fileName (context: BuildContext) graph =
     // Hash directives (#nowarn, #light, etc.) - just skip these
     | SynModuleDecl.HashDirective(_, _) ->
         graph
+
+    // Module-level expressions (do bindings, side effects)
+    | SynModuleDecl.Expr(expr, range) ->
+        let exprNode = createNode "ModuleExpr" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add exprNode.Id.Value exprNode graph.Nodes }
+        let graph'' = addChildToParent exprNode.Id parentId graph'
+        processExpression expr (Some exprNode.Id) fileName context graph''
+
+    // Module abbreviations (module M = Some.Other.Module)
+    | SynModuleDecl.ModuleAbbrev(ident, longId, range) ->
+        let abbrevNode = createNode (sprintf "ModuleAbbrev:%s" ident.idText) range fileName None parentId
+        let graph' = { graph with Nodes = Map.add abbrevNode.Id.Value abbrevNode graph.Nodes }
+        addChildToParent abbrevNode.Id parentId graph'
+
+    // Attributes at module level
+    | SynModuleDecl.Attributes(attributes, range) ->
+        let attrNode = createNode "ModuleAttributes" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add attrNode.Id.Value attrNode graph.Nodes }
+        addChildToParent attrNode.Id parentId graph'
+
+    // Exception definitions
+    | SynModuleDecl.Exception(exnDefn, range) ->
+        let exnNode = createNode "ExceptionDefn" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add exnNode.Id.Value exnNode graph.Nodes }
+        addChildToParent exnNode.Id parentId graph'
 
     // Hard stop on unhandled module declarations
     | other ->

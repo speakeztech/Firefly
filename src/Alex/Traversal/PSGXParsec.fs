@@ -91,6 +91,12 @@ type EmitContext(graph: ProgramSemanticGraph) =
     member val StringLiterals : (string * string) list = [] with get, set
     /// Current function name being emitted
     member val CurrentFunction : string option = None with get, set
+    /// SSA counter for unique value names
+    member val SSACounter : int = 0 with get, set
+    /// Label counter for unique block labels
+    member val LabelCounter : int = 0 with get, set
+    /// External function declarations needed (e.g., "strlen")
+    member val ExternalFuncs : Set<string> = Set.empty with get, set
 
 module EmitContext =
     /// Create emission context from a PSG
@@ -121,6 +127,26 @@ module EmitContext =
     /// Get output string
     let getOutput (ctx: EmitContext) : string =
         ctx.Builder.Output.ToString()
+
+    /// Generate next SSA name and increment counter
+    let nextSSA (ctx: EmitContext) : string =
+        let name = sprintf "%%v%d" ctx.SSACounter
+        ctx.SSACounter <- ctx.SSACounter + 1
+        name
+
+    /// Generate next label name and increment counter
+    let nextLabel (ctx: EmitContext) : string =
+        let name = sprintf "^bb%d" ctx.LabelCounter
+        ctx.LabelCounter <- ctx.LabelCounter + 1
+        name
+
+    /// Register an external function declaration
+    let requireExternalFunc (ctx: EmitContext) (name: string) : unit =
+        ctx.ExternalFuncs <- Set.add name ctx.ExternalFuncs
+
+    /// Emit a formatted line of MLIR
+    let emitLinef (ctx: EmitContext) fmt =
+        Printf.ksprintf (fun s -> emitLine ctx s) fmt
 
 // ═══════════════════════════════════════════════════════════════════
 // PSGParseState - Minimal state for XParsec (supports equality)

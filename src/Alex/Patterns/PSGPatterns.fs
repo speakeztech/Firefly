@@ -237,6 +237,26 @@ let classifyCompareOp (mfv: FSharpMemberOrFunctionOrValue) : CompareOp option =
     | "op_Inequality" -> Some Neq
     | _ -> None
 
+/// Check if a PSG node represents an FSharp.Core built-in operator
+/// Returns Some (mfv, opKind) where opKind is "arith" or "compare"
+let isFSharpCoreOperator (node: PSGNode) : (FSharpMemberOrFunctionOrValue * string) option =
+    match node.Symbol with
+    | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+        try
+            let fullName = mfv.FullName
+            // Check if this is an FSharp.Core operator
+            if fullName.StartsWith("Microsoft.FSharp.Core.Operators.") then
+                // Determine if arithmetic or comparison
+                match arithmeticOp mfv with
+                | Some _ -> Some (mfv, "arith")
+                | None ->
+                    match comparisonOp mfv with
+                    | Some _ -> Some (mfv, "compare")
+                    | None -> None
+            else None
+        with _ -> None
+    | _ -> None
+
 // ═══════════════════════════════════════════════════════════════════
 // Binary Operator Info (for complex pattern results)
 // ═══════════════════════════════════════════════════════════════════

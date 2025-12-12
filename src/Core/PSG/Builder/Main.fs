@@ -12,6 +12,8 @@ open Core.PSG.Nanopass.FlattenApplications
 open Core.PSG.Nanopass.ReducePipeOperators
 open Core.PSG.Nanopass.ReduceAlloyOperators
 open Core.PSG.Nanopass.DefUseEdges
+open Core.PSG.Nanopass.ConstantPropagation
+open Core.PSG.Nanopass.LowerStringLength
 open Core.PSG.Nanopass.ParameterAnnotation
 open Core.PSG.Nanopass.ClassifyOperations
 open Core.PSG.Nanopass.LowerInterpolatedStrings
@@ -206,10 +208,31 @@ let buildProgramSemanticGraph
         emitNanopassIntermediate defUseGraph "3_def_use_edges" nanopassOutputDir
         emitNanopassDiff typeEnhancedGraph defUseGraph "2_type_integration" "3_def_use_edges" nanopassOutputDir
 
+    // Phase 3a: Nanopass - Constant propagation
+    // Evaluates compile-time constant expressions (e.g., "literal".Length)
+    // Critical for freestanding compilation without libc strlen
+    printfn "[BUILDER] Phase 3a: Running constant propagation nanopass"
+    let constPropGraph = propagateConstants defUseGraph
+
+    // Emit Phase 3a intermediate
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediate constPropGraph "3a_const_prop" nanopassOutputDir
+        emitNanopassDiff defUseGraph constPropGraph "3_def_use_edges" "3a_const_prop" nanopassOutputDir
+
+    // Phase 3a2: Nanopass - Lower string length
+    // Transforms remaining PropertyAccess:Length (not constant-folded) to SemanticPrimitive:fidelity_strlen
+    printfn "[BUILDER] Phase 3a2: Running string length lowering nanopass"
+    let strlenLoweredGraph = lowerStringLength constPropGraph
+
+    // Emit Phase 3a2 intermediate
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediate strlenLoweredGraph "3a2_strlen_lowered" nanopassOutputDir
+        emitNanopassDiff constPropGraph strlenLoweredGraph "3a_const_prop" "3a2_strlen_lowered" nanopassOutputDir
+
     // Phase 3b: Nanopass - Annotate function parameters
     // Marks Pattern:Named nodes that are function parameters with their index
     printfn "[BUILDER] Phase 3b: Running parameter annotation nanopass"
-    let paramAnnotatedGraph = annotateParameters defUseGraph
+    let paramAnnotatedGraph = annotateParameters strlenLoweredGraph
 
     // Phase 3c: Nanopass - Classify operations
     // Sets Operation field on App nodes based on symbol analysis

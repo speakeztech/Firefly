@@ -1,5 +1,18 @@
 # Alex/Zipper Architecture - The Non-Dispatch Model
 
+## CRITICAL STATUS (Dec 2024)
+
+**The architecture described in this document IS CORRECT and IS IMPLEMENTED.**
+- `PSGZipper.fs` - Complete zipper with navigation, state, folds
+- `PSGXParsec.fs` - Complete XParsec integration with emission
+- `Bindings/` - Platform-specific extern dispatch
+
+**HOWEVER: `PSGGeneration.fs` VIOLATES this architecture.** It is a monolithic
+recursive descent generator that duplicates functionality and circumvents the
+designed system. It must be removed and replaced with proper Zipper+XParsec usage.
+
+See `alex_actual_vs_intended` memory for the remediation plan.
+
 ## CRITICAL: NO EMITTER OR SCRIBE LAYER
 
 **The "emitter" and "scribe" are ANTIPATTERNS that were removed.** PSGEmitter and PSGScribe were both removed because they created central dispatch hubs that attracted library-aware logic.

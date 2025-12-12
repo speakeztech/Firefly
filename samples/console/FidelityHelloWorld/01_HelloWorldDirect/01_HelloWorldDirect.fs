@@ -7,6 +7,7 @@ open Alloy
 [<EntryPoint>]
 let main argv =
     // Simple static string output - no input, no variables
-    Console.Write "Hello, World!"
-    Console.WriteLine ""
+    // Using non-SRTP WriteStr for now (SRTP resolution pending)
+    Console.WriteStr "Hello, World!"
+    Console.WriteStrLn ""
     0

@@ -665,6 +665,62 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
 
         graph''''
 
+    // Do expressions (do expr - used for side effects)
+    | SynExpr.Do(expr, range) ->
+        let doNode = createNode "Do" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add doNode.Id.Value doNode graph.Nodes }
+        let graph'' = addChildToParent doNode.Id parentId graph'
+        processExpression expr (Some doNode.Id) fileName context graph''
+
+    // Assert expressions (assert expr)
+    | SynExpr.Assert(expr, range) ->
+        let assertNode = createNode "Assert" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add assertNode.Id.Value assertNode graph.Nodes }
+        let graph'' = addChildToParent assertNode.Id parentId graph'
+        processExpression expr (Some assertNode.Id) fileName context graph''
+
+    // Lazy expressions (lazy expr)
+    | SynExpr.Lazy(expr, range) ->
+        let lazyNode = createNode "Lazy" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add lazyNode.Id.Value lazyNode graph.Nodes }
+        let graph'' = addChildToParent lazyNode.Id parentId graph'
+        processExpression expr (Some lazyNode.Id) fileName context graph''
+
+    // Type test expressions (expr :? Type)
+    | SynExpr.TypeTest(expr, targetType, range) ->
+        let typeTestNode = createNode "TypeTest" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add typeTestNode.Id.Value typeTestNode graph.Nodes }
+        let graph'' = addChildToParent typeTestNode.Id parentId graph'
+        processExpression expr (Some typeTestNode.Id) fileName context graph''
+
+    // Upcast expressions (expr :> Type)
+    | SynExpr.Upcast(expr, targetType, range) ->
+        let upcastNode = createNode "Upcast" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add upcastNode.Id.Value upcastNode graph.Nodes }
+        let graph'' = addChildToParent upcastNode.Id parentId graph'
+        processExpression expr (Some upcastNode.Id) fileName context graph''
+
+    // Downcast expressions (expr :?> Type)
+    | SynExpr.Downcast(expr, targetType, range) ->
+        let downcastNode = createNode "Downcast" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add downcastNode.Id.Value downcastNode graph.Nodes }
+        let graph'' = addChildToParent downcastNode.Id parentId graph'
+        processExpression expr (Some downcastNode.Id) fileName context graph''
+
+    // Inferred upcast (upcast expr)
+    | SynExpr.InferredUpcast(expr, range) ->
+        let inferredUpcastNode = createNode "InferredUpcast" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add inferredUpcastNode.Id.Value inferredUpcastNode graph.Nodes }
+        let graph'' = addChildToParent inferredUpcastNode.Id parentId graph'
+        processExpression expr (Some inferredUpcastNode.Id) fileName context graph''
+
+    // Inferred downcast (downcast expr)
+    | SynExpr.InferredDowncast(expr, range) ->
+        let inferredDowncastNode = createNode "InferredDowncast" range fileName None parentId
+        let graph' = { graph with Nodes = Map.add inferredDowncastNode.Id.Value inferredDowncastNode graph.Nodes }
+        let graph'' = addChildToParent inferredDowncastNode.Id parentId graph'
+        processExpression expr (Some inferredDowncastNode.Id) fileName context graph''
+
     // Hard stop on unhandled expressions
     | other ->
         let exprTypeName = other.GetType().Name
