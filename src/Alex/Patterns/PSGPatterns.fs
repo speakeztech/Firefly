@@ -210,6 +210,14 @@ let comparisonOp (mfv: FSharpMemberOrFunctionOrValue) : string option =
     | "op_Inequality" -> Some "ne"
     | _ -> None
 
+/// Check if an operator is a unary operator, return operation kind
+/// Handles FSharp.Core.Operators.not and bitwise complement
+let unaryOp (mfv: FSharpMemberOrFunctionOrValue) : string option =
+    match mfv.CompiledName with
+    | "not" | "op_LogicalNot" -> Some "not"  // Boolean negation
+    | "op_OnesComplement" -> Some "bitnot"   // Bitwise complement
+    | _ -> None
+
 /// Arithmetic operation types (for typed dispatch)
 type ArithOp = Add | Sub | Mul | Div | Mod
 
@@ -238,7 +246,7 @@ let classifyCompareOp (mfv: FSharpMemberOrFunctionOrValue) : CompareOp option =
     | _ -> None
 
 /// Check if a PSG node represents an FSharp.Core built-in operator
-/// Returns Some (mfv, opKind) where opKind is "arith" or "compare"
+/// Returns Some (mfv, opKind) where opKind is "arith", "compare", or "unary"
 let isFSharpCoreOperator (node: PSGNode) : (FSharpMemberOrFunctionOrValue * string) option =
     match node.Symbol with
     | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
@@ -246,13 +254,16 @@ let isFSharpCoreOperator (node: PSGNode) : (FSharpMemberOrFunctionOrValue * stri
             let fullName = mfv.FullName
             // Check if this is an FSharp.Core operator
             if fullName.StartsWith("Microsoft.FSharp.Core.Operators.") then
-                // Determine if arithmetic or comparison
+                // Determine if arithmetic, comparison, or unary
                 match arithmeticOp mfv with
                 | Some _ -> Some (mfv, "arith")
                 | None ->
                     match comparisonOp mfv with
                     | Some _ -> Some (mfv, "compare")
-                    | None -> None
+                    | None ->
+                        match unaryOp mfv with
+                        | Some _ -> Some (mfv, "unary")
+                        | None -> None
             else None
         with _ -> None
     | _ -> None

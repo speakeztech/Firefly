@@ -7,7 +7,7 @@ open Argu
 open CLI.Configurations.FidprojLoader
 open Core.PSG.Builder
 open Core.PSG.Reachability
-open Alex.Pipeline.CompilationOrchestrator
+open Alex.Generation.MLIRGeneration
 
 /// Command line arguments for compile command
 type CompileArgs =
@@ -66,12 +66,6 @@ let private findEntryPointFunctionName (psg: Core.PSG.Types.ProgramSemanticGraph
             else
                 sym.DisplayName
         | None -> "main"
-
-/// Generate MLIR from PSG using Alex emission pipeline
-/// Returns the MLIR content and any emission errors
-let private generateMLIRFromPSG (psg: Core.PSG.Types.ProgramSemanticGraph) (memberBodies: Map<string, Baker.Types.MemberBodyMapping>) (projectName: string) (targetTriple: string) (_outputKind: Core.Types.MLIRTypes.OutputKind) : Alex.Pipeline.CompilationOrchestrator.MLIRGenerationResult =
-    // Use Alex.Pipeline.CompilationOrchestrator.generateMLIRViaAlex
-    generateMLIRViaAlex psg memberBodies projectName targetTriple
 
 /// Lower MLIR to LLVM IR using mlir-opt and mlir-translate
 /// This is MLIR's job - PSG is done at this point
@@ -298,14 +292,14 @@ let execute (args: ParseResults<CompileArgs>) =
 
         report verbose "MLIR" "Generating MLIR..."
 
-        let mlirResult = generateMLIRFromPSG reachabilityResult.MarkedPSG bakerResult.MemberBodies resolved.Name targetTriple resolved.OutputKind
+        let mlirResult = generateMLIR reachabilityResult.MarkedPSG bakerResult.CorrelationState targetTriple
 
         // Report emission errors
         if mlirResult.HasErrors then
             printfn ""
             printfn "[MLIR] Emission errors detected:"
             for error in mlirResult.Errors do
-                printfn "  ERROR: %s" error.Message
+                printfn "  ERROR: %s" error
             printfn ""
 
         match intermediatesDir with
@@ -484,7 +478,7 @@ let execute (args: ParseResults<CompileArgs>) =
             if mlirResult.HasErrors then
                 printfn "Compilation analysis found errors:"
                 for error in mlirResult.Errors do
-                    printfn "  ERROR: %s" error.Message
+                    printfn "  ERROR: %s" error
                 printfn ""
                 printfn "Use -k to generate intermediate files for debugging."
                 1

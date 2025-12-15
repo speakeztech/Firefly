@@ -126,66 +126,6 @@ let generateStatistics (pipelineResult: PipelineResult) (startTime: DateTime) : 
     }
 
 // ===================================================================
-// MLIR Generation via Alex
-// ===================================================================
-
-/// Result of MLIR generation including any errors
-type MLIRGenerationResult = {
-    Content: string
-    Errors: CompilerError list
-    HasErrors: bool
-}
-
-/// Collect emission errors during MLIR generation
-module EmissionErrors =
-    let mutable private errors : CompilerError list = []
-
-    let reset () = errors <- []
-    let add (err: CompilerError) = errors <- err :: errors
-    let toCompilerErrors () = errors |> List.rev
-    let hasErrors () = not (List.isEmpty errors)
-
-/// Generate MLIR from PSG using the Alex traversal architecture
-///
-/// ARCHITECTURE (correct flow):
-///   PSG → EmitContext → genNode (local pattern match) → MLIR accumulation
-///
-/// The traversal follows PSG structure. At each node, local pattern matching
-/// determines the emission. Extern primitives dispatch to platform bindings.
-/// MLIR accumulates in the EmitContext builder (correct centralization point).
-///
-/// Variable resolution uses def-use edges via findDefiningNode, NOT name-based
-/// parameter bindings. This is the correct architectural approach.
-let generateMLIRViaAlex (psg: ProgramSemanticGraph) (memberBodies: Map<string, Baker.Types.MemberBodyMapping>) (projectName: string) (targetTriple: string) : MLIRGenerationResult =
-    // Reset error collector for this compilation
-    EmissionErrors.reset()
-
-    // Register all platform bindings
-    Alex.Bindings.Time.TimeBindings.registerBindings ()
-    Alex.Bindings.Console.ConsoleBindings.registerBindings ()
-    Alex.Bindings.Process.ProcessBindings.registerBindings ()
-
-    // Set target platform from triple
-    match TargetPlatform.parseTriple targetTriple with
-    | Some platform -> ExternDispatch.setTargetPlatform platform
-    | None -> ()  // Use default (auto-detect)
-
-    // Use MLIRGeneration module (proper EmitContext + def-use edge architecture)
-    // This uses PSGXParsec.EmitContext with NodeSSA tracking and def-use edge resolution
-    let result = Alex.Generation.MLIRGeneration.generateMLIR psg targetTriple
-
-    // Convert errors to CompilerError format
-    let errors =
-        result.Errors
-        |> List.map (fun msg -> { Phase = "MLIR Generation"; Message = msg; Location = None; Severity = Error })
-
-    {
-        Content = result.Content
-        Errors = errors
-        HasErrors = result.HasErrors
-    }
-
-// ===================================================================
 // Intermediate File Management
 // ===================================================================
 

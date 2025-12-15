@@ -18,6 +18,7 @@ open Alex.Patterns.PSGPatterns
 open Alex.CodeGeneration.MLIRBuilder
 open Alex.Bindings.BindingTypes
 open Core.PSG.Nanopass.DefUseEdges
+open Baker.Types
 
 // ═══════════════════════════════════════════════════════════════════
 // Type Mapping
@@ -115,6 +116,33 @@ let emitIdent (ctx: EmitContext) (node: PSGNode) : ExprResult =
             EmitError (sprintf "Definition %s not yet emitted" defNode.Id.Value)
     | None ->
         EmitError "No defining node found"
+
+/// Map FSharpType to MLIR type string (for struct field types)
+let private mapFSharpTypeToMLIR (ftype: FSharpType) : string =
+    try
+        if ftype.HasTypeDefinition then
+            match ftype.TypeDefinition.TryFullName with
+            | Some "System.Int32" -> "i32"
+            | Some "System.Int64" -> "i64"
+            | Some "System.Int16" -> "i16"
+            | Some "System.Byte" | Some "System.SByte" -> "i8"
+            | Some "System.Boolean" -> "i1"
+            | Some "System.IntPtr" | Some "System.UIntPtr" -> "!llvm.ptr"
+            | Some n when n.Contains("nativeptr") -> "!llvm.ptr"
+            | Some n when n.Contains("NativeStr") -> "!llvm.struct<(ptr, i64)>"
+            | _ -> "i64"  // Default for struct fields
+        else "i64"
+    with _ -> "i64"
+
+/// Map containing type to MLIR struct type
+let private mapContainingTypeToMLIR (ftype: FSharpType) : string =
+    try
+        if ftype.HasTypeDefinition then
+            match ftype.TypeDefinition.TryFullName with
+            | Some n when n.Contains("NativeStr") -> "!llvm.struct<(ptr, i64)>"
+            | _ -> "!llvm.struct<()>"  // Fallback
+        else "!llvm.struct<()>"
+    with _ -> "!llvm.struct<()>"
 
 /// Emit a sequential expression - process children in order, return last result
 let rec emitSequential (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
@@ -542,6 +570,46 @@ and findParameterNodes (graph: ProgramSemanticGraph) (pattern: PSGNode) : PSGNod
         |> List.choose (fun id -> Map.tryFind id.Value graph.Nodes)
         |> List.collect (findParameterNodes graph)
 
+/// Emit while loop
+/// WhileLoop has 2 children: condition and body
+and emitWhileLoop (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
+    let children = PSGZipper.childNodes zipper
+
+    match children with
+    | [condition; body] ->
+        // Generate unique block labels
+        let condBlock = EmitContext.nextLabel ctx
+        let bodyBlock = EmitContext.nextLabel ctx
+        let exitBlock = EmitContext.nextLabel ctx
+
+        // Jump to condition block
+        EmitContext.emitLine ctx (sprintf "llvm.br %s" condBlock)
+
+        // Condition block
+        EmitContext.emitLine ctx (sprintf "%s:" condBlock)
+        let condResult = emitNode ctx condition
+        let condSsa =
+            match condResult with
+            | Value (ssa, _) -> ssa
+            | _ -> "%cond_error"
+
+        // Conditional branch
+        EmitContext.emitLine ctx (sprintf "llvm.cond_br %s, %s, %s" condSsa bodyBlock exitBlock)
+
+        // Body block
+        EmitContext.emitLine ctx (sprintf "%s:" bodyBlock)
+        emitNode ctx body |> ignore
+        EmitContext.emitLine ctx (sprintf "llvm.br %s" condBlock)
+
+        // Exit block
+        EmitContext.emitLine ctx (sprintf "%s:" exitBlock)
+        Void
+
+    | _ ->
+        let msg = sprintf "WhileLoop expected 2 children (condition, body), got %d" (List.length children)
+        EmitContext.recordError ctx msg
+        EmitError msg
+
 /// Emit property access
 and emitPropertyAccess (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
     let node = zipper.Focus
@@ -549,27 +617,53 @@ and emitPropertyAccess (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
     let propName = if kind.StartsWith("PropertyAccess:") then kind.Substring(15) else ""
     let children = PSGZipper.childNodes zipper
 
-    match node.ConstantValue, propName with
-    | Some (Int32Value length), "Length" ->
-        let ssa = EmitContext.nextSSA ctx
-        EmitContext.emitLine ctx (sprintf "%s = arith.constant %d : i32" ssa length)
-        Value (ssa, "i32")
-    | _ ->
-        match children, propName with
-        | [target], "Length" ->
-            match target.ConstantValue with
-            | Some (StringValue s) ->
+    // First check if we have field access info from Baker correlations (O(1) range-indexed lookup)
+    match EmitContext.lookupFieldAccess ctx node with
+    | Some fieldInfo ->
+        // We have typed tree correlation - use it to emit extractvalue
+        match children with
+        | [target] ->
+            let targetResult = emitNode ctx target
+            match targetResult with
+            | Value (targetSsa, _) ->
+                let containerType = mapContainingTypeToMLIR fieldInfo.ContainingType
+                let resultType = mapFSharpTypeToMLIR fieldInfo.Field.FieldType
                 let ssa = EmitContext.nextSSA ctx
-                EmitContext.emitLine ctx (sprintf "%s = arith.constant %d : i32" ssa s.Length)
-                Value (ssa, "i32")
-            | _ ->
-                let msg = "PropertyAccess:Length reached code gen without transformation (non-constant target)"
+                EmitContext.emitLine ctx (sprintf "%s = llvm.extractvalue %s[%d] : %s" ssa targetSsa fieldInfo.FieldIndex containerType)
+                Value (ssa, resultType)
+            | EmitError msg -> EmitError msg
+            | Void ->
+                let msg = sprintf "PropertyAccess:%s target emitted Void" propName
                 EmitContext.recordError ctx msg
                 EmitError msg
         | _ ->
-            let msg = sprintf "Unknown property access: %s - cannot generate code" propName
+            let msg = sprintf "PropertyAccess:%s with field info but wrong number of children (%d)" propName (List.length children)
             EmitContext.recordError ctx msg
             EmitError msg
+
+    | None ->
+        // No correlation info - fall back to existing behavior
+        match node.ConstantValue, propName with
+        | Some (Int32Value length), "Length" ->
+            let ssa = EmitContext.nextSSA ctx
+            EmitContext.emitLine ctx (sprintf "%s = arith.constant %d : i32" ssa length)
+            Value (ssa, "i32")
+        | _ ->
+            match children, propName with
+            | [target], "Length" ->
+                match target.ConstantValue with
+                | Some (StringValue s) ->
+                    let ssa = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = arith.constant %d : i32" ssa s.Length)
+                    Value (ssa, "i32")
+                | _ ->
+                    let msg = "PropertyAccess:Length reached code gen without correlation info (non-constant target)"
+                    EmitContext.recordError ctx msg
+                    EmitError msg
+            | _ ->
+                let msg = sprintf "Unknown property access: %s - cannot generate code" propName
+                EmitContext.recordError ctx msg
+                EmitError msg
 
 /// Emit semantic primitive
 and emitSemanticPrimitive (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
@@ -666,6 +760,8 @@ and emitNode (ctx: EmitContext) (node: PSGNode) : ExprResult =
         emitPropertyAccess ctx zipper
     elif kind.StartsWith("SemanticPrimitive:") then
         emitSemanticPrimitive ctx zipper
+    elif kind = "WhileLoop" then
+        emitWhileLoop ctx zipper
     elif kind.StartsWith("Pattern:") then
         let children = PSGZipper.childNodes zipper
         match children with
@@ -723,9 +819,25 @@ type MLIRGenerationResult = {
 }
 
 /// Generate complete MLIR module from PSG
-let generateMLIR (psg: ProgramSemanticGraph) (target: string) : MLIRGenerationResult =
-    let ctx = EmitContext.create psg
-    let header = sprintf "// Firefly-generated MLIR\n// Target: %s\n\nmodule {\n" target
+///
+/// This is the single entry point for MLIR generation. It:
+/// 1. Registers platform bindings (Console, Time, Process)
+/// 2. Sets target platform from triple
+/// 3. Traverses PSG and emits MLIR
+/// 4. Returns the complete MLIR module with any errors
+let generateMLIR (psg: ProgramSemanticGraph) (correlationState: Baker.TypedTreeZipper.CorrelationState) (targetTriple: string) : MLIRGenerationResult =
+    // Register all platform bindings
+    Alex.Bindings.Time.TimeBindings.registerBindings ()
+    Alex.Bindings.Console.ConsoleBindings.registerBindings ()
+    Alex.Bindings.Process.ProcessBindings.registerBindings ()
+
+    // Set target platform from triple
+    match TargetPlatform.parseTriple targetTriple with
+    | Some platform -> ExternDispatch.setTargetPlatform platform
+    | None -> ()  // Use default (auto-detect)
+
+    let ctx = EmitContext.create psg correlationState
+    let header = sprintf "// Firefly-generated MLIR\n// Target: %s\n\nmodule {\n" targetTriple
 
     // Find and emit entry points
     let entryPoints = psg.EntryPoints |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)

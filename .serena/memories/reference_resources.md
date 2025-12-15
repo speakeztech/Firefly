@@ -44,8 +44,29 @@ These resources are ESSENTIAL for understanding the project architecture and mak
 
 Essential reading in `/docs/`:
 - `Architecture_Canonical.md` - **AUTHORITATIVE**: Two-layer model, extern primitives, anti-patterns
+- `PSG_Nanopass_Architecture.md` - Nanopass design, typed tree overlay, SRTP
+- `Baker_Architecture.md` - Two-tree zipper, type correlation
+- `DCont_Pipeline_Roadmap.md` - Delimited continuations pipeline
 - `PSG_architecture.md` - PSG design decisions, node identity, reachability
-- `PSG_Nanopass_Architecture.md` - Nanopass design, def-use edges, enrichment
 - `Alex_Architecture_Overview.md` - Alex overview
 - `XParsec_PSG_Architecture.md` - XParsec integration with Zipper
 - `HelloWorld_Lessons_Learned.md` - Common pitfalls and solutions
+
+## Key SpeakEZ Blog Posts
+
+Architectural philosophy at `~/repos/SpeakEZ/hugo/content/blog`:
+- `Baker A Key Ingredient to Firefly.md` - Two-tree zipper, nanopass integration
+- `Delimited Continuations Fidelitys Turning Point.md` - DCont as unifying abstraction
+- `DCont Inet Duality.md` - Sequential vs parallel CE patterns
+- `The Full Frosty Experience.md` - Async with RAII through continuations
+- `FSharp Autocomplete Integration.md` - FSAC extension for `.fidproj` support
+
+## Early Integration: FSAC for Design-Time Tooling
+
+See `fsac_integration_plan` memory for details on:
+- Extending FSAC to support `.fidproj` files
+- VS Code/Ionide and nvim configuration
+- Multi-pane compiler development (F# → MLIR → LLVM)
+- Farscape + clangd for C/C++ binding development
+
+This enables familiar IntelliSense and error highlighting while targeting native compilation.

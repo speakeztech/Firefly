@@ -154,10 +154,38 @@ The `"__fidelity"` library is a marker. `ExternDispatch` looks up bindings by en
 ## Coeffects and Codata
 
 From the SpeakEZ blog:
-- **Coeffects** track what code NEEDS - carried in PSG, not computed during emission
+- **Coeffects** track what code NEEDS from its environment (requirements, not products)
 - **Codata** is demand-driven - Zipper "observes" nodes as it traverses
 
 The Zipper doesn't decide what to do. The PSG node carries enough information (via nanopass enrichment) that emission is deterministic.
+
+**Coeffect-based compilation decisions:**
+```fsharp
+type ResourceCoeffect =
+    | NoResources                        // Pure computation - aggressive optimization
+    | StackBounded of size: int          // Stack-allocated, auto-cleanup
+    | ContinuationBounded of resources   // Cleanup at continuation completion
+    | ExternalResources of handles       // Requires explicit management
+```
+
+## Delimited Continuations: The Unifying Abstraction
+
+Delimited continuations are the connective tissue between:
+- **Async expressions** - continuations with I/O-triggered resumption
+- **Actor model** - continuations with message-triggered resumption  
+- **Computation expressions** - syntax sugar for continuation manipulation
+
+All compile through the **DCont MLIR dialect**, share optimization passes, benefit from similar representations.
+
+**The DCont/Inet Duality:**
+- **DCont (Sequential)**: Each step depends on previous (`async`, monads)
+- **Inet (Parallel)**: No dependencies (`query`, list comprehensions)
+
+The compiler identifies boundaries between pure regions (Inet) and effectful regions (DCont).
+
+**RAII Through Continuation Completion:** Resource cleanup occurs when continuations terminate, not at arbitrary textual boundaries. This aligns resource lifetimes with computation lifetimes.
+
+See `delimited_continuations_architecture` memory and `/docs/DCont_Pipeline_Roadmap.md` for details.
 
 ## Zoom Out Before Fixing
 

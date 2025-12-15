@@ -4,13 +4,51 @@
 /// compute graph - nodes marked IsReachable = true.
 ///
 /// This module defines:
+/// - FieldAccessInfo: Field access information from typed tree
 /// - MemberBodyMapping: Maps member symbols to their FSharpExpr bodies
-/// - BakerContext: Accumulated state during Baker processing
+/// - BakerStatistics: Processing statistics
 module Baker.Types
 
 open FSharp.Compiler.Text
 open FSharp.Compiler.Symbols
 open Core.PSG.Types
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Field Access Types - Extracted from typed tree for struct field emission
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Field access information from FSharpFieldGet
+/// Used for emitting llvm.extractvalue operations
+type FieldAccessInfo = {
+    /// The containing type (e.g., NativeStr)
+    ContainingType: FSharpType
+    /// The field being accessed
+    Field: FSharpField
+    /// Field name (e.g., "Length", "Pointer")
+    FieldName: string
+    /// Field index in the struct (for extraction)
+    FieldIndex: int
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SRTP Resolution Types - For future use
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// SRTP resolution details (for future TraitCall handling)
+type SRTPResolutionInfo = {
+    /// The trait name (e.g., "op_Dollar")
+    TraitName: string
+    /// Source types with the constraint
+    SourceTypes: FSharpType list
+    /// Argument types
+    ArgTypes: FSharpType list
+    /// Return types
+    ReturnTypes: FSharpType list
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Member Body Types
+// ═══════════════════════════════════════════════════════════════════════════
 
 /// Maps a member (function, static member, etc.) to its typed expression body.
 /// Used to look up bodies for inlining during MLIR emission.
@@ -65,16 +103,12 @@ module MemberBodyKey =
             }
         else None
 
-/// Result of Baker enrichment phase
-type BakerResult = {
-    /// Member body mappings (key -> mapping)
-    MemberBodies: Map<string, MemberBodyMapping>
-    /// Statistics about the enrichment
-    Statistics: BakerStatistics
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// Statistics
+// ═══════════════════════════════════════════════════════════════════════════
 
 /// Statistics about Baker processing
-and BakerStatistics = {
+type BakerStatistics = {
     /// Total members processed
     TotalMembers: int
     /// Members with bodies extracted

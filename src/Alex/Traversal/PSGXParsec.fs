@@ -20,6 +20,8 @@ open XParsec
 open FSharp.Compiler.Symbols
 open Core.PSG.Types
 open Alex.Traversal.PSGZipper
+open Baker.Types
+open Baker.TypedTreeZipper
 
 // ═══════════════════════════════════════════════════════════════════
 // Safe Symbol Helpers
@@ -80,9 +82,11 @@ open Alex.CodeGeneration.MLIRBuilder
 /// Access through reference in PSGParseState.
 /// This is a CLASS (reference type) so equality is reference equality, which is fine for XParsec.
 [<Sealed>]
-type EmitContext(graph: ProgramSemanticGraph) =
+type EmitContext(graph: ProgramSemanticGraph, correlationState: CorrelationState) =
     /// The full PSG for edge lookups (def-use resolution)
     member _.Graph = graph
+    /// Baker correlation state (range-indexed maps for O(1) lookup)
+    member _.CorrelationState = correlationState
     /// MLIR output builder state
     member val Builder = BuilderState.create () with get
     /// Map from NodeId to emitted SSA value (for variable resolution via def-use edges)
@@ -101,9 +105,17 @@ type EmitContext(graph: ProgramSemanticGraph) =
     member val Errors : string list = [] with get, set
 
 module EmitContext =
-    /// Create emission context from a PSG
-    let create (graph: ProgramSemanticGraph) : EmitContext =
-        EmitContext(graph)
+    /// Create emission context from a PSG and Baker correlation state
+    let create (graph: ProgramSemanticGraph) (correlationState: CorrelationState) : EmitContext =
+        EmitContext(graph, correlationState)
+
+    /// Look up field access info for a PSG node (O(1) via range-indexed map)
+    let lookupFieldAccess (ctx: EmitContext) (node: PSGNode) : FieldAccessInfo option =
+        Baker.TypedTreeZipper.lookupFieldAccess ctx.CorrelationState node
+
+    /// Look up resolved type for a PSG node (O(1) via range-indexed map)
+    let lookupType (ctx: EmitContext) (node: PSGNode) : FSharpType option =
+        Baker.TypedTreeZipper.lookupType ctx.CorrelationState node
 
     /// Record that a node was emitted with a given SSA value
     let recordNodeSSA (ctx: EmitContext) (nodeId: NodeId) (ssa: string) (mlirType: string) : unit =
@@ -200,18 +212,18 @@ module PSGParseState =
           EmitCtx = None }
 
     /// Create for emission with full context
-    let forEmission (graph: ProgramSemanticGraph) (focusNodeId: string) (ssaCounter: int) : PSGParseState =
+    let forEmission (graph: ProgramSemanticGraph) (correlationState: CorrelationState) (focusNodeId: string) (ssaCounter: int) : PSGParseState =
         { SSACounter = ssaCounter
           LabelCounter = 0
           FocusNodeId = focusNodeId
-          EmitCtx = Some (EmitContext.create graph) }
+          EmitCtx = Some (EmitContext.create graph correlationState) }
 
-    /// Create for emission from zipper
-    let forEmissionFromZipper (zipper: PSGZipper) : PSGParseState =
+    /// Create for emission from zipper with Baker correlation state
+    let forEmissionFromZipper (zipper: PSGZipper) (correlationState: CorrelationState) : PSGParseState =
         { SSACounter = zipper.State.SSACounter
           LabelCounter = zipper.State.LabelCounter
           FocusNodeId = zipper.Focus.Id.Value
-          EmitCtx = Some (EmitContext.create zipper.Graph) }
+          EmitCtx = Some (EmitContext.create zipper.Graph correlationState) }
 
     /// Increment SSA counter
     let nextSSA (state: PSGParseState) : PSGParseState * string =

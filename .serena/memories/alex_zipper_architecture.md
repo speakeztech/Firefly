@@ -101,12 +101,46 @@ match symbolName with
 if node.SymbolName.Contains("Console") then ...
 ```
 
+## Two Zippers, Two Purposes
+
+Firefly uses zippers in two distinct contexts with symmetric architecture:
+
+| Aspect | Baker's TypedTreeZipper | Alex's PSGZipper |
+|--------|-------------------------|------------------|
+| **Trees** | FSharpExpr + PSGNode (two-tree) | PSGNode only |
+| **Purpose** | Correlation/enrichment | Code generation |
+| **Direction** | Inward (gathering type info) | Outward (emitting MLIR) |
+| **State** | Accumulated correlations, member bodies | Emitted MLIR, SSA counters |
+| **Phase** | Phase 4 (typed tree overlay) | Final emission |
+
+**Zipper Coherence**: Both zippers operate on the **same narrowed graph** - the reachable subset determined in Phase 3. SRTP resolutions found by Baker are exactly those needed by Alex.
+
+Baker focuses *in* on the application graph (gathering); Alex fans *out* to MLIR (emitting). One gathers, the other generates - a lens into a prism across the nanopass boundary.
+
+## Correlation Flow from Baker
+
+Baker provides `CorrelationInfo` that flows into Alex's `EmitContext`:
+
+```fsharp
+// CompileCommand.fs calls:
+let mlirResult = generateMLIR psg bakerResult.Correlations targetTriple
+
+// MLIRGeneration.fs creates context:
+let ctx = EmitContext.create psg correlations
+
+// EmitContext provides lookups:
+let fieldInfo = EmitContext.lookupFieldAccess ctx nodeId
+```
+
+`FieldAccessInfo` enables correct `llvm.extractvalue` emission for struct fields like `NativeStr.Length`.
+
 ## Key Files
 
 | File | Role |
 |------|------|
+| `Alex/Generation/MLIRGeneration.fs` | Single MLIR generation entry point |
 | `Alex/Traversal/PSGZipper.fs` | Bidirectional PSG traversal (attention) |
-| `Alex/Traversal/PSGXParsec.fs` | XParsec combinators for local pattern matching |
+| `Alex/Traversal/PSGXParsec.fs` | XParsec combinators, EmitContext with correlations |
 | `Alex/Bindings/BindingTypes.fs` | ExternDispatch registry, platform types |
 | `Alex/Bindings/Console/ConsoleBindings.fs` | Console I/O platform bindings (data) |
 | `Alex/CodeGeneration/MLIRBuilder.fs` | MLIR accumulation (correct centralization point) |
