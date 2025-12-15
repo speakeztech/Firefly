@@ -1,22 +1,11 @@
-/// TypedTreeZipper - Two-tree zipper correlating FSharpExpr with PSGNode
+/// TypedTreeZipper - Two-tree zipper for FSharpExpr/PSG correlation
 ///
-/// This module walks the FCS typed tree and extracts semantic information
-/// that the syntax-based PSG doesn't have: resolved types, SRTP resolutions,
-/// field access info.
+/// This module implements the dual-tree zipper described in the Baker architecture:
+/// - Maintains synchronized position in BOTH typed tree AND PSG
+/// - Navigation is O(1): up, down, left, right
+/// - Structural position determines correspondence (no range searching)
 ///
-/// ARCHITECTURE NOTE (Dec 2024):
-/// The original design attempted synchronized dual-tree navigation with
-/// range-based correlation at every expression. This didn't work because:
-/// 1. The typed tree and PSG have DIFFERENT structures (semantic vs syntactic)
-/// 2. Range-based searching is O(n) per expression = O(n²) overall
-/// 3. Ranges differ subtly between representations
-///
-/// Current approach:
-/// - Phase A: Walk declarations, extract member bodies (for inlining)
-/// - Phase B: Walk typed tree, build range-indexed info map
-/// - At emission: O(1) lookup by PSG node range
-///
-/// CRITICAL: This operates AFTER reachability analysis (Phase 3).
+/// The zipper "carries context" - as we navigate, we know where we are in both trees.
 module Baker.TypedTreeZipper
 
 open FSharp.Compiler.Symbols
@@ -26,168 +15,437 @@ open Core.PSG.Types
 open Baker.Types
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Range Key for Indexing
+// Typed Tree Zipper - Navigation through FSharpExpr
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Normalized range key for O(1) lookup
-type RangeKey = {
-    FileName: string
-    StartLine: int
-    StartColumn: int
-    EndLine: int
-    EndColumn: int
+/// Breadcrumb for typed tree navigation - records how we got here
+type TypedCrumb = {
+    /// Parent expression
+    Parent: FSharpExpr
+    /// Index of current child in parent's ImmediateSubExpressions
+    ChildIndex: int
+    /// Siblings before current position
+    Before: FSharpExpr list
+    /// Siblings after current position
+    After: FSharpExpr list
 }
 
-module RangeKey =
-    let fromRange (r: range) : RangeKey =
-        {
-            FileName = System.IO.Path.GetFileName r.FileName
-            StartLine = r.StartLine
-            StartColumn = r.StartColumn
-            EndLine = r.EndLine
-            EndColumn = r.EndColumn
-        }
+/// Zipper for navigating FSharpExpr tree
+type TypedZipper = {
+    /// Current focused expression
+    Focus: FSharpExpr
+    /// Path back to root (stack of breadcrumbs)
+    Path: TypedCrumb list
+}
 
-    let fromPSGNode (node: PSGNode) : RangeKey =
-        fromRange node.Range
+module TypedZipper =
+    /// Create zipper focused on an expression (at root)
+    let create (expr: FSharpExpr) : TypedZipper =
+        { Focus = expr; Path = [] }
+
+    /// Move down to first child, if any
+    /// Protected against FCS constraint solver exceptions
+    let down (z: TypedZipper) : TypedZipper option =
+        try
+            let children = z.Focus.ImmediateSubExpressions
+            match children with
+            | [] -> None
+            | first :: rest ->
+                Some {
+                    Focus = first
+                    Path = {
+                        Parent = z.Focus
+                        ChildIndex = 0
+                        Before = []
+                        After = rest
+                    } :: z.Path
+                }
+        with _ -> None
+
+    /// Move up to parent
+    let up (z: TypedZipper) : TypedZipper option =
+        match z.Path with
+        | [] -> None
+        | crumb :: rest ->
+            Some { Focus = crumb.Parent; Path = rest }
+
+    /// Move to next sibling (right)
+    let right (z: TypedZipper) : TypedZipper option =
+        match z.Path with
+        | [] -> None
+        | crumb :: rest ->
+            match crumb.After with
+            | [] -> None
+            | next :: afterNext ->
+                Some {
+                    Focus = next
+                    Path = {
+                        Parent = crumb.Parent
+                        ChildIndex = crumb.ChildIndex + 1
+                        Before = z.Focus :: crumb.Before
+                        After = afterNext
+                    } :: rest
+                }
+
+    /// Move to previous sibling (left)
+    let left (z: TypedZipper) : TypedZipper option =
+        match z.Path with
+        | [] -> None
+        | crumb :: rest ->
+            match crumb.Before with
+            | [] -> None
+            | prev :: beforePrev ->
+                Some {
+                    Focus = prev
+                    Path = {
+                        Parent = crumb.Parent
+                        ChildIndex = crumb.ChildIndex - 1
+                        Before = beforePrev
+                        After = z.Focus :: crumb.After
+                    } :: rest
+                }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PSG Navigation - For Baker's internal use (distinct from Alex.Traversal.PSGZipper)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Breadcrumb for PSG navigation
+type BakerPSGCrumb = {
+    /// Parent node ID
+    ParentId: NodeId
+    /// Index of current child among parent's children
+    ChildIndex: int
+    /// Sibling IDs before current
+    Before: NodeId list
+    /// Sibling IDs after current
+    After: NodeId list
+}
+
+/// Baker's internal PSG zipper (separate from Alex.Traversal.PSGZipper)
+type BakerPSGZipper = {
+    /// Current focused node
+    FocusNode: PSGNode
+    /// Path back to root
+    Crumbs: BakerPSGCrumb list
+    /// The full graph (for node lookups)
+    FullGraph: ProgramSemanticGraph
+}
+
+module BakerPSGZipper =
+    /// Get children of a node from the graph (nodes where edge.Target = nodeId)
+    let private getChildren (graph: ProgramSemanticGraph) (nodeId: NodeId) : PSGNode list =
+        graph.Edges
+        |> List.choose (fun edge ->
+            match edge.Kind with
+            | ChildOf when edge.Target = nodeId ->
+                Map.tryFind edge.Source.Value graph.Nodes
+            | _ -> None)
+        |> List.sortBy (fun n -> n.Range.StartLine, n.Range.StartColumn)
+
+    /// Create zipper focused on a node
+    let create (graph: ProgramSemanticGraph) (node: PSGNode) : BakerPSGZipper =
+        { FocusNode = node; Crumbs = []; FullGraph = graph }
+
+    /// Move down to first child
+    let down (z: BakerPSGZipper) : BakerPSGZipper option =
+        let children = getChildren z.FullGraph z.FocusNode.Id
+        match children with
+        | [] -> None
+        | first :: rest ->
+            Some {
+                FocusNode = first
+                Crumbs = {
+                    ParentId = z.FocusNode.Id
+                    ChildIndex = 0
+                    Before = []
+                    After = rest |> List.map (fun n -> n.Id)
+                } :: z.Crumbs
+                FullGraph = z.FullGraph
+            }
+
+    /// Move up to parent
+    let up (z: BakerPSGZipper) : BakerPSGZipper option =
+        match z.Crumbs with
+        | [] -> None
+        | crumb :: rest ->
+            match Map.tryFind crumb.ParentId.Value z.FullGraph.Nodes with
+            | None -> None
+            | Some parent ->
+                Some { FocusNode = parent; Crumbs = rest; FullGraph = z.FullGraph }
+
+    /// Move to next sibling
+    let right (z: BakerPSGZipper) : BakerPSGZipper option =
+        match z.Crumbs with
+        | [] -> None
+        | crumb :: rest ->
+            match crumb.After with
+            | [] -> None
+            | nextId :: afterNext ->
+                match Map.tryFind nextId.Value z.FullGraph.Nodes with
+                | None -> None
+                | Some next ->
+                    Some {
+                        FocusNode = next
+                        Crumbs = {
+                            ParentId = crumb.ParentId
+                            ChildIndex = crumb.ChildIndex + 1
+                            Before = z.FocusNode.Id :: crumb.Before
+                            After = afterNext
+                        } :: rest
+                        FullGraph = z.FullGraph
+                    }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Correlation State
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Accumulated state during traversal
+/// Correlation state accumulated during traversal
 type CorrelationState = {
-    /// Member name -> (member, body) for function inlining
+    /// NodeId.Value -> FieldAccessInfo for PropertyAccess nodes
+    FieldAccess: Map<string, FieldAccessInfo>
+    /// NodeId.Value -> resolved FSharpType
+    Types: Map<string, FSharpType>
+    /// Member fullName -> (member, body) for inlining
     MemberBodies: Map<string, FSharpMemberOrFunctionOrValue * FSharpExpr>
-    /// Range -> FieldAccessInfo for struct field access
-    FieldAccessByRange: Map<RangeKey, FieldAccessInfo>
-    /// Range -> Resolved type
-    TypesByRange: Map<RangeKey, FSharpType>
 }
 
 module CorrelationState =
-    let empty = {
+    let empty : CorrelationState = {
+        FieldAccess = Map.empty
+        Types = Map.empty
         MemberBodies = Map.empty
-        FieldAccessByRange = Map.empty
-        TypesByRange = Map.empty
     }
+
+    let addFieldAccess nodeId info state =
+        { state with FieldAccess = Map.add nodeId info state.FieldAccess }
+
+    let addType nodeId ftype state =
+        { state with Types = Map.add nodeId ftype state.Types }
 
     let addMemberBody fullName mfv body state =
         { state with MemberBodies = Map.add fullName (mfv, body) state.MemberBodies }
 
-    let addFieldAccess range info state =
-        { state with FieldAccessByRange = Map.add range info state.FieldAccessByRange }
-
-    let addType range ftype state =
-        { state with TypesByRange = Map.add range ftype state.TypesByRange }
+/// The dual-tree zipper - maintains synchronized position in both trees
+type DualZipper = {
+    /// Position in typed tree
+    Typed: TypedZipper
+    /// Position in PSG (None if no correlation at this point)
+    PSG: BakerPSGZipper option
+    /// Accumulated correlations
+    State: CorrelationState
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Field Access Extraction
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Find the field index for a field in its containing type
+/// Find field index in containing type (protected against FCS exceptions)
 let private getFieldIndex (containingType: FSharpType) (field: FSharpField) : int =
-    if containingType.HasTypeDefinition then
-        let entity = containingType.TypeDefinition
-        if entity.IsFSharpRecord || entity.IsValueType then
-            entity.FSharpFields
-            |> Seq.tryFindIndex (fun f -> f.Name = field.Name)
-            |> Option.defaultValue 0
+    try
+        if containingType.HasTypeDefinition then
+            let entity = containingType.TypeDefinition
+            if entity.IsFSharpRecord || entity.IsValueType then
+                entity.FSharpFields
+                |> Seq.tryFindIndex (fun f -> f.Name = field.Name)
+                |> Option.defaultValue 0
+            else 0
         else 0
-    else 0
+    with _ -> 0
 
-/// Extract FieldAccessInfo from FSharpFieldGet expression
+/// Extract FieldAccessInfo from current typed tree focus (protected against FCS exceptions)
 let private extractFieldAccess (expr: FSharpExpr) : FieldAccessInfo option =
-    match expr with
-    | FSharpFieldGet(_, containingType, field) ->
-        Some {
-            ContainingType = containingType
-            Field = field
-            FieldName = field.Name
-            FieldIndex = getFieldIndex containingType field
-        }
-    | _ -> None
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Expression Tree Walking (No PSG correlation - just extraction)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Walk an expression tree and extract interesting info into state
-let rec private walkExpression (expr: FSharpExpr) (state: CorrelationState) : CorrelationState =
     try
-        let rangeKey = RangeKey.fromRange expr.Range
-
-        // Record type for this expression (may throw on unsolved constraints)
-        let state =
-            try
-                CorrelationState.addType rangeKey expr.Type state
-            with _ -> state
-
-        // Check for field access
-        let state =
-            match extractFieldAccess expr with
-            | Some fieldInfo -> CorrelationState.addFieldAccess rangeKey fieldInfo state
-            | None -> state
-
-        // Recurse into children (may throw on expressions with constraint issues)
-        try
-            expr.ImmediateSubExpressions
-            |> List.fold (fun s child -> walkExpression child s) state
-        with _ -> state
-    with _ -> state
+        match expr with
+        | FSharpFieldGet(_, containingType, field) ->
+            Some {
+                ContainingType = containingType
+                Field = field
+                FieldName = field.Name
+                FieldIndex = getFieldIndex containingType field
+            }
+        | _ -> None
+    with _ -> None
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Declaration Walking
+// Correlation Logic
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Process a single declaration
-let rec private processDeclaration (decl: FSharpImplementationFileDeclaration) (state: CorrelationState) : CorrelationState =
+/// Record correlation at current synchronized position
+/// Protected against FCS constraint solver exceptions
+let private recordCorrelation (dual: DualZipper) : CorrelationState =
     try
-        match decl with
-        | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(mfv, _args, body) ->
-            // Record member body for inlining lookup
+        match dual.PSG with
+        | None -> dual.State
+        | Some psgZipper ->
+            let nodeId = psgZipper.FocusNode.Id.Value
+            let expr = dual.Typed.Focus
+
+            // Record type (may throw for SRTP expressions)
             let state =
                 try
-                    CorrelationState.addMemberBody mfv.FullName mfv body state
-                with _ -> state
+                    CorrelationState.addType nodeId expr.Type dual.State
+                with _ -> dual.State
 
-            // Walk the body to extract expression-level info
-            walkExpression body state
+            // Record field access if applicable
+            match extractFieldAccess expr with
+            | Some fieldInfo -> CorrelationState.addFieldAccess nodeId fieldInfo state
+            | None -> state
+    with _ ->
+        // If anything fails, just return the unchanged state
+        dual.State
 
-        | FSharpImplementationFileDeclaration.Entity(_entity, decls) ->
-            // Process nested declarations
-            decls |> List.fold (fun s d -> processDeclaration d s) state
+// ═══════════════════════════════════════════════════════════════════════════
+// Synchronized Traversal
+// ═══════════════════════════════════════════════════════════════════════════
 
-        | FSharpImplementationFileDeclaration.InitAction expr ->
-            // Walk init action expression
-            walkExpression expr state
+/// Try to find initial PSG correlation for a typed tree expression by range
+let private findPSGNodeByRange (graph: ProgramSemanticGraph) (range: range) : PSGNode option =
+    graph.Nodes
+    |> Map.tryPick (fun _ node ->
+        if node.Range.FileName = range.FileName &&
+           node.Range.StartLine = range.StartLine &&
+           node.Range.StartColumn = range.StartColumn then
+            Some node
+        else None)
+
+/// Walk the dual zipper, recording correlations at each step
+let rec private walkDual (dual: DualZipper) : CorrelationState =
+    // Record correlation at current position
+    let state = recordCorrelation { dual with State = dual.State }
+
+    // Try to descend into children
+    match TypedZipper.down dual.Typed with
+    | None ->
+        // No children, we're at a leaf - return accumulated state
+        state
+    | Some typedChild ->
+        // Descend in PSG too if we have correlation
+        let psgChild = dual.PSG |> Option.bind BakerPSGZipper.down
+
+        // Walk the first child
+        let stateAfterChild = walkDual {
+            Typed = typedChild
+            PSG = psgChild
+            State = state
+        }
+
+        // Walk remaining siblings
+        walkSiblings { dual with Typed = typedChild; PSG = psgChild; State = stateAfterChild }
+
+and private walkSiblings (dual: DualZipper) : CorrelationState =
+    match TypedZipper.right dual.Typed with
+    | None ->
+        // No more siblings
+        dual.State
+    | Some typedNext ->
+        // Move right in PSG too
+        let psgNext = dual.PSG |> Option.bind BakerPSGZipper.right
+
+        // Record correlation for this sibling
+        let state = recordCorrelation { Typed = typedNext; PSG = psgNext; State = dual.State }
+
+        // Walk this sibling's children
+        let stateAfterChildren =
+            match TypedZipper.down typedNext with
+            | None -> state
+            | Some typedChild ->
+                let psgChild = psgNext |> Option.bind BakerPSGZipper.down
+                walkDual { Typed = typedChild; PSG = psgChild; State = state }
+
+        // Continue to next sibling
+        walkSiblings { Typed = typedNext; PSG = psgNext; State = stateAfterChildren }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Declaration Processing
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Process a member declaration - correlate body with PSG
+/// Protected against FCS exceptions
+let private processMember
+    (graph: ProgramSemanticGraph)
+    (mfv: FSharpMemberOrFunctionOrValue)
+    (body: FSharpExpr)
+    (state: CorrelationState)
+    : CorrelationState =
+    try
+        // Record member body for inlining
+        let state =
+            try
+                CorrelationState.addMemberBody mfv.FullName mfv body state
+            with _ -> state
+
+        // Try to find corresponding PSG node for the body
+        let psgNode =
+            try findPSGNodeByRange graph body.Range
+            with _ -> None
+
+        // Create dual zipper and walk
+        let dual = {
+            Typed = TypedZipper.create body
+            PSG = psgNode |> Option.map (BakerPSGZipper.create graph)
+            State = state
+        }
+
+        walkDual dual
     with _ -> state
 
 /// Process all declarations in a file
-let private processFile (file: FSharpImplementationFileContents) (state: CorrelationState) : CorrelationState =
+/// Protected against FCS exceptions
+let rec private processDeclaration
+    (graph: ProgramSemanticGraph)
+    (decl: FSharpImplementationFileDeclaration)
+    (state: CorrelationState)
+    : CorrelationState =
     try
-        file.Declarations
-        |> List.fold (fun s decl -> processDeclaration decl s) state
+        match decl with
+        | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue(mfv, _args, body) ->
+            processMember graph mfv body state
+
+        | FSharpImplementationFileDeclaration.Entity(_entity, decls) ->
+            decls |> List.fold (fun s d -> processDeclaration graph d s) state
+
+        | FSharpImplementationFileDeclaration.InitAction body ->
+            let psgNode =
+                try findPSGNodeByRange graph body.Range
+                with _ -> None
+            let dual = {
+                Typed = TypedZipper.create body
+                PSG = psgNode |> Option.map (BakerPSGZipper.create graph)
+                State = state
+            }
+            walkDual dual
     with _ -> state
+
+/// Process a single file
+let private processFile
+    (graph: ProgramSemanticGraph)
+    (file: FSharpImplementationFileContents)
+    (state: CorrelationState)
+    : CorrelationState =
+
+    file.Declarations
+    |> List.fold (fun s d -> processDeclaration graph d s) state
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Public API
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Walk all implementation files and extract typed tree info
-let extractTypedTreeInfo (implFiles: FSharpImplementationFileContents list) : CorrelationState =
+/// Correlate typed tree with PSG using dual-tree zipper traversal
+let correlate
+    (graph: ProgramSemanticGraph)
+    (implFiles: FSharpImplementationFileContents list)
+    : CorrelationState =
+
     implFiles
-    |> List.fold (fun state file -> processFile file state) CorrelationState.empty
+    |> List.fold (fun state file -> processFile graph file state) CorrelationState.empty
 
-/// Look up field access info by PSG node range
-let lookupFieldAccess (state: CorrelationState) (node: PSGNode) : FieldAccessInfo option =
-    let key = RangeKey.fromPSGNode node
-    Map.tryFind key state.FieldAccessByRange
+/// Look up field access info by PSG node ID
+let lookupFieldAccess (state: CorrelationState) (nodeId: NodeId) : FieldAccessInfo option =
+    Map.tryFind nodeId.Value state.FieldAccess
 
-/// Look up resolved type by PSG node range
-let lookupType (state: CorrelationState) (node: PSGNode) : FSharpType option =
-    let key = RangeKey.fromPSGNode node
-    Map.tryFind key state.TypesByRange
+/// Look up resolved type by PSG node ID
+let lookupType (state: CorrelationState) (nodeId: NodeId) : FSharpType option =
+    Map.tryFind nodeId.Value state.Types
 
 /// Look up member body by full name
 let lookupMemberBody (state: CorrelationState) (fullName: string) : (FSharpMemberOrFunctionOrValue * FSharpExpr) option =

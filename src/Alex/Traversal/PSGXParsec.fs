@@ -109,13 +109,13 @@ module EmitContext =
     let create (graph: ProgramSemanticGraph) (correlationState: CorrelationState) : EmitContext =
         EmitContext(graph, correlationState)
 
-    /// Look up field access info for a PSG node (O(1) via range-indexed map)
+    /// Look up field access info for a PSG node (by NodeId)
     let lookupFieldAccess (ctx: EmitContext) (node: PSGNode) : FieldAccessInfo option =
-        Baker.TypedTreeZipper.lookupFieldAccess ctx.CorrelationState node
+        Baker.TypedTreeZipper.lookupFieldAccess ctx.CorrelationState node.Id
 
-    /// Look up resolved type for a PSG node (O(1) via range-indexed map)
+    /// Look up resolved type for a PSG node (by NodeId)
     let lookupType (ctx: EmitContext) (node: PSGNode) : FSharpType option =
-        Baker.TypedTreeZipper.lookupType ctx.CorrelationState node
+        Baker.TypedTreeZipper.lookupType ctx.CorrelationState node.Id
 
     /// Record that a node was emitted with a given SSA value
     let recordNodeSSA (ctx: EmitContext) (nodeId: NodeId) (ssa: string) (mlirType: string) : unit =

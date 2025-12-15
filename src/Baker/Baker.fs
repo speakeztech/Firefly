@@ -22,10 +22,10 @@ type BakerEnrichmentResult = {
     EnrichedPSG: ProgramSemanticGraph
     /// Member body mappings for body lookup (fullName -> mapping)
     MemberBodies: Map<string, MemberBodyMapping>
-    /// Correlation state from TypedTreeZipper
-    /// Contains range-indexed maps for O(1) lookup of:
-    /// - FieldAccessByRange: field access info for PropertyAccess nodes
-    /// - TypesByRange: resolved types
+    /// Correlation state from TypedTreeZipper dual-tree traversal
+    /// Contains NodeId-keyed maps for O(1) lookup of:
+    /// - FieldAccess: field access info for PropertyAccess nodes
+    /// - Types: resolved types
     /// - MemberBodies: member bodies (duplicated in MemberBodies above for convenience)
     CorrelationState: CorrelationState
     /// Statistics from Baker processing
@@ -78,17 +78,17 @@ let tryLookupBodyByKey
     let fullName = sprintf "%s.%s" declaringEntity memberName
     tryLookupBody memberBodies fullName
 
-/// Look up field access info by PSG node (O(1) via range-indexed map)
+/// Look up field access info by PSG node (O(1) via NodeId lookup)
 /// Use this when emitting PropertyAccess nodes
 let tryLookupFieldAccess
     (correlationState: CorrelationState)
     (node: PSGNode)
     : FieldAccessInfo option =
-    lookupFieldAccess correlationState node
+    lookupFieldAccess correlationState node.Id
 
-/// Look up resolved type by PSG node (O(1) via range-indexed map)
+/// Look up resolved type by PSG node (O(1) via NodeId lookup)
 let tryLookupType
     (correlationState: CorrelationState)
     (node: PSGNode)
     : FSharp.Compiler.Symbols.FSharpType option =
-    lookupType correlationState node
+    lookupType correlationState node.Id

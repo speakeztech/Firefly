@@ -1,9 +1,7 @@
-/// MemberBodyMapper - Extracts member bodies from FCS typed tree
+/// MemberBodyMapper - Orchestrates dual-tree zipper correlation
 ///
-/// Uses TypedTreeZipper to walk the typed tree and extract:
-/// 1. Member bodies (for function inlining in Alex)
-/// 2. Field access info (indexed by range for O(1) lookup)
-/// 3. Resolved types (indexed by range for O(1) lookup)
+/// Uses TypedTreeZipper to walk both typed tree and PSG in tandem,
+/// extracting correlations at synchronized positions.
 ///
 /// CRITICAL: Operates AFTER reachability analysis (Phase 3).
 ///
@@ -16,38 +14,6 @@ open Core.PSG.Types
 open Baker.Types
 open Baker.TypedTreeZipper
 
-/// Filter member bodies to only include those referenced by reachable PSG nodes
-let filterToReachable
-    (allBodies: Map<string, MemberBodyMapping>)
-    (psg: ProgramSemanticGraph)
-    : Map<string, MemberBodyMapping> =
-
-    // Collect all member names referenced by reachable nodes
-    let referencedMembers =
-        psg.Nodes
-        |> Map.toSeq
-        |> Seq.filter (fun (_, node) -> node.IsReachable)
-        |> Seq.choose (fun (_, node) ->
-            match node.SRTPResolution with
-            | Some (FSMethod (_, mfv, _)) ->
-                try Some mfv.FullName with _ -> None
-            | Some (FSMethodByName name) ->
-                Some name
-            | Some (MultipleOverloads (_, candidates)) ->
-                candidates
-                |> List.tryHead
-                |> Option.map (fun c -> c.TargetMethodFullName)
-            | _ ->
-                match node.Symbol with
-                | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
-                    try Some mfv.FullName with _ -> None
-                | _ -> None)
-        |> Set.ofSeq
-
-    // Filter bodies to only those referenced
-    allBodies
-    |> Map.filter (fun key _ -> Set.contains key referencedMembers)
-
 /// Convert CorrelationState.MemberBodies to MemberBodyMapping format
 let private convertToMemberBodyMappings
     (memberBodies: Map<string, FSharpMemberOrFunctionOrValue * FSharpExpr>)
@@ -59,7 +25,7 @@ let private convertToMemberBodyMappings
             Member = mfv
             DeclarationRange = mfv.DeclarationLocation
             Body = body
-            PSGBindingId = None  // Correlation happens at emission time via range lookup
+            PSGBindingId = None
         })
 
 /// Add operator aliases for lookup flexibility
@@ -106,13 +72,13 @@ let private addOperatorAliases
 type MapperResult = {
     /// Member body mappings (fullName -> mapping)
     MemberBodies: Map<string, MemberBodyMapping>
-    /// Correlation state from TypedTreeZipper (for field access, type lookups)
+    /// Correlation state from dual-tree zipper
     CorrelationState: CorrelationState
     /// Statistics
     Statistics: BakerStatistics
 }
 
-/// Main entry point: Extract member bodies and correlation info using TypedTreeZipper
+/// Main entry point: Correlate typed tree with PSG using dual-tree zipper
 ///
 /// CRITICAL: Should be called AFTER reachability analysis (Phase 3)
 let run
@@ -120,26 +86,23 @@ let run
     (checkResults: FSharpCheckProjectResults)
     : MapperResult =
 
-    // Step 1: Use TypedTreeZipper to walk typed tree and extract correlations
+    // Use dual-tree zipper to correlate typed tree with PSG
     let implFiles = checkResults.AssemblyContents.ImplementationFiles
-    let correlationState = extractTypedTreeInfo implFiles
+    let correlationState = correlate psg implFiles
 
-    // Step 2: Convert member bodies to our MemberBodyMapping format
+    // Convert member bodies to MemberBodyMapping format
     let allBodies = convertToMemberBodyMappings correlationState.MemberBodies
 
-    // Step 3: Add operator aliases for flexible lookup
+    // Add operator aliases for flexible lookup
     let withAliases = addOperatorAliases allBodies
 
-    // Step 4: Filter to only members referenced by reachable nodes
-    let reachableBodies = filterToReachable withAliases psg
-
     {
-        MemberBodies = reachableBodies
+        MemberBodies = withAliases
         CorrelationState = correlationState
         Statistics = {
             TotalMembers = withAliases.Count
-            MembersWithBodies = reachableBodies.Count
-            MembersCorrelatedWithPSG = 0  // Correlation happens at emission time
+            MembersWithBodies = withAliases.Count
+            MembersCorrelatedWithPSG = correlationState.FieldAccess.Count + correlationState.Types.Count
             ProcessingTimeMs = 0.0
         }
     }
