@@ -15,7 +15,7 @@ let rec processBindingWithUseFlag binding parentId fileName (context: BuildConte
     match binding with
     | SynBinding(accessibility, kind, isInline, isMutable, attributes, xmlDoc, valData, pat, returnInfo, expr, range, seqPoint, trivia) ->
         // Get symbol from the PATTERN, not from loose range matching on the binding
-        let symbol = extractSymbolFromPattern pat fileName context.CorrelationContext
+        let symbol = extractSymbolFromPatternOptional pat fileName context.CorrelationContext
 
         // Check for EntryPoint attribute
         let hasEntryPointAttr =

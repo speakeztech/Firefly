@@ -187,3 +187,11 @@ let isFunction (symbol: FSharpSymbol) : bool =
     match symbol with
     | :? FSharpMemberOrFunctionOrValue as mfv -> mfv.IsFunction || mfv.IsMember
     | _ -> false
+
+/// Try to correlate a symbol with an optional context
+/// Returns None if context is None (Phase 1 structural building)
+/// This is the primary function used during PSG construction
+let tryCorrelateSymbolOptional (range: range) (fileName: string) (syntaxKind: string) (contextOpt: CorrelationContext option) : FSharpSymbol option =
+    match contextOpt with
+    | None -> None  // Phase 1: No symbol correlation during structural building
+    | Some context -> tryCorrelateSymbolWithContext range fileName syntaxKind context

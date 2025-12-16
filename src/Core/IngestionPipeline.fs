@@ -381,3 +381,205 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
             Diagnostics = List.ofSeq diagnostics
         }
 }
+
+// ============================================================================
+// OPTIMIZED PIPELINE (Phase separation for faster compilation)
+// ============================================================================
+// This pipeline uses structural reachability BEFORE type-checking to minimize
+// the amount of code that needs expensive FCS type analysis.
+//
+// Flow:
+// 1. Parse all files (fast)
+// 2. Build structural PSG (fast, no symbols)
+// 3. Structural reachability (fast)
+// 4. Get reachable files
+// 5. Type-check only reachable files (much faster!)
+// 6. Build full PSG with symbols
+// 7. Full reachability
+// 8. Baker enrichment
+
+/// Run the optimized ingestion pipeline with phase separation
+/// Uses structural reachability to minimize type-checking scope
+let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineResult> = async {
+    let diagnostics = ResizeArray<Diagnostic>()
+
+    try
+        // Step 1: Prepare intermediate outputs
+        if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+            prepareIntermediatesDirectory config.IntermediatesDir
+
+        // Step 2: Load project and get PARSE-ONLY results (fast)
+        let! ctx = loadProject projectPath config.CacheStrategy
+        let! parseOnly = getParseOnlyResults ctx
+
+        diagnostics.Add {
+            Severity = Info
+            Message = sprintf "Parsed %d files" parseOnly.ParseResults.Length
+            Location = None
+        }
+
+        // Step 3: Build STRUCTURAL PSG (fast, no type checking)
+        let structuralPSG = Core.PSG.Construction.Main.buildStructuralGraph parseOnly.ParseResults
+
+        diagnostics.Add {
+            Severity = Info
+            Message = sprintf "Built structural PSG with %d nodes" structuralPSG.Nodes.Count
+            Location = None
+        }
+
+        // Step 4: Structural reachability (fast)
+        let structuralReach, markedPSG = performStructuralReachabilityAnalysis structuralPSG
+
+        diagnostics.Add {
+            Severity = Info
+            Message = sprintf "Structural reachability: %d reachable functions, %d reachable nodes"
+                structuralReach.ReachableFunctions.Count
+                structuralReach.ReachableNodes.Count
+            Location = None
+        }
+
+        // Step 5: Get reachable files
+        let reachableFiles = getReachableFiles markedPSG
+
+        diagnostics.Add {
+            Severity = Info
+            Message = sprintf "Reachable files: %d of %d total"
+                reachableFiles.Count
+                parseOnly.SourceFiles.Length
+            Location = None
+        }
+
+        // Step 6: Type-check ONLY reachable files (the key optimization!)
+        let! projectResults = getSelectiveCheckResults parseOnly.Context reachableFiles
+
+        if projectResults.CheckResults.HasCriticalErrors then
+            diagnostics.Add {
+                Severity = Error
+                Message = "Project has critical compilation errors"
+                Location = Some projectPath
+            }
+            return {
+                Success = false
+                ProjectResults = Some projectResults
+                ProgramSemanticGraph = None
+                ReachabilityAnalysis = None
+                BakerResult = None
+                Diagnostics = List.ofSeq diagnostics
+            }
+        else
+            // Step 7: Generate intermediate outputs
+            if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                writeSymbolicAst projectResults.ParseResults config.IntermediatesDir.Value
+                writeProjectSummary projectResults config.IntermediatesDir.Value
+
+            // Step 8: Build full PSG with symbol correlation (on reduced file set)
+            if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                Core.PSG.Construction.Main.emitNanopassIntermediates <- true
+                Core.PSG.Construction.Main.nanopassOutputDir <- config.IntermediatesDir.Value
+
+            let psg = buildProgramSemanticGraph projectResults.CheckResults projectResults.ParseResults
+
+            Core.PSG.Construction.Main.emitNanopassIntermediates <- false
+
+            if psg.Nodes.Count = 0 then
+                diagnostics.Add {
+                    Severity = Error
+                    Message = "PSG construction resulted in empty graph"
+                    Location = Some projectPath
+                }
+                return {
+                    Success = false
+                    ProjectResults = Some projectResults
+                    ProgramSemanticGraph = None
+                    ReachabilityAnalysis = None
+                    BakerResult = None
+                    Diagnostics = List.ofSeq diagnostics
+                }
+            else
+                if psg.EntryPoints.Length = 0 then
+                    diagnostics.Add {
+                        Severity = Warning
+                        Message = "PSG has no entry points detected"
+                        Location = None
+                    }
+
+                // Step 9: Full (symbol-aware) reachability
+                let reachabilityResult = performReachabilityAnalysis psg
+
+                // Step 10: Generate debug outputs
+                if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                    let correlationContext = createContext projectResults.CheckResults
+                    let correlations =
+                        projectResults.ParseResults
+                        |> Array.collect (fun pr -> correlateFile pr.ParseTree correlationContext)
+                    let _stats = generateStats correlationContext correlations
+
+                    generateCorrelationDebugOutput correlations config.IntermediatesDir.Value
+                    writePSGSummary psg config.IntermediatesDir.Value
+                    generatePSGDebugOutput reachabilityResult.MarkedPSG config.IntermediatesDir.Value
+
+                    let prunedSymbols = generatePrunedSymbolData reachabilityResult.MarkedPSG reachabilityResult
+                    let comparisonData = generateComparisonData reachabilityResult.MarkedPSG reachabilityResult
+                    let callGraphData = generateCallGraphData reachabilityResult
+                    let libraryBoundaryData = generateLibraryBoundaryData reachabilityResult
+
+                    writeJsonAsset config.IntermediatesDir.Value "psg.pruned.symbols.json" prunedSymbols
+                    writeJsonAsset config.IntermediatesDir.Value "reachability.analysis.json" comparisonData
+                    writeJsonAsset config.IntermediatesDir.Value "psg.callgraph.pruned.json" callGraphData
+                    writeJsonAsset config.IntermediatesDir.Value "library.boundaries.json" libraryBoundaryData
+
+                // Step 11: Validate native types
+                let nativeValidation = validateReachable reachabilityResult.MarkedPSG
+
+                if nativeValidation.HasErrors then
+                    nativeValidation.Errors |> List.iter (fun err ->
+                        diagnostics.Add {
+                            Severity = Error
+                            Message = err.Message
+                            Location = Some (sprintf "Node %s (%s)" err.NodeId err.SyntaxKind)
+                        })
+
+                    return {
+                        Success = false
+                        ProjectResults = Some projectResults
+                        ProgramSemanticGraph = Some psg
+                        ReachabilityAnalysis = Some reachabilityResult
+                        BakerResult = None
+                        Diagnostics = List.ofSeq diagnostics
+                    }
+                else
+                    // Step 12: Baker enrichment (with reachability filter)
+                    let bakerResult = Baker.Baker.enrich reachabilityResult.MarkedPSG projectResults.CheckResults
+
+                    diagnostics.Add {
+                        Severity = Info
+                        Message = sprintf "Baker: %d member bodies, %d correlated with PSG"
+                            bakerResult.Statistics.TotalMembers
+                            bakerResult.Statistics.MembersCorrelatedWithPSG
+                        Location = None
+                    }
+
+                    return {
+                        Success = true
+                        ProjectResults = Some projectResults
+                        ProgramSemanticGraph = Some psg
+                        ReachabilityAnalysis = Some reachabilityResult
+                        BakerResult = Some bakerResult
+                        Diagnostics = List.ofSeq diagnostics
+                    }
+
+    with ex ->
+        diagnostics.Add {
+            Severity = Error
+            Message = sprintf "Optimized pipeline failed: %s" ex.Message
+            Location = Some projectPath
+        }
+        return {
+            Success = false
+            ProjectResults = None
+            ProgramSemanticGraph = None
+            ReachabilityAnalysis = None
+            BakerResult = None
+            Diagnostics = List.ofSeq diagnostics
+        }
+}

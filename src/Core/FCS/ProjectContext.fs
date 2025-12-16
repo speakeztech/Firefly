@@ -312,6 +312,80 @@ let getSymbolAt (line: int) (col: int) (fileName: string) (results: ProjectResul
 /// Get implementation file by name
 let getImplementationFile (fileName: string) (results: ProjectResults) =
     results.CheckResults.AssemblyContents.ImplementationFiles
-    |> List.tryFind (fun implFile -> 
+    |> List.tryFind (fun implFile ->
         implFile.FileName.EndsWith(fileName)
     )
+
+// ============================================================================
+// SELECTIVE TYPE-CHECKING (Phase separation support)
+// ============================================================================
+
+/// Parse-only results (fast, no type checking)
+type ParseOnlyResults = {
+    ParseResults: FSharpParseFileResults[]
+    Context: ProjectContext
+    SourceFiles: string[]
+}
+
+/// Get parse-only results (fast - no type checking)
+let getParseOnlyResults (ctx: ProjectContext) = async {
+    let parsingOptions, _ = ctx.Checker.GetParsingOptionsFromProjectOptions(ctx.ProjectOptions)
+
+    let! parseResults =
+        ctx.ProjectOptions.SourceFiles
+        |> Array.map (fun file -> async {
+            let source = SourceText.ofString(File.ReadAllText(file))
+            return! ctx.Checker.ParseFile(file, source, parsingOptions)
+        })
+        |> Async.Parallel
+
+    return {
+        ParseResults = parseResults
+        Context = ctx
+        SourceFiles = ctx.ProjectOptions.SourceFiles
+    }
+}
+
+/// Create filtered project options with only specified source files
+/// Files are kept in their original compilation order
+let createFilteredProjectOptions (ctx: ProjectContext) (reachableFiles: Set<string>) : FSharpProjectOptions =
+    // Keep only files that are in the reachable set, preserving order
+    let filteredSourceFiles =
+        ctx.ProjectOptions.SourceFiles
+        |> Array.filter (fun file -> Set.contains file reachableFiles)
+
+    { ctx.ProjectOptions with
+        SourceFiles = filteredSourceFiles }
+
+/// Type-check only specific files (creates a subset project)
+let getSelectiveCheckResults (ctx: ProjectContext) (reachableFiles: Set<string>) = async {
+    // Create filtered project options
+    let filteredOptions = createFilteredProjectOptions ctx reachableFiles
+
+    // Type-check only the filtered files
+    let! checkResults = ctx.Checker.ParseAndCheckProject(filteredOptions)
+
+    // Get parse results for filtered files
+    let parsingOptions, _ = ctx.Checker.GetParsingOptionsFromProjectOptions(filteredOptions)
+
+    let! parseResults =
+        filteredOptions.SourceFiles
+        |> Array.map (fun file -> async {
+            let source = SourceText.ofString(File.ReadAllText(file))
+            return! ctx.Checker.ParseFile(file, source, parsingOptions)
+        })
+        |> Async.Parallel
+
+    return {
+        CheckResults = checkResults
+        ParseResults = parseResults
+        SymbolUses = checkResults.GetAllUsesOfAllSymbols()
+        CompilationOrder = filteredOptions.SourceFiles
+        Context = ctx
+    }
+}
+
+/// Upgrade parse-only results to full results by type-checking specific files
+let upgradeToSelectiveCheck (parseOnly: ParseOnlyResults) (reachableFiles: Set<string>) = async {
+    return! getSelectiveCheckResults parseOnly.Context reachableFiles
+}

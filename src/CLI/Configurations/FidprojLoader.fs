@@ -383,3 +383,98 @@ let loadAndCheckProject (filePath: string) = async {
 
             return Ok (resolved, checkResults, parseResults, checker, projectOptions)
 }
+
+// ============================================================================
+// OPTIMIZED LOADING (Phase separation for faster compilation)
+// ============================================================================
+
+/// Parse-only result (fast, no type checking)
+type ParseOnlyResult = {
+    Resolved: ResolvedFidproj
+    ParseResults: FSharpParseFileResults[]
+    Checker: FSharpChecker
+    ProjectOptions: FSharpProjectOptions
+}
+
+/// Load and PARSE project (fast, no type checking)
+let loadAndParseProject (filePath: string) = async {
+    match loadFidproj filePath with
+    | Error msg ->
+        return Error msg
+    | Ok resolved ->
+        printfn "[FidprojLoader] Project '%s' resolved with %d source files" resolved.Name resolved.AllSourcesInOrder.Length
+
+        let checker = createChecker()
+        let projectOptions = createProjectOptions resolved
+
+        printfn "[FidprojLoader] Parsing (no type-checking)..."
+        let parsingOptions, _ = checker.GetParsingOptionsFromProjectOptions(projectOptions)
+
+        let! parseResults =
+            projectOptions.SourceFiles
+            |> Array.map (fun file -> async {
+                let source = FSharp.Compiler.Text.SourceText.ofString(File.ReadAllText(file))
+                return! checker.ParseFile(file, source, parsingOptions)
+            })
+            |> Async.Parallel
+
+        return Ok {
+            Resolved = resolved
+            ParseResults = parseResults
+            Checker = checker
+            ProjectOptions = projectOptions
+        }
+}
+
+/// Type-check only specified files (much faster for large projects)
+let typeCheckReachableFiles (parseOnly: ParseOnlyResult) (reachableFiles: Set<string>) = async {
+    // Create filtered project options with only reachable files
+    let filteredSourceFiles =
+        parseOnly.ProjectOptions.SourceFiles
+        |> Array.filter (fun file -> Set.contains file reachableFiles)
+
+    let filteredOptions =
+        { parseOnly.ProjectOptions with
+            SourceFiles = filteredSourceFiles }
+
+    printfn "[FidprojLoader] Type-checking %d of %d files..."
+        filteredSourceFiles.Length
+        parseOnly.ProjectOptions.SourceFiles.Length
+
+    let! checkResults = parseOnly.Checker.ParseAndCheckProject(filteredOptions)
+
+    // Get parse results for filtered files
+    let parsingOptions, _ = parseOnly.Checker.GetParsingOptionsFromProjectOptions(filteredOptions)
+
+    let! parseResults =
+        filteredSourceFiles
+        |> Array.map (fun file -> async {
+            let source = FSharp.Compiler.Text.SourceText.ofString(File.ReadAllText(file))
+            return! parseOnly.Checker.ParseFile(file, source, parsingOptions)
+        })
+        |> Async.Parallel
+
+    // Report diagnostics
+    let suppressedWarnings = set [ 9; 51 ]
+    let relevantDiagnostics =
+        checkResults.Diagnostics
+        |> Array.filter (fun d ->
+            d.Severity = FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error ||
+            not (suppressedWarnings.Contains(d.ErrorNumber)))
+
+    if relevantDiagnostics.Length > 0 then
+        printfn "[FidprojLoader] Diagnostics:"
+        for diag in relevantDiagnostics do
+            let severity =
+                match diag.Severity with
+                | FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Error -> "ERROR"
+                | FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Warning -> "WARN"
+                | FSharp.Compiler.Diagnostics.FSharpDiagnosticSeverity.Info -> "INFO"
+                | _ -> "NOTE"
+            printfn "  [%s] %s: %s" severity (Path.GetFileName(diag.FileName)) diag.Message
+
+    if checkResults.HasCriticalErrors then
+        return Error "Project has critical compilation errors"
+    else
+        return Ok (parseOnly.Resolved, checkResults, parseResults, parseOnly.Checker, filteredOptions)
+}

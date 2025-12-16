@@ -382,6 +382,195 @@ let analyzeReachability (psg: ProgramSemanticGraph) : LibraryAwareReachability =
         MarkedPSG = markedPSG
     }
 
-/// Entry point for reachability analysis
+/// Entry point for reachability analysis (requires typed PSG with symbols)
 let performReachabilityAnalysis (psg: ProgramSemanticGraph) : LibraryAwareReachability =
     analyzeReachability psg
+
+// ============================================================================
+// STRUCTURAL REACHABILITY (Phase 1 - works without type checking)
+// ============================================================================
+
+/// Structural reachability result (no symbol information)
+type StructuralReachabilityResult = {
+    EntryPointNodes: Set<string>
+    ReachableFunctions: Set<string>
+    ReachableNodes: Set<string>
+    ProvisionalCallGraph: Map<string, string list>
+}
+
+/// Find entry points from structural PSG (no symbols needed)
+let private findStructuralEntryPoints (psg: ProgramSemanticGraph) : Set<string> * Set<string> =
+    // Returns (entry point node IDs, entry point function names)
+    let mutable nodeIds = Set.empty
+    let mutable funcNames = Set.empty
+
+    for KeyValue(nodeId, node) in psg.Nodes do
+        match node.SyntaxKind with
+        | "Binding:EntryPoint" ->
+            nodeIds <- Set.add nodeId nodeIds
+            // Extract function name from binding (next part of syntax kind would have it)
+            // For now use node ID as the name key
+            funcNames <- Set.add "main" funcNames  // EntryPoint typically means main
+        | "Binding:Main" ->
+            nodeIds <- Set.add nodeId nodeIds
+            funcNames <- Set.add "main" funcNames
+        | sk when sk.StartsWith("Binding:") && sk.EndsWith(":main") ->
+            nodeIds <- Set.add nodeId nodeIds
+            funcNames <- Set.add "main" funcNames
+        | _ -> ()
+
+    // Also look for binding nodes that contain "main" in their syntax kind
+    if Set.isEmpty funcNames then
+        for KeyValue(nodeId, node) in psg.Nodes do
+            if node.SyntaxKind.Contains(":main") then
+                nodeIds <- Set.add nodeId nodeIds
+                funcNames <- Set.add "main" funcNames
+
+    nodeIds, funcNames
+
+/// Compute reachable functions from structural call graph
+let private computeStructuralReachability
+    (entryFunctions: Set<string>)
+    (callGraph: Map<string, string list>) : Set<string> =
+
+    let mutable reachable = entryFunctions
+    let mutable toProcess = Set.toList entryFunctions
+
+    while not (List.isEmpty toProcess) do
+        match toProcess with
+        | current :: rest ->
+            toProcess <- rest
+            match Map.tryFind current callGraph with
+            | Some callees ->
+                for callee in callees do
+                    if not (Set.contains callee reachable) then
+                        reachable <- Set.add callee reachable
+                        toProcess <- callee :: toProcess
+            | None -> ()
+        | [] -> ()
+
+    reachable
+
+/// Mark all nodes within reachable functions as reachable
+let private markStructuralReachability
+    (psg: ProgramSemanticGraph)
+    (reachableFunctions: Set<string>)
+    (entryPointNodes: Set<string>) : ProgramSemanticGraph =
+
+    // Build a map of function names to their binding node IDs
+    let functionToNodes =
+        psg.Nodes
+        |> Map.toSeq
+        |> Seq.choose (fun (nodeId, node) ->
+            // Extract function name from syntax kind like "Binding:functionName"
+            if node.SyntaxKind.StartsWith("Binding:") then
+                let funcName =
+                    let suffix = node.SyntaxKind.Substring(8)
+                    // Handle special cases
+                    if suffix = "EntryPoint" || suffix = "Main" then "main"
+                    elif suffix.StartsWith("Mutable:") then suffix.Substring(8)
+                    elif suffix = "Use" then "" // Skip use bindings for now
+                    else suffix
+                if funcName <> "" then Some (funcName, nodeId)
+                else None
+            else None)
+        |> Seq.groupBy fst
+        |> Seq.map (fun (name, pairs) -> name, pairs |> Seq.map snd |> Set.ofSeq)
+        |> Map.ofSeq
+
+    // Find all node IDs for reachable functions
+    let reachableBindingNodes =
+        reachableFunctions
+        |> Set.toSeq
+        |> Seq.collect (fun funcName ->
+            match Map.tryFind funcName functionToNodes with
+            | Some nodeIds -> Set.toSeq nodeIds
+            | None -> Seq.empty)
+        |> Set.ofSeq
+        |> Set.union entryPointNodes
+
+    // Mark all descendants of reachable bindings
+    let mutable reachableNodeIds = Set.empty
+
+    let rec markDescendants nodeId =
+        if not (Set.contains nodeId reachableNodeIds) then
+            reachableNodeIds <- Set.add nodeId reachableNodeIds
+            match Map.tryFind nodeId psg.Nodes with
+            | Some node ->
+                match node.Children with
+                | Parent children ->
+                    for childId in children do
+                        markDescendants childId.Value
+                | _ -> ()
+            | None -> ()
+
+    for bindingId in reachableBindingNodes do
+        markDescendants bindingId
+
+    // Also mark parent chain for structural completeness
+    let markParentChain nodeId =
+        let mutable currentId = Some nodeId
+        while currentId.IsSome do
+            let nId = currentId.Value
+            reachableNodeIds <- Set.add nId reachableNodeIds
+            match Map.tryFind nId psg.Nodes with
+            | Some node ->
+                currentId <- node.ParentId |> Option.map (fun p -> p.Value)
+            | None ->
+                currentId <- None
+
+    for bindingId in reachableBindingNodes do
+        markParentChain bindingId
+
+    // Apply reachability marks to all nodes
+    let finalNodes =
+        psg.Nodes
+        |> Map.map (fun nodeId node ->
+            let isReachable = Set.contains nodeId reachableNodeIds
+            { node with
+                IsReachable = isReachable
+                EliminationReason = if isReachable then None else Some "Not structurally reachable"
+                EliminationPass = if isReachable then None else Some 0 }
+        )
+
+    { psg with Nodes = finalNodes }
+
+/// Perform structural reachability analysis (Phase 1 - before type checking)
+/// Uses provisional call graph built from syntax, not symbols
+let performStructuralReachabilityAnalysis (psg: ProgramSemanticGraph) : StructuralReachabilityResult * ProgramSemanticGraph =
+    // Import provisional call graph builder
+    let callGraph = Core.PSG.Nanopass.ProvisionalCallGraph.buildProvisionalCallGraph psg
+
+    // Find entry points from syntax
+    let entryPointNodes, entryFunctions = findStructuralEntryPoints psg
+
+    // Compute reachable functions
+    let reachableFunctions = computeStructuralReachability entryFunctions callGraph
+
+    // Mark nodes
+    let markedPSG = markStructuralReachability psg reachableFunctions entryPointNodes
+
+    // Collect reachable node IDs
+    let reachableNodes =
+        markedPSG.Nodes
+        |> Map.toSeq
+        |> Seq.filter (fun (_, node) -> node.IsReachable)
+        |> Seq.map fst
+        |> Set.ofSeq
+
+    let result = {
+        EntryPointNodes = entryPointNodes
+        ReachableFunctions = reachableFunctions
+        ReachableNodes = reachableNodes
+        ProvisionalCallGraph = callGraph
+    }
+
+    result, markedPSG
+
+/// Get the set of files that contain reachable code
+let getReachableFiles (psg: ProgramSemanticGraph) : Set<string> =
+    psg.Nodes
+    |> Map.toSeq
+    |> Seq.filter (fun (_, node) -> node.IsReachable)
+    |> Seq.map (fun (_, node) -> node.SourceFile)
+    |> Set.ofSeq

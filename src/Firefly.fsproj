@@ -39,13 +39,16 @@
       
       <!-- Program Semantic Graph (new) -->
       <Compile Include="Core/PSG/Types.fs" />
-      <Compile Include="Core/PSG/Reachability.fs" />
       <Compile Include="Core/PSG/TypeIntegration.fs" />
       <Compile Include="Core/PSG/Correlation.fs" />
       <Compile Include="Core/PSG/SymbolAnalysis.fs" />
 
       <!-- PSG Nanopass (small, single-purpose transformations) -->
       <Compile Include="Core/PSG/Nanopass/IntermediateEmission.fs" />
+      <Compile Include="Core/PSG/Nanopass/ProvisionalCallGraph.fs" />
+
+      <!-- Reachability (must come after ProvisionalCallGraph) -->
+      <Compile Include="Core/PSG/Reachability.fs" />
       <Compile Include="Core/PSG/Nanopass/FlattenApplications.fs" />
       <Compile Include="Core/PSG/Nanopass/ReducePipeOperators.fs" />
       <Compile Include="Core/PSG/Nanopass/ReduceAlloyOperators.fs" />

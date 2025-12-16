@@ -62,7 +62,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
             longDotId.LongIdent |> List.map (fun id -> id.idText) |> String.concat "."
 
         let syntaxKind = sprintf "MethodCall:%s" methodName
-        let methodSymbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+        let methodSymbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
         let methodCallNode = createNode syntaxKind range fileName methodSymbol parentId
 
         let graph' = { graph with Nodes = Map.add methodCallNode.Id.Value methodCallNode graph.Nodes }
@@ -100,7 +100,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
             if System.String.IsNullOrEmpty(typeArgNames) then "TypeApp:Generic"
             else sprintf "TypeApp:%s" typeArgNames
 
-        let genericSymbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+        let genericSymbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
 
         let typeAppNode = createNodeWithKind syntaxKind (SKExpr ETypeApp) range fileName genericSymbol parentId
         let graph' = { graph with Nodes = Map.add typeAppNode.Id.Value typeAppNode graph.Nodes }
@@ -163,7 +163,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
         | None ->
             // Normal function application
             let syntaxKind = "App:FunctionCall"
-            let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+            let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
             let appNode = createNodeWithKind syntaxKind (SKExpr EApp) range fileName symbol parentId
 
             let graph' = { graph with Nodes = Map.add appNode.Id.Value appNode graph.Nodes }
@@ -182,13 +182,13 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
             let functionCallEdges =
                 match funcExpr with
                 | SynExpr.Ident ident ->
-                    match tryCorrelateSymbolWithContext ident.idRange fileName (sprintf "Ident:%s" ident.idText) context.CorrelationContext with
+                    match tryCorrelateSymbolOptional ident.idRange fileName (sprintf "Ident:%s" ident.idText) context.CorrelationContext with
                     | Some funcSym when isFunction funcSym ->
                         [{ Source = appNode.Id; Target = appNode.Id; Kind = FunctionCall }]
                     | _ -> []
                 | SynExpr.LongIdent(_, longDotId, _, _) ->
                     let identText = longDotId.LongIdent |> List.map (fun id -> id.idText) |> String.concat "."
-                    match tryCorrelateSymbolWithContext longDotId.Range fileName (sprintf "LongIdent:%s" identText) context.CorrelationContext with
+                    match tryCorrelateSymbolOptional longDotId.Range fileName (sprintf "LongIdent:%s" identText) context.CorrelationContext with
                     | Some funcSym when isFunction funcSym ->
                         [{ Source = appNode.Id; Target = appNode.Id; Kind = FunctionCall }]
                     | _ -> []
@@ -225,7 +225,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
 
     | SynExpr.Ident ident ->
         let syntaxKind = sprintf "Ident:%s" ident.idText
-        let symbol = tryCorrelateSymbolWithContext ident.idRange fileName syntaxKind context.CorrelationContext
+        let symbol = tryCorrelateSymbolOptional ident.idRange fileName syntaxKind context.CorrelationContext
         let identNode = createNodeWithKind syntaxKind (SKExpr EIdent) ident.idRange fileName symbol parentId
 
         let graph' = { graph with Nodes = Map.add identNode.Id.Value identNode graph.Nodes }
@@ -259,7 +259,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
 
             // Create the PropertyAccess node
             let syntaxKind = sprintf "PropertyAccess:%s" propertyName
-            let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+            let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
             let propAccessNode = createNode syntaxKind range fileName symbol parentId
 
             let graph' = { graph with Nodes = Map.add propAccessNode.Id.Value propAccessNode graph.Nodes }
@@ -271,7 +271,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
             let receiverKind =
                 if List.length receiverParts = 1 then sprintf "Ident:%s" receiverText
                 else sprintf "LongIdent:%s" receiverText
-            let receiverSymbol = tryCorrelateSymbolWithContext receiverRange fileName receiverKind context.CorrelationContext
+            let receiverSymbol = tryCorrelateSymbolOptional receiverRange fileName receiverKind context.CorrelationContext
             let receiverNode = createNode receiverKind receiverRange fileName receiverSymbol (Some propAccessNode.Id)
 
             let graph''' = { graph'' with Nodes = Map.add receiverNode.Id.Value receiverNode graph'' .Nodes }
@@ -299,7 +299,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
         else
             // Simple identifier or qualified name without property access
             let syntaxKind = sprintf "LongIdent:%s" identText
-            let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+            let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
             let longIdentNode = createNode syntaxKind range fileName symbol parentId
 
             let graph' = { graph with Nodes = Map.add longIdentNode.Id.Value longIdentNode graph.Nodes }
@@ -312,7 +312,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
 
     | SynExpr.LetOrUse(isUse, _, bindings, body, range, _) ->
         let syntaxKind = if isUse then "LetOrUse:Use" else "LetOrUse:Let"
-        let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+        let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
         let letNode = createNodeWithKind syntaxKind (SKExpr ELetOrUse) range fileName symbol parentId
 
         let graph' = { graph with Nodes = Map.add letNode.Id.Value letNode graph.Nodes }
@@ -490,7 +490,7 @@ let rec processExpression (expr: SynExpr) (parentId: NodeId option) (fileName: s
             | None -> "TraitCall"
 
         // Try to correlate with the resolved symbol from FCS
-        let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+        let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
         let traitNode = createNode syntaxKind range fileName symbol parentId
         let graph' = { graph with Nodes = Map.add traitNode.Id.Value traitNode graph.Nodes }
         let graph'' = addChildToParent traitNode.Id parentId graph'

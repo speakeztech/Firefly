@@ -29,7 +29,88 @@ let mutable nanopassOutputDir = ""
 /// Symbol validation helper (no-op in production)
 let private validateSymbolCapture (_graph: ProgramSemanticGraph) = ()
 
+/// Build source files map from parse results
+let private buildSourceFiles (parseResults: FSharpParseFileResults[]) =
+    parseResults
+    |> Array.map (fun pr ->
+        let content =
+            if File.Exists pr.FileName then
+                File.ReadAllText pr.FileName
+            else ""
+        pr.FileName, content
+    )
+    |> Map.ofArray
+
+/// Build structural PSG from parse results only (Phase 1)
+/// This is fast - no type checking required
+/// Used for reachability analysis before type checking
+let buildStructuralGraph (parseResults: FSharpParseFileResults[]) : ProgramSemanticGraph =
+    // Force initialization of BindingProcessing module
+    Core.PSG.Construction.BindingProcessing.ensureInitialized ()
+
+    let sourceFiles = buildSourceFiles parseResults
+
+    // Create structural-only context (no symbol correlation)
+    let context = createStructuralContext parseResults sourceFiles
+
+    // Process each file and merge results
+    let graphs =
+        parseResults
+        |> Array.choose (fun pr ->
+            match pr.ParseTree with
+            | ParsedInput.ImplFile implFile ->
+                let (ParsedImplFileInput(contents = modules)) = implFile
+                let emptyGraph = {
+                    Nodes = Map.empty
+                    Edges = []
+                    SymbolTable = Map.empty
+                    EntryPoints = []
+                    SourceFiles = sourceFiles
+                    CompilationOrder = []
+                    StringLiterals = Map.empty
+                }
+                let processedGraph =
+                    modules |> List.fold (fun acc implFile ->
+                        processImplFile implFile context acc) emptyGraph
+                Some processedGraph
+            | _ -> None
+        )
+
+    // Merge all graphs
+    let structuralGraph =
+        if Array.isEmpty graphs then
+            {
+                Nodes = Map.empty
+                Edges = []
+                SymbolTable = Map.empty
+                EntryPoints = []
+                SourceFiles = sourceFiles
+                CompilationOrder = []
+                StringLiterals = Map.empty
+            }
+        else
+            graphs |> Array.reduce (fun g1 g2 ->
+                {
+                    Nodes = Map.fold (fun acc k v -> Map.add k v acc) g1.Nodes g2.Nodes
+                    Edges = g1.Edges @ g2.Edges
+                    SymbolTable = Map.fold (fun acc k v -> Map.add k v acc) g1.SymbolTable g2.SymbolTable
+                    EntryPoints = g1.EntryPoints @ g2.EntryPoints
+                    SourceFiles = Map.fold (fun acc k v -> Map.add k v acc) g1.SourceFiles g2.SourceFiles
+                    CompilationOrder = g1.CompilationOrder @ g2.CompilationOrder
+                    StringLiterals = Map.fold (fun acc k v -> Map.add k v acc) g1.StringLiterals g2.StringLiterals
+                }
+            )
+
+    // Emit Phase 1 intermediate
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediate structuralGraph "1_structural" nanopassOutputDir
+
+    { structuralGraph with
+        CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> List.ofArray
+    }
+
 /// Build complete PSG from project results with ENHANCED symbol correlation (FCS 43.9.300 compatible)
+/// This is the traditional entry point that does everything at once
 let buildProgramSemanticGraph
     (checkResults: FSharpCheckProjectResults)
     (parseResults: FSharpParseFileResults[]) : ProgramSemanticGraph =
@@ -38,24 +119,9 @@ let buildProgramSemanticGraph
     Core.PSG.Construction.BindingProcessing.ensureInitialized ()
 
     let correlationContext = createContext checkResults
+    let sourceFiles = buildSourceFiles parseResults
 
-    let sourceFiles =
-        parseResults
-        |> Array.map (fun pr ->
-            let content =
-                if File.Exists pr.FileName then
-                    File.ReadAllText pr.FileName
-                else ""
-            pr.FileName, content
-        )
-        |> Map.ofArray
-
-    let context = {
-        CheckResults = checkResults
-        ParseResults = parseResults
-        CorrelationContext = correlationContext
-        SourceFiles = sourceFiles
-    }
+    let context = createFullContext checkResults parseResults correlationContext sourceFiles
 
     // Process each file and merge results
     let graphs =

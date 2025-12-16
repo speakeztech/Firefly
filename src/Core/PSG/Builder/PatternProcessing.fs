@@ -27,6 +27,12 @@ let rec extractSymbolFromPattern (pat: SynPat) (fileName: string) (context: Corr
         extractSymbolFromPattern innerPat fileName context
     | _ -> None
 
+/// Extract symbol from pattern with optional context (for Phase 1 structural building)
+let rec extractSymbolFromPatternOptional (pat: SynPat) (fileName: string) (contextOpt: CorrelationContext option) : FSharpSymbol option =
+    match contextOpt with
+    | None -> None  // Phase 1: No symbol correlation
+    | Some context -> extractSymbolFromPattern pat fileName context
+
 /// Process a pattern node in the PSG
 let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string)
                        (context: BuildContext) (graph: ProgramSemanticGraph) : ProgramSemanticGraph =
@@ -34,7 +40,7 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
     | SynPat.Named(synIdent, _, _, range) ->
         let (SynIdent(ident, _)) = synIdent
         let syntaxKind = sprintf "Pattern:Named:%s" ident.idText
-        let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+        let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
         let patNode = createNode syntaxKind range fileName symbol parentId
 
         let graph' = { graph with Nodes = Map.add patNode.Id.Value patNode graph.Nodes }
@@ -56,7 +62,7 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
             else
                 sprintf "Pattern:LongIdent:%s" identText
 
-        let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+        let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
         let patNode = createNode syntaxKind range fileName symbol parentId
 
         let graph' = { graph with Nodes = Map.add patNode.Id.Value patNode graph.Nodes }

@@ -17,7 +17,7 @@ let rec processTypeDefn (typeDefn: SynTypeDefn) parentId fileName (context: Buil
 
     let typeName = longId |> List.map (fun id -> id.idText) |> String.concat "."
     let syntaxKind = sprintf "TypeDefn:%s" typeName
-    let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+    let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
     let typeNode = createNode syntaxKind range fileName symbol parentId
 
     let graph' = { graph with Nodes = Map.add typeNode.Id.Value typeNode graph.Nodes }
@@ -73,7 +73,7 @@ and processModuleDecl decl parentId fileName (context: BuildContext) graph =
         let moduleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
 
         let syntaxKind = sprintf "NestedModule:%s" moduleName
-        let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+        let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
         let nestedModuleNode = createNode syntaxKind range fileName symbol parentId
 
         let graph' = { graph with Nodes = Map.add nestedModuleNode.Id.Value nestedModuleNode graph.Nodes }
@@ -142,7 +142,7 @@ let processImplFile (implFile: SynModuleOrNamespace) (context: BuildContext) gra
     let fileName = range.FileName
 
     let syntaxKind = sprintf "Module:%s" moduleName
-    let symbol = tryCorrelateSymbolWithContext range fileName syntaxKind context.CorrelationContext
+    let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
     let moduleNode = createNode syntaxKind range fileName symbol None
 
     let graph' = { graph with Nodes = Map.add moduleNode.Id.Value moduleNode graph.Nodes }

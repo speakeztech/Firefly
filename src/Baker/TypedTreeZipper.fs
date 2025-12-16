@@ -361,6 +361,7 @@ and private walkSiblings (dual: DualZipper) : CorrelationState =
 
 /// Process a member declaration - correlate body with PSG
 /// Protected against FCS exceptions
+/// OPTIMIZATION: Skip unreachable nodes to focus processing on reachable code only
 let private processMember
     (graph: ProgramSemanticGraph)
     (mfv: FSharpMemberOrFunctionOrValue)
@@ -368,29 +369,37 @@ let private processMember
     (state: CorrelationState)
     : CorrelationState =
     try
-        // Record member body for inlining
-        let state =
-            try
-                CorrelationState.addMemberBody mfv.FullName mfv body state
-            with _ -> state
-
         // Try to find corresponding PSG node for the body
         let psgNode =
             try findPSGNodeByRange graph body.Range
             with _ -> None
 
-        // Create dual zipper and walk
-        let dual = {
-            Typed = TypedZipper.create body
-            PSG = psgNode |> Option.map (BakerPSGZipper.create graph)
-            State = state
-        }
+        // OPTIMIZATION: Skip unreachable nodes - they won't be emitted anyway
+        // This significantly reduces processing time for large libraries like Alloy
+        match psgNode with
+        | Some node when not node.IsReachable ->
+            // Skip unreachable member - no need to record body or walk tree
+            state
+        | _ ->
+            // Record member body for inlining (only for reachable or unknown nodes)
+            let state =
+                try
+                    CorrelationState.addMemberBody mfv.FullName mfv body state
+                with _ -> state
 
-        walkDual dual
+            // Create dual zipper and walk
+            let dual = {
+                Typed = TypedZipper.create body
+                PSG = psgNode |> Option.map (BakerPSGZipper.create graph)
+                State = state
+            }
+
+            walkDual dual
     with _ -> state
 
 /// Process all declarations in a file
 /// Protected against FCS exceptions
+/// OPTIMIZATION: Skip unreachable nodes
 let rec private processDeclaration
     (graph: ProgramSemanticGraph)
     (decl: FSharpImplementationFileDeclaration)
@@ -408,12 +417,18 @@ let rec private processDeclaration
             let psgNode =
                 try findPSGNodeByRange graph body.Range
                 with _ -> None
-            let dual = {
-                Typed = TypedZipper.create body
-                PSG = psgNode |> Option.map (BakerPSGZipper.create graph)
-                State = state
-            }
-            walkDual dual
+
+            // OPTIMIZATION: Skip unreachable init actions
+            match psgNode with
+            | Some node when not node.IsReachable ->
+                state
+            | _ ->
+                let dual = {
+                    Typed = TypedZipper.create body
+                    PSG = psgNode |> Option.map (BakerPSGZipper.create graph)
+                    State = state
+                }
+                walkDual dual
     with _ -> state
 
 /// Process a single file
