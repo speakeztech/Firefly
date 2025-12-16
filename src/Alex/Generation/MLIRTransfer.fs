@@ -177,6 +177,36 @@ module TransferResult =
 type Transfer = PSGChildParser<TransferResult>
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// PART 2B: Zipper-Based Fold Accumulator
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Accumulator for foldPostOrder traversal.
+/// Carries the EmitContext (mutable state) and tracks NodeSSA mappings.
+///
+/// ARCHITECTURAL NOTE: Post-order traversal means children are visited before parents.
+/// When emitNode processes a parent node, its children's SSA values are already in NodeSSA.
+/// This enables expression evaluation: Add(x, y) can look up x and y's SSAs.
+type EmitAcc = {
+    /// The mutable emission context (SSA counter, output buffer, string literals)
+    Ctx: EmitContext
+    /// Last result from the most recent emission (for sequential flow)
+    LastResult: TransferResult
+}
+
+module EmitAcc =
+    /// Create initial accumulator from EmitContext
+    let create (ctx: EmitContext) : EmitAcc =
+        { Ctx = ctx; LastResult = TVoid }
+
+    /// Get SSA values for a node's children from the NodeSSA map
+    /// These were already emitted during post-order traversal
+    let getChildSSAs (node: PSGNode) (ctx: EmitContext) : (string * string) list =
+        match node.Children with
+        | Parent ids ->
+            ids |> List.choose (fun id -> EmitContext.lookupNodeSSA ctx id)
+        | _ -> []
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // PART 3: Operation-Specific Transfer Handlers (using actual OperationKind types)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -265,45 +295,86 @@ and transferConsole (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: PSGN
         else TError "ConsoleReadBytes requires 3 arguments"
 
     | ConsoleWrite | ConsoleWriteln ->
-        // NOTE: Do NOT eagerly process children here - we need to handle args specially
-        // to avoid double-processing interpolated strings
-        // High-level Write/WriteLine - inline the function body
-        // The function body contains the SRTP dispatch to writeNativeStr/writeSystemString
+        // High-level Write/WriteLine
+        //
+        // IMPORTANT: Write/WriteLine use SRTP dispatch (WritableString $ s) which requires
+        // complex inlining through writeSystemString. For string constants, we bypass this
+        // entirely and emit a direct write syscall with known length.
         let funcChildren = getChildren graph node
         match funcChildren with
-        | funcNode :: argNodes ->
-            let funcName =
-                match funcNode.Symbol with
-                | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
-                    try mfv.CompiledName with _ -> mfv.DisplayName
-                | _ ->
-                    extractFunctionNameFromKind funcNode.SyntaxKind |> Option.defaultValue "unknown"
+        | _funcNode :: argNodes ->
+            match argNodes with
+            | [argNode] ->
+                // Check if argument is a string constant - if so, emit direct syscall
+                let isStringConstant = argNode.SyntaxKind.StartsWith("Const:String")
 
-            // Find the function definition in the PSG and inline its body
-            match findFunctionBinding graph funcName with
-            | Some bindingNode ->
-                let (paramNodes, bodyNodeOpt) = getFunctionParamsAndBody graph bindingNode
-                match bodyNodeOpt with
-                | Some bodyNode ->
-                    // For ConsoleWrite/WriteLine with InterpolatedString, we need to process
-                    // the interpolated string parts without duplicating the output.
-                    // The body will reference the parameter, so we need to bind the argument node
-                    // directly to the parameter (for def-use resolution), not the SSA result.
+                if isStringConstant then
+                    // String constant - emit direct write syscall with known length
+                    // First, get or register the string literal
+                    let stringContent =
+                        match argNode.ConstantValue with
+                        | Some (StringValue s) -> s
+                        | _ ->
+                            // Fall back to extracting from SyntaxKind
+                            if argNode.SyntaxKind.StartsWith("Const:String ") then
+                                argNode.SyntaxKind.Substring(13)
+                            else ""
 
-                    // First, check if the argument is an InterpolatedString - if so, process it
-                    // specially to avoid double output
-                    let argResult =
-                        match argNodes with
-                        | [argNode] ->
-                            // Process the argument - if it's an interpolated string, it will emit writes directly
-                            transferNodeDirect ctx graph argNode
-                        | _ -> TVoid
+                    if stringContent <> "" then
+                        let strLen = stringContent.Length
+                        let globalName = EmitContext.registerStringLiteral ctx stringContent
+                        let ptrSSA = EmitContext.nextSSA ctx
+                        EmitContext.emitLine ctx (sprintf "%s = llvm.mlir.addressof %s : !llvm.ptr" ptrSSA globalName)
 
-                    // If the argument was processed and emitted (returns TVoid from StrConcat3),
-                    // just add the newline for WriteLine and return
+                        // Write syscall: syscall 1 (write), fd 1 (stdout), buf, len
+                        let sysNumSSA = EmitContext.nextSSA ctx
+                        EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" sysNumSSA)
+                        let fdSSA = EmitContext.nextSSA ctx
+                        EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" fdSSA)
+                        let lenSSA = EmitContext.nextSSA ctx
+                        EmitContext.emitLine ctx (sprintf "%s = arith.constant %d : i64" lenSSA strLen)
+                        let resultSSA = EmitContext.nextSSA ctx
+                        EmitContext.emitLine ctx (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
+                            resultSSA sysNumSSA fdSSA ptrSSA lenSSA)
+
+                        // Add newline for WriteLine
+                        if op = ConsoleWriteln then
+                            let nlGlobal = EmitContext.registerStringLiteral ctx "\n"
+                            let nlPtrSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = llvm.mlir.addressof %s : !llvm.ptr" nlPtrSSA nlGlobal)
+                            let nlSysNumSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" nlSysNumSSA)
+                            let nlFdSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" nlFdSSA)
+                            let nlLenSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" nlLenSSA)
+                            let nlResultSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
+                                nlResultSSA nlSysNumSSA nlFdSSA nlPtrSSA nlLenSSA)
+                        TVoid
+                    else
+                        // Empty string - for Write, do nothing; for WriteLine, emit just newline
+                        if op = ConsoleWriteln then
+                            let nlGlobal = EmitContext.registerStringLiteral ctx "\n"
+                            let nlPtrSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = llvm.mlir.addressof %s : !llvm.ptr" nlPtrSSA nlGlobal)
+                            let nlSysNumSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" nlSysNumSSA)
+                            let nlFdSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" nlFdSSA)
+                            let nlLenSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" nlLenSSA)
+                            let nlResultSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
+                                nlResultSSA nlSysNumSSA nlFdSSA nlPtrSSA nlLenSSA)
+                        TVoid
+                else
+                    // Not a string constant - process normally
+                    let argResult = transferNodeDirect ctx graph argNode
+
                     match argResult with
                     | TVoid ->
-                        // Argument was already written (StrConcat3 returns TVoid)
+                        // Argument was already written (e.g., InterpolatedString returns TVoid)
                         // Just add newline for WriteLine
                         if op = ConsoleWriteln then
                             let nlGlobal = EmitContext.registerStringLiteral ctx "\n"
@@ -319,16 +390,43 @@ and transferConsole (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: PSGN
                             EmitContext.emitLine ctx (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
                                 resultSSA sysNumSSA fdSSA ptrSSA lenSSA)
                         TVoid
-                    | TValue (ssa, mlirType) ->
-                        // Regular string value - map to parameter and inline body
-                        if paramNodes.Length > 0 then
-                            EmitContext.recordNodeSSA ctx paramNodes.[0].Id ssa mlirType
-                        transferNodeDirect ctx graph bodyNode
+                    | TValue (ssa, _mlirType) ->
+                        // Have a string pointer - check if we know the length from SSAToStringContent
+                        let strContent = ctx.SSAToStringContent.TryGetValue(ssa)
+                        match strContent with
+                        | true, content ->
+                            // We know the string content - emit direct syscall
+                            let strLen = content.Length
+                            let sysNumSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" sysNumSSA)
+                            let fdSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" fdSSA)
+                            let lenSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = arith.constant %d : i64" lenSSA strLen)
+                            let resultSSA = EmitContext.nextSSA ctx
+                            EmitContext.emitLine ctx (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
+                                resultSSA sysNumSSA fdSSA ssa lenSSA)
+
+                            // Add newline for WriteLine
+                            if op = ConsoleWriteln then
+                                let nlGlobal = EmitContext.registerStringLiteral ctx "\n"
+                                let nlPtrSSA = EmitContext.nextSSA ctx
+                                EmitContext.emitLine ctx (sprintf "%s = llvm.mlir.addressof %s : !llvm.ptr" nlPtrSSA nlGlobal)
+                                let nlSysNumSSA = EmitContext.nextSSA ctx
+                                EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" nlSysNumSSA)
+                                let nlFdSSA = EmitContext.nextSSA ctx
+                                EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" nlFdSSA)
+                                let nlLenSSA = EmitContext.nextSSA ctx
+                                EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" nlLenSSA)
+                                let nlResultSSA = EmitContext.nextSSA ctx
+                                EmitContext.emitLine ctx (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
+                                    nlResultSSA nlSysNumSSA nlFdSSA nlPtrSSA nlLenSSA)
+                            TVoid
+                        | false, _ ->
+                            // Unknown string length - would need runtime strlen
+                            TError "ConsoleWrite with dynamic string length not yet supported"
                     | TError msg -> TError msg
-                | None ->
-                    TError "Console function has no body"
-            | None ->
-                TError (sprintf "Console function %s not found in PSG" funcName)
+            | _ -> TError "ConsoleWrite requires exactly one argument"
         | [] ->
             TError "ConsoleWrite has no children"
 
@@ -542,20 +640,16 @@ and transferCore (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: PSGNode
     match op with
     | Ignore ->
         // ignore: process the argument and discard the result
-        // Structure: App [Ident:ignore, <piped expression>]
-        // Find the non-ignore child to process
-        match children |> List.filter (fun c -> not (c.SyntaxKind.StartsWith("Ident:ignore"))) with
-        | arg :: _ ->
+        // Structure: App [Ident:ignore, <argument>]
+        // The argument is the second child (first is the ignore identifier)
+        match children with
+        | _ :: arg :: _ ->
             let _ = transferNodeDirect ctx graph arg
             TVoid
+        | [_] ->
+            TError "ignore: missing argument (only identifier present)"
         | [] ->
-            // Fallback: try first child
-            match children with
-            | arg :: _ ->
-                let _ = transferNodeDirect ctx graph arg
-                TVoid
-            | [] ->
-                TError "ignore requires an argument"
+            TError "ignore: no children in App node"
 
     | Not ->
         // Boolean negation
@@ -635,109 +729,67 @@ and emitExternalCall (ctx: EmitContext) (graph: ProgramSemanticGraph) (argNodes:
     TValue (resultSSA, "i64")
 
 /// Transfer an unclassified application (no Operation set)
-/// This handles function calls by either inlining the function body or emitting an external call
+/// This handles App nodes where ClassifyOperations did not set node.Operation.
+/// Valid cases: platform bindings, user-defined functions that can be inlined.
+/// Invalid cases result in HARD FAIL with clear error message.
 and transferUnclassifiedApp (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: PSGNode) : TransferResult =
     let children = getChildren graph node
     match children with
     | funcNode :: argNodes ->
-        // Process arguments first to get their SSA values
-        let argResults = argNodes |> List.map (fun c -> transferNodeDirect ctx graph c)
-        let argSSAs = argResults |> List.choose TransferResult.getSSA
-        let argTypes = argResults |> List.choose TransferResult.getType
-
-        // Extract function name from the func node
-        let funcNameOpt =
-            match funcNode.Symbol with
-            | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
-                Some (try mfv.CompiledName with _ -> mfv.DisplayName)
-            | _ ->
-                extractFunctionNameFromKind funcNode.SyntaxKind
-
-        match funcNameOpt with
-        | Some funcName ->
-            // Try to find the function definition in the PSG for inlining
-            match findFunctionBinding graph funcName with
-            | Some bindingNode ->
-                // Found the function - inline its body
-                let (paramNodes, bodyNodeOpt) = getFunctionParamsAndBody graph bindingNode
-                match bodyNodeOpt with
-                | Some bodyNode ->
-                    // Map parameters to argument SSA values
-                    // Record each parameter node with its corresponding argument SSA
-                    List.zip paramNodes argResults
-                    |> List.iter (fun (paramNode, argResult) ->
-                        match argResult with
-                        | TValue (ssa, mlirType) ->
-                            EmitContext.recordNodeSSA ctx paramNode.Id ssa mlirType
-                        | _ -> ())
-
-                    // Process the function body (this will resolve parameter references)
-                    transferNodeDirect ctx graph bodyNode
-                | None ->
-                    // Function has no body - might be a platform binding
-                    // TODO: This name-matching should be replaced with node.PlatformBinding.IsSome
-                    if funcName.StartsWith("fidelity_") || funcName = "writeBytes" || funcName = "readBytes" then
-                        // This is a platform binding - emit syscall via binding
-                        let argTypesStr = if List.isEmpty argTypes then "" else argTypes |> String.concat ", "
-                        let argSSAsStr = argSSAs |> String.concat ", "
-                        ctx.ExternalFuncs.Add(funcName) |> ignore
-                        let resultSSA = EmitContext.nextSSA ctx
-                        if List.isEmpty argTypes then
-                            EmitContext.emitLine ctx (sprintf "%s = llvm.call @%s() : () -> i64" resultSSA funcName)
-                        else
-                            EmitContext.emitLine ctx (sprintf "%s = llvm.call @%s(%s) : (%s) -> i64" resultSSA funcName argSSAsStr argTypesStr)
-                        TValue (resultSSA, "i64")
-                    else
-                        TError (sprintf "Function %s has no body to inline" funcName)
-            | None ->
-                // Function not found in PSG - might be external or built-in
-                // Check if it's a special operator or intrinsic
-                let argTypesStr = if List.isEmpty argTypes then "" else argTypes |> String.concat ", "
-                let argSSAsStr = argSSAs |> String.concat ", "
-
-                // Handle special cases
-                match funcName with
-                | "ignore" ->
-                    // ignore just returns unit
-                    TVoid
-                | "op_Dollar" ->
-                    // SRTP dispatch operator - WritableString $ s
-                    // The first arg is the type (WritableString), second is the value (s)
-                    if argResults.Length >= 2 then
-                        match argResults.[1] with
-                        | TValue (strSSA, _) ->
-                            // Get the string length from the SSA to string content mapping
-                            let strLen =
-                                match ctx.SSAToStringContent.TryGetValue(strSSA) with
-                                | true, content -> content.Length
-                                | false, _ -> 0  // Default to 0 for safety
-
-                            // Emit write syscall directly using inline assembly
-                            // Linux x86_64: syscall 1 = write(fd, buf, count)
-                            let sysNumSSA = EmitContext.nextSSA ctx
-                            EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" sysNumSSA)
-                            let fdSSA = EmitContext.nextSSA ctx
-                            EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" fdSSA)  // stdout
-                            let lenSSA = EmitContext.nextSSA ctx
-                            EmitContext.emitLine ctx (sprintf "%s = arith.constant %d : i64" lenSSA strLen)
-                            let resultSSA = EmitContext.nextSSA ctx
-                            EmitContext.emitLine ctx (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
-                                resultSSA sysNumSSA fdSSA strSSA lenSSA)
-                            TValue (resultSSA, "i64")
-                        | TError _ | TVoid -> TVoid
-                    else
-                        TVoid  // Partial application
-                | _ ->
-                    // Register as external and emit call
-                    ctx.ExternalFuncs.Add(funcName) |> ignore
-                    let resultSSA = EmitContext.nextSSA ctx
-                    if List.isEmpty argTypes then
-                        EmitContext.emitLine ctx (sprintf "%s = llvm.call @%s() : () -> i64" resultSSA funcName)
-                    else
-                        EmitContext.emitLine ctx (sprintf "%s = llvm.call @%s(%s) : (%s) -> i64" resultSSA funcName argSSAsStr argTypesStr)
-                    TValue (resultSSA, "i64")
+        // FIRST: Check if this is a platform binding - this takes priority
+        match funcNode.PlatformBinding with
+        | Some binding ->
+            // Platform binding - emit call to platform-provided function
+            let argResults = argNodes |> List.map (fun c -> transferNodeDirect ctx graph c)
+            let argSSAs = argResults |> List.choose TransferResult.getSSA
+            let argTypes = argResults |> List.choose TransferResult.getType
+            let argTypesStr = if List.isEmpty argTypes then "" else argTypes |> String.concat ", "
+            let argSSAsStr = argSSAs |> String.concat ", "
+            ctx.ExternalFuncs.Add(binding.EntryPoint) |> ignore
+            let resultSSA = EmitContext.nextSSA ctx
+            if List.isEmpty argTypes then
+                EmitContext.emitLine ctx (sprintf "%s = llvm.call @%s() : () -> i64" resultSSA binding.EntryPoint)
+            else
+                EmitContext.emitLine ctx (sprintf "%s = llvm.call @%s(%s) : (%s) -> i64" resultSSA binding.EntryPoint argSSAsStr argTypesStr)
+            TValue (resultSSA, "i64")
         | None ->
-            TError (sprintf "Cannot determine function for unclassified App: %s" node.SyntaxKind)
+            // Not a platform binding - try to inline the function body
+            let argResults = argNodes |> List.map (fun c -> transferNodeDirect ctx graph c)
+
+            // Extract function name from the func node
+            let funcNameOpt =
+                match funcNode.Symbol with
+                | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+                    Some (try mfv.CompiledName with _ -> mfv.DisplayName)
+                | _ ->
+                    extractFunctionNameFromKind funcNode.SyntaxKind
+
+            match funcNameOpt with
+            | Some funcName ->
+                // Try to find the function definition in the PSG for inlining
+                match findFunctionBinding graph funcName with
+                | Some bindingNode ->
+                    // Found the function - inline its body
+                    let (paramNodes, bodyNodeOpt) = getFunctionParamsAndBody graph bindingNode
+                    match bodyNodeOpt with
+                    | Some bodyNode ->
+                        // Map parameters to argument SSA values
+                        List.zip paramNodes argResults
+                        |> List.iter (fun (paramNode, argResult) ->
+                            match argResult with
+                            | TValue (ssa, mlirType) ->
+                                EmitContext.recordNodeSSA ctx paramNode.Id ssa mlirType
+                            | _ -> ())
+                        // Process the function body
+                        transferNodeDirect ctx graph bodyNode
+                    | None ->
+                        TError (sprintf "Function %s has no body to inline and is not a platform binding" funcName)
+                | None ->
+                    // HARD FAIL: Unclassified App with no PSG binding
+                    // This indicates incomplete PSG enrichment
+                    TError (sprintf "PSG ENRICHMENT INCOMPLETE: Unclassified App node for function '%s'. Node %s should have Operation set by ClassifyOperations nanopass." funcName node.SyntaxKind)
+            | None ->
+                TError (sprintf "Cannot determine function for unclassified App: %s" node.SyntaxKind)
     | _ ->
         TError "App node has no children"
 
@@ -1191,6 +1243,32 @@ let transferFunctionToMLIR (psg: ProgramSemanticGraph) (funcNode: PSGNode) (corr
     }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// PART 6B: Zipper-Based Emission (foldPostOrder)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Emit a single PSG node during post-order traversal.
+/// Children have already been processed, so their SSA values are in ctx.NodeSSA.
+///
+/// ARCHITECTURAL NOTE: This function wraps transferNodeDirect for use with foldPostOrder.
+/// The key insight is that post-order means children emit first, so we can look up
+/// child SSA values from NodeSSA when processing parent nodes.
+let emitNode (acc: EmitAcc) (zipper: PSGZipper) : EmitAcc =
+    let node = zipper.Focus
+    let ctx = acc.Ctx
+    let graph = ctx.Graph
+
+    // Skip unreachable nodes
+    if not node.IsReachable then
+        acc
+    else
+        // Use the existing transferNodeDirect function
+        // It already handles all node types and records SSAs via EmitContext
+        let result = transferNodeDirect ctx graph node
+
+        // Return updated accumulator with last result
+        { acc with LastResult = result }
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // PART 7: Main Entry Point (for CompileCommand compatibility)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1241,11 +1319,10 @@ let generateMLIR (psg: ProgramSemanticGraph) (correlations: CorrelationState) (t
             ctx.CurrentFunction <- Some funcName
             EmitContext.emitLine ctx (sprintf "  llvm.func @%s() -> i32 {" funcName)
 
-            // Transfer the function body
-            let children = getChildren psg entryNode
-            let mutable lastResult = TVoid
-            for child in children do
-                lastResult <- transferNodeDirect ctx psg child
+            // Transfer the entry point node directly (transferNodeDirect handles recursion)
+            // NOTE: Using zipper foldPostOrder was causing duplicate processing because
+            // transferNodeDirect ALSO recurses through children. We use direct transfer instead.
+            let lastResult = transferNodeDirect ctx psg entryNode
 
             // Emit return or exit syscall depending on output kind
             match outputKind with

@@ -47,18 +47,76 @@ PSG Entry Point
     ↓
 Zipper.create(psg, entryNode)
     ↓
-Fold over structure (pre-order or post-order)
+foldPostOrder (children before parents)
     ↓
-At each node: XParsec pattern → MLIR emission
+At each node: pattern match → MLIR emission
     ↓
 Extern primitive? → ExternDispatch.dispatch(primitive)
     ↓
-MLIR Builder accumulates
+MLIR Builder accumulates (mutable BuilderState)
     ↓
 Output: Complete MLIR module
 ```
 
 There is NO routing table. NO central dispatcher. The PSG structure itself drives emission.
+
+## CRITICAL: Post-Order Traversal for Expression Evaluation
+
+**Use `foldPostOrder`, NOT `foldPreOrder` for MLIR generation.**
+
+SSA-based code generation requires that **children are evaluated before parents**:
+- `Add(x, y)` needs SSA values for `x` and `y` before emitting `arith.addi`
+- Post-order visits children first, then the parent
+- When the parent node is visited, its children's SSA values are already in NodeSSA map
+
+```fsharp
+// Post-order: children emit SSAs first, parent consumes them
+let emitNode (acc: EmitAcc) (zipper: PSGZipper) : EmitAcc =
+    let node = zipper.Focus
+    // Children already processed - their SSAs are in acc.NodeSSA
+    match node.Operation with
+    | Some (Arithmetic Add) ->
+        let childSSAs = getChildSSAs node acc.NodeSSA  // Already available!
+        let result = mlir { let! r = arith.addi childSSAs.[0] childSSAs.[1]; return r } acc.State
+        { acc with NodeSSA = Map.add node.Id.Value result acc.NodeSSA }
+    | ...
+```
+
+## The MLIR Monad: Eager Execution with Mutable State
+
+The `MLIR<'T>` monad is defined as:
+```fsharp
+type MLIR<'T> = BuilderState -> 'T
+```
+
+This is a **Reader monad** with **mutable state**:
+- `BuilderState` has `mutable SSACounter`, `mutable Indent`, `Output: StringBuilder`
+- When you run `mlir { ... } state`, mutations happen immediately
+- The monad composes operations; execution is eager when applied to state
+
+**This is NOT lazy/deferred execution.** Each `mlir { }` block runs immediately when given a BuilderState. The "pull" model refers to:
+1. **Structure-driven**: PSG structure determines what gets emitted (no routing table)
+2. **Demand-driven naming**: We don't pre-allocate SSA names; they're generated as needed
+3. **Local decisions**: Each node's emission logic is self-contained
+
+### Fold Accumulator Design
+
+```fsharp
+type EmitAcc = {
+    State: BuilderState           // Shared, mutated during fold
+    NodeSSA: Map<string, Val>     // NodeId.Value -> emitted Val
+    Graph: ProgramSemanticGraph   // For def-use edge lookups
+}
+
+let emitNode (acc: EmitAcc) (zipper: PSGZipper) : EmitAcc =
+    let node = zipper.Focus
+    // Run mlir { } with shared state - mutations accumulate
+    let emittedVal = emitForNode node acc |> fun m -> m acc.State
+    // Update NodeSSA for def-use resolution
+    { acc with NodeSSA = Map.add node.Id.Value emittedVal acc.NodeSSA }
+```
+
+The `BuilderState` is threaded through the entire fold via the accumulator. Each node's emission mutates it (appending to Output, incrementing SSACounter).
 
 ### Component Roles
 
@@ -149,11 +207,87 @@ let fieldInfo = EmitContext.lookupFieldAccess ctx nodeId
 
 `FieldAccessInfo` enables correct `llvm.extractvalue` emission for struct fields like `NativeStr.Length`.
 
+## THE DEEPER "WHY": DCont/Inet Duality and Waypoints
+
+This architecture is not arbitrary. It's laying groundwork for future capabilities that require discipline NOW.
+
+### DCont/Inet Duality (from "The DCont/Inet Duality" blog post)
+
+Computation expressions decompose into two fundamental patterns:
+- **DCont (Delimited Continuations)**: Sequential effects where each step depends on previous
+- **Inet (Interaction Nets)**: Parallel pure computation with no dependencies
+
+The PSGZipper fold IS the DCont pattern:
+- Each node visit is a "continuation point"
+- Post-order traversal = natural evaluation order (children before parents)
+- State threading through fold = explicit continuation threading
+
+**Why this matters for the future:**
+```fsharp
+// Today: Simple MLIR generation via fold
+let! result = PSGZipper.foldPostOrder emitNode initialAcc zipper
+
+// Future: Async F# compiles to DCont MLIR dialect
+dcont.shift { ... }   // Captures "the rest of the computation"
+dcont.resume k value  // Delivers value to captured continuation
+dcont.reset result    // Establishes boundary
+```
+
+When we add async/await support, the SAME zipper fold architecture naturally extends to emit DCont operations. The discipline now enables DCont later.
+
+### Coeffects: Tracking Requirements, Not Products
+
+From "Coeffects and Codata in Firefly":
+
+> Effects track what code *does* to its environment.
+> Coeffects track what code *needs* from its environment.
+
+The EmitAcc accumulator IS coeffect tracking:
+```fsharp
+type EmitAcc = {
+    State: BuilderState           // SSA counter = "need fresh names"
+    NodeSSA: Map<string, Val>     // Def-use = "need values from definitions"
+    Graph: ProgramSemanticGraph   // Structure = "need child relationships"
+}
+```
+
+Compilation decisions depend on requirements, not products. This is why the fold accumulator tracks what each node NEEDS (child SSAs, SSA counter, graph structure).
+
+### Codata: Demand-Driven Observation
+
+The fold "observes" nodes as it traverses - this IS the codata pattern:
+- Data = eagerly constructed, then examined
+- Codata = defined by observation/consumption
+
+The PSGZipper doesn't pre-construct MLIR trees. It observes nodes on demand:
+```fsharp
+// Codata: observation defines behavior
+let emitNode (acc: EmitAcc) (zipper: PSGZipper) : EmitAcc =
+    let node = zipper.Focus  // OBSERVE the current node
+    // Emit based on what we observe, not what was pre-constructed
+```
+
+This aligns with "codata patterns compile to stack-based state machines" from the blog.
+
+### Why Discipline NOW Enables DCont/Inet LATER
+
+The current refactoring from `transferNodeDirect` (direct recursion) to `foldPostOrder` (zipper fold) is NOT just cleanup. It's establishing the architectural pattern that:
+
+1. **Enables DCont lowering**: When we add async support, suspension points become `dcont.shift` operations. The fold's continuation structure maps directly.
+
+2. **Enables Inet optimization**: Pure regions identified by coeffects can be parallelized via Inet dialect. The fold structure makes these regions explicit.
+
+3. **Enables WAMI targeting**: WebAssembly stack switching requires preserved continuation structure. The zipper fold preserves it.
+
+4. **Enables hardware diversity**: CGRAs, neuromorphic processors, etc. express computation as dataflow graphs. The explicit structure survives to these targets.
+
+**This is the waypoint**: Today's disciplined fold → Tomorrow's DCont/Inet duality → Future hardware targets.
+
 ## Key Files
 
 | File | Role |
 |------|------|
-| `Alex/Generation/MLIRGeneration.fs` | Single MLIR generation entry point |
+| `Alex/Generation/MLIRTransfer.fs` | Single MLIR generation entry point (refactoring target) |
 | `Alex/Traversal/PSGZipper.fs` | Bidirectional PSG traversal (attention) |
 | `Alex/Traversal/PSGXParsec.fs` | XParsec combinators, EmitContext with correlations |
 | `Alex/Bindings/BindingTypes.fs` | ExternDispatch registry, platform types |

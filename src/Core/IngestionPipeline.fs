@@ -310,8 +310,16 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                     generateCorrelationDebugOutput correlations config.IntermediatesDir.Value
                     writePSGSummary psg config.IntermediatesDir.Value
                 
+                // Step 5.5: Extract SRTP call relationships (before reachability!)
+                // This returns additional call relationships that get merged into the call graph
+                let srtpResult = Core.PSG.Nanopass.ExtractSRTPEdges.run projectResults.CheckResults
+                let additionalCalls =
+                    if Map.isEmpty srtpResult.AdditionalCalls then None
+                    else Some srtpResult.AdditionalCalls
+
                 // Step 6: Perform reachability analysis (narrows the graph)
-                let reachabilityResult = performReachabilityAnalysis psg
+                // Pass in SRTP-discovered call relationships to merge into the call graph
+                let reachabilityResult = performReachabilityAnalysis psg additionalCalls
 
                 // Enrichment nanopasses on narrowed graph
                 if config.OutputIntermediates && config.IntermediatesDir.IsSome then
@@ -508,8 +516,14 @@ let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<
                         Location = None
                     }
 
-                // Step 9: Full (symbol-aware) reachability
-                let reachabilityResult = performReachabilityAnalysis psg
+                // Step 8.5: Extract SRTP call relationships (before reachability!)
+                let srtpResult = Core.PSG.Nanopass.ExtractSRTPEdges.run projectResults.CheckResults
+                let additionalCalls =
+                    if Map.isEmpty srtpResult.AdditionalCalls then None
+                    else Some srtpResult.AdditionalCalls
+
+                // Step 9: Full (symbol-aware) reachability with SRTP-discovered calls
+                let reachabilityResult = performReachabilityAnalysis psg additionalCalls
 
                 // Step 9.5: Run enrichment nanopasses on the NARROWED graph
                 let enrichedPSG = runEnrichmentPasses reachabilityResult.MarkedPSG projectResults.CheckResults

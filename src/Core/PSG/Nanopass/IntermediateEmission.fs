@@ -80,6 +80,8 @@ let emitNanopassIntermediate (psg: ProgramSemanticGraph) (phaseLabel: string) (o
                         with _ -> "?")
                     ParentId = node.ParentId |> Option.map (fun n -> n.Value)
                     IsReachable = node.IsReachable
+                    Operation = node.Operation |> Option.map (fun op -> op.ToString())
+                    PlatformBinding = node.PlatformBinding |> Option.map (fun pb -> pb.EntryPoint)
                     Range = {|
                         File = Path.GetFileName(node.Range.FileName)
                         Line = node.Range.StartLine

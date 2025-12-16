@@ -37,6 +37,7 @@ type EdgeKind =
     | ControlFlow of kind: string
     | DataDependency
     | ModuleContainment
+    | SRTPResolves  // SRTP dispatch resolves to this concrete implementation
 
 /// Edge in the program semantic graph
 type PSGEdge = {

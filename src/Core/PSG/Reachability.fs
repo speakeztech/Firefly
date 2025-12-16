@@ -118,11 +118,15 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
         | :? FSharpMemberOrFunctionOrValue as mfv ->
             // Must be a module-level value/member (not a parameter or local binding)
             // AND must be a function or member (not just a value constant)
-            mfv.IsModuleValueOrMember && (mfv.IsFunction || mfv.IsMember)
+            // ALSO include static members on types (like op_Dollar on WritableString)
+            // These may have IsModuleValueOrMember=false but are still callable
+            let isModuleLevelOrMember = mfv.IsModuleValueOrMember && (mfv.IsFunction || mfv.IsMember)
+            let isStaticMember = mfv.IsMember && mfv.IsDispatchSlot = false
+            isModuleLevelOrMember || isStaticMember
         | _ -> false
 
     // Helper: Try to add a call edge to the graph
-    let tryAddCallEdge caller targetSym =
+    let tryAddCallEdge caller (targetSym: FSharpSymbol) =
         if isCallableSymbol targetSym then
             let calledFunc = targetSym.FullName
             if caller <> calledFunc then
@@ -131,9 +135,10 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
                     callGraph <- Map.add caller (calledFunc :: currentCalls) callGraph
 
     // Analyze edges to build call graph
+    // Include SRTPResolves edges to follow SRTP dispatch to concrete implementations
     for edge in psg.Edges do
         match edge.Kind with
-        | FunctionCall | SymRef ->
+        | FunctionCall | SymRef | SRTPResolves ->
             let callerOpt = Map.tryFind edge.Source.Value nodeToFunction
             let targetOpt = Map.tryFind edge.Target.Value psg.Nodes
             match callerOpt, targetOpt with
@@ -146,27 +151,52 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
     
     // Also analyze application nodes for function calls not captured by edges
     // KEY FIX: Only consider actual function/method symbols, not parameters or local bindings
+    let mutable appCount = 0
+    let mutable appWithCallerCount = 0
     for KeyValue(nodeId, node) in psg.Nodes do
         match node.SyntaxKind with
         | "App" | "App:FunctionCall" | "TypeApp" ->
+            appCount <- appCount + 1
             let callerOpt = Map.tryFind nodeId nodeToFunction
 
             match callerOpt with
             | Some caller ->
-                // Look at children to find what's being called
+                appWithCallerCount <- appWithCallerCount + 1
+                // Look at ALL descendants (not just immediate children) to find what's being called
+                // This handles nested applications like: (op_Dollar WritableString) s
+                let rec processDescendants (nId: NodeId) =
+                    match Map.tryFind nId.Value psg.Nodes with
+                    | Some childNode ->
+                        match childNode.Symbol with
+                        | Some sym ->
+                            if sym.DisplayName = "op_Dollar" || sym.DisplayName = "($)" then
+                                let typ = sym.GetType().Name
+                                match sym with
+                                | :? FSharpMemberOrFunctionOrValue as mfv ->
+                                    printfn "[REACH] Found op_Dollar: caller=%s sym.FullName=%s type=%s IsMember=%b IsModuleValueOrMember=%b DeclaringEntity=%A"
+                                        caller sym.FullName typ mfv.IsMember mfv.IsModuleValueOrMember
+                                        (try (mfv.DeclaringEntity |> Option.map (fun e -> e.FullName)) with _ -> None)
+                                | _ ->
+                                    printfn "[REACH] Found op_Dollar: caller=%s sym.FullName=%s type=%s" caller sym.FullName typ
+                            tryAddCallEdge caller sym
+                        | None -> ()
+                        // Recurse into children
+                        match childNode.Children with
+                        | Parent grandchildren ->
+                            for gc in grandchildren do
+                                processDescendants gc
+                        | _ -> ()
+                    | None -> ()
+
                 match node.Children with
                 | Parent children ->
                     for childId in children do
-                        match Map.tryFind childId.Value psg.Nodes with
-                        | Some childNode ->
-                            match childNode.Symbol with
-                            | Some sym -> tryAddCallEdge caller sym
-                            | None -> ()
-                        | None -> ()
+                        processDescendants childId
                 | _ -> ()
             | None -> ()
         | _ -> ()
-    
+
+    printfn "[REACH] App nodes: %d, with caller: %d" appCount appWithCallerCount
     callGraph
 
 /// Compute reachable symbols using semantic analysis
@@ -286,32 +316,54 @@ let private markNodesForSemanticReachability
     { psg with Nodes = finalNodes }
 
 /// Perform semantic reachability analysis
-let analyzeReachability (psg: ProgramSemanticGraph) : LibraryAwareReachability =
+/// additionalCalls: Optional map of additional call relationships (caller -> callees)
+///                  discovered by ExtractSRTPEdges. These get merged into the call graph.
+let analyzeReachability
+    (psg: ProgramSemanticGraph)
+    (additionalCalls: Map<string, string list> option)
+    : LibraryAwareReachability =
     let startTime = DateTime.UtcNow
 
     // Find entry points
-    let entryPoints = 
+    let entryPoints =
         psg.SymbolTable
         |> Map.toSeq
         |> Seq.choose (fun (name, symbol) ->
             match symbol with
-            | :? FSharpMemberOrFunctionOrValue as mfv when 
-                name = "main" || 
+            | :? FSharpMemberOrFunctionOrValue as mfv when
+                name = "main" ||
                 mfv.Attributes |> Seq.exists (fun a -> a.AttributeType.DisplayName = "EntryPoint") ->
                 Some symbol
             | _ -> None)
         |> Seq.toList
-    
+
     // Also check for EntryPointAttribute itself
-    let entryPointAttribute = 
+    let entryPointAttribute =
         psg.SymbolTable
         |> Map.tryFind "EntryPointAttribute"
         |> Option.toList
-    
+
     let allEntryPoints = entryPoints @ entryPointAttribute
 
-    // Build semantic call graph
-    let callGraph = buildSemanticCallGraph psg
+    // Build semantic call graph from PSG edges
+    let psgCallGraph = buildSemanticCallGraph psg
+
+    // Merge in additional call relationships from SRTP resolution
+    let callGraph =
+        match additionalCalls with
+        | None -> psgCallGraph
+        | Some srtpCalls ->
+            printfn "[REACH] Merging %d SRTP call relationships into call graph" srtpCalls.Count
+            // Merge SRTP-discovered calls into the call graph
+            (psgCallGraph, srtpCalls)
+            ||> Map.fold (fun acc caller newCallees ->
+                let existingCallees = Map.tryFind caller acc |> Option.defaultValue []
+                let mergedCallees =
+                    newCallees
+                    |> List.filter (fun c -> not (List.contains c existingCallees))
+                    |> List.append existingCallees
+                printfn "[REACH] SRTP: %s -> %A" caller newCallees
+                Map.add caller mergedCallees acc)
 
     // Compute semantic reachability
     let reachableSymbols = computeSemanticReachability allEntryPoints callGraph
@@ -361,8 +413,12 @@ let analyzeReachability (psg: ProgramSemanticGraph) : LibraryAwareReachability =
     }
 
 /// Entry point for reachability analysis (requires typed PSG with symbols)
-let performReachabilityAnalysis (psg: ProgramSemanticGraph) : LibraryAwareReachability =
-    analyzeReachability psg
+/// additionalCalls: Optional SRTP-discovered call relationships from ExtractSRTPEdges
+let performReachabilityAnalysis
+    (psg: ProgramSemanticGraph)
+    (additionalCalls: Map<string, string list> option)
+    : LibraryAwareReachability =
+    analyzeReachability psg additionalCalls
 
 // ============================================================================
 // STRUCTURAL REACHABILITY (Phase 1 - works without type checking)

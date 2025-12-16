@@ -259,12 +259,24 @@ let execute (args: ParseResults<CompileArgs>) =
         printfn "[PSG] Built: %d nodes, %d edges, %d entry points, %d symbols"
             psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length psg.SymbolTable.Count
 
+        // Nanopass: Extract SRTP call relationships (before reachability!)
+        // This returns additional call relationships that get merged into the call graph
+        report verbose "SRTP" "Extracting SRTP call relationships..."
+
+        let srtpResult =
+            Core.Timing.timePhase "SRTP" "SRTP Call Extraction" (fun () ->
+                Core.PSG.Nanopass.ExtractSRTPEdges.run checkResults)
+
+        let additionalCalls =
+            if Map.isEmpty srtpResult.AdditionalCalls then None
+            else Some srtpResult.AdditionalCalls
+
         // Nanopass: Reachability (soft-delete marking)
         report verbose "REACH" "Analyzing reachability..."
 
         let reachabilityResult =
             Core.Timing.timePhase "REACH" "Reachability" (fun () ->
-                performReachabilityAnalysis psg)
+                performReachabilityAnalysis psg additionalCalls)
 
         printfn "[REACH] %d/%d symbols reachable (%.1f%% eliminated)"
             reachabilityResult.PruningStatistics.ReachableSymbols
