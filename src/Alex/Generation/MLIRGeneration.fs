@@ -109,25 +109,50 @@ let emitConstant (ctx: EmitContext) (node: PSGNode) : ExprResult =
 /// Emit an identifier (variable reference via def-use edges)
 /// For mutable variables, emits a load from the pointer
 let emitIdent (ctx: EmitContext) (node: PSGNode) : ExprResult =
-    match findDefiningNode ctx.Graph node with
-    | Some defNode ->
-        match EmitContext.lookupNodeSSA ctx defNode.Id with
-        | Some (ptrSsa, "!llvm.ptr") ->
-            // Check if this is a mutable binding (need to emit load)
-            match EmitContext.lookupMutableBinding ctx defNode.Id with
-            | Some valueType ->
-                // Emit a load from the pointer to get the actual value
-                let loadedSsa = EmitContext.nextSSA ctx
-                EmitContext.emitLine ctx (sprintf "%s = llvm.load %s : !llvm.ptr -> %s" loadedSsa ptrSsa valueType)
-                Value (loadedSsa, valueType)
+    // Special handling for Unchecked.defaultof - returns zero/null for the type
+    if node.SyntaxKind.Contains("Unchecked.defaultof") || node.SyntaxKind.Contains("defaultof") then
+        // Default value - for pointer types, emit null; for numeric, emit 0
+        match node.Type with
+        | Some t when t.HasTypeDefinition ->
+            let typeName = try t.TypeDefinition.TryFullName with _ -> None
+            match typeName with
+            | Some n when n.Contains("nativeptr") || n.Contains("voidptr") || n.Contains("IntPtr") ->
+                let ssa = EmitContext.nextSSA ctx
+                EmitContext.emitLine ctx (sprintf "%s = llvm.mlir.zero : !llvm.ptr" ssa)
+                Value (ssa, "!llvm.ptr")
+            | _ ->
+                // Default to i64 zero for unknown types
+                let ssa = EmitContext.nextSSA ctx
+                EmitContext.emitLine ctx (sprintf "%s = arith.constant 0 : i64" ssa)
+                Value (ssa, "i64")
+        | _ ->
+            // Without type info, assume pointer (most common use in our context)
+            let ssa = EmitContext.nextSSA ctx
+            EmitContext.emitLine ctx (sprintf "%s = llvm.mlir.zero : !llvm.ptr" ssa)
+            Value (ssa, "!llvm.ptr")
+    else
+        match findDefiningNode ctx.Graph node with
+        | Some defNode ->
+            match EmitContext.lookupNodeSSA ctx defNode.Id with
+            | Some (ptrSsa, "!llvm.ptr") ->
+                // Check if this is a mutable binding (need to emit load)
+                match EmitContext.lookupMutableBinding ctx defNode.Id with
+                | Some valueType ->
+                    // Emit a load from the pointer to get the actual value
+                    let loadedSsa = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = llvm.load %s : !llvm.ptr -> %s" loadedSsa ptrSsa valueType)
+                    Value (loadedSsa, valueType)
+                | None ->
+                    // Not a mutable binding, return pointer as-is (e.g., for nativeptr)
+                    Value (ptrSsa, "!llvm.ptr")
+            | Some (ssa, ty) -> Value (ssa, ty)
             | None ->
-                // Not a mutable binding, return pointer as-is (e.g., for nativeptr)
-                Value (ptrSsa, "!llvm.ptr")
-        | Some (ssa, ty) -> Value (ssa, ty)
+                // Definition not yet emitted - this is a forward reference issue
+                // The definition should have been emitted by the normal tree walk
+                // For now, report the error - proper fix would require dependency ordering
+                EmitError (sprintf "Definition %s not yet emitted (forward reference)" defNode.Id.Value)
         | None ->
-            EmitError (sprintf "Definition %s not yet emitted" defNode.Id.Value)
-    | None ->
-        EmitError "No defining node found"
+            EmitError "No defining node found"
 
 /// Map FSharpType to MLIR type string (for struct field types)
 let private mapFSharpTypeToMLIR (ftype: FSharpType) : string =
@@ -217,15 +242,32 @@ and emitLetBinding (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
                     // Track mutable binding's value type for loads when reading
                     EmitContext.recordMutableBinding ctx bindingNode.Id valueTy
                     emitNode ctx continuation
-                | _ -> emitNode ctx continuation
+                | EmitError msg ->
+                    let fullMsg = sprintf "Mutable binding %s failed: %s" bindingNode.Id.Value msg
+                    EmitContext.recordError ctx fullMsg
+                    EmitError fullMsg
+                | Void ->
+                    let msg = sprintf "Mutable binding %s produced Void - cannot bind" bindingNode.Id.Value
+                    EmitContext.recordError ctx msg
+                    EmitError msg
             else
                 let valueResult = emitNode ctx value
                 match valueResult with
                 | Value (ssa, ty) ->
                     EmitContext.recordNodeSSA ctx bindingNode.Id ssa ty
                     emitNode ctx continuation
-                | _ -> emitNode ctx continuation
-        | _ -> emitNode ctx continuation
+                | EmitError msg ->
+                    let fullMsg = sprintf "Binding %s failed: %s" bindingNode.Id.Value msg
+                    EmitContext.recordError ctx fullMsg
+                    EmitError fullMsg
+                | Void ->
+                    let msg = sprintf "Binding %s produced Void - cannot bind" bindingNode.Id.Value
+                    EmitContext.recordError ctx msg
+                    EmitError msg
+        | _ ->
+            let msg = sprintf "Binding %s has unexpected structure" bindingNode.Id.Value
+            EmitContext.recordError ctx msg
+            EmitError msg
 
     | [_pattern; value] when node.SyntaxKind.StartsWith("Binding") ->
         emitNode ctx value
@@ -236,23 +278,62 @@ and emitLetBinding (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
         | Value (ssa, ty) ->
             EmitContext.recordNodeSSA ctx node.Id ssa ty
             emitNode ctx continuation
-        | _ -> emitNode ctx continuation
+        | EmitError msg ->
+            let fullMsg = sprintf "Binding %s failed: %s" node.Id.Value msg
+            EmitContext.recordError ctx fullMsg
+            EmitError fullMsg
+        | Void ->
+            let msg = sprintf "Binding %s produced Void - cannot bind" node.Id.Value
+            EmitContext.recordError ctx msg
+            EmitError msg
 
     | child :: _ -> emitNode ctx child
     | [] -> Void
 
 /// Emit if-then-else with basic blocks
 and emitIfThenElse (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
+    let node = zipper.Focus
     let children = PSGZipper.childNodes zipper
+    // Get the result type from the IfThenElse node itself - more reliable than checking branches
+    let resultType = getNodeMLIRType node
 
     match children with
     | [condition; thenBranch; elseBranch] ->
-        emitIfThenElseFull ctx condition thenBranch (Some elseBranch)
+        emitIfThenElseFull ctx resultType condition thenBranch (Some elseBranch)
     | [condition; thenBranch] ->
-        emitIfThenElseFull ctx condition thenBranch None
+        emitIfThenElseFull ctx resultType condition thenBranch None
     | _ -> EmitError "Malformed IfThenElse node"
 
-and emitIfThenElseFull (ctx: EmitContext) (condition: PSGNode) (thenBranch: PSGNode) (elseBranch: PSGNode option) : ExprResult =
+/// Helper to get MLIR type from PSG node's F# type
+/// Returns None for Unit/Void types (no value), Some type for value types
+and private getNodeMLIRType (node: PSGNode) : string option =
+    match node.Type with
+    | Some t ->
+        try
+            if t.HasTypeDefinition then
+                let entity = t.TypeDefinition
+                // Check for Unit type first (various ways FCS might represent it)
+                let isUnit =
+                    match entity.TryFullName with
+                    | Some n when n.Contains("Unit") || n.Contains("unit") -> true
+                    | Some n when n.Contains("Void") || n = "System.Void" -> true
+                    | _ -> entity.DisplayName = "unit"
+                if isUnit then None
+                else
+                    match entity.TryFullName with
+                    | Some "System.Int32" -> Some "i32"
+                    | Some "System.Int64" -> Some "i64"
+                    | Some "System.Byte" -> Some "i8"
+                    | Some "System.Boolean" -> Some "i1"
+                    | Some n when n.Contains("NativeStr") -> Some "!llvm.struct<(ptr, i32)>"
+                    | Some n when n.Contains("nativeptr") -> Some "!llvm.ptr"
+                    | Some n when n.Contains("Char") -> Some "i32"  // char as i32
+                    | _ -> None  // Don't assume i64 for unknown types
+            else None
+        with _ -> None
+    | None -> None
+
+and emitIfThenElseFull (ctx: EmitContext) (resultType: string option) (condition: PSGNode) (thenBranch: PSGNode) (elseBranch: PSGNode option) : ExprResult =
     let condResult = emitNode ctx condition
 
     match condResult with
@@ -261,31 +342,57 @@ and emitIfThenElseFull (ctx: EmitContext) (condition: PSGNode) (thenBranch: PSGN
         let elseLabel = EmitContext.nextLabel ctx
         let mergeLabel = EmitContext.nextLabel ctx
 
+        // Use the IfThenElse node's result type to determine if we need block arguments
+        // This is more reliable than checking individual branch node types
+        let useBlockArgs = resultType.IsSome && elseBranch.IsSome
+
         let branchLine =
             match elseBranch with
             | Some _ -> sprintf "llvm.cond_br %s, %s, %s" condSsa thenLabel elseLabel
             | None -> sprintf "llvm.cond_br %s, %s, %s" condSsa thenLabel mergeLabel
         EmitContext.emitLine ctx branchLine
 
+        // Emit then block with terminator
         EmitContext.emitLine ctx (sprintf "%s:" thenLabel)
         let thenResult = emitNode ctx thenBranch
-        EmitContext.emitLine ctx (sprintf "llvm.br %s" mergeLabel)
 
+        // Emit then terminator - use the known result type if available
+        match thenResult, useBlockArgs, resultType with
+        | Value (thenSsa, thenTy), true, _ ->
+            EmitContext.emitLine ctx (sprintf "llvm.br %s(%s : %s)" mergeLabel thenSsa thenTy)
+        | _ ->
+            EmitContext.emitLine ctx (sprintf "llvm.br %s" mergeLabel)
+
+        // Emit else block with terminator (if present)
         let elseResult =
             match elseBranch with
             | Some eb ->
                 EmitContext.emitLine ctx (sprintf "%s:" elseLabel)
                 let r = emitNode ctx eb
-                EmitContext.emitLine ctx (sprintf "llvm.br %s" mergeLabel)
+                match r, useBlockArgs, resultType with
+                | Value (elseSsa, elseTy), true, _ ->
+                    EmitContext.emitLine ctx (sprintf "llvm.br %s(%s : %s)" mergeLabel elseSsa elseTy)
+                | _ ->
+                    EmitContext.emitLine ctx (sprintf "llvm.br %s" mergeLabel)
                 r
             | None -> Void
 
-        EmitContext.emitLine ctx (sprintf "%s:" mergeLabel)
+        // Emit merge block
+        match thenResult, elseResult, useBlockArgs, resultType with
+        | Value (_, thenTy), Value (_, _), true, _ ->
+            let mergeArg = EmitContext.nextSSA ctx
+            EmitContext.emitLine ctx (sprintf "%s(%s: %s):" mergeLabel mergeArg thenTy)
+            Value (mergeArg, thenTy)
+        | _, _, true, Some ty ->
+            // We expected block args but branches didn't produce values - emit diagnostic
+            let mergeArg = EmitContext.nextSSA ctx
+            EmitContext.emitLine ctx (sprintf "%s(%s: %s):" mergeLabel mergeArg ty)
+            EmitContext.recordError ctx (sprintf "IfThenElse: expected value of type %s but branches produced Void" ty)
+            Value (mergeArg, ty)
+        | _ ->
+            EmitContext.emitLine ctx (sprintf "%s:" mergeLabel)
+            Void
 
-        match thenResult, elseResult with
-        | Value (thenSsa, thenTy), Value (_, elseTy) when thenTy = elseTy ->
-            Value (thenSsa, thenTy)
-        | _ -> Void
     | _ -> EmitError "IfThenElse condition did not produce a value"
 
 /// Emit function application
@@ -472,9 +579,16 @@ and emitNativeInteropIntrinsic (ctx: EmitContext) (funcNode: PSGNode) (argNodes:
             Value (ssa, "!llvm.ptr")
     | "stackalloc" ->
         match argSsas with
-        | [(sizeSsa, _)] ->
+        | [(sizeSsa, sizeTy)] ->
+            // Extend size to i64 if needed (llvm.alloca expects i64)
+            let size64 =
+                if sizeTy = "i64" then sizeSsa
+                else
+                    let extSsa = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = arith.extsi %s : %s to i64" extSsa sizeSsa sizeTy)
+                    extSsa
             let allocSsa = EmitContext.nextSSA ctx
-            EmitContext.emitLine ctx (sprintf "%s = llvm.alloca %s x i8 : (i64) -> !llvm.ptr" allocSsa sizeSsa)
+            EmitContext.emitLine ctx (sprintf "%s = llvm.alloca %s x i8 : (i64) -> !llvm.ptr" allocSsa size64)
             Value (allocSsa, "!llvm.ptr")
         | _ -> Void
     | "get" ->
@@ -514,6 +628,19 @@ and emitFSharpCoreOperator (ctx: EmitContext) (mfv: FSharpMemberOrFunctionOrValu
         else [n])
     let argResults = flatArgs |> List.map (emitNode ctx)
     let argSsas = argResults |> List.choose (function Value (s, t) -> Some (s, t) | _ -> None)
+
+    // Check for failed argument emissions (for debugging arity issues)
+    if List.length argSsas < List.length flatArgs then
+        let failedArgs =
+            List.zip flatArgs argResults
+            |> List.choose (fun (node, result) ->
+                match result with
+                | Value _ -> None
+                | EmitError msg -> Some (sprintf "%s: EmitError(%s)" node.SyntaxKind msg)
+                | Void -> Some (sprintf "%s: Void" node.SyntaxKind))
+        if not (List.isEmpty failedArgs) then
+            let failInfo = String.concat "; " failedArgs
+            EmitContext.recordError ctx (sprintf "Argument emission failures for %s: %s" mfv.CompiledName failInfo)
 
 
     match opKind, argSsas with
@@ -797,6 +924,84 @@ and emitWhileLoop (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
         EmitContext.recordError ctx msg
         EmitError msg
 
+/// Emit mutable assignment (MutableSet:varname)
+/// Finds the mutable binding pointer and stores the new value
+and emitMutableSet (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
+    let node = zipper.Focus
+    let children = PSGZipper.childNodes zipper
+
+    match children with
+    | [newValueNode] ->
+        // Find the mutable variable's definition via def-use edges
+        match findDefiningNode ctx.Graph node with
+        | Some defNode ->
+            // Get the pointer from the mutable binding
+            match EmitContext.lookupMutableBinding ctx defNode.Id with
+            | Some valueTy ->
+                match EmitContext.lookupNodeSSA ctx defNode.Id with
+                | Some (ptrSsa, _) ->
+                    // Emit the new value
+                    let valueResult = emitNode ctx newValueNode
+                    match valueResult with
+                    | Value (valueSsa, _) ->
+                        // Store the new value
+                        EmitContext.emitLine ctx (sprintf "llvm.store %s, %s : %s, !llvm.ptr" valueSsa ptrSsa valueTy)
+                        Void  // Assignment doesn't return a value
+                    | EmitError msg -> EmitError (sprintf "MutableSet value failed: %s" msg)
+                    | Void ->
+                        EmitContext.recordError ctx (sprintf "MutableSet for %s: new value produced Void" node.SyntaxKind)
+                        Void
+                | None ->
+                    let msg = sprintf "MutableSet: no SSA for mutable binding %s" defNode.Id.Value
+                    EmitContext.recordError ctx msg
+                    EmitError msg
+            | None ->
+                // Not a mutable binding - this might be an error
+                let msg = sprintf "MutableSet: target %s is not a mutable binding" defNode.Id.Value
+                EmitContext.recordError ctx msg
+                EmitError msg
+        | None ->
+            // Try to find via SymbolUse edges directly
+            let symbolUseEdge =
+                ctx.Graph.Edges
+                |> List.tryFind (fun e -> e.Source = node.Id && e.Kind = SymbolUse)
+
+            match symbolUseEdge with
+            | Some edge ->
+                match Map.tryFind edge.Target.Value ctx.Graph.Nodes with
+                | Some defNode ->
+                    match EmitContext.lookupMutableBinding ctx defNode.Id with
+                    | Some valueTy ->
+                        match EmitContext.lookupNodeSSA ctx defNode.Id with
+                        | Some (ptrSsa, _) ->
+                            let valueResult = emitNode ctx newValueNode
+                            match valueResult with
+                            | Value (valueSsa, _) ->
+                                EmitContext.emitLine ctx (sprintf "llvm.store %s, %s : %s, !llvm.ptr" valueSsa ptrSsa valueTy)
+                                Void
+                            | EmitError msg -> EmitError (sprintf "MutableSet value failed: %s" msg)
+                            | Void -> Void
+                        | None ->
+                            let msg = sprintf "MutableSet: no SSA for mutable binding %s" defNode.Id.Value
+                            EmitContext.recordError ctx msg
+                            EmitError msg
+                    | None ->
+                        let msg = sprintf "MutableSet: target via edge %s is not mutable" defNode.Id.Value
+                        EmitContext.recordError ctx msg
+                        EmitError msg
+                | None ->
+                    let msg = "MutableSet: edge target node not found"
+                    EmitContext.recordError ctx msg
+                    EmitError msg
+            | None ->
+                let msg = sprintf "MutableSet: no def-use edge from %s" node.Id.Value
+                EmitContext.recordError ctx msg
+                EmitError msg
+    | _ ->
+        let msg = sprintf "MutableSet expected 1 child (new value), got %d" (List.length children)
+        EmitContext.recordError ctx msg
+        EmitError msg
+
 /// Emit property access
 and emitPropertyAccess (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
     let node = zipper.Focus
@@ -916,20 +1121,52 @@ and emitTuple (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
     | _ -> children |> List.fold (fun _ child -> emitNode ctx child) Void
 
 /// Emit address-of
+/// For mutable bindings, returns the pointer directly (without loading)
+/// For other values, returns the SSA value as a pointer type
 and emitAddressOf (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
     let children = PSGZipper.childNodes zipper
     match children with
     | [child] ->
-        let result = emitNode ctx child
-        match result with
-        | Value (ssa, _) -> Value (ssa, "!llvm.ptr")
-        | EmitError msg ->
-            // Propagate child error
-            EmitError msg
-        | Void ->
-            let msg = "AddressOf child produced Void - cannot take address"
-            EmitContext.recordError ctx msg
-            EmitError msg
+        // Check if child is a reference to a mutable binding
+        // If so, return the pointer to the mutable's storage directly (don't load)
+        match findDefiningNode ctx.Graph child with
+        | Some defNode ->
+            match EmitContext.lookupNodeSSA ctx defNode.Id with
+            | Some (ptrSsa, "!llvm.ptr") ->
+                // Check if this is a mutable binding
+                match EmitContext.lookupMutableBinding ctx defNode.Id with
+                | Some _ ->
+                    // Mutable binding: return the pointer directly (address of the mutable)
+                    Value (ptrSsa, "!llvm.ptr")
+                | None ->
+                    // Non-mutable: evaluate normally and cast to pointer type
+                    let result = emitNode ctx child
+                    match result with
+                    | Value (ssa, _) -> Value (ssa, "!llvm.ptr")
+                    | other -> other
+            | Some (ssa, _) ->
+                // Non-pointer SSA - just re-type it
+                Value (ssa, "!llvm.ptr")
+            | None ->
+                // Not yet emitted - evaluate and get result
+                let result = emitNode ctx child
+                match result with
+                | Value (ssa, _) -> Value (ssa, "!llvm.ptr")
+                | EmitError msg -> EmitError msg
+                | Void ->
+                    let msg = "AddressOf child produced Void - cannot take address"
+                    EmitContext.recordError ctx msg
+                    EmitError msg
+        | None ->
+            // No defining node - evaluate normally
+            let result = emitNode ctx child
+            match result with
+            | Value (ssa, _) -> Value (ssa, "!llvm.ptr")
+            | EmitError msg -> EmitError msg
+            | Void ->
+                let msg = "AddressOf child produced Void - cannot take address"
+                EmitContext.recordError ctx msg
+                EmitError msg
     | _ ->
         let msg = sprintf "AddressOf expected 1 child, got %d" (List.length children)
         EmitContext.recordError ctx msg
@@ -1023,6 +1260,8 @@ and emitNode (ctx: EmitContext) (node: PSGNode) : ExprResult =
         emitWhileLoop ctx zipper
     elif kind = "DotIndexedGet" then
         emitDotIndexedGet ctx zipper
+    elif kind.StartsWith("MutableSet:") then
+        emitMutableSet ctx zipper
     elif kind.StartsWith("Pattern:") then
         let children = PSGZipper.childNodes zipper
         match children with
@@ -1048,6 +1287,8 @@ and emitNode (ctx: EmitContext) (node: PSGNode) : ExprResult =
 // ═══════════════════════════════════════════════════════════════════
 
 /// Generate MLIR for an entry point function
+/// In freestanding mode, main IS the entry point (no libc _start),
+/// so we must emit exit syscall before returning
 let emitEntryPoint (ctx: EmitContext) (entryNode: PSGNode) : unit =
     EmitContext.emitLine ctx "llvm.func @main() -> i32 {"
     EmitContext.emitLine ctx "  ^entry:"
@@ -1063,9 +1304,20 @@ let emitEntryPoint (ctx: EmitContext) (entryNode: PSGNode) : unit =
     | Some b -> emitNode ctx b |> ignore
     | None -> ()
 
+    // In freestanding mode, we must call exit syscall (60 on Linux x86_64)
+    // before returning, since there's no libc _start to handle the exit
+    let exitCodeSsa = EmitContext.nextSSA ctx
+    EmitContext.emitLine ctx (sprintf "%s = arith.constant 0 : i64" exitCodeSsa)
+    let syscallNumSsa = EmitContext.nextSSA ctx
+    EmitContext.emitLine ctx (sprintf "%s = arith.constant 60 : i64" syscallNumSsa)  // exit syscall
+    let resultSsa = EmitContext.nextSSA ctx
+    EmitContext.emitLine ctx (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},~{rcx},~{r11},~{memory}\" %s, %s : (i64, i64) -> i64"
+        resultSsa syscallNumSsa exitCodeSsa)
+
+    // The exit syscall won't return, but LLVM requires a terminator
     let retVal = EmitContext.nextSSA ctx
-    EmitContext.emitLine ctx (sprintf "  %s = arith.constant 0 : i32" retVal)
-    EmitContext.emitLine ctx (sprintf "  llvm.return %s : i32" retVal)
+    EmitContext.emitLine ctx (sprintf "%s = arith.constant 0 : i32" retVal)
+    EmitContext.emitLine ctx (sprintf "llvm.return %s : i32" retVal)
     EmitContext.emitLine ctx "}"
 
 // ═══════════════════════════════════════════════════════════════════
