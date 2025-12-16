@@ -16,6 +16,7 @@ type CompileArgs =
     | [<AltCommandLine("-t")>] Target of target: string
     | [<AltCommandLine("-k")>] Keep_Intermediates
     | [<AltCommandLine("-v")>] Verbose
+    | [<AltCommandLine("-T")>] Timing
     | Emit_MLIR
     | Emit_LLVM
 
@@ -27,6 +28,7 @@ type CompileArgs =
             | Target _ -> "Target triple (default: host platform)"
             | Keep_Intermediates -> "Keep intermediate files (.mlir, .ll) for debugging"
             | Verbose -> "Enable verbose output"
+            | Timing -> "Show timing for each compilation phase"
             | Emit_MLIR -> "Emit MLIR and stop (don't generate executable)"
             | Emit_LLVM -> "Emit LLVM IR and stop (don't generate executable)"
 
@@ -188,18 +190,20 @@ let execute (args: ParseResults<CompileArgs>) =
     let keepIntermediates = args.Contains(Keep_Intermediates)
     let emitMLIR = args.Contains(Emit_MLIR)
     let emitLLVM = args.Contains(Emit_LLVM)
+    let showTiming = args.Contains(Timing)
+
+    // Enable timing if requested
+    Core.Timing.setEnabled showTiming
 
     report verbose "INIT" (sprintf "Loading project: %s" projectPath)
-
-    // =========================================================================
-    // PHASE 1: Load and parse .fidproj, resolve dependencies
-    // =========================================================================
 
     printfn "Firefly Compiler v0.4.164"
     printfn "========================="
     printfn ""
 
-    let loadResult = loadAndCheckProject projectPath |> Async.RunSynchronously
+    let loadResult =
+        Core.Timing.timePhase "LOAD" "Loading project and type-checking" (fun () ->
+            loadAndCheckProject projectPath |> Async.RunSynchronously)
 
     match loadResult with
     | Error msg ->
@@ -237,34 +241,30 @@ let execute (args: ParseResults<CompileArgs>) =
             else
                 None
 
-        // =========================================================================
-        // PHASE 2: Build Program Semantic Graph
-        // =========================================================================
-
+        // Nanopass Pipeline: PSG Construction
         report verbose "PSG" "Building Program Semantic Graph..."
 
-        // Enable nanopass intermediate emission when keeping intermediates or in verbose mode
         match intermediatesDir with
         | Some dir ->
             Core.PSG.Construction.Main.emitNanopassIntermediates <- true
             Core.PSG.Construction.Main.nanopassOutputDir <- dir
         | None -> ()
 
-        let psg = buildProgramSemanticGraph checkResults parseResults
+        let psg =
+            Core.Timing.timePhase "PSG" "Structural + Symbol Correlation" (fun () ->
+                buildProgramSemanticGraph checkResults parseResults)
 
-        // Reset nanopass emission flags
         Core.PSG.Construction.Main.emitNanopassIntermediates <- false
 
         printfn "[PSG] Built: %d nodes, %d edges, %d entry points, %d symbols"
             psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length psg.SymbolTable.Count
 
-        // =========================================================================
-        // PHASE 3: Reachability Analysis
-        // =========================================================================
-
+        // Nanopass: Reachability (soft-delete marking)
         report verbose "REACH" "Analyzing reachability..."
 
-        let reachabilityResult = performReachabilityAnalysis psg
+        let reachabilityResult =
+            Core.Timing.timePhase "REACH" "Reachability" (fun () ->
+                performReachabilityAnalysis psg)
 
         printfn "[REACH] %d/%d symbols reachable (%.1f%% eliminated)"
             reachabilityResult.PruningStatistics.ReachableSymbols
@@ -274,25 +274,38 @@ let execute (args: ParseResults<CompileArgs>) =
                  float reachabilityResult.PruningStatistics.TotalSymbols) * 100.0
              else 0.0)
 
-        // =========================================================================
-        // PHASE 4: Baker Enrichment (post-reachability type resolution)
-        // =========================================================================
+        // Nanopasses: Enrichment (type integration, def-use, etc.)
+        report verbose "ENRICH" "Running enrichment nanopasses..."
 
+        match intermediatesDir with
+        | Some dir ->
+            Core.PSG.Construction.Main.emitNanopassIntermediates <- true
+            Core.PSG.Construction.Main.nanopassOutputDir <- dir
+        | None -> ()
+
+        let enrichedPSG =
+            Core.Timing.timePhase "ENRICH" "Enrichment" (fun () ->
+                runEnrichmentPasses reachabilityResult.MarkedPSG checkResults)
+
+        Core.PSG.Construction.Main.emitNanopassIntermediates <- false
+
+        // Baker: Type resolution and member body correlation
         report verbose "BAKER" "Running Baker enrichment..."
 
-        let bakerResult = Baker.Baker.enrich reachabilityResult.MarkedPSG checkResults
+        let bakerResult =
+            Core.Timing.timePhase "BAKER" "Baker" (fun () ->
+                Baker.Baker.enrich enrichedPSG checkResults)
 
         printfn "[BAKER] %d member bodies extracted, %d correlated with PSG"
             bakerResult.Statistics.MembersWithBodies
             bakerResult.Statistics.MembersCorrelatedWithPSG
 
-        // =========================================================================
-        // PHASE 5: MLIR Generation
-        // =========================================================================
-
+        // Alex: MLIR Generation
         report verbose "MLIR" "Generating MLIR..."
 
-        let mlirResult = generateMLIR reachabilityResult.MarkedPSG bakerResult.CorrelationState targetTriple
+        let mlirResult =
+            Core.Timing.timePhase "MLIR" "MLIR Generation" (fun () ->
+                generateMLIR enrichedPSG bakerResult.CorrelationState targetTriple)
 
         // Report emission errors
         if mlirResult.HasErrors then
@@ -424,29 +437,34 @@ let execute (args: ParseResults<CompileArgs>) =
                 if mlirResult.HasErrors then
                     printfn "MLIR generation completed with errors (--emit-mlir)"
                     printfn "Check %s for partial output" (Path.Combine(dir, resolved.Name + ".mlir"))
+                    Core.Timing.printSummary()
                     1
                 else
                     printfn "Stopped after MLIR generation (--emit-mlir)"
+                    Core.Timing.printSummary()
                     0
             elif mlirResult.HasErrors then
                 // Don't continue to LLVM if MLIR had errors
                 printfn ""
                 printfn "Compilation failed due to emission errors."
                 printfn "MLIR output written to: %s" (Path.Combine(dir, resolved.Name + ".mlir"))
+                Core.Timing.printSummary()
                 1
             else
-                // =========================================================================
-                // PHASE 5: LLVM IR Generation (MLIR's job)
-                // =========================================================================
-
+                // MLIR → LLVM lowering
                 report verbose "LLVM" "Lowering MLIR to LLVM IR..."
 
                 let mlirPath = Path.Combine(dir, resolved.Name + ".mlir")
                 let llPath = Path.Combine(dir, resolved.Name + ".ll")
 
-                match lowerMLIRToLLVM mlirPath llPath with
+                let llvmResult =
+                    Core.Timing.timePhase "MLIR-LOWER" "Lowering MLIR to LLVM IR" (fun () ->
+                        lowerMLIRToLLVM mlirPath llPath)
+
+                match llvmResult with
                 | Error msg ->
                     printfn "[LLVM] Error: %s" msg
+                    Core.Timing.printSummary()
                     1
                 | Ok () ->
                     printfn "[LLVM] Wrote: %s" llPath
@@ -454,35 +472,82 @@ let execute (args: ParseResults<CompileArgs>) =
                     if emitLLVM then
                         printfn ""
                         printfn "Stopped after LLVM IR generation (--emit-llvm)"
+                        Core.Timing.printSummary()
                         0
                     else
-                        // =========================================================================
-                        // PHASE 6: Native Code Generation (LLVM's job)
-                        // =========================================================================
-
+                        // LLVM → Native linking
                         report verbose "LINK" "Compiling to native executable..."
 
-                        match compileLLVMToNative llPath outputPath targetTriple resolved.OutputKind with
+                        let linkResult =
+                            Core.Timing.timePhase "LINK" "Compiling to native binary" (fun () ->
+                                compileLLVMToNative llPath outputPath targetTriple resolved.OutputKind)
+
+                        match linkResult with
                         | Error msg ->
                             printfn "[LINK] Error: %s" msg
+                            Core.Timing.printSummary()
                             1
                         | Ok () ->
                             printfn "[LINK] Wrote: %s" outputPath
                             printfn ""
                             printfn "Compilation successful!"
+                            Core.Timing.printSummary()
                             0
 
         | None ->
-            // No intermediates requested, but we still did the analysis
-            printfn ""
+            // No intermediates requested - use temp directory for compilation
             if mlirResult.HasErrors then
-                printfn "Compilation analysis found errors:"
+                printfn ""
+                printfn "Compilation failed due to emission errors:"
                 for error in mlirResult.Errors do
                     printfn "  ERROR: %s" error
                 printfn ""
                 printfn "Use -k to generate intermediate files for debugging."
+                Core.Timing.printSummary()
                 1
             else
-                printfn "Compilation analysis complete."
-                printfn "Use -k or --emit-mlir to see generated code."
-                0
+                // Write to temp files and compile
+                let tempDir = Path.Combine(Path.GetTempPath(), "firefly-" + Guid.NewGuid().ToString("N")[..7])
+                Directory.CreateDirectory(tempDir) |> ignore
+
+                let mlirPath = Path.Combine(tempDir, resolved.Name + ".mlir")
+                let llPath = Path.Combine(tempDir, resolved.Name + ".ll")
+
+                File.WriteAllText(mlirPath, mlirResult.Content)
+
+                // MLIR → LLVM lowering
+                report verbose "LLVM" "Lowering MLIR to LLVM IR..."
+
+                let llvmResult =
+                    Core.Timing.timePhase "MLIR-LOWER" "Lowering MLIR to LLVM IR" (fun () ->
+                        lowerMLIRToLLVM mlirPath llPath)
+
+                match llvmResult with
+                | Error msg ->
+                    printfn "[LLVM] Error: %s" msg
+                    Core.Timing.printSummary()
+                    // Clean up temp dir
+                    try Directory.Delete(tempDir, true) with _ -> ()
+                    1
+                | Ok () ->
+                    // LLVM → Native linking
+                    report verbose "LINK" "Compiling to native executable..."
+
+                    let linkResult =
+                        Core.Timing.timePhase "LINK" "Compiling to native binary" (fun () ->
+                            compileLLVMToNative llPath outputPath targetTriple resolved.OutputKind)
+
+                    // Clean up temp dir
+                    try Directory.Delete(tempDir, true) with _ -> ()
+
+                    match linkResult with
+                    | Error msg ->
+                        printfn "[LINK] Error: %s" msg
+                        Core.Timing.printSummary()
+                        1
+                    | Ok () ->
+                        printfn "[LINK] Wrote: %s" outputPath
+                        printfn ""
+                        printfn "Compilation successful!"
+                        Core.Timing.printSummary()
+                        0

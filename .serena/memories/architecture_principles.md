@@ -97,19 +97,21 @@ These were removed twice (PSGEmitter, PSGScribe). They collect routing logic too
 
 ## The PSG Nanopass Pipeline
 
-PSG construction is a true nanopass pipeline:
+PSG construction follows a **true nanopass architecture**. Each pass is single-purpose, independently testable, and called by the orchestrator:
 
 ```
-Phase 1: Structural Construction    SynExpr → PSG nodes + ChildOf edges (FULL)
-Phase 2: Symbol Correlation         + FSharpSymbol attachments (FULL)
-Phase 3: Soft-Delete Reachability   + IsReachable marks *** NARROWS SCOPE ***
-Phase 4: Typed Tree Overlay         + Type, Constraints, SRTP [BAKER] (NARROWED)
-Phase 5+: Enrichment Nanopasses     + def-use edges, classifications (NARROWED)
+STRUCTURAL CONSTRUCTION     SynExpr → PSG nodes + ChildOf edges     [FULL GRAPH]
+SYMBOL CORRELATION          + FSharpSymbol attachments              [FULL GRAPH]
+REACHABILITY               + IsReachable marks                      [NARROWS SCOPE]
+BAKER                      + Types, SRTP, Member bodies             [NARROWED]
+ENRICHMENT NANOPASSES      + def-use, classifications, lowerings    [NARROWED]
 ```
 
-**Soft-delete** is critical - the typed tree zipper needs full structure.
+**Reachability is a semantic boundary**, not just an optimization. Everything after reachability operates on the narrowed compute graph (~30 symbols for HelloWorld instead of ~780).
 
-**Pass Ordering Dependencies**: Phase 3 is a scope-narrowing pass. Phases 4+ (Baker, enrichment, Alex) depend on this narrowing. This is proper nanopass design - semantic dependency made explicit, not arbitrary coupling. The dependency keeps work focused on the right part of the scaffolding.
+**Soft-delete reachability**: Nodes are marked `IsReachable = false`, not removed. Baker's two-tree zipper needs full structure for navigation.
+
+**See `nanopass_pipeline` memory for complete details.**
 
 ## Baker Component Library
 

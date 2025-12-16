@@ -70,17 +70,21 @@ let doctor (args: ParseResults<DoctorArgs>) =
             printfn "Suggested fixes:"
             errors |> List.iter (fun error ->
                 match error with
-                | ConversionError(phase, source, target, message) ->
+                | ConversionError(phase, _, _, message) ->
                     printfn "  - %s: %s" phase message
-                | SyntaxError(pos, message, context) ->
+                | SyntaxError(_, message, context) ->
                     printfn "  - %s: %s" (String.concat " > " context) message
-                | TypeCheckError(construct, message, location) ->
+                | TypeCheckError(construct, message, _) ->
                     printfn "  - %s: %s" construct message
                 | InternalError(phase, message, details) ->
                     printfn "  - %s: %s" phase message
                     match details with
                     | Some d -> printfn "    %s" d
-                    | None -> ())
+                    | None -> ()
+                | ParseError(_, message) ->
+                    printfn "  - Parse: %s" message
+                | DependencyResolutionError(symbol, message) ->
+                    printfn "  - Dependency '%s': %s" symbol message)
         
         // If on Windows with MSYS2, give specific guidance
         if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then

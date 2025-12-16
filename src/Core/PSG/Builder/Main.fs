@@ -101,16 +101,17 @@ let buildStructuralGraph (parseResults: FSharpParseFileResults[]) : ProgramSeman
                 }
             )
 
-    // Emit Phase 1 intermediate
+    // Emit Phase 1 intermediate (parallel)
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediate structuralGraph "1_structural" nanopassOutputDir
+        emitNanopassIntermediateAsync structuralGraph "1_structural" nanopassOutputDir
 
     { structuralGraph with
         CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> List.ofArray
     }
 
-/// Build complete PSG from project results with ENHANCED symbol correlation (FCS 43.9.300 compatible)
-/// This is the traditional entry point that does everything at once
+/// Build correlated PSG from project results (structural + symbol correlation only)
+/// This is the first major pass - returns graph ready for reachability analysis
+/// IMPORTANT: Call reachability BEFORE runEnrichmentPasses to narrow the graph
 let buildProgramSemanticGraph
     (checkResults: FSharpCheckProjectResults)
     (parseResults: FSharpParseFileResults[]) : ProgramSemanticGraph =
@@ -171,97 +172,99 @@ let buildProgramSemanticGraph
                 }
             )
 
-    // Emit Phase 1 intermediate
+    // Emit structural intermediate (parallel)
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediate structuralGraph "1_structural" nanopassOutputDir
+        emitNanopassIntermediateAsync structuralGraph "1_structural" nanopassOutputDir
 
     // Validate symbol capture
     validateSymbolCapture structuralGraph
 
-    // Phase 2: Apply FCS constraint resolution
-    let typeEnhancedGraph = integrateTypesWithCheckResults structuralGraph checkResults
+    // Return correlated structural graph - reachability should be called BEFORE enrichment
+    { structuralGraph with
+        CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> List.ofArray
+    }
 
-    // Emit Phase 2 intermediate
+/// Run enrichment nanopasses on a PSG (post-reachability)
+/// These passes should only be run on the NARROWED (reachable) graph for performance
+/// Call this AFTER reachability analysis has marked unreachable nodes
+let runEnrichmentPasses
+    (graph: ProgramSemanticGraph)
+    (checkResults: FSharpCheckProjectResults) : ProgramSemanticGraph =
+
+    // Type integration - apply FCS constraint resolution
+    let typeEnhancedGraph = integrateTypesWithCheckResults graph checkResults
+
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediate typeEnhancedGraph "2_type_integration" nanopassOutputDir
-        emitNanopassDiff structuralGraph typeEnhancedGraph "1_structural" "2_type_integration" nanopassOutputDir
+        emitNanopassIntermediateAsync typeEnhancedGraph "2_type_integration" nanopassOutputDir
+        emitNanopassDiffAsync graph typeEnhancedGraph "1_structural" "2_type_integration" nanopassOutputDir
 
-    // Phase 2a: Nanopass - Resolve SRTP constraints
+    // Resolve SRTP constraints
     let srtpResolvedGraph = Core.PSG.Nanopass.ResolveSRTP.run typeEnhancedGraph checkResults
 
-    // Emit Phase 2a intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediate srtpResolvedGraph "2a_srtp_resolved" nanopassOutputDir
-        emitNanopassDiff typeEnhancedGraph srtpResolvedGraph "2_type_integration" "2a_srtp_resolved" nanopassOutputDir
+        emitNanopassIntermediateAsync srtpResolvedGraph "2a_srtp_resolved" nanopassOutputDir
+        emitNanopassDiffAsync typeEnhancedGraph srtpResolvedGraph "2_type_integration" "2a_srtp_resolved" nanopassOutputDir
 
-    // Phase 2b: Nanopass - Flatten curried applications
+    // Flatten curried applications
     let flattenedGraph = flattenApplications srtpResolvedGraph
 
-    // Emit Phase 2b intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediate flattenedGraph "2b_flattened_apps" nanopassOutputDir
-        emitNanopassDiff srtpResolvedGraph flattenedGraph "2a_srtp_resolved" "2b_flattened_apps" nanopassOutputDir
+        emitNanopassIntermediateAsync flattenedGraph "2b_flattened_apps" nanopassOutputDir
+        emitNanopassDiffAsync srtpResolvedGraph flattenedGraph "2a_srtp_resolved" "2b_flattened_apps" nanopassOutputDir
 
-    // Phase 2c: Nanopass - Reduce pipe operators
+    // Reduce pipe operators
     let pipeReducedGraph = reducePipeOperators flattenedGraph
 
-    // Emit Phase 2c intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediate pipeReducedGraph "2c_pipe_reduced" nanopassOutputDir
-        emitNanopassDiff flattenedGraph pipeReducedGraph "2b_flattened_apps" "2c_pipe_reduced" nanopassOutputDir
+        emitNanopassIntermediateAsync pipeReducedGraph "2c_pipe_reduced" nanopassOutputDir
+        emitNanopassDiffAsync flattenedGraph pipeReducedGraph "2b_flattened_apps" "2c_pipe_reduced" nanopassOutputDir
 
-    // Phase 2d: Nanopass - Reduce Alloy operators (currently disabled)
+    // Reduce Alloy operators (currently disabled)
     let alloyReducedGraph = pipeReducedGraph
 
-    // Emit Phase 2d intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediate alloyReducedGraph "2d_alloy_reduced" nanopassOutputDir
-        emitNanopassDiff pipeReducedGraph alloyReducedGraph "2c_pipe_reduced" "2d_alloy_reduced" nanopassOutputDir
+        emitNanopassIntermediateAsync alloyReducedGraph "2d_alloy_reduced" nanopassOutputDir
+        emitNanopassDiffAsync pipeReducedGraph alloyReducedGraph "2c_pipe_reduced" "2d_alloy_reduced" nanopassOutputDir
 
-    // Phase 3: Nanopass - Add def-use edges
+    // Add def-use edges
     let defUseGraph = addDefUseEdges alloyReducedGraph
 
-    // Emit Phase 3 intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediate defUseGraph "3_def_use_edges" nanopassOutputDir
-        emitNanopassDiff typeEnhancedGraph defUseGraph "2_type_integration" "3_def_use_edges" nanopassOutputDir
+        emitNanopassIntermediateAsync defUseGraph "3_def_use_edges" nanopassOutputDir
+        emitNanopassDiffAsync typeEnhancedGraph defUseGraph "2_type_integration" "3_def_use_edges" nanopassOutputDir
 
-    // Phase 3a: Nanopass - Constant propagation
+    // Constant propagation
     let constPropGraph = propagateConstants defUseGraph
 
-    // Emit Phase 3a intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediate constPropGraph "3a_const_prop" nanopassOutputDir
-        emitNanopassDiff defUseGraph constPropGraph "3_def_use_edges" "3a_const_prop" nanopassOutputDir
+        emitNanopassIntermediateAsync constPropGraph "3a_const_prop" nanopassOutputDir
+        emitNanopassDiffAsync defUseGraph constPropGraph "3_def_use_edges" "3a_const_prop" nanopassOutputDir
 
-    // Phase 3a2: Nanopass - Lower string length
+    // Lower string length
     let strlenLoweredGraph = lowerStringLength constPropGraph
 
-    // Emit Phase 3a2 intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediate strlenLoweredGraph "3a2_strlen_lowered" nanopassOutputDir
-        emitNanopassDiff constPropGraph strlenLoweredGraph "3a_const_prop" "3a2_strlen_lowered" nanopassOutputDir
+        emitNanopassIntermediateAsync strlenLoweredGraph "3a2_strlen_lowered" nanopassOutputDir
+        emitNanopassDiffAsync constPropGraph strlenLoweredGraph "3a_const_prop" "3a2_strlen_lowered" nanopassOutputDir
 
-    // Phase 3b: Nanopass - Annotate function parameters
+    // Annotate function parameters
     let paramAnnotatedGraph = annotateParameters strlenLoweredGraph
 
-    // Phase 3c: Nanopass - Classify operations
+    // Classify operations
     let classifiedGraph = classifyOperations paramAnnotatedGraph
 
-    // Emit Phase 3c intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediate classifiedGraph "3c_classified_ops" nanopassOutputDir
-        emitNanopassDiff paramAnnotatedGraph classifiedGraph "3b_param_annotated" "3c_classified_ops" nanopassOutputDir
+        emitNanopassIntermediateAsync classifiedGraph "3c_classified_ops" nanopassOutputDir
+        emitNanopassDiffAsync paramAnnotatedGraph classifiedGraph "3b_param_annotated" "3c_classified_ops" nanopassOutputDir
 
-    // Phase 3d: Nanopass - Lower interpolated strings
+    // Lower interpolated strings
     let loweredGraph = lowerInterpolatedStrings classifiedGraph
 
-    // Emit Phase 3d intermediate
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediate loweredGraph "3d_lowered_interp_strings" nanopassOutputDir
-        emitNanopassDiff classifiedGraph loweredGraph "3c_classified_ops" "3d_lowered_interp_strings" nanopassOutputDir
+        emitNanopassIntermediateAsync loweredGraph "3d_lowered_interp_strings" nanopassOutputDir
+        emitNanopassDiffAsync classifiedGraph loweredGraph "3c_classified_ops" "3d_lowered_interp_strings" nanopassOutputDir
 
-    // Phase 4: Finalize nodes and analyze context
+    // Finalize nodes and analyze context
     let finalNodes =
         loweredGraph.Nodes
         |> Map.map (fun _ node ->
@@ -272,13 +275,13 @@ let buildProgramSemanticGraph
     let finalGraph =
         { loweredGraph with
             Nodes = finalNodes
-            CompilationOrder = parseResults |> Array.map (fun pr -> pr.FileName) |> List.ofArray
         }
 
-    // Emit Phase 4 intermediate (final)
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediate finalGraph "4_finalized" nanopassOutputDir
-        emitNanopassDiff loweredGraph finalGraph "3d_lowered_interp_strings" "4_finalized" nanopassOutputDir
+        emitNanopassIntermediateAsync finalGraph "4_finalized" nanopassOutputDir
+        emitNanopassDiffAsync loweredGraph finalGraph "3d_lowered_interp_strings" "4_finalized" nanopassOutputDir
+        // Wait for all parallel writes to complete before returning
+        awaitAllWrites()
 
     validateSymbolCapture finalGraph
     finalGraph

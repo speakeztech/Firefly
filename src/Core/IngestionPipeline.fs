@@ -310,30 +310,35 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                     generateCorrelationDebugOutput correlations config.IntermediatesDir.Value
                     writePSGSummary psg config.IntermediatesDir.Value
                 
-                // Step 6: Perform reachability analysis
+                // Step 6: Perform reachability analysis (narrows the graph)
                 let reachabilityResult = performReachabilityAnalysis psg
+
+                // Enrichment nanopasses on narrowed graph
+                if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                    Core.PSG.Construction.Main.emitNanopassIntermediates <- true
+                    Core.PSG.Construction.Main.nanopassOutputDir <- config.IntermediatesDir.Value
+
+                let enrichedPSG = runEnrichmentPasses reachabilityResult.MarkedPSG projectResults.CheckResults
+
+                Core.PSG.Construction.Main.emitNanopassIntermediates <- false
 
                 // Step 7: Generate pruned PSG debug assets
                 if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-                    
-                    // Use the marked PSG from reachability analysis
-                    let markedPSG = reachabilityResult.MarkedPSG
-                    
-                    // Generate debug outputs with the marked PSG
-                    generatePSGDebugOutput markedPSG config.IntermediatesDir.Value
-                    
-                    let prunedSymbols = generatePrunedSymbolData markedPSG reachabilityResult
-                    let comparisonData = generateComparisonData markedPSG reachabilityResult
+                    // Generate debug outputs with the enriched PSG
+                    generatePSGDebugOutput enrichedPSG config.IntermediatesDir.Value
+
+                    let prunedSymbols = generatePrunedSymbolData enrichedPSG reachabilityResult
+                    let comparisonData = generateComparisonData enrichedPSG reachabilityResult
                     let callGraphData = generateCallGraphData reachabilityResult
                     let libraryBoundaryData = generateLibraryBoundaryData reachabilityResult
-                    
+
                     writeJsonAsset config.IntermediatesDir.Value "psg.pruned.symbols.json" prunedSymbols
                     writeJsonAsset config.IntermediatesDir.Value "reachability.analysis.json" comparisonData
                     writeJsonAsset config.IntermediatesDir.Value "psg.callgraph.pruned.json" callGraphData
                     writeJsonAsset config.IntermediatesDir.Value "library.boundaries.json" libraryBoundaryData
 
                 // Step 7.5: Validate native types (halt on non-native BCL types)
-                let nativeValidation = validateReachable reachabilityResult.MarkedPSG
+                let nativeValidation = validateReachable enrichedPSG
 
                 if nativeValidation.HasErrors then
                     // Add all native type errors as diagnostics
@@ -347,20 +352,20 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                     return {
                         Success = false
                         ProjectResults = Some projectResults
-                        ProgramSemanticGraph = Some psg
+                        ProgramSemanticGraph = Some enrichedPSG
                         ReachabilityAnalysis = Some reachabilityResult
                         BakerResult = None
                         Diagnostics = List.ofSeq diagnostics
                     }
                 else
-                    // Step 8: Run Baker enrichment (Phase 4)
-                    let bakerResult = Baker.Baker.enrich reachabilityResult.MarkedPSG projectResults.CheckResults
+                    // Step 8: Run Baker enrichment
+                    let bakerResult = Baker.Baker.enrich enrichedPSG projectResults.CheckResults
 
                     // Return successful pipeline result
                     return {
                         Success = true
                         ProjectResults = Some projectResults
-                        ProgramSemanticGraph = Some psg
+                        ProgramSemanticGraph = Some enrichedPSG
                         ReachabilityAnalysis = Some reachabilityResult
                         BakerResult = Some bakerResult
                         Diagnostics = List.ofSeq diagnostics
@@ -383,7 +388,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
 }
 
 // ============================================================================
-// OPTIMIZED PIPELINE (Phase separation for faster compilation)
+// OPTIMIZED PIPELINE (Structural reachability pre-filter)
 // ============================================================================
 // This pipeline uses structural reachability BEFORE type-checking to minimize
 // the amount of code that needs expensive FCS type analysis.
@@ -391,14 +396,14 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
 // Flow:
 // 1. Parse all files (fast)
 // 2. Build structural PSG (fast, no symbols)
-// 3. Structural reachability (fast)
-// 4. Get reachable files
-// 5. Type-check only reachable files (much faster!)
-// 6. Build full PSG with symbols
-// 7. Full reachability
+// 3. Structural reachability (fast, narrows file set)
+// 4. Type-check only reachable files (much faster!)
+// 5. Build correlated PSG with symbols
+// 6. Full reachability (narrows node set)
+// 7. Run enrichment nanopasses on narrowed graph
 // 8. Baker enrichment
 
-/// Run the optimized ingestion pipeline with phase separation
+/// Run the optimized ingestion pipeline with structural pre-filtering
 /// Uses structural reachability to minimize type-checking scope
 let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineResult> = async {
     let diagnostics = ResizeArray<Diagnostic>()
@@ -506,6 +511,9 @@ let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<
                 // Step 9: Full (symbol-aware) reachability
                 let reachabilityResult = performReachabilityAnalysis psg
 
+                // Step 9.5: Run enrichment nanopasses on the NARROWED graph
+                let enrichedPSG = runEnrichmentPasses reachabilityResult.MarkedPSG projectResults.CheckResults
+
                 // Step 10: Generate debug outputs
                 if config.OutputIntermediates && config.IntermediatesDir.IsSome then
                     let correlationContext = createContext projectResults.CheckResults
@@ -516,10 +524,10 @@ let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<
 
                     generateCorrelationDebugOutput correlations config.IntermediatesDir.Value
                     writePSGSummary psg config.IntermediatesDir.Value
-                    generatePSGDebugOutput reachabilityResult.MarkedPSG config.IntermediatesDir.Value
+                    generatePSGDebugOutput enrichedPSG config.IntermediatesDir.Value
 
-                    let prunedSymbols = generatePrunedSymbolData reachabilityResult.MarkedPSG reachabilityResult
-                    let comparisonData = generateComparisonData reachabilityResult.MarkedPSG reachabilityResult
+                    let prunedSymbols = generatePrunedSymbolData enrichedPSG reachabilityResult
+                    let comparisonData = generateComparisonData enrichedPSG reachabilityResult
                     let callGraphData = generateCallGraphData reachabilityResult
                     let libraryBoundaryData = generateLibraryBoundaryData reachabilityResult
 
@@ -529,7 +537,7 @@ let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<
                     writeJsonAsset config.IntermediatesDir.Value "library.boundaries.json" libraryBoundaryData
 
                 // Step 11: Validate native types
-                let nativeValidation = validateReachable reachabilityResult.MarkedPSG
+                let nativeValidation = validateReachable enrichedPSG
 
                 if nativeValidation.HasErrors then
                     nativeValidation.Errors |> List.iter (fun err ->
@@ -542,14 +550,14 @@ let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<
                     return {
                         Success = false
                         ProjectResults = Some projectResults
-                        ProgramSemanticGraph = Some psg
+                        ProgramSemanticGraph = Some enrichedPSG
                         ReachabilityAnalysis = Some reachabilityResult
                         BakerResult = None
                         Diagnostics = List.ofSeq diagnostics
                     }
                 else
-                    // Step 12: Baker enrichment (with reachability filter)
-                    let bakerResult = Baker.Baker.enrich reachabilityResult.MarkedPSG projectResults.CheckResults
+                    // Step 12: Baker enrichment
+                    let bakerResult = Baker.Baker.enrich enrichedPSG projectResults.CheckResults
 
                     diagnostics.Add {
                         Severity = Info
@@ -562,7 +570,7 @@ let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<
                     return {
                         Success = true
                         ProjectResults = Some projectResults
-                        ProgramSemanticGraph = Some psg
+                        ProgramSemanticGraph = Some enrichedPSG
                         ReachabilityAnalysis = Some reachabilityResult
                         BakerResult = Some bakerResult
                         Diagnostics = List.ofSeq diagnostics

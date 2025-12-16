@@ -10,6 +10,7 @@ open System
 open System.IO
 open System.Text.Json
 open System.Text.Json.Serialization
+open System.Threading.Tasks
 open FSharp.Compiler.Symbols
 open Core.PSG.Types
 
@@ -172,3 +173,27 @@ let emitNanopassDiff (before: ProgramSemanticGraph) (after: ProgramSemanticGraph
     with _ ->
         // Failed to emit diff - continue silently
         ()
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Parallel write task collection
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Collected write tasks - call awaitAllWrites() before process exit
+let private pendingWrites = System.Collections.Concurrent.ConcurrentBag<Task>()
+
+/// Spin off intermediate emission as a background task (non-blocking)
+let emitNanopassIntermediateAsync (psg: ProgramSemanticGraph) (phaseLabel: string) (outputDir: string) : unit =
+    let task = Task.Run(fun () -> emitNanopassIntermediate psg phaseLabel outputDir)
+    pendingWrites.Add(task)
+
+/// Spin off diff emission as a background task (non-blocking)
+let emitNanopassDiffAsync (before: ProgramSemanticGraph) (after: ProgramSemanticGraph) (fromPhase: string) (toPhase: string) (outputDir: string) : unit =
+    let task = Task.Run(fun () -> emitNanopassDiff before after fromPhase toPhase outputDir)
+    pendingWrites.Add(task)
+
+/// Wait for all pending write tasks to complete
+let awaitAllWrites () : unit =
+    let tasks = pendingWrites.ToArray()
+    if tasks.Length > 0 then
+        Task.WaitAll(tasks)
+        pendingWrites.Clear()

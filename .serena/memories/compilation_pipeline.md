@@ -31,21 +31,35 @@ F# Source → FCS → PSG → Nanopasses → Alex/Zipper → MLIR → LLVM → N
   - Carries proofs about memory lifetimes, type safety, resource ownership, and coeffects
 - **Documentation**: `docs/PSG_*.md`
 
-### 4. Nanopasses
+### 4. Reachability (Critical Boundary)
+- **Location**: `/src/Core/PSG/Reachability.fs`
+- **Purpose**: Soft-delete unreachable nodes, NARROWING the graph scope
+- **Key Point**: Everything AFTER this operates on the narrowed compute graph
+- **Statistics**: HelloWorld has ~780 nodes full, ~30 reachable
+
+### 5. Baker (Post-Reachability Type Resolution)
+- **Location**: `/src/Baker/`
+- **Purpose**: Two-tree zipper correlating typed tree with PSG
+- **Operates on**: NARROWED graph only (post-reachability)
+- **Outputs**: SRTP resolutions, member bodies, type overlay
+
+### 6. Enrichment Nanopasses
 - **Location**: `/src/Core/PSG/Nanopass/`
 - **Purpose**: Small, single-purpose transformations that enrich the PSG
+- **Operates on**: NARROWED graph only (post-reachability)
 - **Design**:
   - Each pass does ONE thing (add def-use edges, classify operations, etc.)
   - Passes are composable and can be inspected independently
 - **Current Passes**:
-  - `IntermediateEmission.fs` - Emit intermediate files
   - `FlattenApplications.fs` - Flatten nested function applications
   - `ReducePipeOperators.fs` - Transform pipe operators
   - `DefUseEdges.fs` - Add definition-use edges
+  - `ConstantPropagation.fs` - Propagate constant values
   - `ParameterAnnotation.fs` - Annotate parameters
   - `ClassifyOperations.fs` - Classify operations by kind
   - `LowerInterpolatedStrings.fs` - Lower interpolated strings
-- **Documentation**: `docs/PSG_Nanopass_Architecture.md`
+  - `ResolveSRTP.fs` - Resolve statically resolved type parameters
+- **Documentation**: See `nanopass_pipeline` memory
 
 ### 5. Alex/Zipper
 - **Location**: `/src/Alex/`

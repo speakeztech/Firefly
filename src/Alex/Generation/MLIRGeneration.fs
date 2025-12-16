@@ -21,38 +21,6 @@ open Core.PSG.Nanopass.DefUseEdges
 open Baker.Types
 
 // ═══════════════════════════════════════════════════════════════════
-// Type Mapping
-// ═══════════════════════════════════════════════════════════════════
-
-/// Map F# type to MLIR type string
-let mapType (ftype: FSharpType option) : string =
-    match ftype with
-    | None -> "i32"
-    | Some t ->
-        try
-            if t.HasTypeDefinition then
-                match t.TypeDefinition.TryFullName with
-                | Some "System.Int32" -> "i32"
-                | Some "System.Int64" -> "i64"
-                | Some "System.Int16" -> "i16"
-                | Some "System.Byte" | Some "System.SByte" -> "i8"
-                | Some "System.UInt32" -> "i32"
-                | Some "System.UInt64" -> "i64"
-                | Some "System.Boolean" -> "i1"
-                | Some "System.Single" -> "f32"
-                | Some "System.Double" -> "f64"
-                | Some "System.Void" | Some "Microsoft.FSharp.Core.unit" -> "unit"
-                | Some "System.IntPtr" | Some "System.UIntPtr" -> "!llvm.ptr"
-                | Some n when n.Contains("nativeptr") -> "!llvm.ptr"
-                | Some "Microsoft.FSharp.Core.string" -> "!llvm.ptr"
-                | _ -> "i32"
-            elif t.IsGenericParameter then
-                "!llvm.ptr"
-            else
-                "i32"
-        with _ -> "i32"
-
-// ═══════════════════════════════════════════════════════════════════
 // Emission Helpers
 // ═══════════════════════════════════════════════════════════════════
 

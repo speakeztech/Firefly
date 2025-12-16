@@ -24,7 +24,8 @@
       
       <!-- Compiler Configuration -->
       <Compile Include="Core/CompilerConfig.fs" />
-      
+      <Compile Include="Core/Timing.fs" />
+
       <!-- Core Types -->
       <Compile Include="Core/Types/Dialects.fs" />
       <Compile Include="Core/Types/MLIRTypes.fs" />

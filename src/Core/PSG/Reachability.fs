@@ -133,31 +133,9 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
     // Analyze edges to build call graph
     for edge in psg.Edges do
         match edge.Kind with
-        | FunctionCall ->
+        | FunctionCall | SymRef ->
             let callerOpt = Map.tryFind edge.Source.Value nodeToFunction
             let targetOpt = Map.tryFind edge.Target.Value psg.Nodes
-
-            match callerOpt, targetOpt with
-            | Some caller, Some targetNode ->
-                match targetNode.Symbol with
-                | Some targetSym -> tryAddCallEdge caller targetSym
-                | None -> ()
-            | _ -> ()
-        | MethodCall ->
-            let callerOpt = Map.tryFind edge.Source.Value nodeToFunction
-            let targetOpt = Map.tryFind edge.Target.Value psg.Nodes
-
-            match callerOpt, targetOpt with
-            | Some caller, Some targetNode ->
-                match targetNode.Symbol with
-                | Some targetSym -> tryAddCallEdge caller targetSym
-                | None -> ()
-            | _ -> ()
-        | Reference ->
-            // References can be to values, types, etc. - only add if it's a callable
-            let callerOpt = Map.tryFind edge.Source.Value nodeToFunction
-            let targetOpt = Map.tryFind edge.Target.Value psg.Nodes
-
             match callerOpt, targetOpt with
             | Some caller, Some targetNode ->
                 match targetNode.Symbol with

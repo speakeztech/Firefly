@@ -224,10 +224,3 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
         let memberNode = createNode (sprintf "Pattern:InstanceMember:%s" memberName) range fileName None parentId
         let graph' = { graph with Nodes = Map.add memberNode.Id.Value memberNode graph.Nodes }
         addChildToParent memberNode.Id parentId graph'
-
-    // Hard stop on unhandled patterns
-    | other ->
-        let patTypeName = other.GetType().Name
-        let range = other.Range
-        failwithf "[BUILDER] ERROR: Unhandled pattern type '%s' at %s in file %s. PSG construction cannot continue with unknown AST nodes."
-            patTypeName (range.ToString()) fileName
