@@ -67,7 +67,7 @@ let private selectConcatOp (argCount: int) : NativeStrOp =
     match argCount with
     | 2 -> StrConcat2
     | 3 -> StrConcat3
-    | _ -> StrConcat3  // For now, handle 2-3 args; more would need chaining
+    | _ -> StrConcatN  // Variable number of args (>3)
 
 /// Transform an InterpolatedStringPart:String node to a Const:String node
 let private transformStringPart (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode =

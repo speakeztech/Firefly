@@ -451,6 +451,46 @@ and transferNativeStr (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: PS
             TVoid
         else TError "StrConcat3 requires 3 arguments"
 
+    | StrConcatN ->
+        // Variable number of arguments (>3) - emit writes for all parts
+        if ssas.Length >= 1 then
+            // Helper to emit write syscall for a string
+            let emitWrite strSSA =
+                match ctx.SSAToStringContent.TryGetValue(strSSA) with
+                | true, content when content.StartsWith("DYNAMIC:") ->
+                    let bytesReadSSA = content.Substring(8)
+                    // Create constant 1 for subtraction
+                    let oneSSA = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" oneSSA)
+                    let adjustedLenSSA = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = arith.subi %s, %s : i64" adjustedLenSSA bytesReadSSA oneSSA)
+                    let sysNumSSA = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" sysNumSSA)
+                    let fdSSA = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" fdSSA)
+                    let resultSSA = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
+                        resultSSA sysNumSSA fdSSA strSSA adjustedLenSSA)
+                | true, content ->
+                    let len = content.Length
+                    let sysNumSSA = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" sysNumSSA)
+                    let fdSSA = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" fdSSA)
+                    let lenSSA = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = arith.constant %d : i64" lenSSA len)
+                    let resultSSA = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}\" %s, %s, %s, %s : (i64, i64, !llvm.ptr, i64) -> i64"
+                        resultSSA sysNumSSA fdSSA strSSA lenSSA)
+                | _ -> ()
+
+            // Emit writes for ALL parts
+            for ssa in ssas do
+                emitWrite ssa
+
+            TVoid
+        else TError "StrConcatN requires at least 1 argument"
+
     | StrLength ->
         if ssas.Length >= 1 then
             let resultSSA = EmitContext.nextSSA ctx
@@ -879,6 +919,35 @@ and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: P
             | TError msg -> TError msg
             | TVoid -> TError "While condition produced no value"
         | _ -> TError "Invalid WhileLoop structure"
+
+    // Match expressions - pattern matching
+    elif kind.StartsWith("Match") then
+        let children = getChildren graph node
+        // Structure: Match has scrutinee as first child, then MatchClause children
+        // For freestanding mode (no argv), we execute the wildcard/default clause
+        let clauses = children |> List.filter (fun c -> c.SyntaxKind.StartsWith("MatchClause"))
+
+        // Find wildcard clause or last clause as default
+        let defaultClause =
+            clauses
+            |> List.tryFind (fun clause ->
+                let clauseChildren = getChildren graph clause
+                clauseChildren |> List.exists (fun c -> c.SyntaxKind = "Pattern:Wildcard"))
+            |> Option.orElse (List.tryLast clauses)
+
+        match defaultClause with
+        | Some clause ->
+            // Find the body (non-Pattern child of MatchClause)
+            let clauseChildren = getChildren graph clause
+            let body = clauseChildren |> List.tryFind (fun c -> not (c.SyntaxKind.StartsWith("Pattern:")))
+            match body with
+            | Some bodyNode -> transferNodeDirect ctx graph bodyNode
+            | None -> TVoid
+        | None -> TError "Match has no clauses"
+
+    // MatchClause - should be handled by parent Match
+    elif kind.StartsWith("MatchClause") then
+        TVoid
 
     // Application nodes - dispatch by Operation
     elif kind.StartsWith("App") then

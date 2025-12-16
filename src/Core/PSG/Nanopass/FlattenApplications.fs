@@ -22,6 +22,7 @@
 /// 2. Makes pattern matching in emitters straightforward
 /// 3. Follows nanopass principle: normalize early, process simple forms later
 ///
+/// Run AFTER ReducePipeOperators (flattens curried structures from pipe reduction).
 /// Run BEFORE DefUseEdges so edges are built on the flattened structure.
 ///
 /// Reference: Nanopass Framework (Sarkar, Waddell, Dybvig, Keep)

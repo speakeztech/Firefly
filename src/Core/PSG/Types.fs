@@ -254,6 +254,7 @@ type NativeStrOp =
     | StrCopyToBuffer // copyToBuffer dest s
     | StrConcat2      // concat2 dest a b
     | StrConcat3      // concat3 dest a b c
+    | StrConcatN      // concatN - variable number of args (>3)
     | StrFromBytesTo  // fromBytesTo dest bytes
 
 /// Memory operations

@@ -205,26 +205,26 @@ let runEnrichmentPasses
         emitNanopassIntermediateAsync srtpResolvedGraph "2a_srtp_resolved" nanopassOutputDir
         emitNanopassDiffAsync typeEnhancedGraph srtpResolvedGraph "2_type_integration" "2a_srtp_resolved" nanopassOutputDir
 
-    // Flatten curried applications
-    let flattenedGraph = flattenApplications srtpResolvedGraph
+    // Reduce pipe operators FIRST (creates curried structures)
+    let pipeReducedGraph = reducePipeOperators srtpResolvedGraph
 
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediateAsync flattenedGraph "2b_flattened_apps" nanopassOutputDir
-        emitNanopassDiffAsync srtpResolvedGraph flattenedGraph "2a_srtp_resolved" "2b_flattened_apps" nanopassOutputDir
+        emitNanopassIntermediateAsync pipeReducedGraph "2b_pipe_reduced" nanopassOutputDir
+        emitNanopassDiffAsync srtpResolvedGraph pipeReducedGraph "2a_srtp_resolved" "2b_pipe_reduced" nanopassOutputDir
 
-    // Reduce pipe operators
-    let pipeReducedGraph = reducePipeOperators flattenedGraph
+    // Flatten curried applications SECOND (flattens structures from pipe reduction)
+    let flattenedGraph = flattenApplications pipeReducedGraph
 
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
-        emitNanopassIntermediateAsync pipeReducedGraph "2c_pipe_reduced" nanopassOutputDir
-        emitNanopassDiffAsync flattenedGraph pipeReducedGraph "2b_flattened_apps" "2c_pipe_reduced" nanopassOutputDir
+        emitNanopassIntermediateAsync flattenedGraph "2c_flattened_apps" nanopassOutputDir
+        emitNanopassDiffAsync pipeReducedGraph flattenedGraph "2b_pipe_reduced" "2c_flattened_apps" nanopassOutputDir
 
     // Reduce Alloy operators (currently disabled)
-    let alloyReducedGraph = pipeReducedGraph
+    let alloyReducedGraph = flattenedGraph
 
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
         emitNanopassIntermediateAsync alloyReducedGraph "2d_alloy_reduced" nanopassOutputDir
-        emitNanopassDiffAsync pipeReducedGraph alloyReducedGraph "2c_pipe_reduced" "2d_alloy_reduced" nanopassOutputDir
+        emitNanopassDiffAsync flattenedGraph alloyReducedGraph "2c_flattened_apps" "2d_alloy_reduced" nanopassOutputDir
 
     // Add def-use edges
     let defUseGraph = addDefUseEdges alloyReducedGraph

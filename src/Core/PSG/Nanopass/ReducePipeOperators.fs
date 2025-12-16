@@ -15,7 +15,7 @@
 /// Alex/XParsec to handle with full type context, preserving MLIR optimization
 /// opportunities.
 ///
-/// Run AFTER FlattenApplications, BEFORE DefUseEdges.
+/// Run BEFORE FlattenApplications (pipe reduction creates curried structures that need flattening).
 ///
 /// Reference: F# Language Spec §1734-1742 (operator syntax translation)
 /// Reference: Nanopass Framework (Sarkar, Waddell, Dybvig, Keep)
@@ -49,14 +49,23 @@ let private isBackwardPipe (node: PSGNode) : bool =
 let private isPipeOperator (node: PSGNode) : bool =
     isForwardPipe node || isBackwardPipe node
 
-/// Check if an App node is a pipe application
+/// Check if an App node is a pipe application (order-independent)
+/// Looks for an inner App child that contains a pipe operator.
 let private isPipeApp (psg: ProgramSemanticGraph) (node: PSGNode) : bool =
     if not (node.SyntaxKind.StartsWith("App:")) then false
     else
         let children = getChildNodes psg node
-        match children with
-        | first :: _ -> isPipeOperator first
-        | _ -> false
+        // Find an inner App that CONTAINS a pipe operator (not just any App)
+        let hasPipeContainingApp =
+            children
+            |> List.exists (fun c ->
+                c.SyntaxKind.StartsWith("App:") &&
+                (let innerChildren = getChildNodes psg c
+                 innerChildren |> List.exists isPipeOperator))
+        if hasPipeContainingApp then true
+        else
+            // Direct structure: check if any child is a pipe operator
+            children |> List.exists isPipeOperator
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Beta Reduction
@@ -64,37 +73,70 @@ let private isPipeApp (psg: ProgramSemanticGraph) (node: PSGNode) : bool =
 
 /// Reduce a pipe application to direct function application.
 ///
-/// For forward pipe (|>):
-///   x |> f  ≡  (|>) x f  →  f x
-///   Children: [op, value, func] → [func, value]
+/// FCS represents x |> f as nested curried application: App(App(|>, x), f)
+/// - Outer App has children: [innerApp, f]
+/// - Inner App has children: [|>, x]
 ///
-/// For backward pipe (<|):
-///   f <| x  ≡  (<|) f x  →  f x
-///   Children: [op, func, value] → [func, value]
+/// We transform this to: App(f, x)
+///
+/// For backward pipe (<|): App(App(<|, f), x) → App(f, x)
+/// NOTE: Children order is not guaranteed, so we identify by SyntaxKind, not position.
 let private reducePipeApp (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode =
     let children = getChildNodes psg node
-    match children with
-    | pipeOp :: arg1 :: arg2 :: rest when isPipeOperator pipeOp ->
-        let (funcNode, valueNode) =
-            if isForwardPipe pipeOp then
-                // x |> f: arg1=value, arg2=func
-                (arg2, arg1)
-            else
-                // f <| x: arg1=func, arg2=value
-                (arg1, arg2)
 
-        // Build new children: function first, then value, then any additional args
-        let newChildren = funcNode :: valueNode :: rest
-        let newChildIds = newChildren |> List.map (fun n -> n.Id)
+    // Find the inner App that CONTAINS the pipe operator (not just any App)
+    let innerAppOpt =
+        children
+        |> List.tryFind (fun c ->
+            c.SyntaxKind.StartsWith("App:") &&
+            (let innerChildren = getChildNodes psg c
+             innerChildren |> List.exists isPipeOperator))
+    let otherChildren = children |> List.filter (fun c -> not (c.SyntaxKind.StartsWith("App:")) ||
+                                                           innerAppOpt |> Option.map (fun ia -> ia.Id <> c.Id) |> Option.defaultValue true)
 
-        // Update node with reduced structure
-        // Symbol changes to the function being applied
-        { node with
-            Children = Parent newChildIds
-            Symbol = funcNode.Symbol }
-    | _ ->
-        // Malformed pipe application - leave unchanged
-        node
+    match innerAppOpt with
+    | Some innerApp ->
+        let innerChildren = getChildNodes psg innerApp
+        // Find pipe operator and value in innerChildren (order-independent)
+        let pipeOpOpt = innerChildren |> List.tryFind isPipeOperator
+        let valueNodes = innerChildren |> List.filter (fun c -> not (isPipeOperator c))
+
+        match pipeOpOpt, valueNodes with
+        | Some pipeOp, [valueNode] when isForwardPipe pipeOp ->
+            // x |> f: valueNode is x, otherChildren[0] should be f
+            match otherChildren with
+            | funcNode :: rest ->
+                let newChildren = funcNode :: valueNode :: rest
+                let newChildIds = newChildren |> List.map (fun n -> n.Id)
+                { node with
+                    Children = Parent newChildIds
+                    Symbol = funcNode.Symbol }
+            | _ -> node
+        | Some pipeOp, [funcInner] when isBackwardPipe pipeOp ->
+            // f <| x: funcInner is f, otherChildren[0] should be x
+            match otherChildren with
+            | valueNode :: rest ->
+                let newChildren = funcInner :: valueNode :: rest
+                let newChildIds = newChildren |> List.map (fun n -> n.Id)
+                { node with
+                    Children = Parent newChildIds
+                    Symbol = funcInner.Symbol }
+            | _ -> node
+        | _ -> node
+    | None ->
+        // No inner App - check for legacy direct structure
+        let pipeOpOpt = children |> List.tryFind isPipeOperator
+        let otherNodes = children |> List.filter (fun c -> not (isPipeOperator c))
+        match pipeOpOpt, otherNodes with
+        | Some pipeOp, [arg1; arg2] ->
+            let (funcNode, valueNode) =
+                if isForwardPipe pipeOp then (arg2, arg1) else (arg1, arg2)
+            let newChildren = [funcNode; valueNode]
+            let newChildIds = newChildren |> List.map (fun n -> n.Id)
+            { node with
+                Children = Parent newChildIds
+                Symbol = funcNode.Symbol }
+        | _ -> node
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Parent Reference Consistency
