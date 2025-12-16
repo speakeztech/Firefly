@@ -7,7 +7,7 @@ open Alloy
 [<EntryPoint>]
 let main argv =
     // Simple static string output - no input, no variables
-    // Using non-SRTP WriteStr for now (SRTP resolution pending)
-    Console.WriteStr "Hello, World!"
-    Console.WriteStrLn ""
+    // Uses SRTP-based Write/WriteLine which properly decompose through PSG
+    Console.Write "Hello, World!"
+    Console.WriteLine ""
     0

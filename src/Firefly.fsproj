@@ -110,7 +110,7 @@
       <Compile Include="Alex/Patterns/PSGPatterns.fs" />
 
       <!-- Alex Generation (uses Zipper + XParsec + Patterns) -->
-      <Compile Include="Alex/Generation/MLIRGeneration.fs" />
+      <Compile Include="Alex/Generation/MLIRTransfer.fs" />
 
       <!-- Alex Pipeline Types -->
       <Compile Include="Alex/Pipeline/CompilationTypes.fs" />

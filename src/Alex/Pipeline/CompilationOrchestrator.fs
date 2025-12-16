@@ -15,7 +15,7 @@ open Alex.Pipeline.CompilationTypes
 open Alex.Bindings.BindingTypes
 open Alex.CodeGeneration.MLIRBuilder
 open Alex.Traversal.PSGZipper
-open Alex.Generation.MLIRGeneration
+open Alex.Generation.MLIRTransfer
 open Alex.Patterns.PSGPatterns
 
 // ===================================================================

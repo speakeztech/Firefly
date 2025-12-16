@@ -78,35 +78,104 @@ let createSliceFromList (nodes: PSGNode list) : PSGChildSlice =
 open System.Text
 open Alex.CodeGeneration.MLIRBuilder
 
+/// Emission layers for structured MLIR output.
+/// Designed for future extension to lowering patterns and target-specific dialects.
+type EmissionLayer =
+    | Declarations   // Globals, extern funcs, type defs - must come first in MLIR
+    | Operations     // Function bodies, control flow - main MLIR ops
+
 /// Mutable emission context - holds state that shouldn't be in XParsec's equality-based state.
 /// Access through reference in PSGParseState.
 /// This is a CLASS (reference type) so equality is reference equality, which is fine for XParsec.
+///
+/// Uses LAYERED EMISSION: Different layers (Declarations, Operations) are accumulated
+/// separately during traversal and assembled in order by Finalize().
 [<Sealed>]
 type EmitContext(graph: ProgramSemanticGraph, correlationState: CorrelationState) =
+    /// Layered buffers for structured MLIR output
+    let layers = System.Collections.Generic.Dictionary<EmissionLayer, System.Text.StringBuilder>()
+
+    do
+        layers.[Declarations] <- System.Text.StringBuilder()
+        layers.[Operations] <- System.Text.StringBuilder()
+
     /// The full PSG for edge lookups (def-use resolution)
     member _.Graph = graph
     /// Baker correlation state (range-indexed maps for O(1) lookup)
     member _.CorrelationState = correlationState
-    /// MLIR output builder state
-    member val Builder = BuilderState.create () with get
+    /// Current emission layer (can be changed during traversal)
+    member val CurrentLayer : EmissionLayer = Operations with get, set
     /// Map from NodeId to emitted SSA value (for variable resolution via def-use edges)
     member val NodeSSA : Map<string, string * string> = Map.empty with get, set
-    /// Accumulated string literals: content -> global name
-    member val StringLiterals : (string * string) list = [] with get, set
+    /// Accumulated string literals: content -> global name (for deduplication)
+    member val StringLiterals : System.Collections.Generic.Dictionary<string, string> =
+        System.Collections.Generic.Dictionary<string, string>() with get
+    /// Reverse mapping: SSA value -> string content (for looking up string lengths)
+    member val SSAToStringContent : System.Collections.Generic.Dictionary<string, string> =
+        System.Collections.Generic.Dictionary<string, string>() with get
     /// Current function name being emitted
     member val CurrentFunction : string option = None with get, set
     /// SSA counter for unique value names
     member val SSACounter : int = 0 with get, set
     /// Label counter for unique block labels
     member val LabelCounter : int = 0 with get, set
-    /// External function declarations needed (e.g., "strlen")
-    member val ExternalFuncs : Set<string> = Set.empty with get, set
+    /// External function declarations registered (for deduplication)
+    member val ExternalFuncs : System.Collections.Generic.HashSet<string> =
+        System.Collections.Generic.HashSet<string>() with get
     /// Accumulated errors during emission
     member val Errors : string list = [] with get, set
     /// Track mutable bindings: nodeId -> underlying value type (for emitting loads)
     member val MutableBindings : Map<string, string> = Map.empty with get, set
     /// Index from FullName → NodeId for Binding nodes (lazy-built on first access)
     member val BindingIndex : Map<string, NodeId> option = None with get, set
+    /// Current indentation level
+    member val IndentLevel : int = 0 with get, set
+
+    /// Get indentation string for current level
+    member private this.Indent() =
+        String.replicate this.IndentLevel "  "
+
+    /// Push indentation level
+    member this.PushIndent() =
+        this.IndentLevel <- this.IndentLevel + 1
+
+    /// Pop indentation level
+    member this.PopIndent() =
+        if this.IndentLevel > 0 then
+            this.IndentLevel <- this.IndentLevel - 1
+
+    /// Emit to a specific layer with current indentation
+    member this.EmitTo(layer: EmissionLayer, text: string) =
+        layers.[layer].Append(this.Indent()).AppendLine(text) |> ignore
+
+    /// Emit to current layer with current indentation
+    member this.Emit(text: string) =
+        this.EmitTo(this.CurrentLayer, text)
+
+    /// Emit to a specific layer without indentation (for raw MLIR)
+    member this.EmitRawTo(layer: EmissionLayer, text: string) =
+        layers.[layer].AppendLine(text) |> ignore
+
+    /// Get layer buffer
+    member this.GetLayer(layer: EmissionLayer) = layers.[layer]
+
+    /// Get raw content from all layers (no module wrapper)
+    /// Use this when the caller will add its own structure
+    member this.GetRawContent() : string =
+        let sb = System.Text.StringBuilder()
+        sb.Append(layers.[Declarations]) |> ignore
+        sb.Append(layers.[Operations]) |> ignore
+        sb.ToString()
+
+    /// Finalize: assemble layers in order for valid MLIR module
+    /// Use this for top-level generation when a complete module is needed
+    member this.Finalize() : string =
+        let sb = System.Text.StringBuilder()
+        sb.AppendLine("module {") |> ignore
+        sb.Append(layers.[Declarations]) |> ignore
+        sb.Append(layers.[Operations]) |> ignore
+        sb.AppendLine("}") |> ignore
+        sb.ToString()
 
 module EmitContext =
     /// Create emission context from a PSG and Baker correlation state
@@ -233,22 +302,48 @@ module EmitContext =
     let lookupMutableBinding (ctx: EmitContext) (nodeId: NodeId) : string option =
         Map.tryFind nodeId.Value ctx.MutableBindings
 
-    /// Register a string literal, returning its global name
+    /// Helper to escape string content for MLIR string literals
+    let private escapeStringContent (s: string) : string =
+        s.Replace("\\", "\\\\")
+         .Replace("\"", "\\\"")
+         .Replace("\n", "\\0A")
+         .Replace("\r", "\\0D")
+         .Replace("\t", "\\09")
+
+    /// Register a string literal and EMIT the global to Declarations layer immediately.
+    /// Returns the global name WITH @ prefix (e.g., "@str0").
+    /// This is the key architectural change: globals are emitted DURING traversal.
     let registerStringLiteral (ctx: EmitContext) (content: string) : string =
-        match ctx.StringLiterals |> List.tryFind (fun (c, _) -> c = content) with
-        | Some (_, name) -> name
-        | None ->
-            let name = sprintf "@str%d" (List.length ctx.StringLiterals)
-            ctx.StringLiterals <- (content, name) :: ctx.StringLiterals
-            name
+        match ctx.StringLiterals.TryGetValue(content) with
+        | true, name -> sprintf "@%s" name  // Already registered and emitted
+        | false, _ ->
+            // Generate unique name (without @)
+            let baseName = sprintf "str%d" ctx.StringLiterals.Count
+            ctx.StringLiterals.[content] <- baseName
+            // EMIT the global NOW to Declarations layer
+            let escaped = escapeStringContent content
+            let len = content.Length + 1  // +1 for null terminator
+            ctx.EmitTo(Declarations,
+                sprintf "  llvm.mlir.global internal constant @%s(\"%s\\00\") : !llvm.array<%d x i8>"
+                    baseName escaped len)
+            sprintf "@%s" baseName
 
-    /// Emit a line of MLIR
+    /// Emit a line of MLIR to the current layer
     let emitLine (ctx: EmitContext) (text: string) : unit =
-        BuilderState.emit ctx.Builder text
+        ctx.Emit(text)
 
-    /// Get output string
+    /// Emit to a specific layer
+    let emitToLayer (ctx: EmitContext) (layer: EmissionLayer) (text: string) : unit =
+        ctx.EmitTo(layer, text)
+
+    /// Get raw output string (no module wrapper)
+    /// Use this when the caller will assemble the final MLIR
     let getOutput (ctx: EmitContext) : string =
-        ctx.Builder.Output.ToString()
+        ctx.GetRawContent()
+
+    /// Get finalized MLIR module (with module wrapper)
+    let finalize (ctx: EmitContext) : string =
+        ctx.Finalize()
 
     /// Generate next SSA name and increment counter
     let nextSSA (ctx: EmitContext) : string =
@@ -262,9 +357,12 @@ module EmitContext =
         ctx.LabelCounter <- ctx.LabelCounter + 1
         name
 
-    /// Register an external function declaration
-    let requireExternalFunc (ctx: EmitContext) (name: string) : unit =
-        ctx.ExternalFuncs <- Set.add name ctx.ExternalFuncs
+    /// Register an external function and EMIT its declaration to Declarations layer.
+    /// This is the key architectural change: extern declarations are emitted DURING traversal.
+    let requireExternalFunc (ctx: EmitContext) (name: string) (signature: string) : unit =
+        if ctx.ExternalFuncs.Add(name) then
+            // First time seeing this extern - emit declaration NOW
+            ctx.EmitTo(Declarations, sprintf "  llvm.func @%s%s" name signature)
 
     /// Emit a formatted line of MLIR
     let emitLinef (ctx: EmitContext) fmt =
@@ -765,7 +863,7 @@ let pushIndent : PSGChildParser<unit> =
     fun reader ->
         match reader.State.EmitCtx with
         | Some ctx ->
-            BuilderState.pushIndent ctx.Builder
+            ctx.PushIndent()
             Parsers.preturn () reader
         | None -> Parsers.preturn () reader
 
@@ -774,7 +872,7 @@ let popIndent : PSGChildParser<unit> =
     fun reader ->
         match reader.State.EmitCtx with
         | Some ctx ->
-            BuilderState.popIndent ctx.Builder
+            ctx.PopIndent()
             Parsers.preturn () reader
         | None -> Parsers.preturn () reader
 

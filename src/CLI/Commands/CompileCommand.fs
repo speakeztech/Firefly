@@ -7,7 +7,7 @@ open Argu
 open CLI.Configurations.FidprojLoader
 open Core.PSG.Builder
 open Core.PSG.Reachability
-open Alex.Generation.MLIRGeneration
+open Alex.Generation.MLIRTransfer
 
 /// Command line arguments for compile command
 type CompileArgs =
@@ -305,7 +305,7 @@ let execute (args: ParseResults<CompileArgs>) =
 
         let mlirResult =
             Core.Timing.timePhase "MLIR" "MLIR Generation" (fun () ->
-                generateMLIR enrichedPSG bakerResult.CorrelationState targetTriple)
+                generateMLIR enrichedPSG bakerResult.CorrelationState targetTriple resolved.OutputKind)
 
         // Report emission errors
         if mlirResult.HasErrors then
