@@ -105,6 +105,8 @@ type EmitContext(graph: ProgramSemanticGraph, correlationState: CorrelationState
     member val Errors : string list = [] with get, set
     /// Track mutable bindings: nodeId -> underlying value type (for emitting loads)
     member val MutableBindings : Map<string, string> = Map.empty with get, set
+    /// Index from FullName → NodeId for Binding nodes (lazy-built on first access)
+    member val BindingIndex : Map<string, NodeId> option = None with get, set
 
 module EmitContext =
     /// Create emission context from a PSG and Baker correlation state
@@ -118,6 +120,102 @@ module EmitContext =
     /// Look up resolved type for a PSG node (by NodeId)
     let lookupType (ctx: EmitContext) (node: PSGNode) : FSharpType option =
         Baker.TypedTreeZipper.lookupType ctx.CorrelationState node.Id
+
+    /// Look up member body by full name (O(1) via Baker's MemberBodies map)
+    /// Returns the member and its body expression if found
+    /// Tries alternative name formats for operators (e.g., op_Dollar -> ( $ ))
+    let lookupMemberBody (ctx: EmitContext) (fullName: string) : (FSharpMemberOrFunctionOrValue * FSharpExpr) option =
+        // Try exact match first
+        match Map.tryFind fullName ctx.CorrelationState.MemberBodies with
+        | Some result -> Some result
+        | None ->
+            // Try alternative name formats for operators
+            // SRTP resolution uses compiled names (op_Dollar) but FCS stores with display names (( $ ))
+            let altNames = [
+                // op_Dollar -> ($) and ( $ )
+                if fullName.Contains("op_Dollar") then
+                    yield fullName.Replace("op_Dollar", "($)")
+                    yield fullName.Replace("op_Dollar", "( $ )")
+                // op_Addition -> (+) and ( + ), etc.
+                if fullName.Contains("op_Addition") then
+                    yield fullName.Replace("op_Addition", "(+)")
+                    yield fullName.Replace("op_Addition", "( + )")
+                if fullName.Contains("op_Subtraction") then
+                    yield fullName.Replace("op_Subtraction", "(-)")
+                    yield fullName.Replace("op_Subtraction", "( - )")
+                if fullName.Contains("op_Multiply") then
+                    yield fullName.Replace("op_Multiply", "(*)")
+                    yield fullName.Replace("op_Multiply", "( * )")
+                if fullName.Contains("op_Division") then
+                    yield fullName.Replace("op_Division", "(/)")
+                    yield fullName.Replace("op_Division", "( / )")
+                if fullName.Contains("op_Modulus") then
+                    yield fullName.Replace("op_Modulus", "(%)")
+                    yield fullName.Replace("op_Modulus", "( % )")
+                if fullName.Contains("op_GreaterThan") then
+                    yield fullName.Replace("op_GreaterThan", "(>)")
+                    yield fullName.Replace("op_GreaterThan", "( > )")
+                if fullName.Contains("op_LessThan") then
+                    yield fullName.Replace("op_LessThan", "(<)")
+                    yield fullName.Replace("op_LessThan", "( < )")
+                if fullName.Contains("op_Equality") then
+                    yield fullName.Replace("op_Equality", "(=)")
+                    yield fullName.Replace("op_Equality", "( = )")
+                if fullName.Contains("op_Inequality") then
+                    yield fullName.Replace("op_Inequality", "(<>)")
+                    yield fullName.Replace("op_Inequality", "( <> )")
+                if fullName.Contains("op_PipeRight") then
+                    yield fullName.Replace("op_PipeRight", "(|>)")
+                    yield fullName.Replace("op_PipeRight", "( |> )")
+                if fullName.Contains("op_PipeLeft") then
+                    yield fullName.Replace("op_PipeLeft", "(<|)")
+                    yield fullName.Replace("op_PipeLeft", "( <| )")
+            ]
+            match altNames |> List.tryPick (fun altName -> Map.tryFind altName ctx.CorrelationState.MemberBodies) with
+            | Some result -> Some result
+            | None ->
+                // Debug: Show available keys that contain relevant strings
+                if fullName.Contains("op_Dollar") || fullName.Contains("WritableString") then
+                    let relevantKeys =
+                        ctx.CorrelationState.MemberBodies
+                        |> Map.toSeq
+                        |> Seq.filter (fun (k, _) -> k.Contains("Dollar") || k.Contains("$") || k.Contains("WritableString"))
+                        |> Seq.map fst
+                        |> Seq.truncate 10
+                        |> Seq.toList
+                    eprintfn "[DEBUG] lookupMemberBody failed for: %s" fullName
+                    eprintfn "[DEBUG] Tried alternatives: %A" altNames
+                    eprintfn "[DEBUG] Relevant Baker keys: %A" relevantKeys
+                None
+
+    /// Build the binding index (FullName → NodeId) for all Binding nodes in the PSG
+    let private buildBindingIndex (graph: ProgramSemanticGraph) : Map<string, NodeId> =
+        graph.Nodes
+        |> Map.toSeq
+        |> Seq.choose (fun (_, node) ->
+            if node.SyntaxKind.StartsWith("Binding") then
+                match node.Symbol with
+                | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+                    try Some (mfv.FullName, node.Id) with _ -> None
+                | _ -> None
+            else None)
+        |> Map.ofSeq
+
+    /// Get or build the binding index (lazy initialization)
+    let getBindingIndex (ctx: EmitContext) : Map<string, NodeId> =
+        match ctx.BindingIndex with
+        | Some idx -> idx
+        | None ->
+            let idx = buildBindingIndex ctx.Graph
+            ctx.BindingIndex <- Some idx
+            idx
+
+    /// Look up a Binding node by full name (O(1) via lazy-built index)
+    let lookupBindingNode (ctx: EmitContext) (fullName: string) : PSGNode option =
+        let index = getBindingIndex ctx
+        match Map.tryFind fullName index with
+        | Some nodeId -> Map.tryFind nodeId.Value ctx.Graph.Nodes
+        | None -> None
 
     /// Record that a node was emitted with a given SSA value
     let recordNodeSSA (ctx: EmitContext) (nodeId: NodeId) (ssa: string) (mlirType: string) : unit =

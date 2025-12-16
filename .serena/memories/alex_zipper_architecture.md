@@ -2,16 +2,21 @@
 
 ## CRITICAL STATUS (Dec 2024)
 
-**The architecture described in this document IS CORRECT and IS IMPLEMENTED.**
-- `PSGZipper.fs` - Complete zipper with navigation, state, folds
-- `PSGXParsec.fs` - Complete XParsec integration with emission
-- `Bindings/` - Platform-specific extern dispatch
+**The architecture described below is CORRECT but NOT YET FULLY IMPLEMENTED.**
 
-**HOWEVER: `PSGGeneration.fs` VIOLATES this architecture.** It is a monolithic
-recursive descent generator that duplicates functionality and circumvents the
-designed system. It must be removed and replaced with proper Zipper+XParsec usage.
+**Infrastructure Status:**
+- `PSGZipper.fs` - Complete with foldPreOrder, foldPostOrder, navigation ✓
+- `PSGXParsec.fs` - Complete with combinators (pBind, pMap, pOr, etc.) ✓
+- `Bindings/` - Platform-specific extern dispatch ✓
 
-See `alex_actual_vs_intended` memory for the remediation plan.
+**VIOLATION: `MLIRGeneration.fs` does NOT use the architecture properly:**
+- Has `emitNode` as a 15+ branch if-elif dispatch table (ANTIPATTERN)
+- Has `emitInlinedCall` doing O(N) name string lookup (ANTIPATTERN)
+- Does not use Zipper fold or XParsec combinators for generation
+
+**The old PSGGeneration.fs was removed, but MLIRGeneration.fs recreated the same problems.**
+
+See `alex_actual_vs_intended` memory for detailed violation analysis.
 
 ## CRITICAL: NO EMITTER OR SCRIBE LAYER
 

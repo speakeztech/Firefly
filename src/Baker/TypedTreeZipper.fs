@@ -376,12 +376,21 @@ let private processMember
 
         // OPTIMIZATION: Skip unreachable nodes - they won't be emitted anyway
         // This significantly reduces processing time for large libraries like Alloy
+        // EXCEPTION: Always capture inline members and operators - SRTP resolution needs them
+        //            even if their PSG node is unreachable
+        let isInlineOrOperator =
+            try
+                mfv.InlineAnnotation <> FSharpInlineAnnotation.NeverInline ||
+                mfv.CompiledName.StartsWith("op_") ||
+                mfv.DisplayName.StartsWith("(") // Operator display names are like "( $ )"
+            with _ -> false
+
         match psgNode with
-        | Some node when not node.IsReachable ->
-            // Skip unreachable member - no need to record body or walk tree
+        | Some node when not node.IsReachable && not isInlineOrOperator ->
+            // Skip unreachable non-inline member - no need to record body or walk tree
             state
         | _ ->
-            // Record member body for inlining (only for reachable or unknown nodes)
+            // Record member body for inlining (reachable, inline, or operator members)
             let state =
                 try
                     CorrelationState.addMemberBody mfv.FullName mfv body state

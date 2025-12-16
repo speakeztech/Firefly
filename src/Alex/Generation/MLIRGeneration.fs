@@ -11,6 +11,7 @@
 module Alex.Generation.MLIRGeneration
 
 open FSharp.Compiler.Symbols
+open FSharp.Compiler.Symbols.FSharpExprPatterns
 open Core.PSG.Types
 open Alex.Traversal.PSGZipper
 open Alex.Traversal.PSGXParsec
@@ -370,12 +371,58 @@ and emitApp (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
 
     match children with
     | funcNode :: argNodes ->
-        // Check SRTP resolution first
-        match node.SRTPResolution with
+        // Check SRTP resolution on BOTH the App node AND the funcNode
+        // The resolution may be on either depending on the expression structure
+        let srtpRes = node.SRTPResolution |> Option.orElse funcNode.SRTPResolution
+        match srtpRes with
         | Some (FSMethodByName methodFullName) ->
-            emitRegularApp ctx node funcNode argNodes
+            emitInlinedCallByName ctx methodFullName argNodes
         | Some (FSMethod (_, mfv, _)) ->
-            emitRegularApp ctx node funcNode argNodes
+            try
+                emitInlinedCallByName ctx mfv.FullName argNodes
+            with _ ->
+                emitRegularApp ctx node funcNode argNodes
+        | Some (MultipleOverloads (traitName, candidates)) ->
+            // Match based on argument types for proper overload resolution
+            // Get the type of the second argument (first is the trait witness like WritableString)
+            let argType =
+                match argNodes with
+                | _ :: actualArg :: _ -> actualArg.Type
+                | [singleArg] -> singleArg.Type
+                | [] -> None
+
+            // Find matching candidate - look for one whose parameter type matches our argument
+            let findMatchingCandidate () =
+                candidates |> List.tryFind (fun c ->
+                    // Check if the candidate's method name suggests the right type
+                    // For op_Dollar overloads: one is for NativeStr, one for string
+                    let methodName = c.TargetMethodFullName
+                    match argType with
+                    | Some t when t.HasTypeDefinition ->
+                        let typeName = try Some (t.TypeDefinition.FullName) with _ -> None
+                        match typeName with
+                        | Some n when n = "System.String" || n = "string" ->
+                            // For string args, prefer the overload that calls writeSystemString
+                            // This is a bit of a heuristic - look for overload [1] which is typically the string one
+                            methodName.EndsWith("[1]") || methodName.Contains("string")
+                        | Some n when n.Contains("NativeStr") ->
+                            methodName.EndsWith("[0]") || methodName.Contains("NativeStr")
+                        | _ -> true  // Unknown type, any candidate
+                    | _ -> true  // No type info, any candidate
+                )
+
+            match findMatchingCandidate () with
+            | Some candidate ->
+                emitInlinedCallByName ctx candidate.TargetMethodFullName argNodes
+            | None ->
+                // Fall back to first candidate
+                match candidates with
+                | candidate :: _ ->
+                    emitInlinedCallByName ctx candidate.TargetMethodFullName argNodes
+                | [] ->
+                    let msg = sprintf "SRTP MultipleOverloads has no candidates for trait '%s'" traitName
+                    EmitContext.recordError ctx msg
+                    EmitError msg
         | Some BuiltIn ->
             emitBuiltInOperator ctx node funcNode argNodes
         | Some (Unresolved reason) ->
@@ -681,6 +728,188 @@ and emitFSharpCoreOperator (ctx: EmitContext) (mfv: FSharpMemberOrFunctionOrValu
 and emitBuiltInOperator (ctx: EmitContext) (appNode: PSGNode) (funcNode: PSGNode) (argNodes: PSGNode list) : ExprResult =
     emitRegularApp ctx appNode funcNode argNodes
 
+/// Emit FSharpExpr body from Baker's MemberBodies
+/// Used when SRTP-resolved functions aren't in PSG as Binding nodes (e.g., static type members)
+/// NOTE: For inline operators, FCS may have already inlined the body, so we may encounter complex expressions.
+/// In that case, we try to find the first meaningful Call and emit from the PSG target.
+and emitFSharpExprBody (ctx: EmitContext) (expr: FSharpExpr) (argSsas: (string * string) list) : ExprResult =
+    // Try to find a Call expression anywhere in the tree that targets a PSG function
+    let rec tryFindCallTarget (e: FSharpExpr) : string option =
+        match e with
+        | Call(_, memberOrFunc, _, _, _) ->
+            try Some memberOrFunc.FullName with _ -> None
+        | Application(funcExpr, _, _) ->
+            tryFindCallTarget funcExpr
+        | Let((_, _, _), bodyExpr) ->
+            tryFindCallTarget bodyExpr
+        | IfThenElse(_, thenExpr, elseExpr) ->
+            match tryFindCallTarget thenExpr with
+            | Some t -> Some t
+            | None -> tryFindCallTarget elseExpr
+        | Sequential(e1, e2) ->
+            match tryFindCallTarget e1 with
+            | Some t -> Some t
+            | None -> tryFindCallTarget e2
+        | _ -> None
+
+    match expr with
+    | Application(funcExpr, _typeArgs, _argExprs) ->
+        // Application: func arg - common for operators
+        // The funcExpr is the function being applied, argExprs are the arguments
+        // Try to get the function's full name and recursively inline
+        match funcExpr with
+        | Call(_, memberOrFunc, _, _, _) ->
+            try
+                let targetFullName = memberOrFunc.FullName
+                // Recursively inline the target function
+                match EmitContext.lookupMemberBody ctx targetFullName with
+                | Some (_mfv, innerBody) ->
+                    emitFSharpExprBody ctx innerBody argSsas
+                | None ->
+                    match EmitContext.lookupBindingNode ctx targetFullName with
+                    | Some binding ->
+                        let bindingChildren = ChildrenStateHelpers.getChildrenList binding
+                                              |> List.choose (fun id -> Map.tryFind id.Value ctx.Graph.Nodes)
+                        match bindingChildren with
+                        | [pattern; body] ->
+                            let paramNodes = findParameterNodes ctx.Graph pattern
+                            if paramNodes.Length = argSsas.Length then
+                                List.zip paramNodes argSsas
+                                |> List.iter (fun (paramNode, (ssa, ty)) ->
+                                    EmitContext.recordNodeSSA ctx paramNode.Id ssa ty)
+                            emitNode ctx body
+                        | _ -> EmitError (sprintf "Malformed Application target: %s" targetFullName)
+                    | None -> EmitError (sprintf "Application target not found: %s" targetFullName)
+            with ex -> EmitError (sprintf "Error processing Application: %s" ex.Message)
+        | FSharpExprPatterns.Value(v) ->
+            // Application of a value (might be a parameter or local function)
+            try
+                let targetFullName = v.FullName
+                match EmitContext.lookupBindingNode ctx targetFullName with
+                | Some binding ->
+                    let bindingChildren = ChildrenStateHelpers.getChildrenList binding
+                                          |> List.choose (fun id -> Map.tryFind id.Value ctx.Graph.Nodes)
+                    match bindingChildren with
+                    | [pattern; body] ->
+                        let paramNodes = findParameterNodes ctx.Graph pattern
+                        if paramNodes.Length = argSsas.Length then
+                            List.zip paramNodes argSsas
+                            |> List.iter (fun (paramNode, (ssa, ty)) ->
+                                EmitContext.recordNodeSSA ctx paramNode.Id ssa ty)
+                        emitNode ctx body
+                    | _ -> EmitError (sprintf "Malformed Application value target: %s" targetFullName)
+                | None -> EmitError (sprintf "Application value target not found: %s" targetFullName)
+            with ex -> EmitError (sprintf "Error processing Application value: %s" ex.Message)
+        | _ ->
+            EmitError "Application with unsupported function expression"
+    | Call(_objExprOpt, memberOrFunc, _typeArgs1, _typeArgs2, _argExprs) ->
+        // The body is a call to another function - recursively inline that
+        try
+            let targetFullName = memberOrFunc.FullName
+            // IMPORTANT: Check PSG FIRST - prefer emitting from PSG over FSharpExpr
+            // PSG has proper structure for parameter binding; FSharpExpr may have complex inlined bodies
+            match EmitContext.lookupBindingNode ctx targetFullName with
+            | Some binding ->
+                let bindingChildren = ChildrenStateHelpers.getChildrenList binding
+                                      |> List.choose (fun id -> Map.tryFind id.Value ctx.Graph.Nodes)
+                match bindingChildren with
+                | [pattern; body] ->
+                    let paramNodes = findParameterNodes ctx.Graph pattern
+                    if paramNodes.Length = argSsas.Length then
+                        List.zip paramNodes argSsas
+                        |> List.iter (fun (paramNode, (ssa, ty)) ->
+                            EmitContext.recordNodeSSA ctx paramNode.Id ssa ty)
+                    emitNode ctx body
+                | _ ->
+                    let msg = sprintf "Malformed binding for FSharpExpr target: %s" targetFullName
+                    EmitContext.recordError ctx msg
+                    EmitError msg
+            | None ->
+                // PSG binding not found - try Baker's MemberBodies as fallback
+                match EmitContext.lookupMemberBody ctx targetFullName with
+                | Some (_mfv, innerBody) ->
+                    // Recursively emit the inner function's body
+                    emitFSharpExprBody ctx innerBody argSsas
+                | None ->
+                    let msg = sprintf "FSharpExpr target not found in PSG or Baker: %s" targetFullName
+                    EmitContext.recordError ctx msg
+                    EmitError msg
+        with ex ->
+            let msg = sprintf "Error processing FSharpExpr Call: %s" ex.Message
+            EmitContext.recordError ctx msg
+            EmitError msg
+    | Let((_bindingVar, _bindingExpr, _debugPoint), bodyExpr) ->
+        // Let expression - for inline operators, the body might be inlined here
+        // Try to find the first Call target and emit from PSG
+        match tryFindCallTarget bodyExpr with
+        | Some targetFullName ->
+            // Found a call - try to emit from PSG
+            match EmitContext.lookupBindingNode ctx targetFullName with
+            | Some binding ->
+                let bindingChildren = ChildrenStateHelpers.getChildrenList binding
+                                      |> List.choose (fun id -> Map.tryFind id.Value ctx.Graph.Nodes)
+                match bindingChildren with
+                | [pattern; body] ->
+                    let paramNodes = findParameterNodes ctx.Graph pattern
+                    if paramNodes.Length = argSsas.Length then
+                        List.zip paramNodes argSsas
+                        |> List.iter (fun (paramNode, (ssa, ty)) ->
+                            EmitContext.recordNodeSSA ctx paramNode.Id ssa ty)
+                    emitNode ctx body
+                | _ -> EmitError (sprintf "Malformed Let call target: %s" targetFullName)
+            | None ->
+                // Try MemberBodies
+                match EmitContext.lookupMemberBody ctx targetFullName with
+                | Some (_mfv, innerBody) ->
+                    emitFSharpExprBody ctx innerBody argSsas
+                | None -> EmitError (sprintf "Let call target not found: %s" targetFullName)
+        | None ->
+            // No call target found - try emitting the body directly
+            emitFSharpExprBody ctx bodyExpr argSsas
+    | IfThenElse(condExpr, thenExpr, elseExpr) ->
+        // For conditional expressions, try to find the first call in either branch
+        match tryFindCallTarget thenExpr with
+        | Some targetFullName ->
+            match EmitContext.lookupBindingNode ctx targetFullName with
+            | Some binding ->
+                let bindingChildren = ChildrenStateHelpers.getChildrenList binding
+                                      |> List.choose (fun id -> Map.tryFind id.Value ctx.Graph.Nodes)
+                match bindingChildren with
+                | [pattern; body] ->
+                    let paramNodes = findParameterNodes ctx.Graph pattern
+                    if paramNodes.Length = argSsas.Length then
+                        List.zip paramNodes argSsas
+                        |> List.iter (fun (paramNode, (ssa, ty)) ->
+                            EmitContext.recordNodeSSA ctx paramNode.Id ssa ty)
+                    emitNode ctx body
+                | _ -> EmitError (sprintf "Malformed IfThenElse target: %s" targetFullName)
+            | None -> EmitError (sprintf "IfThenElse target not found: %s" targetFullName)
+        | None -> EmitError "IfThenElse with no call target found"
+    | Sequential(_e1, e2) ->
+        // Sequential expressions - try the second expression
+        emitFSharpExprBody ctx e2 argSsas
+    | FSharpExprPatterns.Value(v) when v.IsMemberThisValue || v.IsConstructorThisValue ->
+        // 'this' reference - skip it for static member calls
+        Void
+    | FSharpExprPatterns.Value(_v) ->
+        // A parameter reference - look up from argSsas by position
+        // For static member ops, we pass args in order
+        if argSsas.Length > 0 then
+            let (ssa, ty) = argSsas.[0]
+            Value (ssa, ty)
+        else Void
+    | other ->
+        // Try to get more info about the expression
+        let exprString =
+            try sprintf "%A" other
+            with _ -> "unable to stringify"
+        let subExprCount =
+            try other.ImmediateSubExpressions.Length
+            with _ -> -1
+        let msg = sprintf "Unsupported FSharpExpr pattern in SRTP body. SubExprs=%d, Expr=%s" subExprCount (exprString.Substring(0, min 200 exprString.Length))
+        EmitContext.recordError ctx msg
+        EmitError msg
+
 /// Emit inlined function call by name
 and emitInlinedCallByName (ctx: EmitContext) (methodFullName: string) (argNodes: PSGNode list) : ExprResult =
     let flatArgs = argNodes |> List.collect (fun n ->
@@ -691,16 +920,8 @@ and emitInlinedCallByName (ctx: EmitContext) (methodFullName: string) (argNodes:
     let argResults = flatArgs |> List.map (emitNode ctx)
     let argSsas = argResults |> List.choose (function Value (s, t) -> Some (s, t) | _ -> None)
 
-    let funcBinding =
-        ctx.Graph.Nodes
-        |> Map.toSeq
-        |> Seq.tryFind (fun (_, n) ->
-            n.SyntaxKind.StartsWith("Binding") &&
-            match n.Symbol with
-            | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
-                try mfv.FullName = methodFullName with _ -> false
-            | _ -> false)
-        |> Option.map snd
+    // O(1) lookup via lazy-built binding index (replaces O(N) linear search)
+    let funcBinding = EmitContext.lookupBindingNode ctx methodFullName
 
     match funcBinding with
     | Some binding ->
@@ -720,9 +941,15 @@ and emitInlinedCallByName (ctx: EmitContext) (methodFullName: string) (argNodes:
             EmitContext.recordError ctx msg
             EmitError msg
     | None ->
-        let msg = sprintf "SRTP function not found in PSG: %s - cannot inline" methodFullName
-        EmitContext.recordError ctx msg
-        EmitError msg
+        // PSG binding not found - try Baker's MemberBodies (for static type members like op_Dollar)
+        match EmitContext.lookupMemberBody ctx methodFullName with
+        | Some (_mfv, body) ->
+            // Found in Baker - emit from FSharpExpr
+            emitFSharpExprBody ctx body argSsas
+        | None ->
+            let msg = sprintf "SRTP function not found in PSG or Baker: %s - cannot inline" methodFullName
+            EmitContext.recordError ctx msg
+            EmitError msg
 
 /// Emit inlined function call
 and emitInlinedCall (ctx: EmitContext) (funcNode: PSGNode) (argNodes: PSGNode list) : ExprResult =
@@ -742,16 +969,8 @@ and emitInlinedCall (ctx: EmitContext) (funcNode: PSGNode) (argNodes: PSGNode li
 
     match funcName with
     | Some name ->
-        let funcBinding =
-            ctx.Graph.Nodes
-            |> Map.toSeq
-            |> Seq.tryFind (fun (_, n) ->
-                n.SyntaxKind.StartsWith("Binding") &&
-                match n.Symbol with
-                | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
-                    try mfv.FullName = name with _ -> false
-                | _ -> false)
-            |> Option.map snd
+        // O(1) lookup via lazy-built binding index (replaces O(N) linear search)
+        let funcBinding = EmitContext.lookupBindingNode ctx name
 
         match funcBinding with
         | Some binding ->
@@ -775,8 +994,11 @@ and emitInlinedCall (ctx: EmitContext) (funcNode: PSGNode) (argNodes: PSGNode li
             EmitContext.recordError ctx msg
             EmitError msg
     | None ->
-        EmitContext.recordError ctx "Function call with no symbol - cannot determine target"
-        EmitError "Function call with no symbol"
+        // Debug: show what node we're trying to emit so we can diagnose SRTP issues
+        let debugInfo = sprintf "SyntaxKind=%s, SRTPResolution=%A" funcNode.SyntaxKind funcNode.SRTPResolution
+        let msg = sprintf "Function call with no symbol - cannot determine target (%s)" debugInfo
+        EmitContext.recordError ctx msg
+        EmitError msg
 
 /// Find parameter nodes from a pattern
 and findParameterNodes (graph: ProgramSemanticGraph) (pattern: PSGNode) : PSGNode list =
