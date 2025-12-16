@@ -283,6 +283,17 @@ type TextFormatOp =
     | FloatToString
     | BoolToString
 
+/// Platform binding info (set by DetectPlatformBindings nanopass)
+/// Marks functions in Alloy.Platform.Bindings for platform-specific emission
+type PlatformBindingInfo = {
+    /// Library name (e.g., "platform")
+    Library: string
+    /// Entry point name (e.g., "writeBytes")
+    EntryPoint: string
+    /// Calling convention (e.g., "Cdecl")
+    CallingConvention: string
+}
+
 /// Information about a regular function call (for unclassified App nodes)
 type RegularCallInfo = {
     FunctionName: string
@@ -379,6 +390,10 @@ type PSGNode = {
     // NEW FIELD - SRTP resolution (set by ResolveSRTP nanopass)
     // For TraitCall expressions, this contains the resolved concrete implementation
     SRTPResolution: SRTPResolution option
+
+    // NEW FIELD - Platform binding info (set by DetectPlatformBindings nanopass)
+    // For Alloy.Platform.Bindings functions, contains entry point and calling convention
+    PlatformBinding: PlatformBindingInfo option
 }
 
 /// Complete Program Semantic Graph
@@ -451,6 +466,9 @@ module ChildrenStateHelpers =
 
         // Initialize SRTP resolution
         SRTPResolution = None
+
+        // Initialize platform binding info
+        PlatformBinding = None
     }
 
     /// Create a new node with typed syntax kind
@@ -486,6 +504,9 @@ module ChildrenStateHelpers =
 
         // Initialize SRTP resolution
         SRTPResolution = None
+
+        // Initialize platform binding info
+        PlatformBinding = None
     }
 
     /// Add a child to a node (appends to maintain source order)

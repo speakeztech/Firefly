@@ -341,7 +341,7 @@ let private mapFSharpTypeToMLIRType (ftype: FSharpType) : MLIRType =
 
 /// Information extracted from a Platform Binding (before Args are available)
 /// BCL-free: Uses module structure recognition, not DllImport attributes
-type ExternPrimitiveInfo = {
+type PlatformBindingInfo = {
     EntryPoint: string
     Library: string
     CallingConvention: string
@@ -353,7 +353,7 @@ let private platformBindingsModule = "Alloy.Platform.Bindings"
 
 /// Check if a PSG node represents a platform binding (BCL-free pattern)
 /// Recognizes calls to functions in the Alloy.Platform.Bindings module
-let isExternPrimitive (node: PSGNode) : bool =
+let isPlatformBinding (node: PSGNode) : bool =
     match node.Symbol with
     | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
         try
@@ -403,7 +403,7 @@ let getNativeInteropIntrinsicName (node: PSGNode) : string option =
 
 /// Extract Platform Binding information from an FSharpMemberOrFunctionOrValue
 /// BCL-free: Uses module structure and function name, not DllImport attributes
-let private tryExtractPlatformBindingInfo (mfv: FSharpMemberOrFunctionOrValue) : ExternPrimitiveInfo option =
+let private extractPlatformBindingInfo (mfv: FSharpMemberOrFunctionOrValue) : PlatformBindingInfo option =
     try
         let fullName = mfv.FullName
         if fullName.StartsWith(platformBindingsModule + ".") then
@@ -424,14 +424,14 @@ let private tryExtractPlatformBindingInfo (mfv: FSharpMemberOrFunctionOrValue) :
     with _ -> None
 
 /// Extract platform binding info from a PSG node (without args - those come from emission context)
-let tryExtractExternPrimitiveInfo (node: PSGNode) : ExternPrimitiveInfo option =
+let tryGetPlatformBindingInfo (node: PSGNode) : PlatformBindingInfo option =
     match node.Symbol with
     | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
-        tryExtractPlatformBindingInfo mfv
+        extractPlatformBindingInfo mfv
     | _ -> None
 
-/// Create a full ExternPrimitive by combining info with evaluated args
-let createExternPrimitive (info: ExternPrimitiveInfo) (args: Val list) (strategy: BindingStrategy) : ExternPrimitive =
+/// Create a full PlatformPrimitive by combining info with evaluated args
+let createPlatformPrimitive (info: PlatformBindingInfo) (args: Val list) (strategy: BindingStrategy) : PlatformPrimitive =
     {
         EntryPoint = info.EntryPoint
         Library = info.Library

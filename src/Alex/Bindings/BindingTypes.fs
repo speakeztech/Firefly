@@ -117,14 +117,16 @@ type BindingStrategy =
     | Dynamic  // Record symbol reference, resolve via PLT/GOT at runtime
 
 // ===================================================================
-// Extern Primitive Types
+// Platform Primitive Types
 // ===================================================================
 
-/// Represents an extern primitive call extracted from PSG
-type ExternPrimitive = {
-    /// The entry point name (e.g., "fidelity_write_bytes")
+/// Represents a platform primitive call extracted from PSG
+/// Platform primitives are functions in Alloy.Platform.Bindings that
+/// Alex provides platform-specific implementations for
+type PlatformPrimitive = {
+    /// The entry point name (e.g., "writeBytes")
     EntryPoint: string
-    /// The library name (e.g., "__fidelity")
+    /// The library name (e.g., "platform")
     Library: string
     /// Calling convention
     CallingConvention: string
@@ -153,29 +155,29 @@ type ExternalDeclaration = {
 // Binding Function Signature
 // ===================================================================
 
-/// A binding is a function that takes an extern primitive and returns MLIR
+/// A binding is a function that takes a platform primitive and returns MLIR
 /// The MLIR<Val> monad handles all state threading
-type ExternBinding = ExternPrimitive -> MLIR<EmissionResult>
+type PlatformBinding = PlatformPrimitive -> MLIR<EmissionResult>
 
 // ===================================================================
-// Extern Dispatch Registry
+// Platform Dispatch Registry
 // ===================================================================
 
-/// Registry for extern primitive bindings
+/// Registry for platform primitive bindings
 /// Dispatches based on (platform, entry_point) to platform-specific MLIR generators
-module ExternDispatch =
+module PlatformDispatch =
 
     /// Binding registration: (platform, entry_point) -> binding function
-    let mutable private bindings: Map<(OSFamily * Architecture * string), ExternBinding> = Map.empty
+    let mutable private bindings: Map<(OSFamily * Architecture * string), PlatformBinding> = Map.empty
     let mutable private currentPlatform: TargetPlatform option = None
 
     /// Register a binding for a specific platform and entry point
-    let register (os: OSFamily) (arch: Architecture) (entryPoint: string) (binding: ExternBinding) =
+    let register (os: OSFamily) (arch: Architecture) (entryPoint: string) (binding: PlatformBinding) =
         let key = (os, arch, entryPoint)
         bindings <- Map.add key binding bindings
 
     /// Register a binding for all architectures of an OS
-    let registerForOS (os: OSFamily) (entryPoint: string) (binding: ExternBinding) =
+    let registerForOS (os: OSFamily) (entryPoint: string) (binding: PlatformBinding) =
         // Register for common architectures
         register os X86_64 entryPoint binding
         register os ARM64 entryPoint binding
@@ -188,8 +190,8 @@ module ExternDispatch =
     let getTargetPlatform () =
         currentPlatform |> Option.defaultValue (TargetPlatform.detectHost())
 
-    /// Dispatch an extern primitive to its platform binding
-    let dispatch (prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
+    /// Dispatch a platform primitive to its platform binding
+    let dispatch (prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
         let platform = getTargetPlatform()
         let key = (platform.OS, platform.Arch, prim.EntryPoint)
         match Map.tryFind key bindings with

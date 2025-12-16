@@ -91,7 +91,7 @@ let emitUnixReadSyscall (syscallNum: int64) (fd: Val) (buf: Val) (count: Val) : 
 
 /// writeBytes - write bytes to file descriptor
 /// Bound from Alloy.Platform.Bindings.writeBytes
-let bindWriteBytes (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
+let bindWriteBytes (platform: TargetPlatform) (prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
     match prim.Args with
     | [fd; buf; count] ->
         match platform.OS with
@@ -114,7 +114,7 @@ let bindWriteBytes (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<Emi
 
 /// readBytes - read bytes from file descriptor
 /// Bound from Alloy.Platform.Bindings.readBytes
-let bindReadBytes (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
+let bindReadBytes (platform: TargetPlatform) (prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
     match prim.Args with
     | [fd; buf; maxCount] ->
         match platform.OS with
@@ -142,21 +142,21 @@ let bindReadBytes (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<Emis
 /// Entry points match Platform.Bindings function names (e.g., "writeBytes", "readBytes")
 let registerBindings () =
     // Register for Linux
-    ExternDispatch.register Linux X86_64 "writeBytes"
+    PlatformDispatch.register Linux X86_64 "writeBytes"
         (fun ext -> bindWriteBytes TargetPlatform.linux_x86_64 ext)
-    ExternDispatch.register Linux X86_64 "readBytes"
+    PlatformDispatch.register Linux X86_64 "readBytes"
         (fun ext -> bindReadBytes TargetPlatform.linux_x86_64 ext)
-    ExternDispatch.register Linux ARM64 "writeBytes"
+    PlatformDispatch.register Linux ARM64 "writeBytes"
         (fun ext -> bindWriteBytes { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
-    ExternDispatch.register Linux ARM64 "readBytes"
+    PlatformDispatch.register Linux ARM64 "readBytes"
         (fun ext -> bindReadBytes { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
 
     // Register for macOS
-    ExternDispatch.register MacOS X86_64 "writeBytes"
+    PlatformDispatch.register MacOS X86_64 "writeBytes"
         (fun ext -> bindWriteBytes TargetPlatform.macos_x86_64 ext)
-    ExternDispatch.register MacOS X86_64 "readBytes"
+    PlatformDispatch.register MacOS X86_64 "readBytes"
         (fun ext -> bindReadBytes TargetPlatform.macos_x86_64 ext)
-    ExternDispatch.register MacOS ARM64 "writeBytes"
+    PlatformDispatch.register MacOS ARM64 "writeBytes"
         (fun ext -> bindWriteBytes TargetPlatform.macos_arm64 ext)
-    ExternDispatch.register MacOS ARM64 "readBytes"
+    PlatformDispatch.register MacOS ARM64 "readBytes"
         (fun ext -> bindReadBytes TargetPlatform.macos_arm64 ext)

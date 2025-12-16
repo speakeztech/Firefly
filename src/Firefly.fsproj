@@ -61,6 +61,7 @@
       <Compile Include="Core/PSG/Nanopass/LowerInterpolatedStrings.fs" />
       <Compile Include="Core/PSG/Nanopass/ResolveSRTP.fs" />
       <Compile Include="Core/PSG/Nanopass/ValidateNativeTypes.fs" />
+      <Compile Include="Core/PSG/Nanopass/DetectPlatformBindings.fs" />
 
       <!-- PSG Builder (refactored into sub-modules) -->
       <Compile Include="Core/PSG/Builder/Types.fs" />

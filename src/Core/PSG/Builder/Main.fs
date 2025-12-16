@@ -17,6 +17,7 @@ open Core.PSG.Nanopass.LowerStringLength
 open Core.PSG.Nanopass.ParameterAnnotation
 open Core.PSG.Nanopass.ClassifyOperations
 open Core.PSG.Nanopass.LowerInterpolatedStrings
+open Core.PSG.Nanopass.DetectPlatformBindings
 open Core.PSG.Construction.Types
 open Core.PSG.Construction.DeclarationProcessing
 
@@ -257,12 +258,19 @@ let runEnrichmentPasses
         emitNanopassIntermediateAsync classifiedGraph "3c_classified_ops" nanopassOutputDir
         emitNanopassDiffAsync paramAnnotatedGraph classifiedGraph "3b_param_annotated" "3c_classified_ops" nanopassOutputDir
 
+    // Detect platform bindings (marks Alloy.Platform.Bindings functions with PlatformBinding)
+    let platformBindingsGraph = detectPlatformBindings classifiedGraph
+
+    if emitNanopassIntermediates && nanopassOutputDir <> "" then
+        emitNanopassIntermediateAsync platformBindingsGraph "3c2_platform_bindings" nanopassOutputDir
+        emitNanopassDiffAsync classifiedGraph platformBindingsGraph "3c_classified_ops" "3c2_platform_bindings" nanopassOutputDir
+
     // Lower interpolated strings
-    let loweredGraph = lowerInterpolatedStrings classifiedGraph
+    let loweredGraph = lowerInterpolatedStrings platformBindingsGraph
 
     if emitNanopassIntermediates && nanopassOutputDir <> "" then
         emitNanopassIntermediateAsync loweredGraph "3d_lowered_interp_strings" nanopassOutputDir
-        emitNanopassDiffAsync classifiedGraph loweredGraph "3c_classified_ops" "3d_lowered_interp_strings" nanopassOutputDir
+        emitNanopassDiffAsync platformBindingsGraph loweredGraph "3c2_platform_bindings" "3d_lowered_interp_strings" nanopassOutputDir
 
     // Finalize nodes and analyze context
     let finalNodes =

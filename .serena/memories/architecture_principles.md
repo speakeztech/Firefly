@@ -46,6 +46,20 @@ Key memories to consult:
 - `negative_examples` - Real mistakes to avoid
 - `native_binding_architecture` - Extern primitive flow
 
+## FOUNDATIONAL INSIGHT: SSA IS Functional Programming
+
+From Appel's seminal 1998 paper and the SpeakEZ blog "Why F# is a Natural Fit for MLIR":
+
+> F#'s functional structure maps **directly** to MLIR/SSA without reconstruction.
+
+This is why Alex is powerful - it doesn't need to "figure out" what F# code does; the PSG already expresses the SSA structure that MLIR needs.
+
+- **F# ≅ SSA** - The functional structure IS the compilation target
+- **PSG captures intent** - Semantic primitives express WHAT, not HOW
+- **Alex chooses implementation** - Target-aware decisions (x86 AVX, ARM NEON, embedded, WAMI)
+
+**Alex IS a transformer** - it transforms PSG into MLIR compute graphs using XParsec and parser combinator monads. This IS its job. The issue is when cruft accumulates in the transformer that should be moved upstream into PSG enrichment.
+
 ## The Non-Dispatch Model
 
 > **Key Insight: Centralization belongs at the OUTPUT (MLIR Builder), not at DISPATCH (traversal logic).**

@@ -674,10 +674,10 @@ and transferUnclassifiedApp (ctx: EmitContext) (graph: ProgramSemanticGraph) (no
                     // Process the function body (this will resolve parameter references)
                     transferNodeDirect ctx graph bodyNode
                 | None ->
-                    // Function has no body - might be an extern declaration
-                    // Check if this is an extern primitive
+                    // Function has no body - might be a platform binding
+                    // TODO: This name-matching should be replaced with node.PlatformBinding.IsSome
                     if funcName.StartsWith("fidelity_") || funcName = "writeBytes" || funcName = "readBytes" then
-                        // This is a platform primitive - emit external call
+                        // This is a platform binding - emit syscall via binding
                         let argTypesStr = if List.isEmpty argTypes then "" else argTypes |> String.concat ", "
                         let argSSAsStr = argSSAs |> String.concat ", "
                         ctx.ExternalFuncs.Add(funcName) |> ignore

@@ -1,22 +1,32 @@
 # Alex/Zipper Architecture - The Non-Dispatch Model
 
-## CRITICAL STATUS (Dec 2024)
+## FOUNDATIONAL INSIGHT: SSA IS Functional Programming
 
-**The architecture described below is CORRECT but NOT YET FULLY IMPLEMENTED.**
+From Appel's seminal 1998 paper "SSA is Functional Programming":
 
-**Infrastructure Status:**
+> F#'s functional structure maps **directly** to MLIR/SSA without reconstruction.
+
+This means:
+- **F# ≅ SSA** - The functional structure IS the compilation target
+- **PSG captures intent** - Semantic primitives express WHAT, not HOW
+- **Alex chooses implementation** - Target-aware decisions (x86 AVX, ARM NEON, embedded, WAMI)
+
+## STATUS: ARCHITECTURAL INTEGRITY REFACTORING (Dec 2024)
+
+**Alex IS a transformer** - it transforms PSG into MLIR compute graphs using XParsec and parser combinator monads. The issue is that MLIRTransfer.fs has accumulated CRUFT (workarounds, ad-hoc lookups, name matching) that compensates for insufficient PSG enrichment.
+
+**This cruft must be moved UP into proper places:**
+- **PSG nanopasses** for enrichment (ExternInfo, StringInfo, CallTarget edges)
+- **Alloy** for real implementations (not stubs)
+- **Proper Alex architecture** (Zipper + XParsec + Bindings)
+
+**Current Progress:**
 - `PSGZipper.fs` - Complete with foldPreOrder, foldPostOrder, navigation ✓
 - `PSGXParsec.fs` - Complete with combinators (pBind, pMap, pOr, etc.) ✓
 - `Bindings/` - Platform-specific extern dispatch ✓
+- DetectExternPrimitives nanopass - In progress (moving extern detection from MLIR to PSG)
 
-**VIOLATION: `MLIRGeneration.fs` does NOT use the architecture properly:**
-- Has `emitNode` as a 15+ branch if-elif dispatch table (ANTIPATTERN)
-- Has `emitInlinedCall` doing O(N) name string lookup (ANTIPATTERN)
-- Does not use Zipper fold or XParsec combinators for generation
-
-**The old PSGGeneration.fs was removed, but MLIRGeneration.fs recreated the same problems.**
-
-See `alex_actual_vs_intended` memory for detailed violation analysis.
+**See `alex_remediation_plan` memory for the comprehensive migration plan.**
 
 ## CRITICAL: NO EMITTER OR SCRIBE LAYER
 

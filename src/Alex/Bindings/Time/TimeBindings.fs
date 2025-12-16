@@ -103,12 +103,12 @@ let emitLinuxNanosleep (milliseconds: Val) : MLIR<unit> = mlir {
 }
 
 // ===================================================================
-// Extern Primitive Bindings (Platform-Dispatched)
+// Platform Primitive Bindings (Platform-Dispatched)
 // ===================================================================
 
 /// getCurrentTicks - get current time in .NET ticks format
 /// Bound from Alloy.Platform.Bindings.getCurrentTicks
-let bindGetCurrentTicks (platform: TargetPlatform) (_prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
+let bindGetCurrentTicks (platform: TargetPlatform) (_prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
     match platform.OS with
     | Linux ->
         let! ticks = emitLinuxClockGettime SyscallData.CLOCK_REALTIME
@@ -128,7 +128,7 @@ let bindGetCurrentTicks (platform: TargetPlatform) (_prim: ExternPrimitive) : ML
 
 /// getMonotonicTicks - get high-resolution monotonic ticks
 /// Bound from Alloy.Platform.Bindings.getMonotonicTicks
-let bindGetMonotonicTicks (platform: TargetPlatform) (_prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
+let bindGetMonotonicTicks (platform: TargetPlatform) (_prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
     match platform.OS with
     | Linux ->
         let! ticks = emitLinuxClockGettime SyscallData.CLOCK_MONOTONIC
@@ -143,7 +143,7 @@ let bindGetMonotonicTicks (platform: TargetPlatform) (_prim: ExternPrimitive) : 
 
 /// getTickFrequency - get ticks per second
 /// Bound from Alloy.Platform.Bindings.getTickFrequency
-let bindGetTickFrequency (_platform: TargetPlatform) (_prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
+let bindGetTickFrequency (_platform: TargetPlatform) (_prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
     // All platforms use 100-nanosecond ticks = 10,000,000 per second
     let! freq = arith.constant 10000000L I64
     return Emitted freq
@@ -151,7 +151,7 @@ let bindGetTickFrequency (_platform: TargetPlatform) (_prim: ExternPrimitive) : 
 
 /// sleep - sleep for specified milliseconds
 /// Bound from Alloy.Platform.Bindings.sleep
-let bindSleep (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
+let bindSleep (platform: TargetPlatform) (prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
     match prim.Args with
     | [msArg] ->
         match platform.OS with
@@ -176,31 +176,31 @@ let bindSleep (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<Emission
 /// Entry points match Platform.Bindings function names
 let registerBindings () =
     // Linux bindings
-    ExternDispatch.register Linux X86_64 "getCurrentTicks"
+    PlatformDispatch.register Linux X86_64 "getCurrentTicks"
         (fun ext -> bindGetCurrentTicks TargetPlatform.linux_x86_64 ext)
-    ExternDispatch.register Linux X86_64 "getMonotonicTicks"
+    PlatformDispatch.register Linux X86_64 "getMonotonicTicks"
         (fun ext -> bindGetMonotonicTicks TargetPlatform.linux_x86_64 ext)
-    ExternDispatch.register Linux X86_64 "getTickFrequency"
+    PlatformDispatch.register Linux X86_64 "getTickFrequency"
         (fun ext -> bindGetTickFrequency TargetPlatform.linux_x86_64 ext)
-    ExternDispatch.register Linux X86_64 "sleep"
+    PlatformDispatch.register Linux X86_64 "sleep"
         (fun ext -> bindSleep TargetPlatform.linux_x86_64 ext)
 
     // Linux ARM64 (same implementation, different arch tag)
-    ExternDispatch.register Linux ARM64 "getCurrentTicks"
+    PlatformDispatch.register Linux ARM64 "getCurrentTicks"
         (fun ext -> bindGetCurrentTicks { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
-    ExternDispatch.register Linux ARM64 "getMonotonicTicks"
+    PlatformDispatch.register Linux ARM64 "getMonotonicTicks"
         (fun ext -> bindGetMonotonicTicks { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
-    ExternDispatch.register Linux ARM64 "getTickFrequency"
+    PlatformDispatch.register Linux ARM64 "getTickFrequency"
         (fun ext -> bindGetTickFrequency { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
-    ExternDispatch.register Linux ARM64 "sleep"
+    PlatformDispatch.register Linux ARM64 "sleep"
         (fun ext -> bindSleep { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
 
     // macOS bindings (placeholder - will return NotSupported until implemented)
-    ExternDispatch.register MacOS X86_64 "getCurrentTicks"
+    PlatformDispatch.register MacOS X86_64 "getCurrentTicks"
         (fun ext -> bindGetCurrentTicks TargetPlatform.macos_x86_64 ext)
-    ExternDispatch.register MacOS X86_64 "sleep"
+    PlatformDispatch.register MacOS X86_64 "sleep"
         (fun ext -> bindSleep TargetPlatform.macos_x86_64 ext)
-    ExternDispatch.register MacOS ARM64 "getCurrentTicks"
+    PlatformDispatch.register MacOS ARM64 "getCurrentTicks"
         (fun ext -> bindGetCurrentTicks TargetPlatform.macos_arm64 ext)
-    ExternDispatch.register MacOS ARM64 "sleep"
+    PlatformDispatch.register MacOS ARM64 "sleep"
         (fun ext -> bindSleep TargetPlatform.macos_arm64 ext)
