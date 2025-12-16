@@ -103,6 +103,8 @@ type EmitContext(graph: ProgramSemanticGraph, correlationState: CorrelationState
     member val ExternalFuncs : Set<string> = Set.empty with get, set
     /// Accumulated errors during emission
     member val Errors : string list = [] with get, set
+    /// Track mutable bindings: nodeId -> underlying value type (for emitting loads)
+    member val MutableBindings : Map<string, string> = Map.empty with get, set
 
 module EmitContext =
     /// Create emission context from a PSG and Baker correlation state
@@ -124,6 +126,14 @@ module EmitContext =
     /// Look up SSA value for a node by its ID
     let lookupNodeSSA (ctx: EmitContext) (nodeId: NodeId) : (string * string) option =
         Map.tryFind nodeId.Value ctx.NodeSSA
+
+    /// Record a mutable binding with its value type
+    let recordMutableBinding (ctx: EmitContext) (nodeId: NodeId) (valueType: string) : unit =
+        ctx.MutableBindings <- Map.add nodeId.Value valueType ctx.MutableBindings
+
+    /// Check if a node is a mutable binding; returns the value type if so
+    let lookupMutableBinding (ctx: EmitContext) (nodeId: NodeId) : string option =
+        Map.tryFind nodeId.Value ctx.MutableBindings
 
     /// Register a string literal, returning its global name
     let registerStringLiteral (ctx: EmitContext) (content: string) : string =

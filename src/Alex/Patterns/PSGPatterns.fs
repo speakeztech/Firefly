@@ -199,6 +199,16 @@ let arithmeticOp (mfv: FSharpMemberOrFunctionOrValue) : string option =
     | "op_Modulus" -> Some "arith.remsi"
     | _ -> None
 
+/// Check if an operator is bitwise, return MLIR op name
+let bitwiseOp (mfv: FSharpMemberOrFunctionOrValue) : string option =
+    match mfv.CompiledName with
+    | "op_BitwiseAnd" -> Some "arith.andi"   // &&&
+    | "op_BitwiseOr" -> Some "arith.ori"     // |||
+    | "op_ExclusiveOr" -> Some "arith.xori"  // ^^^
+    | "op_LeftShift" -> Some "arith.shli"    // <<<
+    | "op_RightShift" -> Some "arith.shrsi"  // >>> (signed shift)
+    | _ -> None
+
 /// Check if an operator is comparison, return MLIR predicate
 let comparisonOp (mfv: FSharpMemberOrFunctionOrValue) : string option =
     match mfv.CompiledName with
@@ -216,6 +226,21 @@ let unaryOp (mfv: FSharpMemberOrFunctionOrValue) : string option =
     match mfv.CompiledName with
     | "not" | "op_LogicalNot" -> Some "not"  // Boolean negation
     | "op_OnesComplement" -> Some "bitnot"   // Bitwise complement
+    | _ -> None
+
+/// Check if an operator is a type conversion operator
+/// Returns the target MLIR type if it's a conversion
+let conversionOp (mfv: FSharpMemberOrFunctionOrValue) : string option =
+    match mfv.CompiledName with
+    | "ToByte" | "ToByteOperator" -> Some "i8"
+    | "ToSByte" | "ToSByteOperator" -> Some "i8"
+    | "ToInt16" | "ToInt16Operator" -> Some "i16"
+    | "ToUInt16" | "ToUInt16Operator" -> Some "i16"
+    | "ToInt32" | "ToIntOperator" | "ToInt" -> Some "i32"
+    | "ToUInt32" | "ToUInt32Operator" -> Some "i32"
+    | "ToInt64" | "ToInt64Operator" -> Some "i64"
+    | "ToUInt64" | "ToUInt64Operator" -> Some "i64"
+    | "ToChar" | "ToCharOperator" -> Some "i32"  // F# char is 32-bit Unicode codepoint
     | _ -> None
 
 /// Arithmetic operation types (for typed dispatch)
@@ -246,7 +271,7 @@ let classifyCompareOp (mfv: FSharpMemberOrFunctionOrValue) : CompareOp option =
     | _ -> None
 
 /// Check if a PSG node represents an FSharp.Core built-in operator
-/// Returns Some (mfv, opKind) where opKind is "arith", "compare", or "unary"
+/// Returns Some (mfv, opKind) where opKind is "arith", "bitwise", "compare", "unary", or "conversion"
 let isFSharpCoreOperator (node: PSGNode) : (FSharpMemberOrFunctionOrValue * string) option =
     match node.Symbol with
     | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
@@ -254,16 +279,22 @@ let isFSharpCoreOperator (node: PSGNode) : (FSharpMemberOrFunctionOrValue * stri
             let fullName = mfv.FullName
             // Check if this is an FSharp.Core operator
             if fullName.StartsWith("Microsoft.FSharp.Core.Operators.") then
-                // Determine if arithmetic, comparison, or unary
+                // Determine if arithmetic, bitwise, comparison, unary, or conversion
                 match arithmeticOp mfv with
                 | Some _ -> Some (mfv, "arith")
                 | None ->
-                    match comparisonOp mfv with
-                    | Some _ -> Some (mfv, "compare")
+                    match bitwiseOp mfv with
+                    | Some _ -> Some (mfv, "bitwise")
                     | None ->
-                        match unaryOp mfv with
-                        | Some _ -> Some (mfv, "unary")
-                        | None -> None
+                        match comparisonOp mfv with
+                        | Some _ -> Some (mfv, "compare")
+                        | None ->
+                            match unaryOp mfv with
+                            | Some _ -> Some (mfv, "unary")
+                            | None ->
+                                match conversionOp mfv with
+                                | Some _ -> Some (mfv, "conversion")
+                                | None -> None
             else None
         with _ -> None
     | _ -> None

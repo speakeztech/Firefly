@@ -107,10 +107,22 @@ let emitConstant (ctx: EmitContext) (node: PSGNode) : ExprResult =
     | None -> EmitError (sprintf "Unknown constant: %s" node.SyntaxKind)
 
 /// Emit an identifier (variable reference via def-use edges)
+/// For mutable variables, emits a load from the pointer
 let emitIdent (ctx: EmitContext) (node: PSGNode) : ExprResult =
     match findDefiningNode ctx.Graph node with
     | Some defNode ->
         match EmitContext.lookupNodeSSA ctx defNode.Id with
+        | Some (ptrSsa, "!llvm.ptr") ->
+            // Check if this is a mutable binding (need to emit load)
+            match EmitContext.lookupMutableBinding ctx defNode.Id with
+            | Some valueType ->
+                // Emit a load from the pointer to get the actual value
+                let loadedSsa = EmitContext.nextSSA ctx
+                EmitContext.emitLine ctx (sprintf "%s = llvm.load %s : !llvm.ptr -> %s" loadedSsa ptrSsa valueType)
+                Value (loadedSsa, valueType)
+            | None ->
+                // Not a mutable binding, return pointer as-is (e.g., for nativeptr)
+                Value (ptrSsa, "!llvm.ptr")
         | Some (ssa, ty) -> Value (ssa, ty)
         | None ->
             EmitError (sprintf "Definition %s not yet emitted" defNode.Id.Value)
@@ -139,10 +151,40 @@ let private mapContainingTypeToMLIR (ftype: FSharpType) : string =
     try
         if ftype.HasTypeDefinition then
             match ftype.TypeDefinition.TryFullName with
-            | Some n when n.Contains("NativeStr") -> "!llvm.struct<(ptr, i64)>"
+            | Some n when n.Contains("NativeStr") -> "!llvm.struct<(ptr, i32)>"
             | _ -> "!llvm.struct<()>"  // Fallback
         else "!llvm.struct<()>"
     with _ -> "!llvm.struct<()>"
+
+/// Check if a function call is a struct constructor (.ctor)
+let private isStructConstructor (funcNode: PSGNode) : bool =
+    funcNode.SyntaxKind.Contains(".ctor") ||
+    (match funcNode.Symbol with
+     | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+         try mfv.CompiledName = ".ctor" || mfv.IsConstructor with _ -> false
+     | _ -> false)
+
+/// Check if type is NativeStr
+let private isNativeStrType (ftype: FSharpType option) : bool =
+    match ftype with
+    | Some t ->
+        try
+            if t.HasTypeDefinition then
+                match t.TypeDefinition.TryFullName with
+                | Some name -> name.Contains("NativeStr")
+                | None -> false
+            else false
+        with _ -> false
+    | None -> false
+
+/// Get struct type info for construction
+/// Returns (structType, fieldTypes) where fieldTypes are in order
+let private getStructTypeForConstruction (funcNode: PSGNode) : (string * string list) option =
+    // Check the result type of the constructor call
+    if isNativeStrType funcNode.Type then
+        Some ("!llvm.struct<(ptr, i32)>", ["!llvm.ptr"; "i32"])
+    else
+        None
 
 /// Emit a sequential expression - process children in order, return last result
 let rec emitSequential (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
@@ -172,6 +214,8 @@ and emitLetBinding (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
                     EmitContext.emitLine ctx (sprintf "%s = llvm.alloca %s x %s : (i64) -> !llvm.ptr" allocSsa sizeSsa valueTy)
                     EmitContext.emitLine ctx (sprintf "llvm.store %s, %s : %s, !llvm.ptr" valueSsa allocSsa valueTy)
                     EmitContext.recordNodeSSA ctx bindingNode.Id allocSsa "!llvm.ptr"
+                    // Track mutable binding's value type for loads when reading
+                    EmitContext.recordMutableBinding ctx bindingNode.Id valueTy
                     emitNode ctx continuation
                 | _ -> emitNode ctx continuation
             else
@@ -254,20 +298,25 @@ and emitApp (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
         // Check SRTP resolution first
         match node.SRTPResolution with
         | Some (FSMethodByName methodFullName) ->
-            emitRegularApp ctx funcNode argNodes
+            emitRegularApp ctx node funcNode argNodes
         | Some (FSMethod (_, mfv, _)) ->
-            emitRegularApp ctx funcNode argNodes
+            emitRegularApp ctx node funcNode argNodes
         | Some BuiltIn ->
-            emitBuiltInOperator ctx funcNode argNodes
+            emitBuiltInOperator ctx node funcNode argNodes
         | Some (Unresolved reason) ->
-            emitRegularApp ctx funcNode argNodes
-        | _ -> emitRegularApp ctx funcNode argNodes
+            emitRegularApp ctx node funcNode argNodes
+        | _ -> emitRegularApp ctx node funcNode argNodes
     | [] -> Void
 
 /// Emit regular (non-SRTP) function application
-and emitRegularApp (ctx: EmitContext) (funcNode: PSGNode) (argNodes: PSGNode list) : ExprResult =
+/// appNode is the App node with the result type; funcNode is the function being called
+and emitRegularApp (ctx: EmitContext) (appNode: PSGNode) (funcNode: PSGNode) (argNodes: PSGNode list) : ExprResult =
+    // Check for struct constructors first (.ctor for NativeStr, etc.)
+    // Must be BOTH a constructor AND return a struct type we handle
+    if isStructConstructor funcNode && isNativeStrType appNode.Type then
+        emitStructConstruction ctx appNode funcNode argNodes
     // Check for NativeInterop intrinsics
-    if isNativeInteropIntrinsic funcNode then
+    elif isNativeInteropIntrinsic funcNode then
         emitNativeInteropIntrinsic ctx funcNode argNodes
     // Check for extern primitives - use ExternDispatch
     elif isExternPrimitive funcNode then
@@ -279,6 +328,53 @@ and emitRegularApp (ctx: EmitContext) (funcNode: PSGNode) (argNodes: PSGNode lis
             emitFSharpCoreOperator ctx mfv opKind argNodes
         | None ->
             emitInlinedCall ctx funcNode argNodes
+
+/// Emit struct construction (e.g., NativeStr(ptr, len))
+/// Builds struct using llvm.mlir.undef and llvm.insertvalue
+and emitStructConstruction (ctx: EmitContext) (appNode: PSGNode) (funcNode: PSGNode) (argNodes: PSGNode list) : ExprResult =
+    // Get the struct type from the App node's result type
+    let structTypeOpt =
+        if isNativeStrType appNode.Type then
+            Some ("!llvm.struct<(ptr, i32)>", ["!llvm.ptr"; "i32"])
+        else
+            getStructTypeForConstruction funcNode
+
+    match structTypeOpt with
+    | Some (structType, fieldTypes) ->
+        // Flatten tuple arguments - Tuple nodes contain the actual struct field values
+        let flatArgs = argNodes |> List.collect (fun n ->
+            if n.SyntaxKind = "Tuple" || n.SyntaxKind.StartsWith("Tuple") then
+                ChildrenStateHelpers.getChildrenList n
+                |> List.choose (fun id -> Map.tryFind id.Value ctx.Graph.Nodes)
+            else [n])
+
+        // Emit arguments
+        let argResults = flatArgs |> List.map (emitNode ctx)
+        let argSsas = argResults |> List.choose (function Value (s, t) -> Some (s, t) | _ -> None)
+
+        if argSsas.Length <> fieldTypes.Length then
+            let msg = sprintf "Struct construction: expected %d args, got %d" fieldTypes.Length argSsas.Length
+            EmitContext.recordError ctx msg
+            EmitError msg
+        else
+            // Build struct: undef -> insertvalue[0] -> insertvalue[1] -> ...
+            let undefSsa = EmitContext.nextSSA ctx
+            EmitContext.emitLine ctx (sprintf "%s = llvm.mlir.undef : %s" undefSsa structType)
+
+            let finalSsa =
+                argSsas
+                |> List.mapi (fun i (argSsa, argTy) -> (i, argSsa, argTy))
+                |> List.fold (fun currentSsa (i, argSsa, _argTy) ->
+                    let nextSsa = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = llvm.insertvalue %s, %s[%d] : %s" nextSsa argSsa currentSsa i structType)
+                    nextSsa
+                ) undefSsa
+
+            Value (finalSsa, structType)
+
+    | None ->
+        // Unknown struct type - fall back to inlined call
+        emitInlinedCall ctx funcNode argNodes
 
 /// Emit extern primitive using Bindings dispatch
 and emitExternPrimitive (ctx: EmitContext) (funcNode: PSGNode) (argNodes: PSGNode list) : ExprResult =
@@ -432,6 +528,17 @@ and emitFSharpCoreOperator (ctx: EmitContext) (mfv: FSharpMemberOrFunctionOrValu
             EmitContext.recordError ctx msg
             EmitError msg
 
+    | "bitwise", [(left, leftTy); (right, _)] ->
+        match bitwiseOp mfv with
+        | Some mlirOp ->
+            let ssa = EmitContext.nextSSA ctx
+            EmitContext.emitLine ctx (sprintf "%s = %s %s, %s : %s" ssa mlirOp left right leftTy)
+            Value (ssa, leftTy)
+        | None ->
+            let msg = sprintf "Unknown bitwise operator: %s" mfv.CompiledName
+            EmitContext.recordError ctx msg
+            EmitError msg
+
     | "compare", [(left, leftTy); (right, _)] ->
         match comparisonOp mfv with
         | Some predicate ->
@@ -447,14 +554,37 @@ and emitFSharpCoreOperator (ctx: EmitContext) (mfv: FSharpMemberOrFunctionOrValu
             let msg = sprintf "Unknown comparison operator: %s" mfv.CompiledName
             EmitContext.recordError ctx msg
             EmitError msg
+
+    | "conversion", [(input, inputTy)] ->
+        match conversionOp mfv with
+        | Some targetTy ->
+            // Determine conversion direction
+            let inputBits = match inputTy with "i8" -> 8 | "i16" -> 16 | "i32" -> 32 | "i64" -> 64 | _ -> 32
+            let targetBits = match targetTy with "i8" -> 8 | "i16" -> 16 | "i32" -> 32 | "i64" -> 64 | _ -> 32
+            let ssa = EmitContext.nextSSA ctx
+            if inputBits < targetBits then
+                // Sign extend or zero extend (using sign extend for F# semantics)
+                EmitContext.emitLine ctx (sprintf "%s = arith.extsi %s : %s to %s" ssa input inputTy targetTy)
+            elif inputBits > targetBits then
+                // Truncate
+                EmitContext.emitLine ctx (sprintf "%s = arith.trunci %s : %s to %s" ssa input inputTy targetTy)
+            else
+                // Same size, just use the value (might be reinterpreting signed/unsigned)
+                EmitContext.emitLine ctx (sprintf "%s = arith.bitcast %s : %s to %s" ssa input inputTy targetTy)
+            Value (ssa, targetTy)
+        | None ->
+            let msg = sprintf "Unknown conversion operator: %s" mfv.CompiledName
+            EmitContext.recordError ctx msg
+            EmitError msg
+
     | _ ->
         let msg = sprintf "FSharp.Core operator with wrong arity: %s has %d args" mfv.CompiledName argSsas.Length
         EmitContext.recordError ctx msg
         EmitError msg
 
 /// Emit built-in operator
-and emitBuiltInOperator (ctx: EmitContext) (funcNode: PSGNode) (argNodes: PSGNode list) : ExprResult =
-    emitRegularApp ctx funcNode argNodes
+and emitBuiltInOperator (ctx: EmitContext) (appNode: PSGNode) (funcNode: PSGNode) (argNodes: PSGNode list) : ExprResult =
+    emitRegularApp ctx appNode funcNode argNodes
 
 /// Emit inlined function call by name
 and emitInlinedCallByName (ctx: EmitContext) (methodFullName: string) (argNodes: PSGNode list) : ExprResult =
@@ -570,6 +700,56 @@ and findParameterNodes (graph: ProgramSemanticGraph) (pattern: PSGNode) : PSGNod
         |> List.choose (fun id -> Map.tryFind id.Value graph.Nodes)
         |> List.collect (findParameterNodes graph)
 
+/// Emit short-circuit boolean operator (&&) as a value-producing expression
+/// Returns the resulting boolean SSA value
+and emitShortCircuitAnd (ctx: EmitContext) (condition: PSGNode) : ExprResult =
+    // For short-circuit &&, we need to evaluate:
+    // if firstCond then secondCond else false
+    let children = ChildrenStateHelpers.getChildrenList condition
+                   |> List.choose (fun id -> Map.tryFind id.Value ctx.Graph.Nodes)
+    match children with
+    | [firstCond; secondCond; _falseVal] ->
+        // Allocate a result variable on the stack
+        let resultPtr = EmitContext.nextSSA ctx
+        EmitContext.emitLine ctx (sprintf "%s = arith.constant 1 : i64" (EmitContext.nextSSA ctx))
+        let sizeSsa = sprintf "%%v%d" (ctx.SSACounter - 1)
+        EmitContext.emitLine ctx (sprintf "%s = llvm.alloca %s x i1 : (i64) -> !llvm.ptr" resultPtr sizeSsa)
+
+        // Default to false
+        let falseSsa = EmitContext.nextSSA ctx
+        EmitContext.emitLine ctx (sprintf "%s = arith.constant 0 : i1" falseSsa)
+        EmitContext.emitLine ctx (sprintf "llvm.store %s, %s : i1, !llvm.ptr" falseSsa resultPtr)
+
+        // Evaluate first condition
+        let firstResult = emitNode ctx firstCond
+        match firstResult with
+        | Value (firstSsa, _) ->
+            let checkSecondBlock = EmitContext.nextLabel ctx
+            let doneBlock = EmitContext.nextLabel ctx
+
+            // If first is false, skip to done (result is already false)
+            EmitContext.emitLine ctx (sprintf "llvm.cond_br %s, %s, %s" firstSsa checkSecondBlock doneBlock)
+
+            // Check second block
+            EmitContext.emitLine ctx (sprintf "%s:" checkSecondBlock)
+            let secondResult = emitNode ctx secondCond
+            match secondResult with
+            | Value (secondSsa, _) ->
+                // Store second result (which is the final result)
+                EmitContext.emitLine ctx (sprintf "llvm.store %s, %s : i1, !llvm.ptr" secondSsa resultPtr)
+            | _ -> ()
+            EmitContext.emitLine ctx (sprintf "llvm.br %s" doneBlock)
+
+            // Done block - load and return result
+            EmitContext.emitLine ctx (sprintf "%s:" doneBlock)
+            let loadedResult = EmitContext.nextSSA ctx
+            EmitContext.emitLine ctx (sprintf "%s = llvm.load %s : !llvm.ptr -> i1" loadedResult resultPtr)
+            Value (loadedResult, "i1")
+        | _ ->
+            EmitError "First condition of && did not produce a value"
+    | _ ->
+        EmitError "Malformed BoolOp(&&) structure"
+
 /// Emit while loop
 /// WhileLoop has 2 children: condition and body
 and emitWhileLoop (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
@@ -587,7 +767,14 @@ and emitWhileLoop (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
 
         // Condition block
         EmitContext.emitLine ctx (sprintf "%s:" condBlock)
-        let condResult = emitNode ctx condition
+
+        // Handle short-circuit && specially
+        let condResult =
+            if condition.SyntaxKind.StartsWith("IfThenElse:BoolOp") then
+                emitShortCircuitAnd ctx condition
+            else
+                emitNode ctx condition
+
         let condSsa =
             match condResult with
             | Value (ssa, _) -> ssa
@@ -642,7 +829,7 @@ and emitPropertyAccess (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
             EmitError msg
 
     | None ->
-        // No correlation info - fall back to existing behavior
+        // No correlation info - fall back to type-based inference
         match node.ConstantValue, propName with
         | Some (Int32Value length), "Length" ->
             let ssa = EmitContext.nextSSA ctx
@@ -651,13 +838,43 @@ and emitPropertyAccess (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
         | _ ->
             match children, propName with
             | [target], "Length" ->
-                match target.ConstantValue with
-                | Some (StringValue s) ->
-                    let ssa = EmitContext.nextSSA ctx
-                    EmitContext.emitLine ctx (sprintf "%s = arith.constant %d : i32" ssa s.Length)
-                    Value (ssa, "i32")
-                | _ ->
-                    let msg = "PropertyAccess:Length reached code gen without correlation info (non-constant target)"
+                // Check if target is a NativeStr (fat pointer struct)
+                if isNativeStrType target.Type then
+                    // NativeStr is struct { Pointer: ptr, Length: i32 }
+                    // Length is field index 1
+                    let targetResult = emitNode ctx target
+                    match targetResult with
+                    | Value (targetSsa, _) ->
+                        let ssa = EmitContext.nextSSA ctx
+                        EmitContext.emitLine ctx (sprintf "%s = llvm.extractvalue %s[1] : !llvm.struct<(ptr, i32)>" ssa targetSsa)
+                        Value (ssa, "i32")
+                    | EmitError msg -> EmitError msg
+                    | Void -> EmitError "PropertyAccess:Length on NativeStr - target emitted Void"
+                else
+                    // Check for constant string
+                    match target.ConstantValue with
+                    | Some (StringValue s) ->
+                        let ssa = EmitContext.nextSSA ctx
+                        EmitContext.emitLine ctx (sprintf "%s = arith.constant %d : i32" ssa s.Length)
+                        Value (ssa, "i32")
+                    | _ ->
+                        let msg = "PropertyAccess:Length - could not determine target type for extraction"
+                        EmitContext.recordError ctx msg
+                        EmitError msg
+            | [target], "Pointer" ->
+                // Check if target is a NativeStr
+                if isNativeStrType target.Type then
+                    // NativeStr Pointer is field index 0
+                    let targetResult = emitNode ctx target
+                    match targetResult with
+                    | Value (targetSsa, _) ->
+                        let ssa = EmitContext.nextSSA ctx
+                        EmitContext.emitLine ctx (sprintf "%s = llvm.extractvalue %s[0] : !llvm.struct<(ptr, i32)>" ssa targetSsa)
+                        Value (ssa, "!llvm.ptr")
+                    | EmitError msg -> EmitError msg
+                    | Void -> EmitError "PropertyAccess:Pointer on NativeStr - target emitted Void"
+                else
+                    let msg = sprintf "PropertyAccess:Pointer - unknown target type"
                     EmitContext.recordError ctx msg
                     EmitError msg
             | _ ->
@@ -728,6 +945,48 @@ and emitTypeApp (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
         EmitContext.recordError ctx msg
         EmitError msg
 
+/// Emit dot-indexed get (e.g., s[i] for string/array indexing)
+and emitDotIndexedGet (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
+    let children = PSGZipper.childNodes zipper
+    match children with
+    | [target; index] ->
+        let targetResult = emitNode ctx target
+        let indexResult = emitNode ctx index
+        match targetResult, indexResult with
+        | Value (targetSsa, "!llvm.ptr"), Value (indexSsa, indexTy) ->
+            // String indexing: compute pointer to character at offset
+            // First, extend index to i64 if needed
+            let indexSsa64 =
+                if indexTy = "i64" then indexSsa
+                else
+                    let extSsa = EmitContext.nextSSA ctx
+                    EmitContext.emitLine ctx (sprintf "%s = arith.extsi %s : %s to i64" extSsa indexSsa indexTy)
+                    extSsa
+            // GEP to get pointer to character at index
+            let gepSsa = EmitContext.nextSSA ctx
+            EmitContext.emitLine ctx (sprintf "%s = llvm.getelementptr %s[%s] : (!llvm.ptr, i64) -> !llvm.ptr, i8" gepSsa targetSsa indexSsa64)
+            // Load the character (i8)
+            let charSsa = EmitContext.nextSSA ctx
+            EmitContext.emitLine ctx (sprintf "%s = llvm.load %s : !llvm.ptr -> i8" charSsa gepSsa)
+            // Return as i32 (char in F# is 16-bit, but we're treating it as byte for now)
+            let resultSsa = EmitContext.nextSSA ctx
+            EmitContext.emitLine ctx (sprintf "%s = arith.extui %s : i8 to i32" resultSsa charSsa)
+            Value (resultSsa, "i32")
+        | Value (targetSsa, targetTy), Value (indexSsa, _) ->
+            let msg = sprintf "DotIndexedGet: expected !llvm.ptr target, got %s" targetTy
+            EmitContext.recordError ctx msg
+            EmitError msg
+        | EmitError msg, _ -> EmitError msg
+        | _, EmitError msg -> EmitError msg
+        | _ ->
+            let msg = "DotIndexedGet: target or index did not produce a value"
+            EmitContext.recordError ctx msg
+            EmitError msg
+    | _ ->
+        let msg = sprintf "DotIndexedGet expected 2 children (target, index), got %d" (List.length children)
+        EmitContext.recordError ctx msg
+        EmitError msg
+
 // ═══════════════════════════════════════════════════════════════════
 // Main Emission - Uses Zipper for context, dispatches by SyntaxKind
 // ═══════════════════════════════════════════════════════════════════
@@ -762,6 +1021,8 @@ and emitNode (ctx: EmitContext) (node: PSGNode) : ExprResult =
         emitSemanticPrimitive ctx zipper
     elif kind = "WhileLoop" then
         emitWhileLoop ctx zipper
+    elif kind = "DotIndexedGet" then
+        emitDotIndexedGet ctx zipper
     elif kind.StartsWith("Pattern:") then
         let children = PSGZipper.childNodes zipper
         match children with
