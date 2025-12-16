@@ -15,7 +15,7 @@ The Serena MCP server maintains authoritative memories about architectural decis
 - `alex_zipper_architecture` - The correct Zipper + XParsec + Bindings model
 - `baker_component` - Type resolution layer (Phase 4), SRTP handling
 - `negative_examples` - Real mistakes to avoid repeating
-- `native_binding_architecture` - How extern primitives flow to platform bindings
+- `native_binding_architecture` - How platform bindings flow to native code
 
 Use `mcp__serena__read_memory` to review relevant memories before proceeding.
 
@@ -76,7 +76,7 @@ These resources are ESSENTIAL for understanding the project architecture and mak
 
 | Resource | Path | Purpose |
 |----------|------|---------|
-| **Alloy** | `~/repos/Alloy` | Native F# library - ACTIVE TARGET. BCL-sympathetic API, native types, extern primitives |
+| **Alloy** | `~/repos/Alloy` | Native F# library - ACTIVE TARGET. BCL-sympathetic API, native types, platform bindings (BCL-free) |
 | **BAREWire** | `~/repos/BAREWire` | Binary serialization - FUTURE. Memory-efficient wire protocol |
 | **Farscape** | `~/repos/Farscape` | Distributed compute - FUTURE. Native F# distributed processing |
 
@@ -222,9 +222,9 @@ The typed tree zipper captures this resolution INTO the PSG. Downstream passes (
    - Self-contained F# standard library for native compilation
    - BCL-sympathetic API without .NET runtime dependency
    - **Platform-agnostic**: No platform-specific code (Linux/MacOS/Windows directories are WRONG)
-   - **Extern primitives**: I/O operations use `[<DllImport("__fidelity")>] extern` declarations
-   - Alex provides platform-specific implementations of extern primitives
-   - Core modules: Core.fs, Math.fs, Memory.fs, Text.fs, Console.fs, Primitives.fs
+   - **BCL-free platform bindings**: Uses module convention (`Platform.Bindings`) instead of DllImportAttribute
+   - Alex provides platform-specific implementations of platform bindings
+   - Core modules: Core.fs, Math.fs, Memory.fs, Text.fs, Console.fs, Platform.fs
 
 ## CRITICAL: The Layer Separation Principle
 
@@ -281,9 +281,9 @@ Output: Complete MLIR module
 
 **The Bindings:**
 - Contain platform-specific MLIR generation
-- Looked up by extern primitive entry point (e.g., `"fidelity_write_bytes"`)
+- Looked up by `Platform.Bindings` module structure (e.g., `writeBytes`, `readBytes`)
 - Are DATA (syscall numbers, calling conventions), not routing logic
-- Organized by `(OSFamily, Architecture, EntryPoint)`
+- Organized by `(OSFamily, Architecture, BindingFunction)`
 
 **MLIR Builder:**
 - The natural "pool" where emissions accumulate
@@ -380,26 +380,29 @@ module PSGEmitter =
 - It inevitably attracts library-aware logic ("if ConsoleWrite then...")
 - The centralization belongs at the OUTPUT (MLIR Builder), not at DISPATCH
 
-**The fix**: No central dispatcher. The Zipper folds over PSG structure. XParsec matches locally at each node. Bindings are looked up by extern primitive entry point. MLIR Builder accumulates the output.
+**The fix**: No central dispatcher. The Zipper folds over PSG structure. XParsec matches locally at each node. Bindings are looked up by Platform.Bindings module structure. MLIR Builder accumulates the output.
 
-## The Extern Primitive Surface
+## The Platform Binding Surface (BCL-Free)
 
-The ONLY acceptable "stubs" are **extern declarations** using `DllImport("__fidelity")`:
+Platform bindings use a **module convention** - NO BCL dependencies:
 
 ```fsharp
-// Alloy/Primitives.fs - declarative extern primitives
-[<DllImport("__fidelity", CallingConvention = CallingConvention.Cdecl,
-            EntryPoint = "fidelity_write_bytes")>]
-extern int writeBytes(int fd, nativeptr<byte> buffer, int count)
+// Alloy/Platform.fs - BCL-free platform bindings (OCaml-inspired module convention)
+[<Struct>]
+type PlatformProvided = PlatformProvided
 
-[<DllImport("__fidelity", CallingConvention = CallingConvention.Cdecl,
-            EntryPoint = "fidelity_read_bytes")>]
-extern int readBytes(int fd, nativeptr<byte> buffer, int maxCount)
+module Platform.Bindings =
+    let writeBytes fd buffer count : int = Unchecked.defaultof<int>
+    let readBytes fd buffer maxCount : int = Unchecked.defaultof<int>
+    let getCurrentTicks () : int64 = Unchecked.defaultof<int64>
+    let sleep milliseconds : unit = ()
 ```
 
-The `"__fidelity"` library name is a marker for Alex. Alex provides platform-specific implementations.
+The `Platform.Bindings` module structure serves as the recognition marker for Alex. Alex provides platform-specific implementations.
 
-Everything else must decompose to these primitives through real F# code.
+**Why BCL-free?** `DllImportAttribute` from `System.Runtime.InteropServices` is a BCL dependency. Fidelity deliberately avoids ALL BCL dependencies to maintain a clean compilation path to native code.
+
+Everything else must decompose to these platform bindings through real F# code.
 
 ## Critical Working Principle: Zoom Out Before Fixing
 
@@ -540,7 +543,7 @@ Before making changes, review these documents in `/docs/`:
 
 | Document | Purpose |
 |----------|---------|
-| **`Architecture_Canonical.md`** | **AUTHORITATIVE: Two-layer model, extern primitives, nanopass pipeline** |
+| **`Architecture_Canonical.md`** | **AUTHORITATIVE: Two-layer model, platform bindings (BCL-free), nanopass pipeline** |
 | **`PSG_Nanopass_Architecture.md`** | **CANONICAL: True nanopass pipeline, typed tree overlay, SRTP** |
 | **`TypedTree_Zipper_Design.md`** | **Zipper implementation for FSharpExpr/PSG correlation** |
 | `PSG_architecture.md` | PSG design decisions, node identity |
@@ -631,7 +634,7 @@ Firefly compile HelloWorld.fidproj -k
 
 ## Common Pitfalls
 
-1. **Stub Functions**: Alloy functions that compile but do nothing at runtime. Always verify the implementation decomposes to primitives.
+1. **Stub Functions**: Alloy functions that compile but do nothing at runtime. Always verify the implementation decomposes to platform bindings.
 
 2. **Library-Specific Logic**: Adding `if functionName = "Alloy.X.Y"` logic anywhere in code generation. This is ALWAYS wrong.
 
@@ -647,7 +650,7 @@ Firefly compile HelloWorld.fidproj -k
 
 8. **Wrong Nanopass Scope**: Different operator classes need different nanopasses. Pipe operators (`|>`, `<|`) are reduced by `ReducePipeOperators`. Alloy operators (like `$`) are a separate class. Don't mix concerns.
 
-9. **Central Dispatch/Emitter**: Creating a handler registry that routes based on node kinds. This antipattern (PSGEmitter, PSGScribe) was removed twice. The Zipper folds, XParsec matches locally, Bindings provide extern implementations, MLIR Builder accumulates. NO routing table.
+9. **Central Dispatch/Emitter**: Creating a handler registry that routes based on node kinds. This antipattern (PSGEmitter, PSGScribe) was removed twice. The Zipper folds, XParsec matches locally, Bindings provide platform implementations, MLIR Builder accumulates. NO routing table.
 
 10. **Premature Centralization**: Pooling decision-making logic too early. Centralization is natural and correct at the OUTPUT (MLIR text), but wrong at DISPATCH (traversal logic). The PSG structure drives emission; there's no router.
 

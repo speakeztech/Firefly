@@ -57,7 +57,8 @@ let emitUnixExitSyscall (syscallNum: int64) (exitCode: Val) : MLIR<unit> = mlir 
 // Extern Primitive Bindings
 // ===================================================================
 
-/// fidelity_exit - terminate process with exit code
+/// exit - terminate process with exit code
+/// Bound from Alloy.Platform.Bindings.exit
 let bindExit (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
     match prim.Args with
     | [exitCode] ->
@@ -82,15 +83,16 @@ let bindExit (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<EmissionR
 // ===================================================================
 
 /// Register all process bindings for all platforms
+/// Entry points match Platform.Bindings function names
 let registerBindings () =
     // Register for Linux
-    ExternDispatch.register Linux X86_64 "fidelity_exit"
+    ExternDispatch.register Linux X86_64 "exit"
         (fun ext -> bindExit TargetPlatform.linux_x86_64 ext)
-    ExternDispatch.register Linux ARM64 "fidelity_exit"
+    ExternDispatch.register Linux ARM64 "exit"
         (fun ext -> bindExit { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
 
     // Register for macOS
-    ExternDispatch.register MacOS X86_64 "fidelity_exit"
+    ExternDispatch.register MacOS X86_64 "exit"
         (fun ext -> bindExit TargetPlatform.macos_x86_64 ext)
-    ExternDispatch.register MacOS ARM64 "fidelity_exit"
+    ExternDispatch.register MacOS ARM64 "exit"
         (fun ext -> bindExit TargetPlatform.macos_arm64 ext)

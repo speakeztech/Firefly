@@ -498,13 +498,13 @@ and emitStructConstruction (ctx: EmitContext) (appNode: PSGNode) (funcNode: PSGN
         // Unknown struct type - fall back to inlined call
         emitInlinedCall ctx funcNode argNodes
 
-/// Emit extern primitive using Bindings dispatch
+/// Emit extern primitive using platform bindings
 and emitExternPrimitive (ctx: EmitContext) (funcNode: PSGNode) (argNodes: PSGNode list) : ExprResult =
     match tryExtractExternPrimitiveInfo funcNode with
-    | Some info when info.Library = "__fidelity" ->
-        emitFidelityExtern ctx info argNodes
+    | Some info when info.Library = "__fidelity" || info.Library = "platform" ->
+        emitPlatformBinding ctx info argNodes
     | Some info ->
-        let msg = sprintf "Non-fidelity extern not supported: %s/%s" info.Library info.EntryPoint
+        let msg = sprintf "Non-platform extern not supported: %s/%s" info.Library info.EntryPoint
         EmitContext.recordError ctx msg
         EmitError msg
     | None ->
@@ -512,8 +512,8 @@ and emitExternPrimitive (ctx: EmitContext) (funcNode: PSGNode) (argNodes: PSGNod
         EmitContext.recordError ctx msg
         EmitError msg
 
-/// Emit Fidelity extern call (syscalls via Bindings)
-and emitFidelityExtern (ctx: EmitContext) (info: ExternPrimitiveInfo) (argNodes: PSGNode list) : ExprResult =
+/// Emit platform binding call (syscalls for Platform.Bindings functions)
+and emitPlatformBinding (ctx: EmitContext) (info: ExternPrimitiveInfo) (argNodes: PSGNode list) : ExprResult =
     let flatArgs = argNodes |> List.collect (fun n ->
         if n.SyntaxKind = "Tuple" then
             ChildrenStateHelpers.getChildrenList n
@@ -523,7 +523,7 @@ and emitFidelityExtern (ctx: EmitContext) (info: ExternPrimitiveInfo) (argNodes:
     let argSsas = argResults |> List.choose (function Value (s, t) -> Some (s, t) | _ -> None)
 
     match info.EntryPoint with
-    | "fidelity_write_bytes" ->
+    | "writeBytes" ->
         match argSsas with
         | [(fdSsa, _); (bufSsa, _); (countSsa, _)] ->
             let fdExt = EmitContext.nextSSA ctx
@@ -538,11 +538,11 @@ and emitFidelityExtern (ctx: EmitContext) (info: ExternPrimitiveInfo) (argNodes:
             EmitContext.emitLine ctx (sprintf "%s = arith.trunci %s : i64 to i32" truncResult result)
             Value (truncResult, "i32")
         | _ ->
-            let msg = sprintf "fidelity_write_bytes: expected 3 args, got %d" (List.length argSsas)
+            let msg = sprintf "writeBytes: expected 3 args, got %d" (List.length argSsas)
             EmitContext.recordError ctx msg
             EmitError msg
 
-    | "fidelity_read_bytes" ->
+    | "readBytes" ->
         match argSsas with
         | [(fdSsa, _); (bufSsa, _); (countSsa, _)] ->
             let fdExt = EmitContext.nextSSA ctx
@@ -557,11 +557,11 @@ and emitFidelityExtern (ctx: EmitContext) (info: ExternPrimitiveInfo) (argNodes:
             EmitContext.emitLine ctx (sprintf "%s = arith.trunci %s : i64 to i32" truncResult result)
             Value (truncResult, "i32")
         | _ ->
-            let msg = sprintf "fidelity_read_bytes: expected 3 args, got %d" (List.length argSsas)
+            let msg = sprintf "readBytes: expected 3 args, got %d" (List.length argSsas)
             EmitContext.recordError ctx msg
             EmitError msg
 
-    | "fidelity_strlen" ->
+    | "strlen" ->
         match argSsas with
         | [(ptrSsa, _)] ->
             let result = EmitContext.nextSSA ctx
@@ -570,12 +570,12 @@ and emitFidelityExtern (ctx: EmitContext) (info: ExternPrimitiveInfo) (argNodes:
             EmitContext.emitLine ctx (sprintf "%s = arith.trunci %s : i64 to i32" truncResult result)
             Value (truncResult, "i32")
         | _ ->
-            let msg = sprintf "fidelity_strlen: expected 1 arg, got %d" (List.length argSsas)
+            let msg = sprintf "strlen: expected 1 arg, got %d" (List.length argSsas)
             EmitContext.recordError ctx msg
             EmitError msg
 
     | _ ->
-        let msg = sprintf "Unknown fidelity extern: %s" info.EntryPoint
+        let msg = sprintf "Unknown platform binding: %s" info.EntryPoint
         EmitContext.recordError ctx msg
         EmitError msg
 
@@ -1303,6 +1303,33 @@ and emitSemanticPrimitive (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
         EmitContext.recordError ctx msg
         EmitError msg
 
+/// Emit string concatenation (lowered interpolated string)
+/// For now, this emits each part sequentially - a tactical solution.
+/// A proper implementation would concat into a buffer and return NativeStr.
+and emitStringConcat (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
+    let children = PSGZipper.childNodes zipper
+
+    // Emit each child part
+    // String constants become static string references
+    // Fill expressions emit their values (expected to be NativeStr or string)
+    let mutable lastResult = Void
+    for child in children do
+        let result = emitNode ctx child
+        match result with
+        | Value (ssa, ty) ->
+            // For string constants, we get a pointer to static data
+            // For NativeStr expressions, we get the struct
+            // We need to write each part - for now, just emit the parts
+            // and the caller (Console.WriteLine) will handle them
+            lastResult <- result
+        | Void -> ()
+        | EmitError msg ->
+            EmitContext.recordError ctx msg
+
+    // Return the last result
+    // This is a simplification - proper concat would return a combined NativeStr
+    lastResult
+
 /// Emit tuple
 and emitTuple (ctx: EmitContext) (zipper: PSGZipper) : ExprResult =
     let children = PSGZipper.childNodes zipper
@@ -1434,6 +1461,8 @@ and emitNode (ctx: EmitContext) (node: PSGNode) : ExprResult =
         emitLetBinding ctx zipper
     elif kind = "IfThenElse" || kind.StartsWith("IfThenElse:") then
         emitIfThenElse ctx zipper
+    elif kind = "App:StringConcat" then
+        emitStringConcat ctx zipper
     elif kind.StartsWith("App:") then
         emitApp ctx zipper
     elif kind = "Tuple" then

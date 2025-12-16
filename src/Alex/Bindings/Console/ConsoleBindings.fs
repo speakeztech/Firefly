@@ -86,10 +86,11 @@ let emitUnixReadSyscall (syscallNum: int64) (fd: Val) (buf: Val) (count: Val) : 
 }
 
 // ===================================================================
-// Extern Primitive Bindings
+// Platform Bindings (BCL-Free Pattern)
 // ===================================================================
 
-/// fidelity_write_bytes - write bytes to file descriptor
+/// writeBytes - write bytes to file descriptor
+/// Bound from Alloy.Platform.Bindings.writeBytes
 let bindWriteBytes (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
     match prim.Args with
     | [fd; buf; count] ->
@@ -111,7 +112,8 @@ let bindWriteBytes (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<Emi
         return NotSupported "writeBytes requires (fd, buffer, count) arguments"
 }
 
-/// fidelity_read_bytes - read bytes from file descriptor
+/// readBytes - read bytes from file descriptor
+/// Bound from Alloy.Platform.Bindings.readBytes
 let bindReadBytes (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
     match prim.Args with
     | [fd; buf; maxCount] ->
@@ -137,23 +139,24 @@ let bindReadBytes (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<Emis
 // ===================================================================
 
 /// Register all console bindings for all platforms
+/// Entry points match Platform.Bindings function names (e.g., "writeBytes", "readBytes")
 let registerBindings () =
     // Register for Linux
-    ExternDispatch.register Linux X86_64 "fidelity_write_bytes"
+    ExternDispatch.register Linux X86_64 "writeBytes"
         (fun ext -> bindWriteBytes TargetPlatform.linux_x86_64 ext)
-    ExternDispatch.register Linux X86_64 "fidelity_read_bytes"
+    ExternDispatch.register Linux X86_64 "readBytes"
         (fun ext -> bindReadBytes TargetPlatform.linux_x86_64 ext)
-    ExternDispatch.register Linux ARM64 "fidelity_write_bytes"
+    ExternDispatch.register Linux ARM64 "writeBytes"
         (fun ext -> bindWriteBytes { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
-    ExternDispatch.register Linux ARM64 "fidelity_read_bytes"
+    ExternDispatch.register Linux ARM64 "readBytes"
         (fun ext -> bindReadBytes { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
 
     // Register for macOS
-    ExternDispatch.register MacOS X86_64 "fidelity_write_bytes"
+    ExternDispatch.register MacOS X86_64 "writeBytes"
         (fun ext -> bindWriteBytes TargetPlatform.macos_x86_64 ext)
-    ExternDispatch.register MacOS X86_64 "fidelity_read_bytes"
+    ExternDispatch.register MacOS X86_64 "readBytes"
         (fun ext -> bindReadBytes TargetPlatform.macos_x86_64 ext)
-    ExternDispatch.register MacOS ARM64 "fidelity_write_bytes"
+    ExternDispatch.register MacOS ARM64 "writeBytes"
         (fun ext -> bindWriteBytes TargetPlatform.macos_arm64 ext)
-    ExternDispatch.register MacOS ARM64 "fidelity_read_bytes"
+    ExternDispatch.register MacOS ARM64 "readBytes"
         (fun ext -> bindReadBytes TargetPlatform.macos_arm64 ext)

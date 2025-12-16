@@ -106,7 +106,8 @@ let emitLinuxNanosleep (milliseconds: Val) : MLIR<unit> = mlir {
 // Extern Primitive Bindings (Platform-Dispatched)
 // ===================================================================
 
-/// fidelity_get_current_ticks - get current time in .NET ticks format
+/// getCurrentTicks - get current time in .NET ticks format
+/// Bound from Alloy.Platform.Bindings.getCurrentTicks
 let bindGetCurrentTicks (platform: TargetPlatform) (_prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
     match platform.OS with
     | Linux ->
@@ -125,7 +126,8 @@ let bindGetCurrentTicks (platform: TargetPlatform) (_prim: ExternPrimitive) : ML
         return NotSupported $"Time not supported on {platform.OS}"
 }
 
-/// fidelity_get_monotonic_ticks - get high-resolution monotonic ticks
+/// getMonotonicTicks - get high-resolution monotonic ticks
+/// Bound from Alloy.Platform.Bindings.getMonotonicTicks
 let bindGetMonotonicTicks (platform: TargetPlatform) (_prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
     match platform.OS with
     | Linux ->
@@ -139,14 +141,16 @@ let bindGetMonotonicTicks (platform: TargetPlatform) (_prim: ExternPrimitive) : 
         return NotSupported $"Monotonic time not supported on {platform.OS}"
 }
 
-/// fidelity_get_tick_frequency - get ticks per second
+/// getTickFrequency - get ticks per second
+/// Bound from Alloy.Platform.Bindings.getTickFrequency
 let bindGetTickFrequency (_platform: TargetPlatform) (_prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
     // All platforms use 100-nanosecond ticks = 10,000,000 per second
     let! freq = arith.constant 10000000L I64
     return Emitted freq
 }
 
-/// fidelity_sleep - sleep for specified milliseconds
+/// sleep - sleep for specified milliseconds
+/// Bound from Alloy.Platform.Bindings.sleep
 let bindSleep (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<EmissionResult> = mlir {
     match prim.Args with
     | [msArg] ->
@@ -169,33 +173,34 @@ let bindSleep (platform: TargetPlatform) (prim: ExternPrimitive) : MLIR<Emission
 // ===================================================================
 
 /// Register all time bindings for all platforms
+/// Entry points match Platform.Bindings function names
 let registerBindings () =
     // Linux bindings
-    ExternDispatch.register Linux X86_64 "fidelity_get_current_ticks"
+    ExternDispatch.register Linux X86_64 "getCurrentTicks"
         (fun ext -> bindGetCurrentTicks TargetPlatform.linux_x86_64 ext)
-    ExternDispatch.register Linux X86_64 "fidelity_get_monotonic_ticks"
+    ExternDispatch.register Linux X86_64 "getMonotonicTicks"
         (fun ext -> bindGetMonotonicTicks TargetPlatform.linux_x86_64 ext)
-    ExternDispatch.register Linux X86_64 "fidelity_get_tick_frequency"
+    ExternDispatch.register Linux X86_64 "getTickFrequency"
         (fun ext -> bindGetTickFrequency TargetPlatform.linux_x86_64 ext)
-    ExternDispatch.register Linux X86_64 "fidelity_sleep"
+    ExternDispatch.register Linux X86_64 "sleep"
         (fun ext -> bindSleep TargetPlatform.linux_x86_64 ext)
 
     // Linux ARM64 (same implementation, different arch tag)
-    ExternDispatch.register Linux ARM64 "fidelity_get_current_ticks"
+    ExternDispatch.register Linux ARM64 "getCurrentTicks"
         (fun ext -> bindGetCurrentTicks { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
-    ExternDispatch.register Linux ARM64 "fidelity_get_monotonic_ticks"
+    ExternDispatch.register Linux ARM64 "getMonotonicTicks"
         (fun ext -> bindGetMonotonicTicks { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
-    ExternDispatch.register Linux ARM64 "fidelity_get_tick_frequency"
+    ExternDispatch.register Linux ARM64 "getTickFrequency"
         (fun ext -> bindGetTickFrequency { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
-    ExternDispatch.register Linux ARM64 "fidelity_sleep"
+    ExternDispatch.register Linux ARM64 "sleep"
         (fun ext -> bindSleep { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
 
     // macOS bindings (placeholder - will return NotSupported until implemented)
-    ExternDispatch.register MacOS X86_64 "fidelity_get_current_ticks"
+    ExternDispatch.register MacOS X86_64 "getCurrentTicks"
         (fun ext -> bindGetCurrentTicks TargetPlatform.macos_x86_64 ext)
-    ExternDispatch.register MacOS X86_64 "fidelity_sleep"
+    ExternDispatch.register MacOS X86_64 "sleep"
         (fun ext -> bindSleep TargetPlatform.macos_x86_64 ext)
-    ExternDispatch.register MacOS ARM64 "fidelity_get_current_ticks"
+    ExternDispatch.register MacOS ARM64 "getCurrentTicks"
         (fun ext -> bindGetCurrentTicks TargetPlatform.macos_arm64 ext)
-    ExternDispatch.register MacOS ARM64 "fidelity_sleep"
+    ExternDispatch.register MacOS ARM64 "sleep"
         (fun ext -> bindSleep TargetPlatform.macos_arm64 ext)

@@ -311,10 +311,10 @@ type BinaryOpInfo = {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Extern Primitive Detection
+// Platform Binding Detection (BCL-Free Pattern)
 // ═══════════════════════════════════════════════════════════════════
 
-/// Map F# type to MLIRType (simplified mapping for extern primitives)
+/// Map F# type to MLIRType (simplified mapping for platform bindings)
 let private mapFSharpTypeToMLIRType (ftype: FSharpType) : MLIRType =
     try
         if ftype.HasTypeDefinition then
@@ -339,7 +339,8 @@ let private mapFSharpTypeToMLIRType (ftype: FSharpType) : MLIRType =
             Integer I32
     with _ -> Integer I32
 
-/// Information extracted from a DllImport attribute (before Args are available)
+/// Information extracted from a Platform Binding (before Args are available)
+/// BCL-free: Uses module structure recognition, not DllImport attributes
 type ExternPrimitiveInfo = {
     EntryPoint: string
     Library: string
@@ -347,15 +348,17 @@ type ExternPrimitiveInfo = {
     ReturnType: MLIRType
 }
 
-/// Check if a PSG node represents an extern primitive (DllImport)
+/// The module path that indicates a platform binding (BCL-free pattern)
+let private platformBindingsModule = "Alloy.Platform.Bindings"
+
+/// Check if a PSG node represents a platform binding (BCL-free pattern)
+/// Recognizes calls to functions in the Alloy.Platform.Bindings module
 let isExternPrimitive (node: PSGNode) : bool =
     match node.Symbol with
     | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
-        mfv.Attributes
-        |> Seq.exists (fun attr ->
-            let fullName = attr.AttributeType.FullName
-            fullName = "System.Runtime.InteropServices.DllImportAttribute" ||
-            fullName.EndsWith("DllImportAttribute"))
+        try
+            mfv.FullName.StartsWith(platformBindingsModule + ".")
+        with _ -> false
     | _ -> false
 
 /// FSharp.NativeInterop intrinsics - these are compiler primitives, not user functions
@@ -398,66 +401,33 @@ let getNativeInteropIntrinsicName (node: PSGNode) : string option =
         with _ -> None
     | None -> None
 
-/// Extract DllImport attribute information from an FSharpMemberOrFunctionOrValue
-let private tryExtractDllImportInfo (mfv: FSharpMemberOrFunctionOrValue) : ExternPrimitiveInfo option =
-    mfv.Attributes
-    |> Seq.tryFind (fun attr ->
-        let fullName = attr.AttributeType.FullName
-        fullName = "System.Runtime.InteropServices.DllImportAttribute" ||
-        fullName.EndsWith("DllImportAttribute"))
-    |> Option.bind (fun attr ->
-        // The first constructor argument is the library name
-        let libraryName =
-            attr.ConstructorArguments
-            |> Seq.tryHead
-            |> Option.bind (fun (_, value) ->
-                match value with
-                | :? string as s -> Some s
-                | _ -> None)
-            |> Option.defaultValue "__fidelity"
+/// Extract Platform Binding information from an FSharpMemberOrFunctionOrValue
+/// BCL-free: Uses module structure and function name, not DllImport attributes
+let private tryExtractPlatformBindingInfo (mfv: FSharpMemberOrFunctionOrValue) : ExternPrimitiveInfo option =
+    try
+        let fullName = mfv.FullName
+        if fullName.StartsWith(platformBindingsModule + ".") then
+            // Extract function name as entry point (e.g., "writeBytes" from "Alloy.Platform.Bindings.writeBytes")
+            let entryPoint = fullName.Substring(platformBindingsModule.Length + 1)
 
-        // Named arguments contain EntryPoint and CallingConvention
-        let entryPoint =
-            attr.NamedArguments
-            |> Seq.tryFind (fun (_, name, _, _) -> name = "EntryPoint")
-            |> Option.bind (fun (_, _, _, value) ->
-                match value with
-                | :? string as s -> Some s
-                | _ -> None)
-            |> Option.defaultValue mfv.LogicalName
+            // Get return type from the member
+            let returnType = mapFSharpTypeToMLIRType mfv.ReturnParameter.Type
 
-        let callingConv =
-            attr.NamedArguments
-            |> Seq.tryFind (fun (_, name, _, _) -> name = "CallingConvention")
-            |> Option.bind (fun (_, _, _, value) ->
-                match value with
-                | :? int as i ->
-                    // CallingConvention enum values
-                    match i with
-                    | 1 -> Some "Winapi"
-                    | 2 -> Some "Cdecl"
-                    | 3 -> Some "StdCall"
-                    | 4 -> Some "ThisCall"
-                    | 5 -> Some "FastCall"
-                    | _ -> Some "Cdecl"
-                | _ -> None)
-            |> Option.defaultValue "Cdecl"
+            Some {
+                EntryPoint = entryPoint
+                Library = "platform"  // Marker indicating platform-provided binding
+                CallingConvention = "Cdecl"  // Default for platform bindings
+                ReturnType = returnType
+            }
+        else
+            None
+    with _ -> None
 
-        // Get return type from the member
-        let returnType = mapFSharpTypeToMLIRType mfv.ReturnParameter.Type
-
-        Some {
-            EntryPoint = entryPoint
-            Library = libraryName
-            CallingConvention = callingConv
-            ReturnType = returnType
-        })
-
-/// Extract extern primitive info from a PSG node (without args - those come from emission context)
+/// Extract platform binding info from a PSG node (without args - those come from emission context)
 let tryExtractExternPrimitiveInfo (node: PSGNode) : ExternPrimitiveInfo option =
     match node.Symbol with
     | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
-        tryExtractDllImportInfo mfv
+        tryExtractPlatformBindingInfo mfv
     | _ -> None
 
 /// Create a full ExternPrimitive by combining info with evaluated args

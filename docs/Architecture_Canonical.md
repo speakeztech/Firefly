@@ -7,8 +7,8 @@
 │  Alloy (Platform-Agnostic Library)                      │
 │  - Pure F# + FSharp.NativeInterop                       │
 │  - BCL-sympathetic API surface                          │
-│  - Extern primitives: DllImport("__fidelity")           │
-│  - ZERO platform knowledge                              │
+│  - Platform Bindings: Module convention + marker type   │
+│  - ZERO platform knowledge, ZERO BCL dependencies       │
 └─────────────────────────────────────────────────────────┘
                           │
                           │ FCS parses & type-checks
@@ -54,23 +54,38 @@
 
 ## Alloy: What It Is
 
-Alloy provides F# implementations that decompose to **abstract primitives**:
+Alloy provides F# implementations that decompose to **platform bindings** - functions that Alex provides platform-specific implementations for.
+
+### The Platform Binding Pattern (BCL-Free)
+
+Platform bindings are declared using a module convention (OCaml homage) combined with a marker type:
 
 ```fsharp
-// Primitives.fs - THE ONLY acceptable "stubs"
-[<DllImport("__fidelity", EntryPoint = "fidelity_write_bytes")>]
-extern int writeBytes(int fd, nativeptr<byte> buffer, int count)
+// Core marker type - signals "platform provides this"
+[<Struct>]
+type PlatformProvided = PlatformProvided
 
-// Console.fs - Real F# that decomposes to primitives
-let inline writeBytes fd buffer count = Primitives.writeBytes(fd, buffer, count)
-let inline write (s: NativeStr) = writeBytes STDOUT s.Pointer s.Length |> ignore
+// Primary approach: Functions in Platform.Bindings module
+// Alex recognizes this module structure and provides implementations
+module Platform.Bindings =
+    let writeBytes fd buffer count : int = Unchecked.defaultof<int>
+    let readBytes fd buffer maxCount : int = Unchecked.defaultof<int>
+    let getCurrentTicks () : int64 = Unchecked.defaultof<int64>
+    let sleep milliseconds : unit = ()
+
+// Console.fs - Real F# that decomposes to platform bindings
+let inline write (s: NativeStr) =
+    Platform.Bindings.writeBytes STDOUT s.Pointer s.Length |> ignore
 ```
+
+**Why BCL-Free?** The `DllImportAttribute` from `System.Runtime.InteropServices` is a BCL dependency. Fidelity deliberately avoids ALL BCL dependencies to maintain a clean compilation path to native code. The Platform Binding pattern achieves the same goal (marking functions for platform-specific implementation) without BCL pollution.
 
 **Alloy does NOT:**
 - Know about Linux/Windows/macOS
 - Contain `#if PLATFORM` conditionals
 - Have platform-specific directories
 - Make syscalls directly
+- Use ANY BCL types (including DllImportAttribute)
 
 ## Alex: The Non-Dispatch Model
 
@@ -132,27 +147,29 @@ Unlike Fable (AST→AST, delegates memory to target runtime), Fidelity:
 
 The generated native binary has the same safety properties as the source F#.
 
-## Extern Primitive Contract
+## Platform Binding Contract
 
-| Primitive | Entry Point | Signature |
-|-----------|-------------|-----------|
-| writeBytes | fidelity_write_bytes | (i32, ptr, i32) → i32 |
-| readBytes | fidelity_read_bytes | (i32, ptr, i32) → i32 |
-| getCurrentTicks | fidelity_get_current_ticks | () → i64 |
-| getMonotonicTicks | fidelity_get_monotonic_ticks | () → i64 |
-| getTickFrequency | fidelity_get_tick_frequency | () → i64 |
-| sleep | fidelity_sleep | (i32) → void |
+Alex recognizes functions in the `Platform.Bindings` module and provides platform-specific implementations:
 
-Alex provides implementations for each (primitive, platform) pair.
+| Binding Function | MLIR Mapping | Signature |
+|-----------------|--------------|-----------|
+| writeBytes | write syscall | (i32, ptr, i32) → i32 |
+| readBytes | read syscall | (i32, ptr, i32) → i32 |
+| getCurrentTicks | clock_gettime | () → i64 |
+| getMonotonicTicks | clock_gettime(MONOTONIC) | () → i64 |
+| getTickFrequency | constant (platform-specific) | () → i64 |
+| sleep | nanosleep/Sleep | (i32) → void |
+
+Alex provides implementations for each `(binding, platform)` pair. The module structure (`Platform.Bindings`) serves as the recognition marker - no attributes required.
 
 ## File Organization
 
 ```
 Alloy/src/
-├── Primitives.fs      # Extern declarations only
-├── Console.fs         # Decomposes to Primitives
-├── Time.fs            # Decomposes to Primitives
-└── ...                # NO platform directories
+├── Platform.fs        # PlatformProvided marker + Platform.Bindings module
+├── Console.fs         # Decomposes to Platform.Bindings
+├── Time.fs            # Decomposes to Platform.Bindings
+└── ...                # NO platform directories, NO BCL dependencies
 
 Firefly/src/Baker/
 ├── Baker.fs               # Main entry point, orchestration
@@ -185,6 +202,11 @@ Firefly/src/Alex/
 ## Anti-Patterns (DO NOT DO)
 
 ```fsharp
+// WRONG: BCL dependencies in Alloy (including DllImportAttribute!)
+open System.Runtime.InteropServices
+[<DllImport("__fidelity")>]
+extern int writeBytes(...)  // NO! This pollutes entire pipeline with BCL
+
 // WRONG: Platform code in Alloy
 #if LINUX
 let write fd buf len = syscall 1 fd buf len
@@ -213,10 +235,11 @@ module PSGEmitter =
 // not at traversal dispatch.
 ```
 
-**The correct model has NO central dispatch:**
+**The correct model:**
+- Platform bindings in `Platform.Bindings` module (no attributes, just structure)
 - Zipper provides attention (focus + context)
 - XParsec provides local pattern matching
-- Bindings are looked up by extern entry point
+- Bindings looked up by module structure, not by attributes
 - MLIR Builder accumulates (correct centralization point)
 
 ## PSG Construction: True Nanopass Pipeline
