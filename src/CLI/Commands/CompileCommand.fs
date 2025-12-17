@@ -8,7 +8,7 @@ open CLI.Configurations.FidprojLoader
 open Core.PSG.Builder
 open Core.PSG.Reachability
 open Core.CompilerConfig
-open Alex.Generation.MLIRTransfer
+open Alex.Generation.Transfer
 
 /// Command line arguments for compile command
 type CompileArgs =

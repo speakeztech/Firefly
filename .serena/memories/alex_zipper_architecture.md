@@ -11,20 +11,44 @@ This means:
 - **PSG captures intent** - Semantic primitives express WHAT, not HOW
 - **Alex chooses implementation** - Target-aware decisions (x86 AVX, ARM NEON, embedded, WAMI)
 
-## STATUS: ARCHITECTURAL INTEGRITY REFACTORING (Dec 2024)
+## STATUS: DUAL-ZIPPER ARCHITECTURE IMPLEMENTED (Dec 2024)
 
-**Alex IS a transformer** - it transforms PSG into MLIR compute graphs using XParsec and parser combinator monads. The issue is that MLIRTransfer.fs has accumulated CRUFT (workarounds, ad-hoc lookups, name matching) that compensates for insufficient PSG enrichment.
+**Alex IS a transformer** - it transforms PSG into MLIR compute graphs using the dual-zipper architecture.
 
-**This cruft must be moved UP into proper places:**
-- **PSG nanopasses** for enrichment (ExternInfo, StringInfo, CallTarget edges)
-- **Alloy** for real implementations (not stubs)
-- **Proper Alex architecture** (Zipper + XParsec + Bindings)
+**NEW: MLIRZipper & Transfer.fs**
+
+The dual-zipper architecture is now implemented:
+- `PSGZipper.fs` - Complete INPUT zipper (PSG navigation) ✓
+- `MLIRZipper.fs` - NEW OUTPUT zipper (MLIR composition) ✓
+- `Transfer.fs` - NEW principled transfer pipeline using dual zippers ✓
+- `MLIRTransfer.fs` - Legacy (still used for compilation, to be replaced)
+
+**MLIRZipper Design** (symmetric to PSGZipper):
+```fsharp
+type MLIRZipper = {
+    Focus: MLIRFocus           // AtModule | InFunction | InBlock
+    Path: MLIRPath             // Breadcrumbs for bidirectional navigation
+    CurrentOps: MLIROp list    // Operations at current focus
+    State: MLIRState           // SSA counters, NodeSSA map, string literals
+    Globals: MLIRGlobal list   // Global declarations
+}
+```
+
+**Transfer.fs Key Principle:**
+> "Children are ALREADY processed when parent is visited" (post-order traversal)
+
+- Uses `foldPostOrder` ONCE at entry point - no manual navigation
+- Child SSAs are looked up from accumulated `NodeSSA` map
+- NO recursive `transferNode` calls - fold handles traversal
+- Dispatch on `node.Kind`, `node.Operation`, `node.PlatformBinding` - NOT names
 
 **Current Progress:**
 - `PSGZipper.fs` - Complete with foldPreOrder, foldPostOrder, navigation ✓
 - `PSGXParsec.fs` - Complete with combinators (pBind, pMap, pOr, etc.) ✓
+- `MLIRZipper.fs` - NEW: Complete with functional state threading ✓
+- `Transfer.fs` - NEW: Principled dual-zipper pipeline ✓
 - `Bindings/` - Platform-specific extern dispatch ✓
-- DetectExternPrimitives nanopass - In progress (moving extern detection from MLIR to PSG)
+- All samples 01-04 compile and run ✓
 
 **See `alex_remediation_plan` memory for the comprehensive migration plan.**
 
@@ -287,8 +311,10 @@ The current refactoring from `transferNodeDirect` (direct recursion) to `foldPos
 
 | File | Role |
 |------|------|
-| `Alex/Generation/MLIRTransfer.fs` | Single MLIR generation entry point (refactoring target) |
-| `Alex/Traversal/PSGZipper.fs` | Bidirectional PSG traversal (attention) |
+| `Alex/Generation/MLIRTransfer.fs` | Legacy MLIR generation (still used, to be replaced) |
+| `Alex/Generation/Transfer.fs` | **NEW**: Principled dual-zipper transfer pipeline |
+| `Alex/Traversal/PSGZipper.fs` | INPUT zipper - Bidirectional PSG traversal |
+| `Alex/Traversal/MLIRZipper.fs` | **NEW**: OUTPUT zipper - MLIR composition |
 | `Alex/Traversal/PSGXParsec.fs` | XParsec combinators, EmitContext with correlations |
 | `Alex/Bindings/BindingTypes.fs` | ExternDispatch registry, platform types |
 | `Alex/Bindings/Console/ConsoleBindings.fs` | Console I/O platform bindings (data) |

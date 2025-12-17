@@ -108,12 +108,14 @@
       <!-- Alex Traversal -->
       <Compile Include="Alex/Traversal/PSGZipper.fs" />
       <Compile Include="Alex/Traversal/PSGXParsec.fs" />
+      <Compile Include="Alex/Traversal/MLIRZipper.fs" />
 
       <!-- Alex Patterns -->
       <Compile Include="Alex/Patterns/PSGPatterns.fs" />
 
       <!-- Alex Generation (uses Zipper + XParsec + Patterns) -->
       <Compile Include="Alex/Generation/MLIRTransfer.fs" />
+      <Compile Include="Alex/Generation/Transfer.fs" />
 
       <!-- Alex Pipeline Types -->
       <Compile Include="Alex/Pipeline/CompilationTypes.fs" />
