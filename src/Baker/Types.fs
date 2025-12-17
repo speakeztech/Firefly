@@ -33,6 +33,18 @@ type FieldAccessInfo = {
 // ═══════════════════════════════════════════════════════════════════════════
 // SRTP Resolution Types - For future use
 // ═══════════════════════════════════════════════════════════════════════════
+//
+// NOTE: ConstructorInfo and TupleInfo types were REMOVED per Fidelity memory model.
+//
+// F# construction is purely STRUCTURAL (not method calls):
+// - NewRecord(type, values) → type determines layout, values go in slots
+// - NewTuple(type, values) → type determines layout, values go in positions
+// - NewUnionCase(type, case, values) → tag + payload
+//
+// Transfer.fs computes MLIR struct layouts ON-DEMAND from FSharpType.
+// No pre-computed ConstructorInfo/TupleInfo needed.
+// See: "Memory Management by Choice" blog entry.
+// ═══════════════════════════════════════════════════════════════════════════
 
 /// SRTP resolution details (for future TraitCall handling)
 type SRTPResolutionInfo = {

@@ -229,7 +229,10 @@ let correlateNodeWithResolvedTypes (node: PSGNode) (resolvedIndex: ResolvedTypeI
         // For App nodes (function applications), PREFER range-based correlation
         // because the range gives us the RESULT type of the expression,
         // while the symbol gives us the FUNCTION type (which is wrong for emissions)
-        let isAppNode = node.SyntaxKind.StartsWith("App")
+        let isAppNode =
+            match node.Kind with
+            | SKExpr EApp | SKExpr ETypeApp -> true
+            | _ -> false
 
         if isAppNode then
             // Strategy 1 for App: Range-based correlation first (gives result type)

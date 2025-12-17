@@ -200,10 +200,15 @@ module BakerPSGZipper =
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Correlation state accumulated during traversal
+///
+/// NOTE: Constructors and Tuples maps were REMOVED per Fidelity memory model.
+/// F# construction is purely structural - Transfer.fs computes MLIR struct
+/// layouts on-demand from FSharpType stored in the Types map.
+/// See: "Memory Management by Choice" blog entry.
 type CorrelationState = {
     /// NodeId.Value -> FieldAccessInfo for PropertyAccess nodes
     FieldAccess: Map<string, FieldAccessInfo>
-    /// NodeId.Value -> resolved FSharpType
+    /// NodeId.Value -> resolved FSharpType (used for struct layout computation)
     Types: Map<string, FSharpType>
     /// Member fullName -> (member, body) for inlining
     MemberBodies: Map<string, FSharpMemberOrFunctionOrValue * FSharpExpr>

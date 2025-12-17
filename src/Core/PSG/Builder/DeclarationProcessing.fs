@@ -15,10 +15,8 @@ let rec processTypeDefn (typeDefn: SynTypeDefn) parentId fileName (context: Buil
     let (SynTypeDefn(componentInfo, typeRepr, members, implicitCtor, range, trivia)) = typeDefn
     let (SynComponentInfo(attributes, typeParams, constraints, longId, xmlDoc, preferPostfix, accessibility, range2)) = componentInfo
 
-    let typeName = longId |> List.map (fun id -> id.idText) |> String.concat "."
-    let syntaxKind = sprintf "TypeDefn:%s" typeName
-    let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
-    let typeNode = createNode syntaxKind range fileName symbol parentId
+    let symbol = tryCorrelateSymbolOptional range fileName "TypeDefn" context.CorrelationContext
+    let typeNode = createNode (SKDecl DTypeDefn) range fileName symbol parentId
 
     let graph' = { graph with Nodes = Map.add typeNode.Id.Value typeNode graph.Nodes }
     let graph'' = addChildToParent typeNode.Id parentId graph'
@@ -44,10 +42,9 @@ and processMemberDefn (memberDefn: SynMemberDefn) parentId fileName (context: Bu
             processBinding binding parentId fileName context g
         ) graph
 
-    // For now, skip other member types (abstract, interface, etc.) with a node marker
+    // Other member types (abstract, interface, etc.) - create marker node
     | other ->
-        let memberTypeName = other.GetType().Name
-        let markerNode = createNode (sprintf "MemberDefn:%s" memberTypeName) other.Range fileName None parentId
+        let markerNode = createNode (SKDecl DMemberDefn) other.Range fileName None parentId
         let graph' = { graph with Nodes = Map.add markerNode.Id.Value markerNode graph.Nodes }
         addChildToParent markerNode.Id parentId graph'
 
@@ -55,7 +52,7 @@ and processMemberDefn (memberDefn: SynMemberDefn) parentId fileName (context: Bu
 and processModuleDecl decl parentId fileName (context: BuildContext) graph =
     match decl with
     | SynModuleDecl.Let(_, bindings, range) ->
-        let letDeclNode = createNode "LetDeclaration" range fileName None parentId
+        let letDeclNode = createNode (SKDecl DLetDecl) range fileName None parentId
         let graph' = { graph with Nodes = Map.add letDeclNode.Id.Value letDeclNode graph.Nodes }
         let graph'' = addChildToParent letDeclNode.Id parentId graph'
 
@@ -64,17 +61,15 @@ and processModuleDecl decl parentId fileName (context: BuildContext) graph =
         ) graph''
 
     | SynModuleDecl.Open(_, range) ->
-        let openNode = createNode "Open" range fileName None parentId
+        let openNode = createNode (SKDecl DOpen) range fileName None parentId
         let graph' = { graph with Nodes = Map.add openNode.Id.Value openNode graph.Nodes }
         addChildToParent openNode.Id parentId graph'
 
     | SynModuleDecl.NestedModule(componentInfo, _, decls, _, range, _) ->
         let (SynComponentInfo(attributes, typeArgs, constraints, longId, xmlDoc, preferPostfix, accessibility, range2)) = componentInfo
-        let moduleName = longId |> List.map (fun id -> id.idText) |> String.concat "."
 
-        let syntaxKind = sprintf "NestedModule:%s" moduleName
-        let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
-        let nestedModuleNode = createNode syntaxKind range fileName symbol parentId
+        let symbol = tryCorrelateSymbolOptional range fileName "NestedModule" context.CorrelationContext
+        let nestedModuleNode = createNode (SKDecl DNestedModule) range fileName symbol parentId
 
         let graph' = { graph with Nodes = Map.add nestedModuleNode.Id.Value nestedModuleNode graph.Nodes }
         let graph'' = addChildToParent nestedModuleNode.Id parentId graph'
@@ -91,7 +86,7 @@ and processModuleDecl decl parentId fileName (context: BuildContext) graph =
 
     // Type declarations (type Foo = ..., type Bar = { ... }, etc.)
     | SynModuleDecl.Types(typeDefns, range) ->
-        let typesNode = createNode "TypeDeclarations" range fileName None parentId
+        let typesNode = createNode (SKDecl DTypesGroup) range fileName None parentId
         let graph' = { graph with Nodes = Map.add typesNode.Id.Value typesNode graph.Nodes }
         let graph'' = addChildToParent typesNode.Id parentId graph'
 
@@ -105,26 +100,26 @@ and processModuleDecl decl parentId fileName (context: BuildContext) graph =
 
     // Module-level expressions (do bindings, side effects)
     | SynModuleDecl.Expr(expr, range) ->
-        let exprNode = createNode "ModuleExpr" range fileName None parentId
+        let exprNode = createNode (SKDecl DModuleExpr) range fileName None parentId
         let graph' = { graph with Nodes = Map.add exprNode.Id.Value exprNode graph.Nodes }
         let graph'' = addChildToParent exprNode.Id parentId graph'
         processExpression expr (Some exprNode.Id) fileName context graph''
 
     // Module abbreviations (module M = Some.Other.Module)
     | SynModuleDecl.ModuleAbbrev(ident, longId, range) ->
-        let abbrevNode = createNode (sprintf "ModuleAbbrev:%s" ident.idText) range fileName None parentId
+        let abbrevNode = createNode (SKDecl DModuleAbbrev) range fileName None parentId
         let graph' = { graph with Nodes = Map.add abbrevNode.Id.Value abbrevNode graph.Nodes }
         addChildToParent abbrevNode.Id parentId graph'
 
     // Attributes at module level
     | SynModuleDecl.Attributes(attributes, range) ->
-        let attrNode = createNode "ModuleAttributes" range fileName None parentId
+        let attrNode = createNode (SKDecl DAttribute) range fileName None parentId
         let graph' = { graph with Nodes = Map.add attrNode.Id.Value attrNode graph.Nodes }
         addChildToParent attrNode.Id parentId graph'
 
     // Exception definitions
     | SynModuleDecl.Exception(exnDefn, range) ->
-        let exnNode = createNode "ExceptionDefn" range fileName None parentId
+        let exnNode = createNode (SKDecl DException) range fileName None parentId
         let graph' = { graph with Nodes = Map.add exnNode.Id.Value exnNode graph.Nodes }
         addChildToParent exnNode.Id parentId graph'
 
@@ -141,9 +136,8 @@ let processImplFile (implFile: SynModuleOrNamespace) (context: BuildContext) gra
     let moduleName = name |> List.map (fun i -> i.idText) |> String.concat "."
     let fileName = range.FileName
 
-    let syntaxKind = sprintf "Module:%s" moduleName
-    let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
-    let moduleNode = createNode syntaxKind range fileName symbol None
+    let symbol = tryCorrelateSymbolOptional range fileName "Module" context.CorrelationContext
+    let moduleNode = createNode (SKDecl DModule) range fileName symbol None
 
     let graph' = { graph with Nodes = Map.add moduleNode.Id.Value moduleNode graph.Nodes }
 

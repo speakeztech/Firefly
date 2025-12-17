@@ -25,21 +25,21 @@ let private findParameterNodes (psg: ProgramSemanticGraph) : (PSGNode * int) lis
     psg.Nodes
     |> Map.toList
     |> List.map snd
-    |> List.filter (fun node -> node.SyntaxKind.StartsWith("Binding"))
+    |> List.filter (fun node -> SyntaxKindT.isBinding node.Kind)
     |> List.collect (fun bindingNode ->
         // Get children of binding node
         match bindingNode.Children with
         | Parent childIds ->
             childIds
             |> List.choose (fun childId -> Map.tryFind childId.Value psg.Nodes)
-            |> List.filter (fun n -> n.SyntaxKind.StartsWith("Pattern:LongIdent"))
+            |> List.filter (fun n -> SyntaxKindT.isLongIdentPattern n.Kind)
             |> List.collect (fun longIdentNode ->
                 // Get Pattern:Named children (parameters)
                 match longIdentNode.Children with
                 | Parent paramIds ->
                     paramIds
                     |> List.choose (fun paramId -> Map.tryFind paramId.Value psg.Nodes)
-                    |> List.filter (fun n -> n.SyntaxKind.StartsWith("Pattern:Named"))
+                    |> List.filter (fun n -> SyntaxKindT.isNamedPattern n.Kind)
                     |> List.mapi (fun i node -> (node, i))
                 | _ -> [])
         | _ -> [])

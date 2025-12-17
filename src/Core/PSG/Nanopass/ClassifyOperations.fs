@@ -65,16 +65,8 @@ let private classifyComparisonOp (opName: string) : ComparisonOp option =
     | "op_GreaterThanOrEqual" -> Some Gte
     | _ -> None
 
-/// Classify operator from SyntaxKind (e.g., "LongIdent:op_Addition")
-let private classifyOperator (syntaxKind: string) : OperationKind option =
-    // Extract op_ name from SyntaxKind
-    let opName =
-        if syntaxKind.Contains("op_") then
-            let idx = syntaxKind.IndexOf("op_")
-            syntaxKind.Substring(idx)
-        else
-            ""
-
+/// Classify operator from symbol name (e.g., "op_Addition")
+let private classifyOperator (opName: string) : OperationKind option =
     if opName = "" then None
     else
         // Try arithmetic first
@@ -218,97 +210,78 @@ let private classifyConversionOp (displayName: string) : ConversionOp option =
 
 /// Classify an App node based on its symbol and children
 let private classifyAppNode (psg: ProgramSemanticGraph) (node: PSGNode) : OperationKind option =
-    // First, check SyntaxKind for operator patterns
-    if node.SyntaxKind.Contains("op_") then
-        classifyOperator node.SyntaxKind
-    else
-        // Get the function node (first child of App)
-        let children =
-            match node.Children with
-            | Parent ids -> ids |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
-            | _ -> []
+    // Get the function node (first child of App)
+    let children =
+        match node.Children with
+        | Parent ids -> ids |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
+        | _ -> []
 
-        match children with
-        | [] -> None
-        | funcNode :: args ->
-            // Check the function node's symbol or SyntaxKind
-            let funcSymbol = funcNode.Symbol
-            let funcKind = funcNode.SyntaxKind
+    match children with
+    | [] -> None
+    | funcNode :: args ->
+        // Check the function node's symbol
+        let funcSymbol = funcNode.Symbol
 
-            // Check for operator in function node
-            if funcKind.Contains("op_") then
-                classifyOperator funcKind
+        // Classify based on symbol
+        match funcSymbol with
+        | Some symbol ->
+            let fullName = getFullName symbol
+            let displayName = getDisplayName symbol
+
+            // Check for operator in symbol name
+            if displayName.Contains("op_") then
+                classifyOperator displayName
             else
-                // Classify based on symbol
-                match funcSymbol with
-                | Some symbol ->
-                    let fullName = getFullName symbol
-                    let displayName = getDisplayName symbol
 
-                    // Console operations
-                    if fullName.StartsWith("Alloy.Console.") then
-                        classifyConsoleOp displayName |> Option.map Console
-                    // NativeString operations
-                    elif fullName.StartsWith("Alloy.NativeTypes.NativeString.") ||
-                         fullName.StartsWith("Alloy.NativeTypes.NativeStr.") then
-                        classifyNativeStrOp displayName |> Option.map NativeStr
-                    // Memory operations
-                    elif fullName.StartsWith("Alloy.Memory.") then
-                        classifyMemoryOp displayName |> Option.map Memory
-                    // NativePtr operations
-                    elif fullName.Contains("NativePtr.") || fullName.Contains("NativeInterop.") then
-                        classifyNativePtrOp displayName |> Option.map NativePtr
-                    // Time operations
-                    elif fullName.StartsWith("Alloy.Time.") then
-                        classifyTimeOp displayName |> Option.map Time
-                    // Result operations
-                    elif fullName.Contains("Result") || displayName = "Ok" || displayName = "Error" then
-                        classifyResultOp displayName fullName |> Option.map Result
-                    // Core operations
-                    elif fullName.StartsWith("Alloy.Core.") ||
-                         fullName.StartsWith("Microsoft.FSharp.Core.Operators.") then
-                        // Try core ops first
-                        match classifyCoreOp displayName with
-                        | Some op -> Some (Core op)
-                        | None ->
-                            // Try conversion ops
-                            match classifyConversionOp displayName with
-                            | Some op -> Some (Conversion op)
-                            | None -> None
-                    // Conversion operations (standalone)
-                    elif classifyConversionOp displayName |> Option.isSome then
-                        classifyConversionOp displayName |> Option.map Conversion
-                    else
-                        // Regular function call
-                        let modulePath =
-                            let parts = fullName.Split('.')
-                            if parts.Length > 1 then
-                                Some (String.concat "." parts.[0..parts.Length-2])
-                            else
-                                None
-                        Some (RegularCall {
-                            FunctionName = displayName
-                            ModulePath = modulePath
-                            ArgumentCount = args.Length
-                        })
-                | None ->
-                    // No symbol - check SyntaxKind for clues
-                    if funcKind.StartsWith("LongIdent:") then
-                        let name = funcKind.Substring(10) // Remove "LongIdent:"
-                        // Try to classify by name
-                        match classifyCoreOp name with
-                        | Some op -> Some (Core op)
-                        | None ->
-                            match classifyConversionOp name with
-                            | Some op -> Some (Conversion op)
-                            | None ->
-                                Some (RegularCall {
-                                    FunctionName = name
-                                    ModulePath = None
-                                    ArgumentCount = args.Length
-                                })
-                    else
-                        None
+                // Console operations
+                if fullName.StartsWith("Alloy.Console.") then
+                    classifyConsoleOp displayName |> Option.map Console
+                // NativeString operations
+                elif fullName.StartsWith("Alloy.NativeTypes.NativeString.") ||
+                     fullName.StartsWith("Alloy.NativeTypes.NativeStr.") then
+                    classifyNativeStrOp displayName |> Option.map NativeStr
+                // Memory operations
+                elif fullName.StartsWith("Alloy.Memory.") then
+                    classifyMemoryOp displayName |> Option.map Memory
+                // NativePtr operations
+                elif fullName.Contains("NativePtr.") || fullName.Contains("NativeInterop.") then
+                    classifyNativePtrOp displayName |> Option.map NativePtr
+                // Time operations
+                elif fullName.StartsWith("Alloy.Time.") then
+                    classifyTimeOp displayName |> Option.map Time
+                // Result operations
+                elif fullName.Contains("Result") || displayName = "Ok" || displayName = "Error" then
+                    classifyResultOp displayName fullName |> Option.map Result
+                // Core operations
+                elif fullName.StartsWith("Alloy.Core.") ||
+                     fullName.StartsWith("Microsoft.FSharp.Core.Operators.") then
+                    // Try core ops first
+                    match classifyCoreOp displayName with
+                    | Some op -> Some (Core op)
+                    | None ->
+                        // Try conversion ops
+                        match classifyConversionOp displayName with
+                        | Some op -> Some (Conversion op)
+                        | None -> None
+                // Conversion operations (standalone)
+                elif classifyConversionOp displayName |> Option.isSome then
+                    classifyConversionOp displayName |> Option.map Conversion
+                else
+                    // Regular function call
+                    let modulePath =
+                        let parts = fullName.Split('.')
+                        if parts.Length > 1 then
+                            Some (String.concat "." parts.[0..parts.Length-2])
+                        else
+                            None
+                    Some (RegularCall {
+                        FunctionName = displayName
+                        ModulePath = modulePath
+                        ArgumentCount = args.Length
+                    })
+        | None ->
+            // No symbol available
+            None
 
 /// Classify a TypeApp node based on its symbol
 /// TypeApp nodes represent generic type applications like NativePtr.stackalloc<byte>
@@ -331,18 +304,18 @@ let private classifyTypeAppNode (node: PSGNode) : OperationKind option =
 
 /// Classify a single node (processes App and TypeApp nodes)
 let private classifyNode (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode =
-    if node.SyntaxKind.StartsWith("App") && node.Operation.IsNone then
+    match node.Kind with
+    | SKExpr EApp when node.Operation.IsNone ->
         let result = classifyAppNode psg node
         match result with
         | Some op -> { node with Operation = Some op }
         | None -> node
-    elif node.SyntaxKind.StartsWith("TypeApp") && node.Operation.IsNone then
+    | SKExpr ETypeApp when node.Operation.IsNone ->
         let result = classifyTypeAppNode node
         match result with
         | Some op -> { node with Operation = Some op }
         | None -> node
-    else
-        node
+    | _ -> node
 
 // ═══════════════════════════════════════════════════════════════════
 // Nanopass Entry Point

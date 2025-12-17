@@ -28,11 +28,13 @@ open Core.PSG.NavigationUtils
 /// Check if a node is Alloy's $ (direct application) operator
 /// The $ operator is defined as: let inline ($) f x = f x
 let private isDollarOperator (node: PSGNode) : bool =
-    node.SyntaxKind.Contains("op_Dollar")
+    match node.Symbol with
+    | Some sym -> sym.DisplayName.Contains("op_Dollar") || sym.DisplayName.Contains("$")
+    | None -> false
 
 /// Check if an App node is a $ application
 let private isDollarApp (psg: ProgramSemanticGraph) (node: PSGNode) : bool =
-    if not (node.SyntaxKind.StartsWith("App:")) then false
+    if not (SyntaxKindT.isApp node.Kind) then false
     else
         let children = getChildNodes psg node
         match children with

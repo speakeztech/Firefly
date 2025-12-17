@@ -709,10 +709,11 @@ let run (psg: ProgramSemanticGraph) (checkResults: FSharpCheckProjectResults) : 
                 | Some resolution ->
                     { node with SRTPResolution = Some resolution }
                 | None ->
-                    if node.SyntaxKind.StartsWith("TraitCall") then
+                    // Check if this is a TraitCall node
+                    match node.Kind with
+                    | SKExpr ETraitCall ->
                         { node with SRTPResolution = Some (Unresolved "No resolution found for TraitCall") }
-                    else
-                        node
+                    | _ -> node
             )
 
         { psg with Nodes = updatedNodes }

@@ -24,13 +24,13 @@ let private lowerStringLengthNodes (psg: ProgramSemanticGraph) : ProgramSemantic
     let updatedNodes =
         psg.Nodes
         |> Map.map (fun nodeIdVal node ->
-            // Check for PropertyAccess:Length that is System.String.Length and wasn't constant-folded
-            if node.SyntaxKind = "PropertyAccess:Length" &&
-               node.ConstantValue.IsNone &&
-               isStringLengthSymbol node then
-                { node with SyntaxKind = "SemanticPrimitive:fidelity_strlen" }
-            else
-                node)
+            // Check for PropertyAccess that is System.String.Length and wasn't constant-folded
+            match node.Kind with
+            | SKExpr EPropertyAccess when node.ConstantValue.IsNone && isStringLengthSymbol node ->
+                // Transform to a semantic primitive for strlen
+                // Keep the Kind as EPropertyAccess but mark with special operation
+                { node with Operation = Some (NativeStr StrLength) }
+            | _ -> node)
     { psg with Nodes = updatedNodes }
 
 /// Main entry point for the LowerStringLength nanopass

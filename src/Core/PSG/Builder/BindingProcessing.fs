@@ -44,15 +44,14 @@ let rec processBindingWithUseFlag binding parentId fileName (context: BuildConte
                 ident.idText = "main"
             | _ -> false
 
-        // Create binding node with enhanced detection
-        let syntaxKind =
-            if hasEntryPointAttr then "Binding:EntryPoint"
-            elif isMainFunc then "Binding:Main"
-            elif isUse then "Binding:Use"
-            elif isMutable then "Binding:Mutable"
-            else "Binding"
+        // Determine binding kind using typed discriminated union
+        let bindingKind =
+            if hasEntryPointAttr || isMainFunc then BEntryPoint
+            elif isUse then BUse
+            elif isMutable then BMutable
+            else BLet
 
-        let bindingNode = createNode syntaxKind range fileName symbol parentId
+        let bindingNode = createNode (SKBinding bindingKind) range fileName symbol parentId
 
         let graph' = { graph with Nodes = Map.add bindingNode.Id.Value bindingNode graph.Nodes }
         let graph'' = addChildToParent bindingNode.Id parentId graph'
@@ -62,9 +61,9 @@ let rec processBindingWithUseFlag binding parentId fileName (context: BuildConte
             | Some sym ->
                 let updatedSymbolTable = Map.add sym.DisplayName sym graph''.SymbolTable
 
-                // Add to entry points if this is an entry point
+                // Add to entry points if this is an entry point binding
                 let updatedEntryPoints =
-                    if hasEntryPointAttr || isMainFunc then
+                    if bindingKind = BEntryPoint then
                         bindingNode.Id :: graph''.EntryPoints
                     else
                         graph''.EntryPoints

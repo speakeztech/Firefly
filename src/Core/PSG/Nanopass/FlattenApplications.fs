@@ -37,13 +37,11 @@ open Core.PSG.NavigationUtils
 
 /// Check if a node is an App (function application)
 let private isAppNode (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("App:")
+    SyntaxKindT.isApp node.Kind
 
 /// Check if a node is an Ident or LongIdent (function reference)
 let private isFunctionRef (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("Ident:") ||
-    node.SyntaxKind.StartsWith("LongIdent:") ||
-    node.SyntaxKind.StartsWith("Value:")
+    SyntaxKindT.isIdent node.Kind || SyntaxKindT.isLongIdent node.Kind
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Flattening Algorithm

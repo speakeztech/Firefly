@@ -74,8 +74,7 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
         // Only top-level function bindings start new "containing function" scopes
         // Local let bindings (for variables) should NOT start new scopes
         for KeyValue(nodeId, node) in psg.Nodes do
-            match node.SyntaxKind with
-            | sk when sk.StartsWith("Binding") || sk.StartsWith("Member") ->
+            if SyntaxKindT.isBinding node.Kind || SyntaxKindT.isDecl node.Kind then
                 match node.Symbol with
                 | Some sym ->
                     // Only mark as a function boundary if this is a module-level function
@@ -108,7 +107,7 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
 
                         markDescendants nodeId sym.FullName
                 | None -> ()
-            | _ -> ()
+            else ()
 
         result
 
@@ -155,8 +154,7 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
     let mutable appCount = 0
     let mutable appWithCallerCount = 0
     for KeyValue(nodeId, node) in psg.Nodes do
-        match node.SyntaxKind with
-        | "App" | "App:FunctionCall" | "TypeApp" ->
+        if SyntaxKindT.isApp node.Kind || SyntaxKindT.isTypeApp node.Kind then
             appCount <- appCount + 1
             let callerOpt = Map.tryFind nodeId nodeToFunction
 
@@ -195,7 +193,7 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
                         processDescendants childId
                 | _ -> ()
             | None -> ()
-        | _ -> ()
+        else ()
 
     if isReachabilityVerbose() then
         printfn "[REACH] App nodes: %d, with caller: %d" appCount appWithCallerCount
@@ -252,10 +250,9 @@ let private markNodesForSemanticReachability
         |> Seq.choose (fun (nodeId, node) ->
             match node.Symbol with
             | Some symbol when Set.contains symbol.FullName reachableSymbols ->
-                match node.SyntaxKind with
-                | sk when sk.StartsWith("Binding") || sk.StartsWith("Member") ->
+                if SyntaxKindT.isBinding node.Kind || SyntaxKindT.isDecl node.Kind then
                     Some nodeId
-                | _ -> None
+                else None
             | _ -> None)
         |> Set.ofSeq
 
@@ -296,13 +293,12 @@ let private markNodesForSemanticReachability
 
     // Step 4: Mark nodes that call reachable functions (App nodes with reachable targets)
     for KeyValue(nodeId, node) in psg.Nodes do
-        match node.SyntaxKind with
-        | sk when sk.StartsWith("App") ->
+        if SyntaxKindT.isApp node.Kind then
             match node.Symbol with
             | Some symbol when Set.contains symbol.FullName reachableSymbols ->
                 markDescendants nodeId
             | _ -> ()
-        | _ -> ()
+        else ()
 
     // Step 5: Apply reachability to all nodes
     let finalNodes =
@@ -443,26 +439,18 @@ let private findStructuralEntryPoints (psg: ProgramSemanticGraph) : Set<string> 
     let mutable funcNames = Set.empty
 
     for KeyValue(nodeId, node) in psg.Nodes do
-        match node.SyntaxKind with
-        | "Binding:EntryPoint" ->
+        match node.Kind with
+        | SKBinding BEntryPoint ->
             nodeIds <- Set.add nodeId nodeIds
-            // Extract function name from binding (next part of syntax kind would have it)
-            // For now use node ID as the name key
             funcNames <- Set.add "main" funcNames  // EntryPoint typically means main
-        | "Binding:Main" ->
-            nodeIds <- Set.add nodeId nodeIds
-            funcNames <- Set.add "main" funcNames
-        | sk when sk.StartsWith("Binding:") && sk.EndsWith(":main") ->
-            nodeIds <- Set.add nodeId nodeIds
-            funcNames <- Set.add "main" funcNames
-        | _ -> ()
-
-    // Also look for binding nodes that contain "main" in their syntax kind
-    if Set.isEmpty funcNames then
-        for KeyValue(nodeId, node) in psg.Nodes do
-            if node.SyntaxKind.Contains(":main") then
+        | SKBinding _ ->
+            // Check if the old SyntaxKind string contains "main" for backward compatibility
+            // during transition (can be removed once fully migrated)
+            let skStr = SyntaxKindT.toString node.Kind
+            if skStr.Contains(":main") || skStr.Contains("Main") then
                 nodeIds <- Set.add nodeId nodeIds
                 funcNames <- Set.add "main" funcNames
+        | _ -> ()
 
     nodeIds, funcNames
 
@@ -500,18 +488,40 @@ let private markStructuralReachability
         psg.Nodes
         |> Map.toSeq
         |> Seq.choose (fun (nodeId, node) ->
-            // Extract function name from syntax kind like "Binding:functionName"
-            if node.SyntaxKind.StartsWith("Binding:") then
-                let funcName =
-                    let suffix = node.SyntaxKind.Substring(8)
-                    // Handle special cases
-                    if suffix = "EntryPoint" || suffix = "Main" then "main"
-                    elif suffix.StartsWith("Mutable:") then suffix.Substring(8)
-                    elif suffix = "Use" then "" // Skip use bindings for now
-                    else suffix
-                if funcName <> "" then Some (funcName, nodeId)
-                else None
-            else None)
+            match node.Kind with
+            | SKBinding BEntryPoint ->
+                Some ("main", nodeId)
+            | SKBinding BMutable ->
+                // For mutable bindings, we need to extract the name from the old SyntaxKind
+                // or from the symbol if available
+                match node.Symbol with
+                | Some sym -> Some (sym.DisplayName, nodeId)
+                | None ->
+                    let skStr = SyntaxKindT.toString node.Kind
+                    if skStr.Contains(":") then
+                        let parts = skStr.Split(':')
+                        if parts.Length >= 2 then Some (parts.[1], nodeId)
+                        else None
+                    else None
+            | SKBinding BFunction ->
+                // Extract function name from symbol or old SyntaxKind
+                match node.Symbol with
+                | Some sym -> Some (sym.DisplayName, nodeId)
+                | None ->
+                    let skStr = SyntaxKindT.toString node.Kind
+                    if skStr.Contains(":") then
+                        let parts = skStr.Split(':')
+                        if parts.Length >= 2 then Some (parts.[1], nodeId)
+                        else None
+                    else None
+            | SKBinding BLet ->
+                // For let bindings, extract name from symbol
+                match node.Symbol with
+                | Some sym -> Some (sym.DisplayName, nodeId)
+                | None -> None
+            | SKBinding BUse ->
+                None  // Skip use bindings
+            | _ -> None)
         |> Seq.groupBy fst
         |> Seq.map (fun (name, pairs) -> name, pairs |> Seq.map snd |> Set.ofSeq)
         |> Map.ofSeq

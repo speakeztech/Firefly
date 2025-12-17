@@ -30,13 +30,19 @@ open Core.PSG.NavigationUtils
 
 /// Check if a node is a forward pipe operator (|>)
 let private isForwardPipe (node: PSGNode) : bool =
-    node.SyntaxKind.Contains("op_PipeRight") ||
-    (node.SyntaxKind.StartsWith("LongIdent:") && node.SyntaxKind.Contains("(|>)"))
+    match node.Symbol with
+    | Some sym ->
+        let name = sym.DisplayName
+        name.Contains("op_PipeRight") || name.Contains("|>")
+    | None -> false
 
 /// Check if a node is a backward pipe operator (<|)
 let private isBackwardPipe (node: PSGNode) : bool =
-    node.SyntaxKind.Contains("op_PipeLeft") ||
-    (node.SyntaxKind.StartsWith("LongIdent:") && node.SyntaxKind.Contains("(<|)"))
+    match node.Symbol with
+    | Some sym ->
+        let name = sym.DisplayName
+        name.Contains("op_PipeLeft") || name.Contains("<|")
+    | None -> false
 
 /// Check if a node is any pipe operator
 let private isPipeOperator (node: PSGNode) : bool =
@@ -45,14 +51,14 @@ let private isPipeOperator (node: PSGNode) : bool =
 /// Check if an App node is a pipe application (order-independent)
 /// Looks for an inner App child that contains a pipe operator.
 let private isPipeApp (psg: ProgramSemanticGraph) (node: PSGNode) : bool =
-    if not (node.SyntaxKind.StartsWith("App:")) then false
+    if not (SyntaxKindT.isApp node.Kind) then false
     else
         let children = getChildNodes psg node
         // Find an inner App that CONTAINS a pipe operator (not just any App)
         let hasPipeContainingApp =
             children
             |> List.exists (fun c ->
-                c.SyntaxKind.StartsWith("App:") &&
+                SyntaxKindT.isApp c.Kind &&
                 (let innerChildren = getChildNodes psg c
                  innerChildren |> List.exists isPipeOperator))
         if hasPipeContainingApp then true
@@ -81,10 +87,10 @@ let private reducePipeApp (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode 
     let innerAppOpt =
         children
         |> List.tryFind (fun c ->
-            c.SyntaxKind.StartsWith("App:") &&
+            SyntaxKindT.isApp c.Kind &&
             (let innerChildren = getChildNodes psg c
              innerChildren |> List.exists isPipeOperator))
-    let otherChildren = children |> List.filter (fun c -> not (c.SyntaxKind.StartsWith("App:")) ||
+    let otherChildren = children |> List.filter (fun c -> not (SyntaxKindT.isApp c.Kind) ||
                                                            innerAppOpt |> Option.map (fun ia -> ia.Id <> c.Id) |> Option.defaultValue true)
 
     match innerAppOpt with

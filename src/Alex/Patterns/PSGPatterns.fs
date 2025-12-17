@@ -27,12 +27,14 @@ let private tryGetFullName (sym: FSharpSymbol) : string option =
 // ═══════════════════════════════════════════════════════════════════
 
 /// Check syntax kind (exact match)
+/// Deprecated: Use typed Kind pattern matching instead
 let hasSyntaxKind (kind: string) (node: PSGNode) : bool =
-    node.SyntaxKind = kind
+    SyntaxKindT.toString node.Kind = kind
 
 /// Check syntax kind prefix
+/// Deprecated: Use typed Kind pattern matching instead
 let hasSyntaxKindPrefix (prefix: string) (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith(prefix)
+    (SyntaxKindT.toString node.Kind).StartsWith(prefix)
 
 /// Check symbol full name
 let hasSymbolName (name: string) (node: PSGNode) : bool =
@@ -63,73 +65,98 @@ let symbolEndsWith (suffix: string) (node: PSGNode) : bool =
 
 /// Is an App node
 let isApp (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("App")
+    SyntaxKindT.isApp node.Kind
 
 /// Is a Const node
 let isConst (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("Const")
+    SyntaxKindT.isConst node.Kind
 
 /// Is an Ident/Value node
 let isIdent (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("Ident") ||
-    node.SyntaxKind.StartsWith("Value") ||
-    node.SyntaxKind.StartsWith("LongIdent")
+    SyntaxKindT.isIdent node.Kind || SyntaxKindT.isLongIdent node.Kind
 
 /// Is a Let binding
 /// Matches: LetOrUse, LetOrUse:Let, Let, LetDeclaration, etc.
 let isLet (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("LetOrUse") || node.SyntaxKind.StartsWith("Let")
+    match node.Kind with
+    | SKExpr ELetOrUse -> true
+    | SKBinding (BLet | BFunction | BUse | BMutable) -> true
+    | _ -> false
 
 /// Is a Sequential expression
 let isSequential (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("Sequential")
+    match node.Kind with
+    | SKExpr ESequential -> true
+    | _ -> false
 
 /// Is a Lambda
 let isLambda (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("Lambda")
+    match node.Kind with
+    | SKExpr (ELambda | EMatchLambda) -> true
+    | _ -> false
 
 /// Is a Match expression
 let isMatch (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("Match")
+    match node.Kind with
+    | SKExpr (EMatch | EMatchClause) -> true
+    | _ -> false
 
 /// Is a While loop
 let isWhile (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("While")
+    match node.Kind with
+    | SKExpr EWhileLoop -> true
+    | _ -> false
 
 /// Is a For loop
 let isFor (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("For")
+    match node.Kind with
+    | SKExpr EForLoop -> true
+    | _ -> false
 
 /// Is an If expression
 let isIf (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("If")
+    match node.Kind with
+    | SKExpr EIfThenElse -> true
+    | _ -> false
 
 /// Is an AddressOf expression (&&var or &var)
 let isAddressOf (node: PSGNode) : bool =
-    node.SyntaxKind = "AddressOf"
+    match node.Kind with
+    | SKExpr EAddressOf -> true
+    | _ -> false
 
 /// Is a Pattern node (structural, typically skipped)
 let isPattern (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("Pattern:")
+    SyntaxKindT.isPattern node.Kind
 
 /// Is a TypeApp node
 let isTypeApp (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("TypeApp")
+    SyntaxKindT.isTypeApp node.Kind
 
 /// Is a MutableSet node
 let isMutableSet (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("MutableSet:")
+    SyntaxKindT.isMutableSet node.Kind
 
 /// Is a PropertyAccess node (like receiver.Length)
 let isPropertyAccess (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("PropertyAccess:")
+    match node.Kind with
+    | SKExpr EPropertyAccess -> true
+    | _ -> false
 
 /// Extract property name from a PropertyAccess node
+/// NOTE: This is a transitional implementation. The property name should come from Symbol field.
+/// During migration from string SyntaxKind, we extract from the legacy string representation.
 let extractPropertyName (node: PSGNode) : string option =
-    if node.SyntaxKind.StartsWith("PropertyAccess:") then
-        Some (node.SyntaxKind.Substring("PropertyAccess:".Length))
-    else
-        None
+    match node.Kind with
+    | SKExpr EPropertyAccess ->
+        // First try to get from Symbol (preferred)
+        match node.Symbol with
+        | Some sym -> Some sym.DisplayName
+        | None ->
+            // Fallback: Try to parse from old string SyntaxKind if still present
+            // This is temporary during migration
+            None
+    | _ -> None
 
 // ═══════════════════════════════════════════════════════════════════
 // Node Extractors - Extract typed data from nodes
@@ -180,10 +207,19 @@ let extractBoolConst (node: PSGNode) : bool option =
     | _ -> None
 
 /// Extract variable name from MutableSet node
+/// NOTE: This is a transitional implementation. The variable name should come from Symbol field.
+/// During migration from string SyntaxKind, we extract from the legacy string representation.
 let extractMutableSetName (node: PSGNode) : string option =
-    if node.SyntaxKind.StartsWith("MutableSet:") then
-        Some (node.SyntaxKind.Substring("MutableSet:".Length))
-    else None
+    match node.Kind with
+    | SKExpr EMutableSet ->
+        // First try to get from Symbol (preferred)
+        match node.Symbol with
+        | Some sym -> Some sym.DisplayName
+        | None ->
+            // Fallback: Try to parse from old string SyntaxKind if still present
+            // This is temporary during migration
+            None
+    | _ -> None
 
 // ═══════════════════════════════════════════════════════════════════
 // Operator Classification

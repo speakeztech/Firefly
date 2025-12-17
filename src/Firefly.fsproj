@@ -58,6 +58,7 @@
       <Compile Include="Core/PSG/Nanopass/DefUseEdges.fs" />
       <Compile Include="Core/PSG/Nanopass/ConstantPropagation.fs" />
       <Compile Include="Core/PSG/Nanopass/LowerStringLength.fs" />
+      <Compile Include="Core/PSG/Nanopass/LowerStructConstructors.fs" />
       <Compile Include="Core/PSG/Nanopass/ParameterAnnotation.fs" />
       <Compile Include="Core/PSG/Nanopass/ClassifyOperations.fs" />
       <Compile Include="Core/PSG/Nanopass/LowerInterpolatedStrings.fs" />

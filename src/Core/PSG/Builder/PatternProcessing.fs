@@ -14,13 +14,9 @@ let rec extractSymbolFromPattern (pat: SynPat) (fileName: string) (context: Corr
     match pat with
     | SynPat.Named(synIdent, _, _, range) ->
         let (SynIdent(ident, _)) = synIdent
-        let syntaxKind = sprintf "Pattern:Named:%s" ident.idText
-        tryCorrelateSymbolWithContext range fileName syntaxKind context
+        tryCorrelateSymbolWithContext range fileName "Pattern:Named" context
     | SynPat.LongIdent(longIdent, _, _, _, _, range) ->
-        let (SynLongIdent(idents, _, _)) = longIdent
-        let identText = idents |> List.map (fun id -> id.idText) |> String.concat "."
-        let syntaxKind = sprintf "Pattern:LongIdent:%s" identText
-        tryCorrelateSymbolWithContext range fileName syntaxKind context
+        tryCorrelateSymbolWithContext range fileName "Pattern:LongIdent" context
     | SynPat.Paren(innerPat, _) ->
         extractSymbolFromPattern innerPat fileName context
     | SynPat.Typed(innerPat, _, _) ->
@@ -39,9 +35,8 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
     match pat with
     | SynPat.Named(synIdent, _, _, range) ->
         let (SynIdent(ident, _)) = synIdent
-        let syntaxKind = sprintf "Pattern:Named:%s" ident.idText
-        let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
-        let patNode = createNode syntaxKind range fileName symbol parentId
+        let symbol = tryCorrelateSymbolOptional range fileName "Pattern:Named" context.CorrelationContext
+        let patNode = createNode (SKPattern PNamed) range fileName symbol parentId
 
         let graph' = { graph with Nodes = Map.add patNode.Id.Value patNode graph.Nodes }
         let graph'' = addChildToParent patNode.Id parentId graph'
@@ -55,15 +50,9 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
         let (SynLongIdent(idents, _, _)) = longIdent
         let identText = idents |> List.map (fun id -> id.idText) |> String.concat "."
 
-        // Detect union case patterns
-        let syntaxKind =
-            if identText = "Ok" || identText = "Error" || identText = "Some" || identText = "None" then
-                sprintf "Pattern:UnionCase:%s" identText
-            else
-                sprintf "Pattern:LongIdent:%s" identText
-
-        let symbol = tryCorrelateSymbolOptional range fileName syntaxKind context.CorrelationContext
-        let patNode = createNode syntaxKind range fileName symbol parentId
+        // PLongIdent covers both union cases and qualified names - symbol correlation distinguishes
+        let symbol = tryCorrelateSymbolOptional range fileName "Pattern:LongIdent" context.CorrelationContext
+        let patNode = createNode (SKPattern PLongIdent) range fileName symbol parentId
 
         let graph' = { graph with Nodes = Map.add patNode.Id.Value patNode graph.Nodes }
         let graph'' = addChildToParent patNode.Id parentId graph'
@@ -85,8 +74,8 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
         | Some sym ->
             let updatedSymbolTable = Map.add sym.DisplayName sym graph'''.SymbolTable
 
-            // Create union case reference edge for Ok/Error patterns
-            if identText = "Ok" || identText = "Error" then
+            // Create union case reference edge for union case patterns
+            if identText = "Ok" || identText = "Error" || identText = "Some" || identText = "None" then
                 let unionCaseEdge = {
                     Source = patNode.Id
                     Target = patNode.Id
@@ -110,7 +99,7 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
 
     // Tuple patterns ((a, b, c))
     | SynPat.Tuple(isStruct, pats, commaRanges, range) ->
-        let tupleNode = createNode "Pattern:Tuple" range fileName None parentId
+        let tupleNode = createNode (SKPattern PTuple) range fileName None parentId
         let graph' = { graph with Nodes = Map.add tupleNode.Id.Value tupleNode graph.Nodes }
         let graph'' = addChildToParent tupleNode.Id parentId graph'
         pats |> List.fold (fun g pat ->
@@ -119,20 +108,19 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
 
     // Wildcard pattern (_)
     | SynPat.Wild(range) ->
-        let wildNode = createNode "Pattern:Wildcard" range fileName None parentId
+        let wildNode = createNode (SKPattern PWild) range fileName None parentId
         let graph' = { graph with Nodes = Map.add wildNode.Id.Value wildNode graph.Nodes }
         addChildToParent wildNode.Id parentId graph'
 
     // Constant patterns (match with 0 | 1 | ...)
     | SynPat.Const(constant, range) ->
-        let constNode = createNode "Pattern:Const" range fileName None parentId
+        let constNode = createNode (SKPattern PConst) range fileName None parentId
         let graph' = { graph with Nodes = Map.add constNode.Id.Value constNode graph.Nodes }
         addChildToParent constNode.Id parentId graph'
 
     // Array or list patterns ([], [a; b], [||], [|a; b|])
     | SynPat.ArrayOrList(isArray, pats, range) ->
-        let kind = if isArray then "Pattern:Array" else "Pattern:List"
-        let arrNode = createNode kind range fileName None parentId
+        let arrNode = createNode (SKPattern PArrayOrList) range fileName None parentId
         let graph' = { graph with Nodes = Map.add arrNode.Id.Value arrNode graph.Nodes }
         let graph'' = addChildToParent arrNode.Id parentId graph'
         pats |> List.fold (fun g pat ->
@@ -141,7 +129,7 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
 
     // List cons pattern (head :: tail)
     | SynPat.ListCons(headPat, tailPat, range, trivia) ->
-        let consNode = createNode "Pattern:ListCons" range fileName None parentId
+        let consNode = createNode (SKPattern PListCons) range fileName None parentId
         let graph' = { graph with Nodes = Map.add consNode.Id.Value consNode graph.Nodes }
         let graph'' = addChildToParent consNode.Id parentId graph'
         let graph''' = processPattern headPat (Some consNode.Id) fileName context graph''
@@ -149,7 +137,7 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
 
     // As pattern (pat as name)
     | SynPat.As(lhsPat, rhsPat, range) ->
-        let asNode = createNode "Pattern:As" range fileName None parentId
+        let asNode = createNode (SKPattern PAs) range fileName None parentId
         let graph' = { graph with Nodes = Map.add asNode.Id.Value asNode graph.Nodes }
         let graph'' = addChildToParent asNode.Id parentId graph'
         let graph''' = processPattern lhsPat (Some asNode.Id) fileName context graph''
@@ -157,27 +145,27 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
 
     // Type test pattern (:? type)
     | SynPat.IsInst(typeSig, range) ->
-        let isInstNode = createNode "Pattern:IsInst" range fileName None parentId
+        let isInstNode = createNode (SKPattern PIsInst) range fileName None parentId
         let graph' = { graph with Nodes = Map.add isInstNode.Id.Value isInstNode graph.Nodes }
         addChildToParent isInstNode.Id parentId graph'
 
     // Null pattern
     | SynPat.Null(range) ->
-        let nullNode = createNode "Pattern:Null" range fileName None parentId
+        let nullNode = createNode (SKPattern PNull) range fileName None parentId
         let graph' = { graph with Nodes = Map.add nullNode.Id.Value nullNode graph.Nodes }
         addChildToParent nullNode.Id parentId graph'
 
     // Attributed pattern (pattern with attributes, e.g., extern arg with [<MarshalAs(...)>])
     | SynPat.Attrib(innerPat, attributes, range) ->
         // Create a node for the attributed pattern, then process inner
-        let attribNode = createNode "Pattern:Attrib" range fileName None parentId
+        let attribNode = createNode (SKPattern PAttrib) range fileName None parentId
         let graph' = { graph with Nodes = Map.add attribNode.Id.Value attribNode graph.Nodes }
         let graph'' = addChildToParent attribNode.Id parentId graph'
         processPattern innerPat (Some attribNode.Id) fileName context graph''
 
     // Or pattern (pat1 | pat2)
     | SynPat.Or(lhsPat, rhsPat, range, trivia) ->
-        let orNode = createNode "Pattern:Or" range fileName None parentId
+        let orNode = createNode (SKPattern POr) range fileName None parentId
         let graph' = { graph with Nodes = Map.add orNode.Id.Value orNode graph.Nodes }
         let graph'' = addChildToParent orNode.Id parentId graph'
         let graph''' = processPattern lhsPat (Some orNode.Id) fileName context graph''
@@ -185,7 +173,7 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
 
     // And patterns ([<...>] pat1 & pat2)
     | SynPat.Ands(pats, range) ->
-        let andsNode = createNode "Pattern:Ands" range fileName None parentId
+        let andsNode = createNode (SKPattern PAnds) range fileName None parentId
         let graph' = { graph with Nodes = Map.add andsNode.Id.Value andsNode graph.Nodes }
         let graph'' = addChildToParent andsNode.Id parentId graph'
         pats |> List.fold (fun g pat ->
@@ -194,7 +182,7 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
 
     // Record pattern ({ field1 = pat1; ... })
     | SynPat.Record(fieldPats, range) ->
-        let recordNode = createNode "Pattern:Record" range fileName None parentId
+        let recordNode = createNode (SKPattern PRecord) range fileName None parentId
         let graph' = { graph with Nodes = Map.add recordNode.Id.Value recordNode graph.Nodes }
         let graph'' = addChildToParent recordNode.Id parentId graph'
         fieldPats |> List.fold (fun g ((_, _), _, pat) ->
@@ -203,13 +191,13 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
 
     // Optional value pattern (?x)
     | SynPat.OptionalVal(ident, range) ->
-        let optNode = createNode (sprintf "Pattern:OptionalVal:%s" ident.idText) range fileName None parentId
+        let optNode = createNode (SKPattern POptionalVal) range fileName None parentId
         let graph' = { graph with Nodes = Map.add optNode.Id.Value optNode graph.Nodes }
         addChildToParent optNode.Id parentId graph'
 
     // Quote expression pattern (<@ ... @>)
     | SynPat.QuoteExpr(expr, range) ->
-        let quoteNode = createNode "Pattern:QuoteExpr" range fileName None parentId
+        let quoteNode = createNode (SKPattern PQuoteExpr) range fileName None parentId
         let graph' = { graph with Nodes = Map.add quoteNode.Id.Value quoteNode graph.Nodes }
         addChildToParent quoteNode.Id parentId graph'
 
@@ -220,7 +208,6 @@ let rec processPattern (pat: SynPat) (parentId: NodeId option) (fileName: string
 
     // Instance member pattern (this.Member)
     | SynPat.InstanceMember(thisId, memberId, _, _, range) ->
-        let memberName = sprintf "%s.%s" thisId.idText memberId.idText
-        let memberNode = createNode (sprintf "Pattern:InstanceMember:%s" memberName) range fileName None parentId
+        let memberNode = createNode (SKPattern PInstanceMember) range fileName None parentId
         let graph' = { graph with Nodes = Map.add memberNode.Id.Value memberNode graph.Nodes }
         addChildToParent memberNode.Id parentId graph'

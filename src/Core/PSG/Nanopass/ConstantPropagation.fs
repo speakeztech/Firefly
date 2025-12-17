@@ -26,13 +26,13 @@ let private resolveConstantValue (psg: ProgramSemanticGraph) (node: PSGNode) : C
     | Some cv -> Some cv  // Direct constant
     | None ->
         // Check if this is an identifier that references a constant
-        if node.SyntaxKind.StartsWith("Ident:") || node.SyntaxKind.StartsWith("LongIdent:") then
+        match node.Kind with
+        | SKExpr EIdent | SKExpr ELongIdent ->
             // Follow def-use edge to find definition
             match findDefinition psg node.Id with
             | Some defNode -> defNode.ConstantValue
             | None -> None
-        else
-            None
+        | _ -> None
 
 /// Get children of a node
 let private getChildren (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode list =
@@ -48,8 +48,9 @@ let private propagateStringLength (psg: ProgramSemanticGraph) : ProgramSemanticG
     let updatedNodes =
         psg.Nodes
         |> Map.map (fun nodeIdVal node ->
-            // Check for PropertyAccess:Length
-            if node.SyntaxKind = "PropertyAccess:Length" then
+            // Check for PropertyAccess (.Length property)
+            match node.Kind with
+            | SKExpr EPropertyAccess when node.Symbol |> Option.exists (fun s -> s.DisplayName = "Length") ->
                 // Get the receiver (child node)
                 let children = getChildren psg node
                 match children with
@@ -61,8 +62,7 @@ let private propagateStringLength (psg: ProgramSemanticGraph) : ProgramSemanticG
                         { node with ConstantValue = Some (Int32Value s.Length) }
                     | _ -> node  // Not a constant string
                 | _ -> node  // Multiple or no children
-            else
-                node)
+            | _ -> node)
     { psg with Nodes = updatedNodes }
 
 /// Main entry point for the ConstantPropagation nanopass

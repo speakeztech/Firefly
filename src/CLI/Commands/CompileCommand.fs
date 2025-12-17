@@ -53,14 +53,15 @@ let private report (verbose: bool) (phase: string) (message: string) =
 /// Entry point nodes may have the attribute as their symbol, but the actual
 /// function name is in the binding pattern or can be found from the symbol table
 let private findEntryPointFunctionName (psg: Core.PSG.Types.ProgramSemanticGraph) (node: Core.PSG.Types.PSGNode) : string =
-    // If this is a Binding:EntryPoint, the function name is "main" by convention
+    // If this is a BEntryPoint binding, the function name is "main" by convention
     // or we look for it in the symbol table
-    if node.SyntaxKind = "Binding:EntryPoint" || node.SyntaxKind = "Binding:Main" then
+    match node.Kind with
+    | Core.PSG.Types.SKBinding Core.PSG.Types.BEntryPoint ->
         // Look for "main" in the symbol table
         match Map.tryFind "main" psg.SymbolTable with
         | Some sym -> sym.DisplayName
         | None -> "main"  // Default to main
-    else
+    | _ ->
         match node.Symbol with
         | Some sym ->
             // If the symbol is an attribute, try to find the actual function
@@ -357,7 +358,7 @@ let execute (args: ParseResults<CompileArgs>) =
                 match Map.tryFind ep.Value markedPsg.Nodes with
                 | Some node ->
                     let name = node.Symbol |> Option.map (fun s -> s.FullName) |> Option.defaultValue "(unknown)"
-                    psgInfo.AppendLine(sprintf "  - %s (%s)" name node.SyntaxKind) |> ignore
+                    psgInfo.AppendLine(sprintf "  - %s (%s)" name (Core.PSG.Types.SyntaxKindT.toString node.Kind)) |> ignore
                 | None -> ()
             psgInfo.AppendLine() |> ignore
 
@@ -381,7 +382,7 @@ let execute (args: ParseResults<CompileArgs>) =
                 if Set.contains nodeId visited then
                     // Cycle detected - don't recurse
                     let prefix = if isLast then "└── " else "├── "
-                    psgInfo.AppendLine(sprintf "%s%s(CYCLE: %s)" indent prefix node.SyntaxKind) |> ignore
+                    psgInfo.AppendLine(sprintf "%s%s(CYCLE: %s)" indent prefix (Core.PSG.Types.SyntaxKindT.toString node.Kind)) |> ignore
                 else
                     let prefix = if isLast then "└── " else "├── "
                     let symbolInfo =
@@ -395,7 +396,7 @@ let execute (args: ParseResults<CompileArgs>) =
                             with _ -> "")
                         |> Option.defaultValue ""
                     let reachMark = if node.IsReachable then "" else " (UNREACHABLE)"
-                    psgInfo.AppendLine(sprintf "%s%s%s%s%s%s" indent prefix node.SyntaxKind symbolInfo typeInfo reachMark) |> ignore
+                    psgInfo.AppendLine(sprintf "%s%s%s%s%s%s" indent prefix (Core.PSG.Types.SyntaxKindT.toString node.Kind) symbolInfo typeInfo reachMark) |> ignore
 
                     let children = getChildren node
                     let childIndent = indent + (if isLast then "    " else "│   ")
@@ -423,7 +424,7 @@ let execute (args: ParseResults<CompileArgs>) =
                 |> List.filter (fun (id, node) ->
                     node.IsReachable &&
                     not (Set.contains id entryIds) &&
-                    (node.SyntaxKind = "Binding" || node.SyntaxKind.StartsWith("LetBinding")))
+                    Core.PSG.Types.SyntaxKindT.isBinding node.Kind)
                 |> List.filter (fun (_, node) ->
                     match node.Symbol with
                     | Some (:? FSharp.Compiler.Symbols.FSharpMemberOrFunctionOrValue as mfv) ->

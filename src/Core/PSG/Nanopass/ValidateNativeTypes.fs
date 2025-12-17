@@ -118,7 +118,7 @@ let private validateSymbol (nodeId: string) (syntaxKind: string) (symbol: FSharp
 let private validateNode (node: PSGNode) : NativeTypeValidationError list =
     match node.Symbol with
     | Some symbol ->
-        validateSymbol node.Id.Value node.SyntaxKind symbol
+        validateSymbol node.Id.Value (SyntaxKindT.toString node.Kind) symbol
         |> Option.toList
     | None -> []
 

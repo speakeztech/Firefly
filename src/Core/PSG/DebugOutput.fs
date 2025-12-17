@@ -28,23 +28,23 @@ let private nodeIdToString (nodeId: NodeId) = nodeId.Value
 /// Enhanced PSG Node serialization with detailed symbol correlation info
 let private preparePSGNodeForJson (node: PSGNode) = {|
     Id = nodeIdToString node.Id
-    SyntaxKind = node.SyntaxKind
+    SyntaxKind = SyntaxKindT.toString node.Kind
     SymbolFullName = node.Symbol |> Option.map (fun s -> s.FullName)
     SymbolDisplayName = node.Symbol |> Option.map (fun s -> s.DisplayName)
     SymbolTypeName = node.Symbol |> Option.map (fun s -> s.GetType().Name)
     SymbolHash = node.Symbol |> Option.map (fun s -> s.GetHashCode())
-    TypeName = node.Type |> Option.map (fun t -> 
+    TypeName = node.Type |> Option.map (fun t ->
         try t.Format(FSharpDisplayContext.Empty)
         with _ -> "unknown_type")
     Range = rangeToJson node.Range
     SourceFile = Path.GetFileName(node.SourceFile)
     ParentId = node.ParentId |> Option.map nodeIdToString
-    Children = 
+    Children =
         match node.Children with
         | NotProcessed -> [||]
         | NoChildren -> [||]
         | Parent children -> children |> List.map nodeIdToString |> List.toArray
-    ChildrenState = 
+    ChildrenState =
         match node.Children with
         | NotProcessed -> "NotProcessed"
         | NoChildren -> "NoChildren"
@@ -120,11 +120,11 @@ let generateSymbolCorrelationAnalysis (psg: ProgramSemanticGraph) (reachableSymb
                     FullName = symbol.FullName
                     DisplayName = symbol.DisplayName
                     NodeId = nodeIdToString node.Id
-                    SyntaxKind = node.SyntaxKind
+                    SyntaxKind = SyntaxKindT.toString node.Kind
                     IsReachable = node.IsReachable
                     SymbolType = symbol.GetType().Name
                     MatchesAnyTarget = reachableSymbols |> Set.exists (fun target ->
-                        symbol.FullName = target || 
+                        symbol.FullName = target ||
                         symbol.DisplayName = target ||
                         symbol.FullName.EndsWith("." + target) ||
                         target.EndsWith("." + symbol.FullName))

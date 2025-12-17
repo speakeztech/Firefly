@@ -23,27 +23,23 @@ open Core.PSG.NavigationUtils
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Extract hash from InterpolatedStringPart:String:hash syntax kind
-let private extractStringHash (syntaxKind: string) : uint32 option =
-    if syntaxKind.StartsWith("InterpolatedStringPart:String:") then
-        let hashStr = syntaxKind.Substring("InterpolatedStringPart:String:".Length)
-        match System.UInt32.TryParse(hashStr) with
-        | true, hash -> Some hash
-        | _ -> None
-    else
-        None
-
 /// Check if a node is an InterpolatedString
 let private isInterpolatedString (node: PSGNode) : bool =
-    node.SyntaxKind = "InterpolatedString"
+    SyntaxKindT.isInterpolatedString node.Kind
 
-/// Check if a node is an InterpolatedStringPart:String
+/// Check if a node is an InterpolatedStringPart (either string literal or fill)
+let private isInterpolatedPart (node: PSGNode) : bool =
+    match node.Kind with
+    | SKExpr EInterpolatedPart -> true
+    | _ -> false
+
+/// Check if an interpolated part is a string literal (has ConstantValue)
 let private isStringPart (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("InterpolatedStringPart:String:")
+    isInterpolatedPart node && node.ConstantValue.IsSome
 
-/// Check if a node is an InterpolatedStringPart:Fill
+/// Check if an interpolated part is a fill expression (no ConstantValue)
 let private isFillPart (node: PSGNode) : bool =
-    node.SyntaxKind = "InterpolatedStringPart:Fill"
+    isInterpolatedPart node && node.ConstantValue.IsNone
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Lowering Strategy
@@ -56,21 +52,12 @@ let private selectConcatOp (argCount: int) : NativeStrOp =
     | 3 -> StrConcat3
     | _ -> StrConcatN  // Variable number of args (>3)
 
-/// Transform an InterpolatedStringPart:String node to a Const:String node
+/// Transform an InterpolatedStringPart (string literal) node to a Const node
 let private transformStringPart (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode =
-    match extractStringHash node.SyntaxKind with
-    | Some hash ->
-        // Look up the actual string content from StringLiterals
-        let stringValue = Map.tryFind hash psg.StringLiterals
-        // Transform to Const:String with the actual string value
-        { node with
-            SyntaxKind = sprintf "Const:String %s" (stringValue |> Option.defaultValue "")
-            Kind = SKExpr EConst
-            Operation = None
-            ConstantValue = stringValue |> Option.map StringValue }
-    | None ->
-        // Shouldn't happen, but preserve the node if we can't parse
-        node
+    // The ConstantValue should already be set during PSG construction
+    { node with
+        Kind = SKExpr EConst
+        Operation = None }
 
 /// Transform an InterpolatedStringPart:Fill node - extract the child expression
 /// The Fill node wraps an expression; we want the expression itself as the argument
@@ -107,10 +94,9 @@ let private lowerInterpolatedString (psg: ProgramSemanticGraph) (node: PSGNode) 
     // Create new child IDs for the transformed arguments
     let newChildIds = transformedArgs |> List.map (fun n -> n.Id)
 
-    // Transform the parent node to an App:StringConcat
+    // Transform the parent node to an App with StringConcat operation
     let transformedNode =
         { node with
-            SyntaxKind = "App:StringConcat"
             Kind = SKExpr EApp
             Operation = Some (NativeStr concatOp)
             Children = Parent newChildIds }

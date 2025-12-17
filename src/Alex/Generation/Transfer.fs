@@ -78,21 +78,45 @@ module TransferAcc =
 let mapFSharpTypeToMLIR (fsharpType: FSharp.Compiler.Symbols.FSharpType) : string =
     try
         if fsharpType.HasTypeDefinition then
-            match fsharpType.TypeDefinition.TryFullName with
-            | Some "System.Int32" | Some "Microsoft.FSharp.Core.int" -> "i32"
-            | Some "System.Int64" | Some "Microsoft.FSharp.Core.int64" -> "i64"
-            | Some "System.Byte" | Some "Microsoft.FSharp.Core.byte" -> "i8"
-            | Some "System.Boolean" | Some "Microsoft.FSharp.Core.bool" -> "i1"
-            | Some "System.String" | Some "Microsoft.FSharp.Core.string" -> "!llvm.ptr"
-            | Some "System.IntPtr" | Some "Microsoft.FSharp.Core.nativeint" -> "i64"
-            | Some "System.UIntPtr" | Some "Microsoft.FSharp.Core.unativeint" -> "i64"
-            | Some "Microsoft.FSharp.Core.Unit" | Some "Microsoft.FSharp.Core.unit" -> "()"
-            | Some typeName when typeName.Contains("nativeptr") -> "!llvm.ptr"
-            | Some typeName when typeName.Contains("NativeStr") -> "!llvm.struct<(!llvm.ptr, i64)>"
-            | _ -> "!llvm.ptr"
+            let typeDef = fsharpType.TypeDefinition
+            let displayName = typeDef.DisplayName
+
+            // First check DisplayName for common type abbreviations
+            match displayName with
+            | "unit" -> "()"
+            | "int" | "int32" -> "i32"
+            | "int64" -> "i64"
+            | "byte" -> "i8"
+            | "bool" -> "i1"
+            | "string" -> "!llvm.ptr"
+            | "nativeint" -> "i64"
+            | "unativeint" -> "i64"
+            | name when name.Contains("nativeptr") -> "!llvm.ptr"
+            | "NativeStr" -> "!llvm.struct<(!llvm.ptr, i64)>"
+            | _ ->
+                // Try full name for more specific matching
+                match typeDef.TryFullName with
+                | Some "System.Int32" -> "i32"
+                | Some "System.Int64" -> "i64"
+                | Some "System.Byte" -> "i8"
+                | Some "System.Boolean" -> "i1"
+                | Some "System.String" -> "!llvm.ptr"
+                | Some "System.IntPtr" -> "i64"
+                | Some "System.UIntPtr" -> "i64"
+                | Some "Microsoft.FSharp.Core.Unit" -> "()"
+                | Some typeName when typeName.Contains("nativeptr") -> "!llvm.ptr"
+                | Some typeName when typeName.Contains("NativeStr") -> "!llvm.struct<(!llvm.ptr, i64)>"
+                | Some typeName ->
+                    // Log unknown types for debugging (but don't fail)
+                    // printfn "[TRANSFER] Unknown type: %s (display: %s)" typeName displayName
+                    "!llvm.ptr"  // Default for unknown reference types
+                | None ->
+                    // No full name available - use display name heuristics
+                    "()"  // Default to unit for safety
         else
-            "!llvm.ptr"
-    with _ -> "!llvm.ptr"
+            "()"  // No type definition - default to unit for safety
+    with _ ->
+        "()"  // On exception, default to unit
 
 // ═══════════════════════════════════════════════════════════════════
 // Helper Functions
@@ -114,8 +138,8 @@ let recallChildSSAs (graph: ProgramSemanticGraph) (node: PSGNode) (mlirZ: MLIRZi
 let recallOperandSSAs (graph: ProgramSemanticGraph) (node: PSGNode) (mlirZ: MLIRZipper) : (string * string) list =
     getChildren graph node
     |> List.filter (fun c ->
-        not (c.SyntaxKind.StartsWith("LongIdent")) &&
-        not (c.SyntaxKind.StartsWith("Ident")))
+        not (SyntaxKindT.isLongIdent c.Kind) &&
+        not (SyntaxKindT.isIdent c.Kind))
     |> List.choose (fun child -> MLIRZipper.recallNodeSSA child.Id.Value mlirZ)
 
 /// Extract constant value and MLIR type from a Const node
@@ -124,27 +148,101 @@ let extractConstant (node: PSGNode) : (string * string) option =
     | Some (StringValue s) -> Some (s, "string")
     | Some (Int32Value i) -> Some (string i, "i32")
     | Some (Int64Value i) -> Some (sprintf "%dL" i, "i64")
-    | Some (BoolValue b) -> Some ((if b then "true" else "false"), "i1")
+    | Some (BoolValue b) -> Some ((if b then "1" else "0"), "i1")  // MLIR uses 1/0 for i1, not true/false
     | Some (ByteValue b) -> Some (string (int b), "i8")
     | Some (FloatValue f) -> Some (string f, "f64")
     | Some (CharValue c) -> Some (string (int c), "i8")
     | Some UnitValue -> Some ("()", "unit")
-    | None ->
-        // Fall back to parsing SyntaxKind for legacy nodes
-        let kind = node.SyntaxKind
-        if kind.StartsWith("Const:Int32 ") then
-            Some (kind.Substring(12), "i32")
-        elif kind.StartsWith("Const:Int64 ") then
-            Some (kind.Substring(12), "i64")
-        elif kind.StartsWith("Const:String ") then
-            Some (kind.Substring(13), "string")
-        elif kind.StartsWith("Const:Boolean ") then
-            let v = kind.Substring(14).ToLower()
-            Some (v, "i1")
-        elif kind = "Const:Unit" || kind = "Const:()" then
-            Some ("()", "unit")
+    | None -> None
+
+// ═══════════════════════════════════════════════════════════════════
+// Function Inlining Helpers - For witnessing user-defined function calls
+// ═══════════════════════════════════════════════════════════════════
+
+/// Find a function's Binding node in the PSG by name
+let findFunctionBinding (graph: ProgramSemanticGraph) (funcName: string) : PSGNode option =
+    graph.Nodes
+    |> Map.toSeq
+    |> Seq.tryFind (fun (_, node) ->
+        let isBinding = SyntaxKindT.isBinding node.Kind
+        let symbolMatch =
+            match node.Symbol with
+            | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+                mfv.DisplayName = funcName ||
+                (try mfv.CompiledName = funcName with _ -> false)
+            | _ -> false
+        isBinding && symbolMatch && node.IsReachable)
+    |> Option.map snd
+
+/// Extract parameter nodes and body node from a function binding
+let getFunctionParamsAndBody (graph: ProgramSemanticGraph) (bindingNode: PSGNode) : (PSGNode list * PSGNode option) =
+    let children = getChildren graph bindingNode
+    let patternNodes =
+        children
+        |> List.filter (fun c -> SyntaxKindT.isPattern c.Kind)
+    let bodyNode =
+        children
+        |> List.tryFind (fun c -> not (SyntaxKindT.isPattern c.Kind))
+    // Extract named parameters from pattern nodes
+    let rec extractNamedParams (node: PSGNode) : PSGNode list =
+        if SyntaxKindT.isNamedPattern node.Kind then
+            [node]
         else
-            None
+            getChildren graph node
+            |> List.collect extractNamedParams
+    let paramNodes = patternNodes |> List.collect extractNamedParams
+    (paramNodes, bodyNode)
+
+/// Extract function name from a node (ident or longident)
+let extractFunctionName (node: PSGNode) : string option =
+    match node.Symbol with
+    | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+        Some (try mfv.CompiledName with _ -> mfv.DisplayName)
+    | _ -> None
+
+/// Check if a binding node represents a function (has parameters, not a value binding)
+let isFunction (graph: ProgramSemanticGraph) (node: PSGNode) : bool =
+    let children = getChildren graph node
+    // A function has Pattern:LongIdent or Pattern:Named children that contain parameters
+    // Look for patterns with nested patterns (parameters)
+    let patternChildren = children |> List.filter (fun c -> SyntaxKindT.isPattern c.Kind)
+    if List.isEmpty patternChildren then false
+    else
+        // Check if any pattern has children (indicating parameters)
+        patternChildren |> List.exists (fun pat ->
+            let patKids = getChildren graph pat
+            // Pattern:Const indicates unit parameter (), Pattern:Named indicates real param
+            patKids |> List.exists (fun pk ->
+                match pk.Kind with
+                | SKPattern PNamed | SKPattern PConst | SKPattern PWild -> true
+                | _ -> false))
+
+/// Get mangled MLIR function name from a binding node
+let getMangledFunctionName (node: PSGNode) : string =
+    match node.Symbol with
+    | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+        // Use full name with module path, replace . with _
+        let fullName =
+            try
+                match mfv.DeclaringEntity with
+                | Some entity -> entity.FullName + "." + mfv.CompiledName
+                | None -> mfv.CompiledName
+            with _ -> mfv.DisplayName
+        fullName.Replace(".", "_").Replace("`", "_")
+    | Some sym -> sym.DisplayName.Replace(".", "_")
+    | None -> "unknown_func"
+
+/// Determine return type for a function (unit functions return void/unit)
+let getFunctionReturnType (graph: ProgramSemanticGraph) (node: PSGNode) : string =
+    // For now, default to unit return - we'd need type info for accurate returns
+    // Most Alloy functions return unit or simple types
+    match node.Symbol with
+    | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+        try
+            let retType = mfv.ReturnParameter.Type
+            mapFSharpTypeToMLIR retType
+        with _ -> "()"  // Default to unit
+    | _ -> "()"
 
 // ═══════════════════════════════════════════════════════════════════
 // Node Witness Functions - Each witnesses ONE node, children already bound
@@ -174,18 +272,16 @@ let witnessConst (acc: TransferAcc) (node: PSGNode) : TransferAcc =
         TransferAcc.withMLIRAndResult mlirZ3 (TRValue (ssaName, mlirType)) acc
 
     | None ->
-        TransferAcc.withResult (TRError (sprintf "Unknown constant: %s" node.SyntaxKind)) acc
+        TransferAcc.withResult (TRError (sprintf "Unknown constant: %s" (SyntaxKindT.toString node.Kind))) acc
 
 /// Witness a binding/let node
 /// Children: Pattern nodes + value expression (already witnessed by post-order)
 /// We bind the observed SSA from the value child to this node
 let witnessBinding (acc: TransferAcc) (node: PSGNode) : TransferAcc =
-    // Recall the value child SSA (skip Pattern: nodes)
+    // Recall the value child SSA (skip Pattern nodes)
     let valueChildSSA =
         getChildren acc.Graph node
-        |> List.filter (fun c ->
-            not (c.SyntaxKind.StartsWith("Pattern:")) &&
-            not (c.SyntaxKind.StartsWith("Named")))
+        |> List.filter (fun c -> not (SyntaxKindT.isPattern c.Kind))
         |> List.tryHead
         |> Option.bind (fun child -> MLIRZipper.recallNodeSSA child.Id.Value acc.MLIR)
 
@@ -197,6 +293,187 @@ let witnessBinding (acc: TransferAcc) (node: PSGNode) : TransferAcc =
     | None ->
         // No value - this is a unit binding
         TransferAcc.withResult TRVoid acc
+
+/// Witness an if-then-else expression
+/// NOTE: In post-order fold, children are already witnessed. This means the
+/// then/else branch operations are already in the linear MLIR stream.
+/// For proper control flow, we would need a different traversal strategy.
+/// For now, we recall child SSAs and propagate the result.
+let witnessIfThenElse (acc: TransferAcc) (node: PSGNode) : TransferAcc =
+    let children = getChildren acc.Graph node
+    // IfThenElse has: condition, thenBranch, [elseBranch]
+    let conditionChild = children |> List.tryHead
+    let thenChild = children |> List.tryItem 1
+    let elseChild = children |> List.tryItem 2
+
+    // Recall condition SSA (should be i1)
+    let condSSA = conditionChild |> Option.bind (fun c -> MLIRZipper.recallNodeSSA c.Id.Value acc.MLIR)
+
+    // For now, just recall the then-branch result as the if result
+    // (proper implementation would use phi nodes after control flow blocks)
+    let resultSSA =
+        match thenChild |> Option.bind (fun c -> MLIRZipper.recallNodeSSA c.Id.Value acc.MLIR) with
+        | Some r -> Some r
+        | None -> elseChild |> Option.bind (fun c -> MLIRZipper.recallNodeSSA c.Id.Value acc.MLIR)
+
+    match resultSSA with
+    | Some (ssa, mlirType) ->
+        let mlirZ = MLIRZipper.bindNodeSSA node.Id.Value ssa mlirType acc.MLIR
+        TransferAcc.withMLIRAndResult mlirZ (TRValue (ssa, mlirType)) acc
+    | None ->
+        // Both branches are unit - the if expression is unit
+        TransferAcc.withResult TRVoid acc
+
+/// Witness a while loop
+/// NOTE: In post-order fold, children (condition, body) are already witnessed.
+/// The loop semantics require re-evaluation which post-order doesn't support.
+/// For now, we recognize the construct and return unit.
+let witnessWhileLoop (acc: TransferAcc) (node: PSGNode) : TransferAcc =
+    // While loops always return unit
+    // The body has already been witnessed (linear emission) during post-order
+    TransferAcc.withResult TRVoid acc
+
+/// Witness a match expression
+/// NOTE: Similar to IfThenElse - branches are already witnessed in post-order.
+/// We recall the result from the first match clause for now.
+let witnessMatch (acc: TransferAcc) (node: PSGNode) : TransferAcc =
+    let children = getChildren acc.Graph node
+    // Match has: expression, clauses...
+    // Skip the first child (matched expression), look for clause results
+    let clauseChildren =
+        children
+        |> List.filter (fun c -> match c.Kind with SKExpr EMatchClause -> true | _ -> false)
+
+    // Recall the first clause's result
+    let resultSSA =
+        clauseChildren
+        |> List.tryHead
+        |> Option.bind (fun clause ->
+            // Get the result expression of the clause (last child that's not a pattern)
+            getChildren acc.Graph clause
+            |> List.filter (fun c -> not (SyntaxKindT.isPattern c.Kind))
+            |> List.tryLast
+            |> Option.bind (fun resultExpr -> MLIRZipper.recallNodeSSA resultExpr.Id.Value acc.MLIR))
+
+    match resultSSA with
+    | Some (ssa, mlirType) ->
+        let mlirZ = MLIRZipper.bindNodeSSA node.Id.Value ssa mlirType acc.MLIR
+        TransferAcc.withMLIRAndResult mlirZ (TRValue (ssa, mlirType)) acc
+    | None ->
+        TransferAcc.withResult TRVoid acc
+
+/// Witness a mutable variable set (assignment)
+/// Children: target identifier, new value expression
+let witnessMutableSet (acc: TransferAcc) (node: PSGNode) : TransferAcc =
+    // Mutable set is a statement that returns unit
+    // The actual assignment would require memory operations which we defer
+    TransferAcc.withResult TRVoid acc
+
+/// Witness a tuple expression
+/// Children: Elements of the tuple (already witnessed by post-order)
+/// Fidelity Memory Model: Tuples are pure structural assembly - values in positions.
+/// FSharpType determines the layout; we compute the MLIR struct type on-demand.
+let witnessTuple (acc: TransferAcc) (node: PSGNode) : TransferAcc =
+    let elementSSAs = recallOperandSSAs acc.Graph node acc.MLIR
+
+    match elementSSAs with
+    | [] -> TransferAcc.withResult TRVoid acc
+    | [(ssa, mlirType)] ->
+        // Single element tuple - pass through the element
+        let mlirZ = MLIRZipper.bindNodeSSA node.Id.Value ssa mlirType acc.MLIR
+        TransferAcc.withMLIRAndResult mlirZ (TRValue (ssa, mlirType)) acc
+    | elements ->
+        // Multi-element tuple: compute struct type from element types
+        // Type layout: !llvm.struct<(type1, type2, ...)>
+        let types = elements |> List.map snd
+        let tupleType = sprintf "!llvm.struct<(%s)>" (String.concat ", " types)
+
+        // Emit: undef + insertvalue sequence (structural assembly)
+        let ssaName, mlirZ1 = MLIRZipper.yieldSSA acc.MLIR
+        let mlirZ2 = MLIRZipper.witnessVoidOp (sprintf "%s = llvm.mlir.undef : %s" ssaName tupleType) mlirZ1
+
+        // Insert each element value into its position
+        let (finalSSA, finalZ) =
+            elements |> List.indexed
+            |> List.fold (fun (currentSSA, z) (idx, (elemSSA, _)) ->
+                let newSSA, z1 = MLIRZipper.yieldSSA z
+                let op = sprintf "%s = llvm.insertvalue %s, %s[%d] : %s" newSSA elemSSA currentSSA idx tupleType
+                (newSSA, MLIRZipper.witnessVoidOp op z1)
+            ) (ssaName, mlirZ2)
+
+        let mlirZ3 = MLIRZipper.bindNodeSSA node.Id.Value finalSSA tupleType finalZ
+        TransferAcc.withMLIRAndResult mlirZ3 (TRValue (finalSSA, tupleType)) acc
+
+/// Witness a record construction (Record:New)
+/// Handles TWO syntactic forms that both map to structural construction:
+/// 1. Record expression: { Field1 = v1; Field2 = v2 } → children are RecordField:* nodes
+/// 2. Struct constructor: TypeName(arg1, arg2) → children are Ident + Tuple
+///
+/// Fidelity Memory Model: Records/structs are pure structural assembly - values in slots.
+/// FSharpType determines the layout; we compute the MLIR struct type on-demand.
+let witnessRecord (acc: TransferAcc) (node: PSGNode) : TransferAcc =
+    let children = getChildren acc.Graph node
+
+    // Try both syntactic forms to extract field SSAs
+    let fieldSSAs =
+        // Form 1: Record expression syntax - look for RecordField children
+        let recordFieldSSAs =
+            children
+            |> List.filter (fun c -> match c.Kind with SKExpr ERecordField -> true | _ -> false)
+            |> List.choose (fun fieldNode ->
+                // RecordField has one child: the value expression
+                getChildren acc.Graph fieldNode
+                |> List.tryHead
+                |> Option.bind (fun valueNode -> MLIRZipper.recallNodeSSA valueNode.Id.Value acc.MLIR))
+
+        if not (List.isEmpty recordFieldSSAs) then
+            recordFieldSSAs
+        else
+            // Form 2: Struct constructor syntax - look for Tuple child (skipping the Ident)
+            // Structure: Record:New → [Ident:TypeName, Tuple → [arg1, arg2, ...]]
+            let tupleChild =
+                children
+                |> List.tryFind (fun c -> match c.Kind with SKExpr ETuple -> true | _ -> false)
+
+            match tupleChild with
+            | Some tuple ->
+                // Get the tuple's children (the constructor arguments)
+                getChildren acc.Graph tuple
+                |> List.choose (fun argNode -> MLIRZipper.recallNodeSSA argNode.Id.Value acc.MLIR)
+            | None ->
+                // Maybe single argument (not wrapped in tuple)
+                // Look for any non-Ident child that might be the single argument
+                children
+                |> List.filter (fun c -> not (SyntaxKindT.isIdent c.Kind))
+                |> List.choose (fun argNode -> MLIRZipper.recallNodeSSA argNode.Id.Value acc.MLIR)
+
+    match fieldSSAs with
+    | [] -> TransferAcc.withResult TRVoid acc
+    | [(ssa, mlirType)] ->
+        // Single-field record - just bind the SSA
+        let mlirZ = MLIRZipper.bindNodeSSA node.Id.Value ssa mlirType acc.MLIR
+        TransferAcc.withMLIRAndResult mlirZ (TRValue (ssa, mlirType)) acc
+    | fields ->
+        // Multi-field record: compute struct type from field types
+        // Type layout: !llvm.struct<(type1, type2, ...)>
+        let types = fields |> List.map snd
+        let recordType = sprintf "!llvm.struct<(%s)>" (String.concat ", " types)
+
+        // Emit: undef + insertvalue sequence (structural assembly)
+        let ssaName, mlirZ1 = MLIRZipper.yieldSSA acc.MLIR
+        let mlirZ2 = MLIRZipper.witnessVoidOp (sprintf "%s = llvm.mlir.undef : %s" ssaName recordType) mlirZ1
+
+        // Insert each field value into its slot
+        let (finalSSA, finalZ) =
+            fields |> List.indexed
+            |> List.fold (fun (currentSSA, z) (idx, (fieldSSA, _)) ->
+                let newSSA, z1 = MLIRZipper.yieldSSA z
+                let op = sprintf "%s = llvm.insertvalue %s, %s[%d] : %s" newSSA fieldSSA currentSSA idx recordType
+                (newSSA, MLIRZipper.witnessVoidOp op z1)
+            ) (ssaName, mlirZ2)
+
+        let mlirZ3 = MLIRZipper.bindNodeSSA node.Id.Value finalSSA recordType finalZ
+        TransferAcc.withMLIRAndResult mlirZ3 (TRValue (finalSSA, recordType)) acc
 
 /// Witness a sequential expression
 /// Children: Sequence items (already witnessed by post-order)
@@ -236,7 +513,7 @@ let witnessIdent (acc: TransferAcc) (node: PSGNode) : TransferAcc =
             TransferAcc.withResult (TRError (sprintf "Definition node %s has no SSA" edge.Target.Value)) acc
     | None ->
         // No def-use edge - try direct lookup (might be a parameter)
-        TransferAcc.withResult (TRError (sprintf "Unresolved identifier: %s" node.SyntaxKind)) acc
+        TransferAcc.withResult (TRError (sprintf "Unresolved identifier: %s" (SyntaxKindT.toString node.Kind))) acc
 
 /// Witness arithmetic operation
 /// Children: Operands (already witnessed by post-order)
@@ -275,20 +552,17 @@ let witnessConsoleWrite (acc: TransferAcc) (node: PSGNode) (addNewline: bool) : 
     let argChildren =
         getChildren acc.Graph node
         |> List.filter (fun c ->
-            not (c.SyntaxKind.StartsWith("LongIdent")) &&
-            not (c.SyntaxKind.StartsWith("Ident")))
+            not (SyntaxKindT.isLongIdent c.Kind) &&
+            not (SyntaxKindT.isIdent c.Kind))
 
     match argChildren with
     | [argNode] ->
         // Check if it's a string constant (special case: known content and length)
-        if argNode.SyntaxKind.StartsWith("Const:String") then
+        if SyntaxKindT.isConst argNode.Kind then
             let stringContent =
                 match argNode.ConstantValue with
                 | Some (StringValue s) -> s
-                | _ ->
-                    if argNode.SyntaxKind.StartsWith("Const:String ") then
-                        argNode.SyntaxKind.Substring(13)
-                    else ""
+                | _ -> ""
 
             if stringContent <> "" then
                 let strLen = stringContent.Length
@@ -357,6 +631,37 @@ let witnessConsole (acc: TransferAcc) (node: PSGNode) (op: ConsoleOp) : Transfer
     | _ ->
         TransferAcc.withResult (TRError (sprintf "Console operation %A not yet implemented" op)) acc
 
+/// Try to find a function binding by name and get its mangled MLIR name
+let tryGetFunctionMLIRName (graph: ProgramSemanticGraph) (funcName: string) : string option =
+    findFunctionBinding graph funcName
+    |> Option.map getMangledFunctionName
+
+/// Witness a function call - emit llvm.call to a user-defined function
+let witnessFunctionCall (acc: TransferAcc) (node: PSGNode) (funcName: string) : TransferAcc =
+    match tryGetFunctionMLIRName acc.Graph funcName with
+    | Some mlirFuncName ->
+        // Get return type of the function
+        let returnType =
+            findFunctionBinding acc.Graph funcName
+            |> Option.map (fun fn -> getFunctionReturnType acc.Graph fn)
+            |> Option.defaultValue "()"
+
+        // For now, call with no arguments (unit parameter functions)
+        // TODO: Handle functions with real parameters
+        if returnType = "()" then
+            let callOp = sprintf "llvm.call @%s() : () -> ()" mlirFuncName
+            let mlirZ = MLIRZipper.witnessVoidOp callOp acc.MLIR
+            TransferAcc.withMLIRAndResult mlirZ TRVoid acc
+        else
+            let ssaName, mlirZ1 = MLIRZipper.yieldSSA acc.MLIR
+            let callOp = sprintf "%s = llvm.call @%s() : () -> %s" ssaName mlirFuncName returnType
+            let mlirZ2 = MLIRZipper.witnessVoidOp callOp mlirZ1
+            let mlirZ3 = MLIRZipper.bindNodeSSA node.Id.Value ssaName returnType mlirZ2
+            TransferAcc.withMLIRAndResult mlirZ3 (TRValue (ssaName, returnType)) acc
+    | None ->
+        // Function not found - likely an extern/intrinsic we haven't handled
+        TransferAcc.withResult (TRError (sprintf "Unknown function: %s" funcName)) acc
+
 /// Witness an application node
 /// Dispatch by Operation field (set by ClassifyOperations nanopass)
 let witnessApp (acc: TransferAcc) (node: PSGNode) : TransferAcc =
@@ -370,18 +675,52 @@ let witnessApp (acc: TransferAcc) (node: PSGNode) : TransferAcc =
     | Some op ->
         TransferAcc.withResult (TRError (sprintf "Operation %A not yet implemented in Transfer.fs" op)) acc
     | None ->
-        // Unclassified app - children already processed
-        // Try to get the last operand's result as this node's result
-        let lastChildSSA =
-            recallOperandSSAs acc.Graph node acc.MLIR
-            |> List.tryLast
+        // Unclassified app - check if it's a function call to a user-defined function
+        let children = getChildren acc.Graph node
+        let funcIdent = children |> List.tryFind (fun c ->
+            SyntaxKindT.isIdent c.Kind || SyntaxKindT.isLongIdent c.Kind)
 
-        match lastChildSSA with
-        | Some (ssa, mlirType) ->
-            let mlirZ = MLIRZipper.bindNodeSSA node.Id.Value ssa mlirType acc.MLIR
-            TransferAcc.withMLIRAndResult mlirZ (TRValue (ssa, mlirType)) acc
+        match funcIdent with
+        | Some identNode ->
+            // Extract function name and check if it's a known user-defined function
+            match extractFunctionName identNode with
+            | Some funcName when findFunctionBinding acc.Graph funcName |> Option.isSome ->
+                // It's a call to a user-defined function - emit llvm.call
+                witnessFunctionCall acc node funcName
+            | Some ".ctor" ->
+                // HARD ERROR: .ctor is a BCL/CLR artifact that should NEVER appear in PSG.
+                // F# construction is structural (Record:New, Tuple) - not method calls.
+                // If we see .ctor here, something upstream is broken:
+                // - PSG Builder produced wrong structure, OR
+                // - Typed tree correlation failed, OR
+                // - Alloy has a stub instead of real implementation
+                // This MUST be surfaced as an error, not silently handled.
+                TransferAcc.withResult (TRError "PIPELINE BUG: .ctor in PSG - construction should be structural (Record:New, Tuple), not method calls") acc
+            | _ ->
+                // Not a user-defined function - fall through to default behavior
+                // Try to get the last operand's result as this node's result
+                let lastChildSSA =
+                    recallOperandSSAs acc.Graph node acc.MLIR
+                    |> List.tryLast
+
+                match lastChildSSA with
+                | Some (ssa, mlirType) ->
+                    let mlirZ = MLIRZipper.bindNodeSSA node.Id.Value ssa mlirType acc.MLIR
+                    TransferAcc.withMLIRAndResult mlirZ (TRValue (ssa, mlirType)) acc
+                | None ->
+                    TransferAcc.withResult TRVoid acc
         | None ->
-            TransferAcc.withResult TRVoid acc
+            // No function identifier - just pass through last child result
+            let lastChildSSA =
+                recallOperandSSAs acc.Graph node acc.MLIR
+                |> List.tryLast
+
+            match lastChildSSA with
+            | Some (ssa, mlirType) ->
+                let mlirZ = MLIRZipper.bindNodeSSA node.Id.Value ssa mlirType acc.MLIR
+                TransferAcc.withMLIRAndResult mlirZ (TRValue (ssa, mlirType)) acc
+            | None ->
+                TransferAcc.withResult TRVoid acc
 
 // ═══════════════════════════════════════════════════════════════════
 // Main Witness Function - Single dispatch point for foldPostOrder
@@ -392,38 +731,47 @@ let witnessApp (acc: TransferAcc) (node: PSGNode) : TransferAcc =
 /// DO NOT manually navigate to children or recursively call witnessNode
 let witnessNode (acc: TransferAcc) (zipper: PSGZipper) : TransferAcc =
     let node = zipper.Focus
-    let kind = node.SyntaxKind
 
     // Skip unreachable nodes
     if not node.IsReachable then
         acc
     else
 
-    // Dispatch by SyntaxKind (using typed Kind where available)
+    // Dispatch on typed Kind
     match node.Kind with
     | SKExpr EConst -> witnessConst acc node
     | SKExpr EIdent | SKExpr ELongIdent -> witnessIdent acc node
     | SKExpr ESequential -> witnessSequential acc node
     | SKExpr EApp | SKExpr ETypeApp -> witnessApp acc node
+    | SKExpr EIfThenElse -> witnessIfThenElse acc node
+    | SKExpr EWhileLoop -> witnessWhileLoop acc node
+    | SKExpr EForLoop -> acc  // For loops - handled structurally
+    | SKExpr EMatch -> witnessMatch acc node
+    | SKExpr EMatchClause -> acc  // Match clauses are handled by witnessMatch
+    | SKExpr EMatchLambda -> acc  // Match lambdas are handled like functions
+    | SKExpr EMutableSet -> witnessMutableSet acc node
+    | SKExpr ETuple -> witnessTuple acc node
+    | SKExpr ERecord -> witnessRecord acc node  // Structural record construction
+    | SKExpr ERecordField -> acc  // RecordField nodes are structural, witnessed via parent Record
+    | SKExpr ELetOrUse -> acc  // Let bindings - handled via children
+    | SKExpr ELambda -> acc  // Lambdas - handled via witnessBinding
+    | SKExpr ETryWith | SKExpr ETryFinally -> acc  // Exception handling - structural
+    | SKExpr EMethodCall | SKExpr EPropertyAccess -> acc  // Method/property - handled via App
+    | SKExpr EAddressOf -> acc  // Address-of - structural
+    | SKExpr EArrayOrList -> acc  // Array/list construction - structural
+    | SKExpr EIndexGet | SKExpr EIndexSet -> acc  // Indexer operations - structural
+    | SKExpr ETraitCall -> acc  // SRTP - resolved via typed tree
+    | SKExpr EInterpolatedString | SKExpr EInterpolatedPart -> acc  // Interpolated strings - lowered in nanopass
+    | SKExpr EObjExpr -> acc  // Object expressions - structural
+    | SKExpr EUpcast | SKExpr EDowncast | SKExpr ETypeTest -> acc  // Type casts - structural
+    | SKExpr EDo | SKExpr EAssert | SKExpr ELazy -> acc  // Effects - structural
+    | SKExpr ENew -> acc  // Object construction - structural
     | SKBinding _ -> witnessBinding acc node
     | SKPattern _ -> acc  // Patterns are structural, no emission
-    | _ ->
-        // Fall back to string matching for migration period
-        if kind.StartsWith("Const:") then
-            witnessConst acc node
-        elif kind.StartsWith("Ident:") || kind.StartsWith("LongIdent:") || kind.StartsWith("Value:") then
-            witnessIdent acc node
-        elif kind.StartsWith("Sequential") then
-            witnessSequential acc node
-        elif kind.StartsWith("App") then
-            witnessApp acc node
-        elif kind.StartsWith("Binding") || kind.StartsWith("Let") || kind.StartsWith("LetOrUse") then
-            witnessBinding acc node
-        elif kind.StartsWith("Pattern:") || kind.StartsWith("Named") then
-            acc  // Skip patterns
-        else
-            // Unknown node - just pass through (children already processed)
-            TransferAcc.withResult (TRError (sprintf "Unknown node kind: %s" kind)) acc
+    | SKDecl _ -> acc  // Declarations are structural, no emission
+    | SKUnknown ->
+        // Unknown nodes - pass through silently
+        TransferAcc.withResult (TRError (sprintf "Unknown node kind: %s" (SyntaxKindT.toString node.Kind))) acc
 
 // ═══════════════════════════════════════════════════════════════════
 // Entry Point - Codata Extraction from PSG Observation
@@ -516,6 +864,97 @@ let private witnessReturn (acc: TransferAcc) (outputKind: OutputKind) : MLIRZipp
             let mlirZ2 = MLIRZipper.witnessVoidOp (sprintf "%s = arith.constant 0 : i32" zeroSSA) mlirZ
             MLIRZipper.witnessVoidOp (sprintf "llvm.return %s : i32" zeroSSA) mlirZ2
 
+// ═══════════════════════════════════════════════════════════════════
+// Function Collection - Find all reachable function bindings
+// ═══════════════════════════════════════════════════════════════════
+
+/// Collect all reachable function bindings (excluding entry points which are handled separately)
+let collectReachableFunctions (psg: ProgramSemanticGraph) : PSGNode list =
+    let entryPointIds = psg.EntryPoints |> List.map (fun id -> id.Value) |> Set.ofList
+    psg.Nodes
+    |> Map.toList
+    |> List.map snd
+    |> List.filter (fun node ->
+        node.IsReachable &&
+        SyntaxKindT.isBinding node.Kind &&
+        not (match node.Kind with SKBinding BEntryPoint -> true | _ -> false) &&
+        not (match node.Kind with SKBinding BMutable -> true | _ -> false) &&  // Skip mutable variables
+        not (Set.contains node.Id.Value entryPointIds) &&
+        isFunction psg node)
+
+// ═══════════════════════════════════════════════════════════════════
+// Function MLIR Generation - Generate function definitions
+// ═══════════════════════════════════════════════════════════════════
+
+/// Generate MLIR for a single non-entry-point function
+let witnessNonEntryFunction (psg: ProgramSemanticGraph) (funcNode: PSGNode) (mlirZ: MLIRZipper) : MLIRZipper * string list =
+    let errors = ResizeArray<string>()
+    let funcName = getMangledFunctionName funcNode
+    let returnType = getFunctionReturnType psg funcNode
+
+    // Witness function header - for now, all non-entry functions take no args and return unit
+    // Full parameter handling would require more sophisticated type analysis
+    let mlirZ1 =
+        if returnType = "()" then
+            MLIRZipper.witnessVoidOp (sprintf "llvm.func @%s() {" funcName) mlirZ
+        else
+            MLIRZipper.witnessVoidOp (sprintf "llvm.func @%s() -> %s {" funcName returnType) mlirZ
+
+    // Create zipper and witness all nodes in function body
+    let psgZipper = PSGZipper.create psg funcNode
+    let acc = { TransferAcc.create psg with MLIR = mlirZ1 }
+    let finalAcc = PSGZipper.foldPostOrder witnessNode acc psgZipper
+
+    // Check for errors
+    match finalAcc.LastResult with
+    | TRError err -> errors.Add(sprintf "[%s] %s" funcName err)
+    | _ -> ()
+
+    // Witness return - for non-entry functions, generate proper return
+    let mlirZ2 =
+        if returnType = "()" then
+            MLIRZipper.witnessVoidOp "llvm.return" finalAcc.MLIR
+        else
+            match finalAcc.LastResult with
+            | TRValue (ssa, mlirType) when mlirType = returnType ->
+                MLIRZipper.witnessVoidOp (sprintf "llvm.return %s : %s" ssa returnType) finalAcc.MLIR
+            | TRValue (ssa, _) ->
+                // Type mismatch - try to return anyway (may need cast)
+                MLIRZipper.witnessVoidOp (sprintf "llvm.return %s : %s" ssa returnType) finalAcc.MLIR
+            | _ ->
+                // No value available - generate a default zero value for the return type
+                // This handles cases where function bodies have unimplemented constructs
+                let defaultSSA, mlirZ' = MLIRZipper.yieldSSA finalAcc.MLIR
+                let (mlirZ'', returnVal) =
+                    match returnType with
+                    | "i32" ->
+                        let m = MLIRZipper.witnessVoidOp (sprintf "%s = arith.constant 0 : i32" defaultSSA) mlirZ'
+                        (m, defaultSSA)
+                    | "i64" ->
+                        let m = MLIRZipper.witnessVoidOp (sprintf "%s = arith.constant 0 : i64" defaultSSA) mlirZ'
+                        (m, defaultSSA)
+                    | "i1" ->
+                        let m = MLIRZipper.witnessVoidOp (sprintf "%s = arith.constant 0 : i1" defaultSSA) mlirZ'
+                        (m, defaultSSA)
+                    | "!llvm.ptr" ->
+                        let m = MLIRZipper.witnessVoidOp (sprintf "%s = llvm.mlir.zero : !llvm.ptr" defaultSSA) mlirZ'
+                        (m, defaultSSA)
+                    | _ when returnType.StartsWith("!llvm.struct") ->
+                        // For struct types, generate llvm.mlir.undef
+                        let m = MLIRZipper.witnessVoidOp (sprintf "%s = llvm.mlir.undef : %s" defaultSSA returnType) mlirZ'
+                        (m, defaultSSA)
+                    | _ ->
+                        // Unknown type - use undef
+                        let m = MLIRZipper.witnessVoidOp (sprintf "%s = llvm.mlir.undef : %s" defaultSSA returnType) mlirZ'
+                        (m, defaultSSA)
+                errors.Add(sprintf "[%s] Generated default return value - function body incomplete" funcName)
+                MLIRZipper.witnessVoidOp (sprintf "llvm.return %s : %s" returnVal returnType) mlirZ''
+
+    // Close function
+    let mlirZ3 = MLIRZipper.witnessVoidOp "}" mlirZ2
+
+    (mlirZ3, errors |> Seq.toList)
+
 /// Generate complete MLIR module from PSG
 /// This is the API-compatible entry point that replaces MLIRTransfer.generateMLIR
 let generateMLIR (psg: ProgramSemanticGraph) (_correlations: CorrelationState) (_targetTriple: string) (outputKind: OutputKind) : GenerationResult =
@@ -524,7 +963,15 @@ let generateMLIR (psg: ProgramSemanticGraph) (_correlations: CorrelationState) (
     // Create a shared zipper for the module
     let mutable mlirZ = MLIRZipper.create ()
 
-    // Process each entry point
+    // STEP 1: Generate MLIR function definitions for all non-entry reachable functions
+    // This ensures they exist before any call sites reference them
+    let reachableFunctions = collectReachableFunctions psg
+    for funcNode in reachableFunctions do
+        let (mlirZ', funcErrors) = witnessNonEntryFunction psg funcNode mlirZ
+        mlirZ <- mlirZ'
+        errors.AddRange(funcErrors)
+
+    // STEP 2: Process entry points (main functions with exit handling)
     for entryId in psg.EntryPoints do
         match Map.tryFind entryId.Value psg.Nodes with
         | Some entryNode ->

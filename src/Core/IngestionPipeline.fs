@@ -114,7 +114,7 @@ let private generatePrunedSymbolData (psg: ProgramSemanticGraph) (result: Librar
                 IsReachable = Set.contains symbolId result.BasicResult.ReachableSymbols
                 LibraryCategory = Map.tryFind symbolId result.LibraryCategories |> Option.map (sprintf "%A")
                 NodeId = node.Id.Value
-                SyntaxKind = node.SyntaxKind
+                SyntaxKind = SyntaxKindT.toString node.Kind
             |}
         | None -> None
     )

@@ -95,7 +95,9 @@ type ExprKind =
     | ESequential    // Sequential expressions
     | EIfThenElse    // Conditional
     | EMatch         // Pattern match
+    | EMatchClause   // Match clause within a match/lambda
     | ELambda        // Lambda expression
+    | EMatchLambda   // Match lambda (function | pat -> expr)
     | EForLoop       // For loop
     | EWhileLoop     // While loop
     | ETryWith       // Try/with exception handling
@@ -105,15 +107,22 @@ type ExprKind =
     | EMutableSet    // Mutable variable assignment
     | EAddressOf     // Address-of operator (&)
     | ERecord        // Record construction
+    | ERecordField   // Record field assignment
     | ETuple         // Tuple construction
     | EArrayOrList   // Array or list construction
     | EIndexGet      // Indexer get (arr.[i])
     | EIndexSet      // Indexer set (arr.[i] <- v)
     | ETraitCall     // SRTP trait call
     | EInterpolatedString // Interpolated string literal
+    | EInterpolatedPart   // Part of interpolated string (literal or fill)
     | EObjExpr       // Object expression
     | EUpcast        // Upcast (:>)
     | EDowncast      // Downcast (:?>)
+    | ETypeTest      // Type test (:?)
+    | EDo            // Do expression (side effect)
+    | EAssert        // Assert expression
+    | ELazy          // Lazy expression
+    | ENew           // Object construction (new Type(...))
 
 /// Pattern syntax kinds (mirrors FCS SynPat cases)
 type PatternKind =
@@ -127,16 +136,28 @@ type PatternKind =
     | PAs           // As pattern
     | POr           // Or pattern
     | PTyped        // Typed pattern
+    | PListCons     // List cons pattern (head :: tail)
+    | PIsInst       // Type test pattern (:? type)
+    | PNull         // Null pattern
+    | PAttrib       // Attributed pattern
+    | PAnds         // And patterns (&)
+    | POptionalVal  // Optional value (?x)
+    | PQuoteExpr    // Quote expression (<@ @>)
+    | PInstanceMember // Instance member (this.Member)
 
 /// Declaration syntax kinds (mirrors FCS SynModuleDecl/SynTypeDefn)
 type DeclKind =
     | DModule       // Module declaration
     | DNestedModule // Nested module
     | DTypeDefn     // Type definition
-    | DBinding      // Value/function binding
+    | DTypesGroup   // Group of type declarations
+    | DLetDecl      // Let declaration at module level
     | DOpen         // Open declaration
     | DAttribute    // Attribute application
     | DException    // Exception type
+    | DModuleAbbrev // Module abbreviation
+    | DModuleExpr   // Module-level expression
+    | DMemberDefn   // Member definition (method, property, etc.)
 
 /// Binding kinds
 type BindingKind =
@@ -144,6 +165,7 @@ type BindingKind =
     | BUse          // use x = ...
     | BMutable      // let mutable x = ...
     | BFunction     // let f x = ...
+    | BEntryPoint   // [<EntryPoint>] binding or main function
 
 /// Top-level syntax kind - the typed alternative to string SyntaxKind
 type SyntaxKindT =
@@ -154,7 +176,7 @@ type SyntaxKindT =
     | SKUnknown  // For cases not yet classified (temporary during migration)
 
 module SyntaxKindT =
-    /// Convert typed SyntaxKind to string (for backwards compatibility during migration)
+    /// Convert typed SyntaxKind to string (for debug output and logging)
     let toString (sk: SyntaxKindT) : string =
         match sk with
         | SKExpr e -> sprintf "Expr:%A" e
@@ -395,9 +417,9 @@ type SRTPResolution =
 
 /// PSG node with soft-delete support added to existing structure
 type PSGNode = {
-    // EXISTING FIELDS - DO NOT CHANGE
+    // Core identification
     Id: NodeId
-    SyntaxKind: string  // DEPRECATED: Use Kind field for type-driven dispatch
+    Kind: SyntaxKindT  // Typed syntax kind for pattern matching
     Symbol: FSharpSymbol option
     Type: FSharpType option
     Constraints: FSharpGenericParameterConstraint list option
@@ -406,32 +428,26 @@ type PSGNode = {
     ParentId: NodeId option
     Children: ChildrenState
 
-    // NEW FIELDS - Soft-delete support
+    // Soft-delete support
     IsReachable: bool
     EliminationPass: int option
     EliminationReason: string option
     ReachabilityDistance: int option
 
-    // NEW FIELDS - Context tracking for continuation compilation
+    // Context tracking for continuation compilation
     ContextRequirement: ContextRequirement option
     ComputationPattern: ComputationPattern option
 
-    // NEW FIELD - Operation classification (set by ClassifyOperations nanopass)
+    // Operation classification (set by ClassifyOperations nanopass)
     Operation: OperationKind option
 
-    // NEW FIELD - Constant value for Const nodes (set by PSG Builder)
+    // Constant value for Const nodes (set by PSG Builder)
     ConstantValue: ConstantValue option
 
-    // NEW FIELD - Typed syntax kind for type-driven dispatch (set by PSG Builder)
-    // Use this instead of parsing SyntaxKind string
-    Kind: SyntaxKindT
-
-    // NEW FIELD - SRTP resolution (set by ResolveSRTP nanopass)
-    // For TraitCall expressions, this contains the resolved concrete implementation
+    // SRTP resolution (set by ResolveSRTP nanopass)
     SRTPResolution: SRTPResolution option
 
-    // NEW FIELD - Platform binding info (set by DetectPlatformBindings nanopass)
-    // For Alloy.Platform.Bindings functions, contains entry point and calling convention
+    // Platform binding info (set by DetectPlatformBindings nanopass)
     PlatformBinding: PlatformBindingInfo option
 }
 
@@ -471,49 +487,10 @@ and PSGErrorKind =
 /// Helper functions for working with ChildrenState
 module ChildrenStateHelpers =
 
-    /// Create a new node with NotProcessed children state
-    /// The `kind` parameter defaults to Unknown for backwards compatibility during migration
-    let createWithNotProcessed id syntaxKind symbol range sourceFile parentId = {
-        Id = id
-        SyntaxKind = syntaxKind
-        Symbol = symbol
-        Type = None
-        Constraints = None
-        Range = range
-        SourceFile = sourceFile
-        ParentId = parentId
-        Children = NotProcessed
-
-        // Initialize new soft-delete fields with defaults
-        IsReachable = false
-        EliminationPass = None
-        EliminationReason = None
-        ReachabilityDistance = None
-
-        // Initialize context tracking fields
-        ContextRequirement = None
-        ComputationPattern = None
-
-        // Initialize operation classification
-        Operation = None
-
-        // Initialize constant value
-        ConstantValue = None
-
-        // Initialize typed syntax kind (Unknown during migration)
-        Kind = SKUnknown
-
-        // Initialize SRTP resolution
-        SRTPResolution = None
-
-        // Initialize platform binding info
-        PlatformBinding = None
-    }
-
     /// Create a new node with typed syntax kind
-    let createWithKind id syntaxKind kind symbol range sourceFile parentId = {
+    let create id kind symbol range sourceFile parentId : PSGNode = {
         Id = id
-        SyntaxKind = syntaxKind
+        Kind = kind
         Symbol = symbol
         Type = None
         Constraints = None
@@ -522,29 +499,26 @@ module ChildrenStateHelpers =
         ParentId = parentId
         Children = NotProcessed
 
-        // Initialize new soft-delete fields with defaults
+        // Soft-delete fields
         IsReachable = false
         EliminationPass = None
         EliminationReason = None
         ReachabilityDistance = None
 
-        // Initialize context tracking fields
+        // Context tracking fields
         ContextRequirement = None
         ComputationPattern = None
 
-        // Initialize operation classification
+        // Operation classification
         Operation = None
 
-        // Initialize constant value
+        // Constant value
         ConstantValue = None
 
-        // Set typed syntax kind
-        Kind = kind
-
-        // Initialize SRTP resolution
+        // SRTP resolution
         SRTPResolution = None
 
-        // Initialize platform binding info
+        // Platform binding info
         PlatformBinding = None
     }
 
@@ -593,10 +567,9 @@ module ReachabilityHelpers =
     /// Analyze context requirement from syntax kind and symbol
     let analyzeContextRequirement (node: PSGNode) : ContextRequirement option =
         // First check for resource management patterns in syntax
-        match node.SyntaxKind with
-        | "LetOrUse:Use" | "Binding:Use" -> Some ResourceAccess
-        | "TryWith" | "TryFinally" -> Some ResourceAccess
-        | sk when sk.Contains("Console.") -> Some ResourceAccess  // Any Console operation is IO
+        match node.Kind with
+        | SKBinding BUse -> Some ResourceAccess
+        | SKExpr ETryWith | SKExpr ETryFinally -> Some ResourceAccess
         | _ ->
             // Then check symbol information for async/IO patterns
             match node.Symbol with
@@ -667,11 +640,11 @@ module ReachabilityHelpers =
                         else
                             Some Pure
                     | _ -> Some Pure
-            | None -> 
+            | None ->
                 // Fallback to syntax kind analysis
-                match node.SyntaxKind with
-                | sk when sk.StartsWith("Const:") -> Some Pure
-                | sk when sk.Contains("Sequential") -> None  // Inherit from children
+                match node.Kind with
+                | SKExpr EConst -> Some Pure
+                | SKExpr ESequential -> None  // Inherit from children
                 | _ -> None
     
     /// Analyze computation pattern from node structure
@@ -711,10 +684,10 @@ module ReachabilityHelpers =
             | _ -> Some DataDriven
         | None ->
             // Fallback to syntax kind patterns
-            match node.SyntaxKind with
-            | sk when sk.Contains("Sequential") -> Some DataDriven
-            | sk when sk.Contains("Match") -> Some DataDriven
-            | sk when sk.Contains("Lambda") -> Some DemandDriven
+            match node.Kind with
+            | SKExpr ESequential -> Some DataDriven
+            | SKExpr EMatch -> Some DataDriven
+            | SKExpr ELambda -> Some DemandDriven
             | _ -> None
     
     /// Update node with analyzed context

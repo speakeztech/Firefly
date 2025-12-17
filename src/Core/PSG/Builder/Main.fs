@@ -14,6 +14,7 @@ open Core.PSG.Nanopass.ReducePipeOperators
 open Core.PSG.Nanopass.DefUseEdges
 open Core.PSG.Nanopass.ConstantPropagation
 open Core.PSG.Nanopass.LowerStringLength
+open Core.PSG.Nanopass.LowerStructConstructors
 open Core.PSG.Nanopass.ParameterAnnotation
 open Core.PSG.Nanopass.ClassifyOperations
 open Core.PSG.Nanopass.LowerInterpolatedStrings
@@ -229,8 +230,15 @@ let runEnrichmentPasses
         emitNanopassIntermediateAsync strlenLoweredGraph "3a2_strlen_lowered" (getNanopassOutputDir())
         emitNanopassDiffAsync constPropGraph strlenLoweredGraph "3a_const_prop" "3a2_strlen_lowered" (getNanopassOutputDir())
 
+    // Lower struct constructors to Record nodes (Fidelity memory model)
+    let structLoweredGraph = lowerStructConstructors strlenLoweredGraph
+
+    if shouldEmitNanopassIntermediates() then
+        emitNanopassIntermediateAsync structLoweredGraph "3a3_struct_lowered" (getNanopassOutputDir())
+        emitNanopassDiffAsync strlenLoweredGraph structLoweredGraph "3a2_strlen_lowered" "3a3_struct_lowered" (getNanopassOutputDir())
+
     // Annotate function parameters
-    let paramAnnotatedGraph = annotateParameters strlenLoweredGraph
+    let paramAnnotatedGraph = annotateParameters structLoweredGraph
 
     // Classify operations
     let classifiedGraph = classifyOperations paramAnnotatedGraph

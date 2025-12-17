@@ -65,7 +65,7 @@ let emitNanopassIntermediate (psg: ProgramSemanticGraph) (phaseLabel: string) (o
                 |> Map.toSeq
                 |> Seq.map (fun (id, node) -> {|
                     Id = id
-                    SyntaxKind = node.SyntaxKind
+                    SyntaxKind = SyntaxKindT.toString node.Kind
                     SymbolName = node.Symbol |> Option.map (fun s -> s.DisplayName)
                     SymbolFullName = node.Symbol |> Option.map (fun s -> s.FullName)
                     TypeName = node.Type |> Option.map (fun t ->

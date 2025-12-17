@@ -9,31 +9,26 @@ module Core.PSG.Nanopass.ProvisionalCallGraph
 
 open Core.PSG.Types
 
-/// Extract function name from a binding syntax kind
-let private extractBindingName (syntaxKind: string) : string option =
-    if syntaxKind.StartsWith("Binding:") then
-        Some (syntaxKind.Substring(8))
-    elif syntaxKind.StartsWith("Binding:Mutable:") then
-        Some (syntaxKind.Substring(16))
-    else
-        None
+/// Extract function name from a binding node
+let private extractBindingName (node: PSGNode) : string option =
+    match node.Kind with
+    | SKBinding _ ->
+        // Use symbol name if available
+        node.Symbol |> Option.map (fun s -> s.DisplayName)
+    | _ -> None
 
-/// Extract called function name from various syntax kinds
-let private extractCalledName (syntaxKind: string) : string option =
-    // LongIdent:Module.Function
-    if syntaxKind.StartsWith("LongIdent:") then
-        Some (syntaxKind.Substring(10))
-    // MethodCall:MethodName
-    elif syntaxKind.StartsWith("MethodCall:") then
-        Some (syntaxKind.Substring(11))
-    // Ident:name
-    elif syntaxKind.StartsWith("Ident:") then
-        Some (syntaxKind.Substring(6))
-    // App:FunctionCall with child LongIdent
-    elif syntaxKind = "App:FunctionCall" then
+/// Extract called function name from a node
+let private extractCalledName (node: PSGNode) : string option =
+    match node.Kind with
+    | SKExpr ELongIdent | SKExpr EIdent ->
+        // Use symbol name if available
+        node.Symbol |> Option.map (fun s -> s.DisplayName)
+    | SKExpr EMethodCall ->
+        // Use symbol name if available
+        node.Symbol |> Option.map (fun s -> s.DisplayName)
+    | SKExpr EApp ->
         None  // Will be handled by looking at children
-    else
-        None
+    | _ -> None
 
 /// Extract the module path from a node's file location
 let private getModuleFromFile (fileName: string) : string =
@@ -45,12 +40,12 @@ let buildProvisionalCallGraph (psg: ProgramSemanticGraph) : Map<string, string l
     let mutable callGraph = Map.empty
     let mutable currentFunction = None
 
-    // First pass: identify all function definitions by their syntax kind
+    // First pass: identify all function definitions
     let functionDefinitions =
         psg.Nodes
         |> Map.toSeq
         |> Seq.choose (fun (nodeId, node) ->
-            extractBindingName node.SyntaxKind
+            extractBindingName node
             |> Option.map (fun name -> (nodeId, name, node)))
         |> Seq.toList
 
@@ -79,7 +74,7 @@ let buildProvisionalCallGraph (psg: ProgramSemanticGraph) : Map<string, string l
 
     // Second pass: find all calls and build edges
     for KeyValue(nodeId, node) in psg.Nodes do
-        match extractCalledName node.SyntaxKind with
+        match extractCalledName node with
         | Some calledName ->
             // Find which function this call is in
             match Map.tryFind nodeId nodeToFunction with
@@ -103,7 +98,7 @@ let addProvisionalCallEdges (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
         psg.Nodes
         |> Map.toSeq
         |> Seq.choose (fun (nodeId, node) ->
-            extractBindingName node.SyntaxKind
+            extractBindingName node
             |> Option.map (fun name -> (name, nodeId)))
         |> Map.ofSeq
 
@@ -138,12 +133,12 @@ let addProvisionalCallEdges (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
 let getDefinedFunctions (psg: ProgramSemanticGraph) : Set<string> =
     psg.Nodes
     |> Map.toSeq
-    |> Seq.choose (fun (_, node) -> extractBindingName node.SyntaxKind)
+    |> Seq.choose (fun (_, node) -> extractBindingName node)
     |> Set.ofSeq
 
 /// Get the set of function names called in this PSG
 let getCalledFunctions (psg: ProgramSemanticGraph) : Set<string> =
     psg.Nodes
     |> Map.toSeq
-    |> Seq.choose (fun (_, node) -> extractCalledName node.SyntaxKind)
+    |> Seq.choose (fun (_, node) -> extractCalledName node)
     |> Set.ofSeq

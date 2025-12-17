@@ -38,20 +38,15 @@ let extractConstant (node: PSGNode) : (string * string) option =
     | Some (FloatValue f) -> Some (string f, "f64")
     | Some UnitValue -> Some ("", "unit")
     | None ->
-        let kind = node.SyntaxKind
-        if kind.StartsWith("Const:") then
-            let constKind = kind.Substring(6)
-            match constKind with
-            | "Int32 0" -> Some ("0", "i32")
-            | s when s.StartsWith("Int32 ") -> Some (s.Substring(6), "i32")
-            | s when s.StartsWith("Int64 ") -> Some (s.Substring(6), "i64")
-            | s when s.StartsWith("Byte ") -> Some (s.Substring(5).TrimEnd([|'u'; 'y'|]), "i8")
-            | "Unit" -> Some ("", "unit")
-            | s when s.StartsWith("String ") -> Some (s.Substring(7), "string")
-            | "String" -> Some ("", "string")
-            | "Null" -> Some ("null", "!llvm.ptr")
-            | _ -> None
-        else None
+        // Fallback: parse from Kind for backward compatibility with old PSG data
+        match node.Kind with
+        | SKExpr EConst ->
+            let kind = SyntaxKindT.toString node.Kind
+            if kind.StartsWith("Expr:EConst") then
+                // For typed Kind, constant value should be in ConstantValue field
+                None
+            else None
+        | _ -> None
 
 /// Map an FSharpType to its MLIR representation
 let mapFSharpTypeToMLIR (ftype: FSharpType) : string =
@@ -103,18 +98,13 @@ let getChildren (graph: ProgramSemanticGraph) (node: PSGNode) : PSGNode list =
     | Parent ids -> ids |> List.choose (fun id -> Map.tryFind id.Value graph.Nodes)
     | NoChildren | NotProcessed -> []
 
-/// Extract function name from a SyntaxKind (e.g., "LongIdent:Console.Write" → "Write")
-let extractFunctionNameFromKind (syntaxKind: string) : string option =
-    if syntaxKind.StartsWith("LongIdent:") then
-        let fullName = syntaxKind.Substring(10)
-        // Get last part after dot
-        let lastDot = fullName.LastIndexOf('.')
-        if lastDot >= 0 then Some (fullName.Substring(lastDot + 1))
-        else Some fullName
-    elif syntaxKind.StartsWith("Ident:") then
-        Some (syntaxKind.Substring(6))
-    else
-        None
+/// Extract function name from a PSG node's Symbol
+let extractFunctionNameFromNode (node: PSGNode) : string option =
+    match node.Symbol with
+    | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
+        Some (try mfv.CompiledName with _ -> mfv.DisplayName)
+    | Some sym -> Some sym.DisplayName
+    | None -> None
 
 /// Find a function Binding node by name in the PSG
 let findFunctionBinding (graph: ProgramSemanticGraph) (funcName: string) : PSGNode option =
@@ -122,7 +112,7 @@ let findFunctionBinding (graph: ProgramSemanticGraph) (funcName: string) : PSGNo
     |> Map.toSeq
     |> Seq.tryFind (fun (_, node) ->
         // Check for Binding nodes
-        let isBinding = node.SyntaxKind.StartsWith("Binding")
+        let isBinding = SyntaxKindT.isBinding node.Kind
         // Check Symbol for name matching
         let symbolMatch =
             match node.Symbol with
@@ -138,13 +128,13 @@ let getFunctionParamsAndBody (graph: ProgramSemanticGraph) (bindingNode: PSGNode
     let children = getChildren graph bindingNode
     let patternNodes =
         children
-        |> List.filter (fun c -> c.SyntaxKind.StartsWith("Pattern:"))
+        |> List.filter (fun c -> SyntaxKindT.isPattern c.Kind)
     let bodyNode =
         children
-        |> List.tryFind (fun c -> not (c.SyntaxKind.StartsWith("Pattern:")))
+        |> List.tryFind (fun c -> not (SyntaxKindT.isPattern c.Kind))
     // Extract named parameters from pattern nodes
     let rec extractNamedParams (node: PSGNode) : PSGNode list =
-        if node.SyntaxKind.StartsWith("Pattern:Named:") then
+        if SyntaxKindT.isNamedPattern node.Kind then
             [node]
         else
             getChildren graph node
@@ -306,7 +296,7 @@ and transferConsole (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: PSGN
             match argNodes with
             | [argNode] ->
                 // Check if argument is a string constant - if so, emit direct syscall
-                let isStringConstant = argNode.SyntaxKind.StartsWith("Const:String")
+                let isStringConstant = SyntaxKindT.isConst argNode.Kind
 
                 if isStringConstant then
                     // String constant - emit direct write syscall with known length
@@ -314,11 +304,7 @@ and transferConsole (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: PSGN
                     let stringContent =
                         match argNode.ConstantValue with
                         | Some (StringValue s) -> s
-                        | _ ->
-                            // Fall back to extracting from SyntaxKind
-                            if argNode.SyntaxKind.StartsWith("Const:String ") then
-                                argNode.SyntaxKind.Substring(13)
-                            else ""
+                        | _ -> ""
 
                     if stringContent <> "" then
                         let strLen = stringContent.Length
@@ -762,7 +748,7 @@ and transferUnclassifiedApp (ctx: EmitContext) (graph: ProgramSemanticGraph) (no
                 | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
                     Some (try mfv.CompiledName with _ -> mfv.DisplayName)
                 | _ ->
-                    extractFunctionNameFromKind funcNode.SyntaxKind
+                    extractFunctionNameFromNode funcNode
 
             match funcNameOpt with
             | Some funcName ->
@@ -787,9 +773,9 @@ and transferUnclassifiedApp (ctx: EmitContext) (graph: ProgramSemanticGraph) (no
                 | None ->
                     // HARD FAIL: Unclassified App with no PSG binding
                     // This indicates incomplete PSG enrichment
-                    TError (sprintf "PSG ENRICHMENT INCOMPLETE: Unclassified App node for function '%s'. Node %s should have Operation set by ClassifyOperations nanopass." funcName node.SyntaxKind)
+                    TError (sprintf "PSG ENRICHMENT INCOMPLETE: Unclassified App node for function '%s'. Node %A should have Operation set by ClassifyOperations nanopass." funcName node.Kind)
             | None ->
-                TError (sprintf "Cannot determine function for unclassified App: %s" node.SyntaxKind)
+                TError (sprintf "Cannot determine function for unclassified App: %A" node.Kind)
     | _ ->
         TError "App node has no children"
 
@@ -799,10 +785,9 @@ and transferUnclassifiedApp (ctx: EmitContext) (graph: ProgramSemanticGraph) (no
 
 /// Transfer a PSG node to MLIR
 and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: PSGNode) : TransferResult =
-    let kind = node.SyntaxKind
-
     // Constants
-    if kind.StartsWith("Const:") then
+    match node.Kind with
+    | SKExpr EConst ->
         match extractConstant node with
         | Some (_, "unit") -> TVoid
         | Some (value, "string") ->
@@ -820,10 +805,10 @@ and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: P
             let ssa = EmitContext.nextSSA ctx
             EmitContext.emitLine ctx (sprintf "%s = arith.constant %s : %s" ssa value mlirType)
             TValue (ssa, mlirType)
-        | None -> TError (sprintf "Unknown constant: %s" kind)
+        | None -> TError (sprintf "Unknown constant: %A" node.Kind)
 
     // Identifiers / Value references
-    elif kind.StartsWith("Ident:") || kind.StartsWith("LongIdent:") || kind.StartsWith("Value:") then
+    | SKExpr EIdent | SKExpr ELongIdent ->
         // Try def-use resolution
         let defEdge = graph.Edges |> List.tryFind (fun e -> e.Source = node.Id && e.Kind = SymbolUse)
         match defEdge with
@@ -840,10 +825,10 @@ and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: P
         | None ->
             match EmitContext.lookupNodeSSA ctx node.Id with
             | Some (ssa, mlirType) -> TValue (ssa, mlirType)
-            | None -> TError (sprintf "Unresolved identifier: %s" kind)
+            | None -> TError (sprintf "Unresolved identifier: %A" node.Kind)
 
     // Sequential expressions
-    elif kind.StartsWith("Sequential") then
+    | SKExpr ESequential ->
         let children = getChildren graph node
         let rec transferAll lastResult remaining =
             match remaining with
@@ -856,21 +841,20 @@ and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: P
         transferAll TVoid children
 
     // LetOrUse:Let - has two children: binding and body
-    elif kind.StartsWith("LetOrUse:Let") then
+    | SKExpr ELetOrUse ->
         let children = getChildren graph node
         // LetOrUse:Let structure: Binding [name], <body expression>
-        let bindingChild = children |> List.tryFind (fun c -> c.SyntaxKind.StartsWith("Binding"))
+        let bindingChild = children |> List.tryFind (fun c -> SyntaxKindT.isBinding c.Kind)
         let bodyChild = children |> List.tryFind (fun c ->
-            not (c.SyntaxKind.StartsWith("Binding")) &&
-            not (c.SyntaxKind.StartsWith("Pattern:")) &&
-            not (c.SyntaxKind.StartsWith("Named")))
+            not (SyntaxKindT.isBinding c.Kind) &&
+            not (SyntaxKindT.isPattern c.Kind))
 
         // Process the binding first to define the variable
         match bindingChild with
         | Some binding ->
             let bindingResult = transferNodeDirect ctx graph binding
             // Record the binding's SSA for the Pattern:Named node
-            let patternNode = getChildren graph binding |> List.tryFind (fun c -> c.SyntaxKind.StartsWith("Pattern:Named:"))
+            let patternNode = getChildren graph binding |> List.tryFind (fun c -> SyntaxKindT.isNamedPattern c.Kind)
             match patternNode, bindingResult with
             | Some pn, TValue (ssa, mlirType) ->
                 EmitContext.recordNodeSSA ctx pn.Id ssa mlirType
@@ -883,28 +867,29 @@ and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: P
         | None -> TVoid
 
     // Plain Let bindings (just the binding part, no body)
-    elif kind.StartsWith("Binding") || kind = "LetOrUse" || kind.StartsWith("Let") then
+    | SKBinding bindKind ->
         let children = getChildren graph node
-        let valueChild = children |> List.tryFind (fun c ->
-            not (c.SyntaxKind.StartsWith("Pattern:")) && not (c.SyntaxKind.StartsWith("Named")))
+        let valueChild = children |> List.tryFind (fun c -> not (SyntaxKindT.isPattern c.Kind))
         match valueChild with
         | Some child ->
             let result = transferNodeDirect ctx graph child
             match result with
             | TValue (ssa, mlirType) ->
                 EmitContext.recordNodeSSA ctx node.Id ssa mlirType
-                if kind.Contains("Mutable") then
+                match bindKind with
+                | BMutable ->
                     let ptrSSA = EmitContext.nextSSA ctx
                     EmitContext.emitLine ctx (sprintf "%s = llvm.alloca i64 x 1 : (i64) -> !llvm.ptr" ptrSSA)
                     EmitContext.emitLine ctx (sprintf "llvm.store %s, %s : %s, !llvm.ptr" ssa ptrSSA mlirType)
                     EmitContext.recordMutableBinding ctx node.Id mlirType
                     EmitContext.recordNodeSSA ctx node.Id ptrSSA "!llvm.ptr"
+                | _ -> ()
                 result
             | _ -> result
         | None -> TVoid
 
     // If-then-else
-    elif kind.StartsWith("IfThenElse") then
+    | SKExpr EIfThenElse ->
         let children = getChildren graph node
         match children with
         | cond :: thenBranch :: rest ->
@@ -950,7 +935,7 @@ and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: P
         | _ -> TError "Invalid IfThenElse structure"
 
     // While loops
-    elif kind.StartsWith("WhileLoop") then
+    | SKExpr EWhileLoop ->
         let children = getChildren graph node
         match children with
         | cond :: body :: _ ->
@@ -973,36 +958,36 @@ and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: P
         | _ -> TError "Invalid WhileLoop structure"
 
     // Match expressions - pattern matching
-    elif kind.StartsWith("Match") then
+    | SKExpr EMatch ->
         let children = getChildren graph node
         // Structure: Match has scrutinee as first child, then MatchClause children
         // For freestanding mode (no argv), we execute the wildcard/default clause
-        let clauses = children |> List.filter (fun c -> c.SyntaxKind.StartsWith("MatchClause"))
+        let clauses = children |> List.filter (fun c -> match c.Kind with SKExpr EMatchClause -> true | _ -> false)
 
         // Find wildcard clause or last clause as default
         let defaultClause =
             clauses
             |> List.tryFind (fun clause ->
                 let clauseChildren = getChildren graph clause
-                clauseChildren |> List.exists (fun c -> c.SyntaxKind = "Pattern:Wildcard"))
+                clauseChildren |> List.exists (fun c -> match c.Kind with SKPattern PWild -> true | _ -> false))
             |> Option.orElse (List.tryLast clauses)
 
         match defaultClause with
         | Some clause ->
             // Find the body (non-Pattern child of MatchClause)
             let clauseChildren = getChildren graph clause
-            let body = clauseChildren |> List.tryFind (fun c -> not (c.SyntaxKind.StartsWith("Pattern:")))
+            let body = clauseChildren |> List.tryFind (fun c -> not (SyntaxKindT.isPattern c.Kind))
             match body with
             | Some bodyNode -> transferNodeDirect ctx graph bodyNode
             | None -> TVoid
         | None -> TError "Match has no clauses"
 
     // MatchClause - should be handled by parent Match
-    elif kind.StartsWith("MatchClause") then
+    | SKExpr EMatchClause ->
         TVoid
 
     // Application nodes - dispatch by Operation
-    elif kind.StartsWith("App") then
+    | SKExpr EApp ->
         match node.Operation with
         | Some (Arithmetic op) -> transferArithmetic ctx graph node op
         | Some (Comparison op) -> transferComparison ctx graph node op
@@ -1020,7 +1005,7 @@ and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: P
         | None -> transferUnclassifiedApp ctx graph node
 
     // Tuple construction
-    elif kind.StartsWith("Tuple") || kind.StartsWith("NewTuple") then
+    | SKExpr ETuple ->
         let children = getChildren graph node
         let results = children |> List.map (fun c -> transferNodeDirect ctx graph c)
         let ssas = results |> List.choose TransferResult.getSSA
@@ -1040,7 +1025,7 @@ and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: P
             TValue (finalSSA, tupleType)
 
     // Property/field access
-    elif kind.StartsWith("PropGet") || kind.StartsWith("FieldGet") then
+    | SKExpr EPropertyAccess ->
         match EmitContext.lookupFieldAccess ctx node with
         | Some fieldInfo ->
             let children = getChildren graph node
@@ -1056,10 +1041,10 @@ and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: P
                     TValue (resultSSA, fieldType)
                 | _ -> objResult
             | _ -> TError "Property access requires object"
-        | None -> TError (sprintf "Unknown property: %s" kind)
+        | None -> TError (sprintf "Unknown property: %A" node.Kind)
 
     // Mutable set
-    elif kind.StartsWith("MutableSet") || kind.StartsWith("ValueSet") then
+    | SKExpr EMutableSet ->
         let children = getChildren graph node
         match children with
         | target :: value :: _ ->
@@ -1074,14 +1059,14 @@ and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: P
         | _ -> TError "MutableSet requires target and value"
 
     // TypeApp - passthrough
-    elif kind.StartsWith("TypeApp") then
+    | SKExpr ETypeApp ->
         let children = getChildren graph node
         match children with
         | child :: _ -> transferNodeDirect ctx graph child
         | _ -> TVoid
 
     // AddressOf
-    elif kind.StartsWith("AddressOf") then
+    | SKExpr EAddressOf ->
         let children = getChildren graph node
         match children with
         | child :: _ ->
@@ -1092,11 +1077,12 @@ and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: P
         | _ -> TError "AddressOf requires child"
 
     // Patterns - structural, no emission
-    elif kind.StartsWith("Pattern:") || kind.StartsWith("Named") then
+    | SKPattern _ ->
         TVoid
 
-    else
-        TError (sprintf "Unknown node type: %s" kind)
+    // Unknown or unhandled node type
+    | _ ->
+        TError (sprintf "Unknown node type: %A" node.Kind)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PART 5: XParsec Combinators
@@ -1104,7 +1090,7 @@ and transferNodeDirect (ctx: EmitContext) (graph: ProgramSemanticGraph) (node: P
 
 /// Transfer a constant node
 let pTransferConstant : Transfer =
-    satisfyChild (fun n -> n.SyntaxKind.StartsWith("Const:"))
+    satisfyChild (fun n -> SyntaxKindT.isConst n.Kind)
     |> pBind (fun node ->
         getEmitCtx
         |> pBind (fun ctx ->
@@ -1114,9 +1100,8 @@ let pTransferConstant : Transfer =
 /// Transfer an identifier
 let pTransferIdent : Transfer =
     satisfyChild (fun n ->
-        n.SyntaxKind.StartsWith("Ident:") ||
-        n.SyntaxKind.StartsWith("LongIdent:") ||
-        n.SyntaxKind.StartsWith("Value:"))
+        SyntaxKindT.isIdent n.Kind ||
+        SyntaxKindT.isLongIdent n.Kind)
     |> pBind (fun node ->
         getEmitCtx
         |> pBind (fun ctx ->
@@ -1125,7 +1110,7 @@ let pTransferIdent : Transfer =
 
 /// Transfer a sequential expression
 let pTransferSequential : Transfer =
-    satisfyChild (fun n -> n.SyntaxKind.StartsWith("Sequential"))
+    satisfyChild (fun n -> match n.Kind with SKExpr ESequential -> true | _ -> false)
     |> pBind (fun node ->
         getEmitCtx
         |> pBind (fun ctx ->
@@ -1135,9 +1120,8 @@ let pTransferSequential : Transfer =
 /// Transfer a let binding
 let pTransferLetBinding : Transfer =
     satisfyChild (fun n ->
-        n.SyntaxKind.StartsWith("Binding") ||
-        n.SyntaxKind = "LetOrUse" ||
-        n.SyntaxKind.StartsWith("Let"))
+        SyntaxKindT.isBinding n.Kind ||
+        match n.Kind with SKExpr ELetOrUse -> true | _ -> false)
     |> pBind (fun node ->
         getEmitCtx
         |> pBind (fun ctx ->
@@ -1146,7 +1130,7 @@ let pTransferLetBinding : Transfer =
 
 /// Transfer an if-then-else
 let pTransferIfThenElse : Transfer =
-    satisfyChild (fun n -> n.SyntaxKind.StartsWith("IfThenElse"))
+    satisfyChild (fun n -> match n.Kind with SKExpr EIfThenElse -> true | _ -> false)
     |> pBind (fun node ->
         getEmitCtx
         |> pBind (fun ctx ->
@@ -1155,7 +1139,7 @@ let pTransferIfThenElse : Transfer =
 
 /// Transfer an application
 let pTransferApp : Transfer =
-    satisfyChild (fun n -> n.SyntaxKind.StartsWith("App"))
+    satisfyChild (fun n -> SyntaxKindT.isApp n.Kind)
     |> pBind (fun node ->
         getEmitCtx
         |> pBind (fun ctx ->
@@ -1164,7 +1148,7 @@ let pTransferApp : Transfer =
 
 /// Transfer a while loop
 let pTransferWhile : Transfer =
-    satisfyChild (fun n -> n.SyntaxKind.StartsWith("WhileLoop"))
+    satisfyChild (fun n -> match n.Kind with SKExpr EWhileLoop -> true | _ -> false)
     |> pBind (fun node ->
         getEmitCtx
         |> pBind (fun ctx ->

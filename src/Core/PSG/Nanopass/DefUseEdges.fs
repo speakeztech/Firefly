@@ -61,7 +61,7 @@ let private isParameterPattern (psg: ProgramSemanticGraph) (node: PSGNode) : boo
     match node.ParentId with
     | Some parentId ->
         match Map.tryFind parentId.Value psg.Nodes with
-        | Some parentNode -> parentNode.SyntaxKind.StartsWith("Pattern:LongIdent")
+        | Some parentNode -> SyntaxKindT.isLongIdentPattern parentNode.Kind
         | None -> false
     | None -> false
 
@@ -71,13 +71,12 @@ let private isParameterPattern (psg: ProgramSemanticGraph) (node: PSGNode) : boo
 /// - Pattern:Named nodes ONLY if they are function parameters (SSA recorded by FunctionEmitter)
 ///   Pattern:Named inside Bindings are NOT indexed - we use the Binding node instead
 let private isDefinitionNode (psg: ProgramSemanticGraph) (node: PSGNode) : bool =
-    if node.SyntaxKind.StartsWith("Binding") then
-        true
-    elif node.SyntaxKind.StartsWith("Pattern:Named") then
+    match node.Kind with
+    | SKBinding _ -> true
+    | SKPattern PNamed ->
         // Only index Pattern:Named that are function parameters
         isParameterPattern psg node
-    else
-        false
+    | _ -> false
 
 /// Build an index of symbol definitions from Binding and parameter Pattern:Named nodes.
 /// This is Nanopass 3a - a pure function from PSG to index.
@@ -100,13 +99,12 @@ let buildDefinitionIndex (psg: ProgramSemanticGraph) : SymbolDefinitionIndex =
 // Nanopass 3b: Create Def-Use Edges
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Check if a node is a variable use (Ident, Value, LongIdent, MutableSet)
+/// Check if a node is a variable use (Ident, LongIdent, MutableSet)
 /// MutableSet is included because it references a mutable variable for assignment
 let private isVariableUse (node: PSGNode) : bool =
-    node.SyntaxKind.StartsWith("Ident:") ||
-    node.SyntaxKind.StartsWith("Value:") ||
-    node.SyntaxKind.StartsWith("LongIdent:") ||
-    node.SyntaxKind.StartsWith("MutableSet:")
+    match node.Kind with
+    | SKExpr EIdent | SKExpr ELongIdent | SKExpr EMutableSet -> true
+    | _ -> false
 
 /// Create def-use edges for all variable uses in the PSG.
 /// This is Nanopass 3b - transforms PSG by adding SymbolUse edges.

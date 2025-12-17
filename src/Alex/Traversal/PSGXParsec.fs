@@ -262,7 +262,7 @@ module EmitContext =
         graph.Nodes
         |> Map.toSeq
         |> Seq.choose (fun (_, node) ->
-            if node.SyntaxKind.StartsWith("Binding") then
+            if SyntaxKindT.isBinding node.Kind then
                 match node.Symbol with
                 | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
                     try Some (mfv.FullName, node.Id) with _ -> None
@@ -519,12 +519,14 @@ let anyChild : PSGChildParser<PSGNode> =
     satisfyChild (fun _ -> true)
 
 /// Match child with specific syntax kind (exact match)
+/// Deprecated: Use typed Kind pattern matching instead
 let childSyntaxKind (kind: string) : PSGChildParser<PSGNode> =
-    satisfyChild (fun n -> n.SyntaxKind = kind)
+    satisfyChild (fun n -> SyntaxKindT.toString n.Kind = kind)
 
 /// Match child with syntax kind starting with prefix
+/// Deprecated: Use typed Kind pattern matching instead
 let childKindPrefix (prefix: string) : PSGChildParser<PSGNode> =
-    satisfyChild (fun n -> n.SyntaxKind.StartsWith(prefix))
+    satisfyChild (fun n -> (SyntaxKindT.toString n.Kind).StartsWith(prefix))
 
 /// Match child with specific symbol full name
 let childSymbolName (name: string) : PSGChildParser<PSGNode> =
@@ -722,31 +724,35 @@ let remainingChildren : PSGChildParser<PSGNode list> =
 
 /// Match App node child
 let appChild : PSGChildParser<PSGNode> =
-    childKindPrefix "App"
+    satisfyChild (fun n -> SyntaxKindT.isApp n.Kind)
 
 /// Match Const node child
 let constChild : PSGChildParser<PSGNode> =
-    childKindPrefix "Const"
+    satisfyChild (fun n -> SyntaxKindT.isConst n.Kind)
 
 /// Match Ident/Value node child
 let identChild : PSGChildParser<PSGNode> =
     satisfyChild (fun n ->
-        n.SyntaxKind.StartsWith("Ident") ||
-        n.SyntaxKind.StartsWith("Value") ||
-        n.SyntaxKind.StartsWith("LongIdent"))
+        SyntaxKindT.isIdent n.Kind || SyntaxKindT.isLongIdent n.Kind)
 
 /// Match Let binding child
 let letChild : PSGChildParser<PSGNode> =
     satisfyChild (fun n ->
-        n.SyntaxKind = "LetOrUse" || n.SyntaxKind.StartsWith("Let"))
+        match n.Kind with
+        | SKExpr ELetOrUse -> true
+        | SKBinding (BLet | BFunction | BUse | BMutable) -> true
+        | _ -> false)
 
 /// Match Sequential child
 let sequentialChild : PSGChildParser<PSGNode> =
-    childKindPrefix "Sequential"
+    satisfyChild (fun n ->
+        match n.Kind with
+        | SKExpr ESequential -> true
+        | _ -> false)
 
 /// Match Pattern node child (structural, typically skipped)
 let patternChild : PSGChildParser<PSGNode> =
-    childKindPrefix "Pattern:"
+    satisfyChild (fun n -> SyntaxKindT.isPattern n.Kind)
 
 // ═══════════════════════════════════════════════════════════════════
 // State Access Parsers - Minimal state operations within XParsec
