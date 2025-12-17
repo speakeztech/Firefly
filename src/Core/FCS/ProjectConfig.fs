@@ -1,4 +1,4 @@
-﻿module CLI.Configurations.ProjectConfig
+﻿module Core.FCS.ProjectConfig
 
 open System
 open System.IO

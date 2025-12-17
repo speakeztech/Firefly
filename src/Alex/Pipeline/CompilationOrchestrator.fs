@@ -1,239 +1,301 @@
+/// CompilationOrchestrator - THE single orchestrator for Firefly compilation
+///
+/// This is the ONE pipeline. There are no alternate paths.
+/// All compilation flows through this orchestrator:
+///   1. Load project (FidprojLoader)
+///   2. Run IngestionPipeline (PSG + nanopasses + Baker)
+///   3. Generate MLIR (Alex/Transfer)
+///   4. Lower MLIR → LLVM (Toolchain)
+///   5. Link LLVM → Native (Toolchain)
+///
+/// The CLI is a thin wrapper that parses args and calls this orchestrator.
 module Alex.Pipeline.CompilationOrchestrator
 
 open System
 open System.IO
-open System.Text
-open FSharp.Compiler.CodeAnalysis
-open FSharp.Compiler.Text
-open FSharp.Compiler.Symbols
-open FSharp.Compiler.Symbols.FSharpExprPatterns
 open Core.IngestionPipeline
-open Core.FCS.ProjectContext
-open Core.Utilities.IntermediateWriter
 open Core.PSG.Types
-open Alex.Pipeline.CompilationTypes
-open Alex.Bindings.BindingTypes
-open Alex.CodeGeneration.MLIRBuilder
-open Alex.Traversal.PSGZipper
-open Alex.Generation.MLIRTransfer
-open Alex.Patterns.PSGPatterns
+open Core.CompilerConfig
+open Core.FCS.ProjectContext
+open Core.FCS.FidprojLoader
+open Core.Toolchain
+open Alex.Generation.Transfer
 
-// ===================================================================
-// Pipeline Integration Types
-// ===================================================================
+// ═══════════════════════════════════════════════════════════════════════════
+// Types
+// ═══════════════════════════════════════════════════════════════════════════
 
-/// Extended compilation result with outputs
-type CompilationResult = {
-    Success: bool
-    Diagnostics: CompilerError list
-    Statistics: CompilationStatistics
-    Intermediates: IntermediateOutputs
+/// Compilation options passed from CLI
+type CompilationOptions = {
+    ProjectPath: string
+    OutputPath: string option
+    TargetTriple: string option
+    KeepIntermediates: bool
+    EmitMLIROnly: bool
+    EmitLLVMOnly: bool
+    Verbose: bool
+    ShowTiming: bool
 }
 
-/// Intermediate file outputs
-and IntermediateOutputs = {
-    ProjectAnalysis: string option
-    PSGRepresentation: string option
-    ReachabilityAnalysis: string option
-    PrunedSymbols: string option
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// Pipeline Configuration
+// ═══════════════════════════════════════════════════════════════════════════
 
-/// Empty intermediates for initialization
-let emptyIntermediates = {
-    ProjectAnalysis = None
-    PSGRepresentation = None
-    ReachabilityAnalysis = None
-    PrunedSymbols = None
-}
-
-// ===================================================================
-// Pipeline Configuration Bridge
-// ===================================================================
-
-/// Convert compilation config to ingestion pipeline config
-let createPipelineConfig (config: CompilationConfig) (intermediatesDir: string option) : PipelineConfig = {
+/// Create pipeline config from compilation options
+let private createPipelineConfig (options: CompilationOptions) (intermediatesDir: string option) : PipelineConfig = {
     CacheStrategy = Balanced
     TemplateName = None
     CustomTemplateDir = None
-    EnableCouplingAnalysis = config.EnableReachabilityAnalysis
-    EnableMemoryOptimization = config.EnableStackAllocation
-    OutputIntermediates = config.PreserveIntermediateASTs
+    EnableCouplingAnalysis = true
+    EnableMemoryOptimization = true
+    OutputIntermediates = options.KeepIntermediates || options.EmitMLIROnly || options.EmitLLVMOnly
     IntermediatesDir = intermediatesDir
 }
 
-// ===================================================================
-// Type Conversions
-// ===================================================================
+// ═══════════════════════════════════════════════════════════════════════════
+// PSG Debug Output Helper
+// ═══════════════════════════════════════════════════════════════════════════
 
-/// Convert IngestionPipeline.DiagnosticSeverity to CompilationTypes.ErrorSeverity
-let convertSeverity (severity: DiagnosticSeverity) : ErrorSeverity =
-    match severity with
-    | DiagnosticSeverity.Error -> ErrorSeverity.Error
-    | DiagnosticSeverity.Warning -> ErrorSeverity.Warning
-    | DiagnosticSeverity.Info -> ErrorSeverity.Info
+/// Write PSG debug info to file
+let private writePSGDebugInfo (psg: ProgramSemanticGraph) (path: string) =
+    let sb = System.Text.StringBuilder()
+    sb.AppendLine("PSG Summary") |> ignore
+    sb.AppendLine(sprintf "Nodes: %d" psg.Nodes.Count) |> ignore
+    sb.AppendLine(sprintf "Edges: %d" psg.Edges.Length) |> ignore
+    sb.AppendLine(sprintf "Entry Points: %d" psg.EntryPoints.Length) |> ignore
+    sb.AppendLine(sprintf "Symbols: %d" psg.SymbolTable.Count) |> ignore
 
-/// Convert IngestionPipeline.Diagnostic to CompilerError
-let convertDiagnostic (diag: Diagnostic) : CompilerError = {
-    Phase = "Pipeline"
-    Message = diag.Message
-    Location = diag.Location
-    Severity = convertSeverity diag.Severity
-}
+    let reachableCount = psg.Nodes |> Map.filter (fun _ n -> n.IsReachable) |> Map.count
+    sb.AppendLine(sprintf "Reachable Nodes: %d (%.1f%%)"
+        reachableCount
+        (100.0 * float reachableCount / float psg.Nodes.Count)) |> ignore
 
-// ===================================================================
-// Progress Reporting
-// ===================================================================
+    sb.AppendLine() |> ignore
+    sb.AppendLine("Entry Points:") |> ignore
+    for ep in psg.EntryPoints do
+        match Map.tryFind ep.Value psg.Nodes with
+        | Some node ->
+            let name = node.Symbol |> Option.map (fun s -> s.FullName) |> Option.defaultValue "(unknown)"
+            sb.AppendLine(sprintf "  - %s (%s)" name (SyntaxKindT.toString node.Kind)) |> ignore
+        | None -> ()
 
-/// Report compilation phase progress
-let reportPhase (progress: ProgressCallback) (phase: CompilationPhase) (message: string) =
-    progress phase message
+    File.WriteAllText(path, sb.ToString())
 
-// ===================================================================
-// Statistics Collection
-// ===================================================================
+// ═══════════════════════════════════════════════════════════════════════════
+// Main Compilation Entry Point
+// ═══════════════════════════════════════════════════════════════════════════
 
-/// Generate meaningful compilation statistics from pipeline results
-let generateStatistics (pipelineResult: PipelineResult) (startTime: DateTime) : CompilationStatistics =
-    let endTime = DateTime.UtcNow
-    let duration = endTime - startTime
+/// Compile a project - THE single entry point for all compilation
+let compileProject (options: CompilationOptions) : int =
+    // Enable timing if requested
+    Core.Timing.setEnabled options.ShowTiming
 
-    let totalFiles =
-        match pipelineResult.ProjectResults with
-        | Some projectResults -> projectResults.CompilationOrder.Length
-        | None -> 0
+    // Enable verbose mode if requested
+    if options.Verbose then
+        enableVerboseMode()
 
-    let totalSymbols =
-        match pipelineResult.ReachabilityAnalysis with
-        | Some analysis -> analysis.PruningStatistics.TotalSymbols
-        | None -> 0
+    printfn "Firefly Compiler v0.4.164"
+    printfn "========================="
+    printfn ""
 
-    let reachableSymbols =
-        match pipelineResult.ReachabilityAnalysis with
-        | Some analysis -> analysis.PruningStatistics.ReachableSymbols
-        | None -> 0
+    // Step 1: Load project via FidprojLoader
+    let loadResult =
+        Core.Timing.timePhase "LOAD" "Loading project and type-checking" (fun () ->
+            loadAndCheckProject options.ProjectPath |> Async.RunSynchronously)
 
-    let eliminatedSymbols =
-        match pipelineResult.ReachabilityAnalysis with
-        | Some analysis -> analysis.PruningStatistics.EliminatedSymbols
-        | None -> 0
+    match loadResult with
+    | Error msg ->
+        printfn "Error: %s" msg
+        1
 
-    {
-        TotalFiles = totalFiles
-        TotalSymbols = totalSymbols
-        ReachableSymbols = reachableSymbols
-        EliminatedSymbols = eliminatedSymbols
-        CompilationTimeMs = float duration.TotalMilliseconds
-    }
+    | Ok (resolved, checkResults, parseResults, _checker, _projectOptions) ->
 
-// ===================================================================
-// Intermediate File Management
-// ===================================================================
+        let targetTriple =
+            options.TargetTriple
+            |> Option.orElse resolved.Target
+            |> Option.defaultValue (getDefaultTarget())
 
-/// Collect intermediate file paths from pipeline execution
-let collectIntermediates (intermediatesDir: string option) : IntermediateOutputs =
-    match intermediatesDir with
-    | None -> emptyIntermediates
-    | Some dir ->
-        let tryFindFile fileName =
-            let path = Path.Combine(dir, fileName)
-            if File.Exists(path) then Some path else None
+        // Build directory
+        let buildDir = Path.Combine(resolved.ProjectDir, resolved.BuildDir)
+        Directory.CreateDirectory(buildDir) |> ignore
 
-        {
-            ProjectAnalysis = tryFindFile "project.analysis.json"
-            PSGRepresentation = tryFindFile "psg.summary.json"
-            ReachabilityAnalysis = tryFindFile "reachability.analysis.json"
-            PrunedSymbols = tryFindFile "psg.pruned.symbols.json"
-        }
+        let outputPath =
+            options.OutputPath
+            |> Option.defaultValue (Path.Combine(buildDir, resolved.OutputName))
 
-// ===================================================================
-// Main Compilation Entry Points
-// ===================================================================
+        printfn "Project: %s" resolved.Name
+        printfn "Sources: %d files (%d from dependencies)"
+            resolved.AllSourcesInOrder.Length
+            (resolved.AllSourcesInOrder.Length - resolved.Sources.Length)
+        printfn "Target:  %s" targetTriple
+        printfn "Output:  %s" outputPath
+        printfn ""
 
-/// Compile a project file using the ingestion pipeline
-let compileProject
-    (projectPath: string)
-    (outputPath: string)
-    (projectOptions: FSharpProjectOptions)
-    (compilationConfig: CompilationConfig)
-    (intermediatesDir: string option)
-    (progress: ProgressCallback) = async {
+        // Create intermediates directory if needed
+        let intermediatesDir =
+            if options.KeepIntermediates || options.EmitMLIROnly || options.EmitLLVMOnly then
+                let dir = Path.Combine(buildDir, "intermediates")
+                Directory.CreateDirectory(dir) |> ignore
+                Some dir
+            else
+                None
 
-    let startTime = DateTime.UtcNow
+        // Step 2: Run IngestionPipeline (THE pipeline)
+        // Use runPipelineWithResults since FidprojLoader already loaded the project
+        let pipelineConfig = createPipelineConfig options intermediatesDir
 
-    // Convert CompilationConfig to PipelineConfig
-    let pipelineConfig = createPipelineConfig compilationConfig intermediatesDir
+        let pipelineResult =
+            Core.Timing.timePhase "PIPELINE" "Running ingestion pipeline" (fun () ->
+                runPipelineWithResults checkResults parseResults pipelineConfig)
 
-    try
-        // Execute the complete ingestion and analysis pipeline
-        let! pipelineResult = runPipeline projectPath pipelineConfig
+        if not pipelineResult.Success then
+            printfn ""
+            printfn "Pipeline failed:"
+            for diag in pipelineResult.Diagnostics do
+                printfn "  [%A] %s" diag.Severity diag.Message
+            Core.Timing.printSummary()
+            1
+        else
+            // Extract results
+            let enrichedPSG = pipelineResult.ProgramSemanticGraph.Value
+            let bakerResult = pipelineResult.BakerResult.Value
+            let reachabilityResult = pipelineResult.ReachabilityAnalysis.Value
 
-        // Convert diagnostics and generate statistics
-        let diagnostics = pipelineResult.Diagnostics |> List.map convertDiagnostic
-        let statistics = generateStatistics pipelineResult startTime
-        let intermediates = collectIntermediates intermediatesDir
+            // Report reachability stats
+            printfn "[REACH] %d/%d symbols reachable (%.1f%% eliminated)"
+                reachabilityResult.PruningStatistics.ReachableSymbols
+                reachabilityResult.PruningStatistics.TotalSymbols
+                (if reachabilityResult.PruningStatistics.TotalSymbols > 0 then
+                    (float reachabilityResult.PruningStatistics.EliminatedSymbols /
+                     float reachabilityResult.PruningStatistics.TotalSymbols) * 100.0
+                 else 0.0)
 
-        return {
-            Success = pipelineResult.Success
-            Diagnostics = diagnostics
-            Statistics = statistics
-            Intermediates = intermediates
-        }
+            printfn "[BAKER] %d member bodies extracted, %d correlated with PSG"
+                bakerResult.Statistics.MembersWithBodies
+                bakerResult.Statistics.MembersCorrelatedWithPSG
 
-    with ex ->
-        return {
-            Success = false
-            Diagnostics = [{
-                Phase = "Compilation"
-                Message = ex.Message
-                Location = None
-                Severity = ErrorSeverity.Error
-            }]
-            Statistics = CompilationStatistics.empty
-            Intermediates = emptyIntermediates
-        }
-}
+            // Step 3: Generate MLIR
+            let mlirResult =
+                Core.Timing.timePhase "MLIR" "MLIR Generation" (fun () ->
+                    generateMLIR enrichedPSG bakerResult.CorrelationState targetTriple resolved.OutputKind)
 
-/// Simplified entry point using file path
-let compile
-    (projectPath: string)
-    (intermediatesDir: string option)
-    (progress: ProgressCallback) = async {
+            printfn "[MLIR] Collected %d reachable functions:" mlirResult.CollectedFunctions.Length
+            for funcInfo in mlirResult.CollectedFunctions do
+                printfn "  - %s" funcInfo
 
-    // Create default compilation configuration
-    let compilationConfig : CompilationConfig = {
-        EnableClosureElimination = true
-        EnableStackAllocation = true
-        EnableReachabilityAnalysis = true
-        PreserveIntermediateASTs = intermediatesDir.IsSome
-        VerboseOutput = false
-    }
+            if mlirResult.HasErrors then
+                printfn ""
+                printfn "[MLIR] Emission errors detected:"
+                for error in mlirResult.Errors do
+                    printfn "  ERROR: %s" error
+                printfn ""
 
-    // Create F# checker and load project
-    let checker = FSharpChecker.Create()
+            // Write MLIR if keeping intermediates
+            match intermediatesDir with
+            | Some dir ->
+                let mlirPath = Path.Combine(dir, resolved.Name + ".mlir")
+                File.WriteAllText(mlirPath, mlirResult.Content)
+                printfn "[MLIR] Wrote: %s" mlirPath
 
-    try
-        // Read the project file content and create ISourceText
-        let content = File.ReadAllText(projectPath)
-        let sourceText = SourceText.ofString content
+                // Write PSG debug info
+                let psgInfoPath = Path.Combine(dir, resolved.Name + ".psg.txt")
+                writePSGDebugInfo enrichedPSG psgInfoPath
+                printfn "[PSG] Wrote debug info: %s" psgInfoPath
 
-        // Get project options from script
-        let! (projectOptions, _diagnostics) = checker.GetProjectOptionsFromScript(projectPath, sourceText)
+                if options.EmitMLIROnly then
+                    printfn ""
+                    if mlirResult.HasErrors then
+                        printfn "MLIR generation completed with errors (--emit-mlir)"
+                    else
+                        printfn "Stopped after MLIR generation (--emit-mlir)"
+                    Core.Timing.printSummary()
+                    if mlirResult.HasErrors then 1 else 0
+                elif mlirResult.HasErrors then
+                    printfn ""
+                    printfn "Compilation failed due to emission errors."
+                    Core.Timing.printSummary()
+                    1
+                else
+                    // Step 4: Lower MLIR → LLVM (via Toolchain)
+                    let llPath = Path.Combine(dir, resolved.Name + ".ll")
 
-        // Use a default output path
-        let outputPath = Path.ChangeExtension(projectPath, ".exe")
+                    let llvmResult =
+                        Core.Timing.timePhase "MLIR-LOWER" "Lowering MLIR to LLVM IR" (fun () ->
+                            lowerMLIRToLLVM mlirPath llPath)
 
-        return! compileProject projectPath outputPath projectOptions compilationConfig intermediatesDir progress
+                    match llvmResult with
+                    | Error msg ->
+                        printfn "[LLVM] Error: %s" msg
+                        Core.Timing.printSummary()
+                        1
+                    | Ok () ->
+                        printfn "[LLVM] Wrote: %s" llPath
 
-    with ex ->
-        return {
-            Success = false
-            Diagnostics = [{
-                Phase = "ProjectLoading"
-                Message = ex.Message
-                Location = Some projectPath
-                Severity = ErrorSeverity.Error
-            }]
-            Statistics = CompilationStatistics.empty
-            Intermediates = emptyIntermediates
-        }
-}
+                        if options.EmitLLVMOnly then
+                            printfn ""
+                            printfn "Stopped after LLVM IR generation (--emit-llvm)"
+                            Core.Timing.printSummary()
+                            0
+                        else
+                            // Step 5: Link LLVM → Native (via Toolchain)
+                            let linkResult =
+                                Core.Timing.timePhase "LINK" "Compiling to native binary" (fun () ->
+                                    compileLLVMToNative llPath outputPath targetTriple resolved.OutputKind)
+
+                            match linkResult with
+                            | Error msg ->
+                                printfn "[LINK] Error: %s" msg
+                                Core.Timing.printSummary()
+                                1
+                            | Ok () ->
+                                printfn "[LINK] Wrote: %s" outputPath
+                                printfn ""
+                                printfn "Compilation successful!"
+                                Core.Timing.printSummary()
+                                0
+
+            | None ->
+                // No intermediates - use temp directory
+                if mlirResult.HasErrors then
+                    printfn ""
+                    printfn "Compilation failed due to emission errors."
+                    printfn "Use -k to generate intermediate files for debugging."
+                    Core.Timing.printSummary()
+                    1
+                else
+                    let tempDir = Path.Combine(Path.GetTempPath(), "firefly-" + Guid.NewGuid().ToString("N").[..7])
+                    Directory.CreateDirectory(tempDir) |> ignore
+
+                    let mlirPath = Path.Combine(tempDir, resolved.Name + ".mlir")
+                    let llPath = Path.Combine(tempDir, resolved.Name + ".ll")
+
+                    File.WriteAllText(mlirPath, mlirResult.Content)
+
+                    let llvmResult =
+                        Core.Timing.timePhase "MLIR-LOWER" "Lowering MLIR to LLVM IR" (fun () ->
+                            lowerMLIRToLLVM mlirPath llPath)
+
+                    match llvmResult with
+                    | Error msg ->
+                        printfn "[LLVM] Error: %s" msg
+                        try Directory.Delete(tempDir, true) with _ -> ()
+                        Core.Timing.printSummary()
+                        1
+                    | Ok () ->
+                        let linkResult =
+                            Core.Timing.timePhase "LINK" "Compiling to native binary" (fun () ->
+                                compileLLVMToNative llPath outputPath targetTriple resolved.OutputKind)
+
+                        try Directory.Delete(tempDir, true) with _ -> ()
+
+                        match linkResult with
+                        | Error msg ->
+                            printfn "[LINK] Error: %s" msg
+                            Core.Timing.printSummary()
+                            1
+                        | Ok () ->
+                            printfn "[LINK] Wrote: %s" outputPath
+                            printfn ""
+                            printfn "Compilation successful!"
+                            Core.Timing.printSummary()
+                            0

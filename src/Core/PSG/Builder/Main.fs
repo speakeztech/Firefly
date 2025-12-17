@@ -19,6 +19,7 @@ open Core.PSG.Nanopass.ParameterAnnotation
 open Core.PSG.Nanopass.ClassifyOperations
 open Core.PSG.Nanopass.LowerInterpolatedStrings
 open Core.PSG.Nanopass.DetectPlatformBindings
+open Core.PSG.Nanopass.DetectInlineFunctions
 open Core.PSG.Construction.Types
 open Core.PSG.Construction.DeclarationProcessing
 
@@ -254,12 +255,19 @@ let runEnrichmentPasses
         emitNanopassIntermediateAsync platformBindingsGraph "3c2_platform_bindings" (getNanopassOutputDir())
         emitNanopassDiffAsync classifiedGraph platformBindingsGraph "3c_classified_ops" "3c2_platform_bindings" (getNanopassOutputDir())
 
+    // Detect inline functions (marks F# inline functions for exclusion from standalone emission)
+    let inlineFunctionsGraph = detectInlineFunctions platformBindingsGraph
+
+    if shouldEmitNanopassIntermediates() then
+        emitNanopassIntermediateAsync inlineFunctionsGraph "3c3_inline_functions" (getNanopassOutputDir())
+        emitNanopassDiffAsync platformBindingsGraph inlineFunctionsGraph "3c2_platform_bindings" "3c3_inline_functions" (getNanopassOutputDir())
+
     // Lower interpolated strings
-    let loweredGraph = lowerInterpolatedStrings platformBindingsGraph
+    let loweredGraph = lowerInterpolatedStrings inlineFunctionsGraph
 
     if shouldEmitNanopassIntermediates() then
         emitNanopassIntermediateAsync loweredGraph "3d_lowered_interp_strings" (getNanopassOutputDir())
-        emitNanopassDiffAsync platformBindingsGraph loweredGraph "3c2_platform_bindings" "3d_lowered_interp_strings" (getNanopassOutputDir())
+        emitNanopassDiffAsync inlineFunctionsGraph loweredGraph "3c3_inline_functions" "3d_lowered_interp_strings" (getNanopassOutputDir())
 
     // Finalize nodes and analyze context
     let finalNodes =

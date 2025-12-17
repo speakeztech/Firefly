@@ -13,6 +13,7 @@
 module Alex.Traversal.PSGZipper
 
 open Core.PSG.Types
+open Core.PSG.NavigationUtils
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PSG Path - Zipper navigation context
@@ -146,9 +147,9 @@ module PSGZipper =
         Map.tryFind nodeId.Value zipper.Graph.Nodes
 
     /// Get children of the focus node as NodeIds (in source order)
-    /// Note: Children are now in correct source order after PSG finalization
+    /// Uses ChildOf edges as the authoritative source of graph structure
     let children (zipper: PSGZipper) : NodeId list =
-        ChildrenStateHelpers.getChildrenList zipper.Focus
+        getChildIds zipper.Graph zipper.Focus
 
     /// Get children of the focus node as actual nodes (in source order)
     let childNodes (zipper: PSGZipper) : PSGNode list =

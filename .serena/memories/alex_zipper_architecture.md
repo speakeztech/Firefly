@@ -15,13 +15,14 @@ This means:
 
 **Alex IS a transformer** - it transforms PSG into MLIR compute graphs using the dual-zipper architecture.
 
-**NEW: MLIRZipper & Transfer.fs**
+**Transfer.fs is the ONLY MLIR generation file**
 
 The dual-zipper architecture is now implemented:
 - `PSGZipper.fs` - Complete INPUT zipper (PSG navigation) ✓
-- `MLIRZipper.fs` - NEW OUTPUT zipper (MLIR composition) ✓
-- `Transfer.fs` - NEW principled transfer pipeline using dual zippers ✓
-- `MLIRTransfer.fs` - Legacy (still used for compilation, to be replaced)
+- `MLIRZipper.fs` - OUTPUT zipper (MLIR composition) ✓
+- `Transfer.fs` - Principled transfer pipeline using dual zippers ✓
+
+**NOTE**: `MLIRTransfer.fs` has been REMOVED (Dec 2024). All MLIR generation goes through `Transfer.fs`.
 
 **MLIRZipper Design** (symmetric to PSGZipper):
 ```fsharp
@@ -311,8 +312,7 @@ The current refactoring from `transferNodeDirect` (direct recursion) to `foldPos
 
 | File | Role |
 |------|------|
-| `Alex/Generation/MLIRTransfer.fs` | Legacy MLIR generation (still used, to be replaced) |
-| `Alex/Generation/Transfer.fs` | **NEW**: Principled dual-zipper transfer pipeline |
+| `Alex/Generation/Transfer.fs` | Principled dual-zipper transfer pipeline (ONLY MLIR generation file) |
 | `Alex/Traversal/PSGZipper.fs` | INPUT zipper - Bidirectional PSG traversal |
 | `Alex/Traversal/MLIRZipper.fs` | **NEW**: OUTPUT zipper - MLIR composition |
 | `Alex/Traversal/PSGXParsec.fs` | XParsec combinators, EmitContext with correlations |

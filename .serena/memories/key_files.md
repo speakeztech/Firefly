@@ -45,7 +45,9 @@
 
 | File | Purpose |
 |------|---------|
+| `/src/Alex/Generation/Transfer.fs` | **MLIR generation** - the ONLY MLIR gen file |
 | `/src/Alex/Traversal/PSGZipper.fs` | Zipper traversal engine |
+| `/src/Alex/Traversal/MLIRZipper.fs` | MLIR output composition |
 | `/src/Alex/Traversal/PSGXParsec.fs` | XParsec pattern matching |
 | `/src/Alex/Bindings/BindingTypes.fs` | Binding type definitions |
 | `/src/Alex/Bindings/Console/ConsoleBindings.fs` | Console I/O bindings |
@@ -56,16 +58,21 @@
 | `/src/Alex/Pipeline/CompilationTypes.fs` | Compilation type definitions |
 | `/src/Alex/Pipeline/CompilationOrchestrator.fs` | Full compilation orchestration |
 
-## CLI
+## CLI (Paper-thin Wrapper)
 
 | File | Purpose |
 |------|---------|
-| `/src/CLI/Program.fs` | Entry point |
-| `/src/CLI/Commands/CompileCommand.fs` | Compile command |
-| `/src/CLI/Commands/VerifyCommand.fs` | Verify command |
-| `/src/CLI/Commands/DoctorCommand.fs` | Doctor command |
-| `/src/CLI/Configurations/ProjectConfig.fs` | Project configuration |
-| `/src/CLI/Configurations/FidprojLoader.fs` | .fidproj file loader |
+| `/src/CLI/Program.fs` | Entry point - thin wrapper calling orchestrator |
+| `/src/CLI/Commands/VerifyCommand.fs` | Verify toolchain command |
+| `/src/CLI/Commands/DoctorCommand.fs` | Doctor diagnostics command |
+
+## Project Configuration
+
+| File | Purpose |
+|------|---------|
+| `/src/Core/FCS/ProjectConfig.fs` | Project configuration parsing |
+| `/src/Core/FCS/FidprojLoader.fs` | .fidproj file loader |
+| `/src/Core/Toolchain.fs` | External tool calls (mlir-opt, llc, clang) - isolated for self-hosting |
 
 ## Documentation (Essential Reading)
 

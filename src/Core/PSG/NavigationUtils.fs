@@ -1,24 +1,39 @@
 /// NavigationUtils - Shared PSG navigation helpers
 ///
 /// Common utility functions for navigating the PSG structure.
-/// Used by nanopasses that need to traverse parent-child relationships.
+/// Used by nanopasses, Baker, and Alex for traversing parent-child relationships.
+///
+/// IMPORTANT: Edge semantics for ChildOf:
+///   ChildOf edges go FROM parent TO child: Source = parent, Target = child
+///   This is the AUTHORITATIVE source of truth for graph structure.
 module Core.PSG.NavigationUtils
 
 open Core.PSG.Types
 
-/// Get child nodes for a given node by resolving child IDs
+/// Get child nodes for a given node using ChildOf edges (authoritative)
+/// ChildOf edges: Source = parent, Target = child
 let getChildNodes (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode list =
-    match node.Children with
-    | Parent childIds ->
-        childIds
-        |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
-    | _ -> []
+    psg.Edges
+    |> List.choose (fun edge ->
+        match edge.Kind with
+        | ChildOf when edge.Source = node.Id ->
+            Map.tryFind edge.Target.Value psg.Nodes
+        | _ -> None)
+    |> List.sortBy (fun n -> n.Range.StartLine, n.Range.StartColumn)
 
-/// Get child node IDs without resolving
-let getChildIds (node: PSGNode) : NodeId list =
-    match node.Children with
-    | Parent childIds -> childIds
-    | _ -> []
+/// Get child node IDs using ChildOf edges (authoritative)
+/// Returns IDs in source order (sorted by range)
+let getChildIds (psg: ProgramSemanticGraph) (node: PSGNode) : NodeId list =
+    psg.Edges
+    |> List.choose (fun edge ->
+        match edge.Kind with
+        | ChildOf when edge.Source = node.Id ->
+            // Look up node to get range for sorting
+            Map.tryFind edge.Target.Value psg.Nodes
+            |> Option.map (fun n -> (edge.Target, n.Range.StartLine, n.Range.StartColumn))
+        | _ -> None)
+    |> List.sortBy (fun (_, line, col) -> (line, col))
+    |> List.map (fun (id, _, _) -> id)
 
 /// Get parent node if exists
 let getParentNode (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode option =

@@ -1,29 +1,96 @@
-﻿module CLI.Program
+/// Firefly CLI - Thin wrapper around CompilationOrchestrator
+///
+/// This is intentionally minimal. All compilation logic lives in the orchestrator.
+/// The CLI only handles:
+///   - Argument parsing
+///   - Calling the orchestrator
+///   - Returning exit codes
+module CLI.Program
 
 open System
+open System.IO
 open Argu
-open CLI.Commands.CompileCommand
+open Alex.Pipeline.CompilationOrchestrator
 open CLI.Commands.VerifyCommand
 open CLI.Commands.DoctorCommand
 
-/// Command line arguments for Firefly CLI - simplified approach
-type ToolArgs =
-    | Version
-with
+// ═══════════════════════════════════════════════════════════════════════════
+// Command Line Arguments
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Compile command arguments
+type CompileArgs =
+    | [<MainCommand; Unique>] Project of path: string
+    | [<AltCommandLine("-o")>] Output of path: string
+    | [<AltCommandLine("-t")>] Target of target: string
+    | [<AltCommandLine("-k")>] Keep_Intermediates
+    | [<AltCommandLine("-v")>] Verbose
+    | [<AltCommandLine("-T")>] Timing
+    | Emit_MLIR
+    | Emit_LLVM
+
     interface IArgParserTemplate with
         member this.Usage =
             match this with
-            | Version -> "Display version information"
+            | Project _ -> ".fidproj file or F# source file to compile"
+            | Output _ -> "Output executable path"
+            | Target _ -> "Target triple (default: host platform)"
+            | Keep_Intermediates -> "Keep intermediate files (.mlir, .ll) for debugging"
+            | Verbose -> "Enable verbose output"
+            | Timing -> "Show timing for each compilation phase"
+            | Emit_MLIR -> "Emit MLIR and stop (don't generate executable)"
+            | Emit_LLVM -> "Emit LLVM IR and stop (don't generate executable)"
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Compile Command Handler
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Execute compile command - delegates to orchestrator
+let private executeCompile (args: ParseResults<CompileArgs>) : int =
+    // Find project path
+    let projectPath =
+        match args.TryGetResult(Project) with
+        | Some p -> p
+        | None ->
+            let fidprojs = Directory.GetFiles(".", "*.fidproj")
+            if fidprojs.Length = 1 then
+                fidprojs.[0]
+            elif fidprojs.Length > 1 then
+                printfn "Error: Multiple .fidproj files found. Please specify which one to compile."
+                exit 1
+            else
+                printfn "Error: No .fidproj file found and no project specified."
+                printfn "Usage: firefly compile <project.fidproj>"
+                exit 1
+
+    // Build options and delegate to orchestrator
+    let options : CompilationOptions = {
+        ProjectPath = projectPath
+        OutputPath = args.TryGetResult(Output)
+        TargetTriple = args.TryGetResult(Target)
+        KeepIntermediates = args.Contains(Keep_Intermediates)
+        EmitMLIROnly = args.Contains(Emit_MLIR)
+        EmitLLVMOnly = args.Contains(Emit_LLVM)
+        Verbose = args.Contains(Verbose)
+        ShowTiming = args.Contains(Timing)
+    }
+
+    // THE single entry point for compilation
+    compileProject options
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CLI Entry Point
+// ═══════════════════════════════════════════════════════════════════════════
 
 /// Display version information
-let showVersion() =
+let private showVersion() =
     let version = "0.4.164"
     printfn "Firefly %s - F# to Native Compiler with Deterministic Memory Management" version
     printfn "Copyright (c) 2025 SpeakEZ LLC"
     0
 
 /// Display usage information
-let showUsage() =
+let private showUsage() =
     printfn "Firefly - F# to Native Compiler"
     printfn ""
     printfn "Usage:"
@@ -48,7 +115,7 @@ let main argv =
             let compileParser = ArgumentParser.Create<CompileArgs>(programName = "firefly compile", errorHandler = errorHandler)
             let compileArgs = Array.skip 1 argv
             let compileResults = compileParser.ParseCommandLine(compileArgs)
-            execute compileResults
+            executeCompile compileResults
         elif argv.[0] = "verify" then
             let verifyParser = ArgumentParser.Create<VerifyArgs>(programName = "firefly verify", errorHandler = errorHandler)
             let verifyArgs = Array.skip 1 argv

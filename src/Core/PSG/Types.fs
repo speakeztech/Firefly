@@ -449,6 +449,10 @@ type PSGNode = {
 
     // Platform binding info (set by DetectPlatformBindings nanopass)
     PlatformBinding: PlatformBindingInfo option
+
+    // Inline function marker (set by DetectInlineFunctions nanopass)
+    // Inline functions should not be compiled as standalone - they are inlined at call sites
+    IsInlineFunction: bool
 }
 
 /// Complete Program Semantic Graph
@@ -520,6 +524,9 @@ module ChildrenStateHelpers =
 
         // Platform binding info
         PlatformBinding = None
+
+        // Inline function marker
+        IsInlineFunction = false
     }
 
     /// Add a child to a node (appends to maintain source order)

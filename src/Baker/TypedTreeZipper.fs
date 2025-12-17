@@ -12,6 +12,7 @@ open FSharp.Compiler.Symbols
 open FSharp.Compiler.Symbols.FSharpExprPatterns
 open FSharp.Compiler.Text
 open Core.PSG.Types
+open Core.PSG.NavigationUtils
 open Baker.Types
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -132,23 +133,13 @@ type BakerPSGZipper = {
 }
 
 module BakerPSGZipper =
-    /// Get children of a node from the graph (nodes where edge.Target = nodeId)
-    let private getChildren (graph: ProgramSemanticGraph) (nodeId: NodeId) : PSGNode list =
-        graph.Edges
-        |> List.choose (fun edge ->
-            match edge.Kind with
-            | ChildOf when edge.Target = nodeId ->
-                Map.tryFind edge.Source.Value graph.Nodes
-            | _ -> None)
-        |> List.sortBy (fun n -> n.Range.StartLine, n.Range.StartColumn)
-
     /// Create zipper focused on a node
     let create (graph: ProgramSemanticGraph) (node: PSGNode) : BakerPSGZipper =
         { FocusNode = node; Crumbs = []; FullGraph = graph }
 
     /// Move down to first child
     let down (z: BakerPSGZipper) : BakerPSGZipper option =
-        let children = getChildren z.FullGraph z.FocusNode.Id
+        let children = getChildNodes z.FullGraph z.FocusNode
         match children with
         | [] -> None
         | first :: rest ->

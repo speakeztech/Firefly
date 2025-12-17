@@ -46,7 +46,7 @@ and Diagnostic = {
     Location: string option
 }
 
-and DiagnosticSeverity = Info | Warning | Error
+and DiagnosticSeverity = Info | Warning | DiagError
 
 /// Default pipeline configuration
 let defaultConfig = {
@@ -238,7 +238,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
         // Validate project compilation
         if projectResults.CheckResults.HasCriticalErrors then
             diagnostics.Add {
-                Severity = Error
+                Severity = DiagError
                 Message = "Project has critical compilation errors"
                 Location = Some projectPath
             }
@@ -270,7 +270,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
             // Basic validation of PSG structure
             if psg.Nodes.Count = 0 then
                 diagnostics.Add {
-                    Severity = Error
+                    Severity = DiagError
                     Message = "PSG construction resulted in empty graph"
                     Location = Some projectPath
                 }
@@ -339,13 +339,15 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                     writeJsonAsset config.IntermediatesDir.Value "library.boundaries.json" libraryBoundaryData
 
                 // Step 7.5: Validate native types (halt on non-native BCL types)
+                eprintfn "[PIPELINE] About to call validateReachable"
                 let nativeValidation = validateReachable enrichedPSG
+                eprintfn "[PIPELINE] validateReachable returned HasErrors=%b" nativeValidation.HasErrors
 
                 if nativeValidation.HasErrors then
                     // Add all native type errors as diagnostics
                     nativeValidation.Errors |> List.iter (fun err ->
                         diagnostics.Add {
-                            Severity = Error
+                            Severity = DiagError
                             Message = err.Message
                             Location = Some (sprintf "Node %s (%s)" err.NodeId err.SyntaxKind)
                         })
@@ -374,7 +376,7 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
             
     with ex ->
         diagnostics.Add {
-            Severity = Error
+            Severity = DiagError
             Message = sprintf "Pipeline execution failed: %s" ex.Message
             Location = Some projectPath
         }
@@ -387,6 +389,217 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
             Diagnostics = List.ofSeq diagnostics
         }
 }
+
+// ============================================================================
+// PIPELINE WITH PRE-LOADED RESULTS
+// ============================================================================
+// This entry point accepts already-loaded FCS results (from FidprojLoader)
+// and runs the enrichment pipeline without re-loading the project.
+
+/// Run the pipeline with pre-loaded FCS results (used by orchestrator after FidprojLoader)
+let runPipelineWithResults
+    (checkResults: FSharpCheckProjectResults)
+    (parseResults: FSharpParseFileResults[])
+    (config: PipelineConfig)
+    : PipelineResult =
+
+    let diagnostics = ResizeArray<Diagnostic>()
+
+    try
+        // Step 1: Prepare intermediate outputs
+        if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+            prepareIntermediatesDirectory config.IntermediatesDir
+
+        // Create a ProjectResults-like structure for compatibility
+        // Note: We don't have full ProjectResults since we came from FidprojLoader
+        let compilationOrder =
+            parseResults
+            |> Array.map (fun pr -> pr.FileName)
+
+        // Validate project compilation
+        if checkResults.HasCriticalErrors then
+            diagnostics.Add {
+                Severity = DiagError
+                Message = "Project has critical compilation errors"
+                Location = None
+            }
+            {
+                Success = false
+                ProjectResults = None
+                ProgramSemanticGraph = None
+                ReachabilityAnalysis = None
+                BakerResult = None
+                Diagnostics = List.ofSeq diagnostics
+            }
+        else
+            // EARLY VALIDATION: Check for BCL types BEFORE building PSG
+            // FAIL FAST - stops immediately on first BCL type detected
+            let earlyValidationResult =
+                try
+                    validateEarlyFailFast checkResults
+                    None  // No error
+                with
+                | BclTypeDetectedException(file, line, col, typeName) ->
+                    Some (file, line, col, typeName)
+
+            match earlyValidationResult with
+            | Some (file, line, col, typeName) ->
+                // Clean, controlled error output - BCL types should NEVER appear
+                eprintfn ""
+                eprintfn "BCL TYPE ERROR: Type requires .NET runtime"
+                eprintfn ""
+                eprintfn "  File: %s" file
+                eprintfn "  Location: line %d, column %d" line col
+                eprintfn "  Type: %s" typeName
+                eprintfn ""
+                eprintfn "BCL types cannot appear in the Firefly compilation pipeline."
+                eprintfn "They require the .NET garbage collector and managed runtime."
+                eprintfn ""
+                eprintfn "This is a bug - BCL types should never reach this point:"
+                eprintfn "  - If in library code: The library must use native types (NativeStr, voption, nativeptr, etc.)"
+                eprintfn "  - If in user code: Use Alloy's API which provides native alternatives"
+                eprintfn ""
+                eprintfn "Allowed FSharp.Core types: int, byte, bool, unit, voption, nativeptr, etc."
+                eprintfn "Forbidden BCL types: string, option, list, System.*, etc."
+                eprintfn ""
+
+                {
+                    Success = false
+                    ProjectResults = None
+                    ProgramSemanticGraph = None
+                    ReachabilityAnalysis = None
+                    BakerResult = None
+                    Diagnostics = [{
+                        Severity = DiagError
+                        Message = sprintf "BCL type '%s' at %s:%d:%d" typeName file line col
+                        Location = Some file
+                    }]
+                }
+
+            | None ->
+            // Step 2: Generate initial intermediate outputs
+            if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                writeSymbolicAst parseResults config.IntermediatesDir.Value
+
+            // Step 3: Build Program Semantic Graph
+            if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                enableNanopassIntermediates config.IntermediatesDir.Value
+
+            let psg = buildProgramSemanticGraph checkResults parseResults
+
+            disableNanopassIntermediates()
+
+            // Basic validation of PSG structure
+            if psg.Nodes.Count = 0 then
+                diagnostics.Add {
+                    Severity = DiagError
+                    Message = "PSG construction resulted in empty graph"
+                    Location = None
+                }
+                {
+                    Success = false
+                    ProjectResults = None
+                    ProgramSemanticGraph = None
+                    ReachabilityAnalysis = None
+                    BakerResult = None
+                    Diagnostics = List.ofSeq diagnostics
+                }
+            else
+                // Add warning if no entry points, but continue execution
+                if psg.EntryPoints.Length = 0 then
+                    diagnostics.Add {
+                        Severity = Warning
+                        Message = "PSG has no entry points detected"
+                        Location = None
+                    }
+
+                // Step 4: Generate initial PSG debug outputs (before reachability)
+                if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                    let correlationContext = createContext checkResults
+                    let correlations =
+                        parseResults
+                        |> Array.collect (fun pr -> correlateFile pr.ParseTree correlationContext)
+                    generateStats correlationContext correlations |> ignore
+                    generateCorrelationDebugOutput correlations config.IntermediatesDir.Value
+                    writePSGSummary psg config.IntermediatesDir.Value
+
+                // Step 5: Extract SRTP call relationships (before reachability!)
+                let srtpResult = Core.PSG.Nanopass.ExtractSRTPEdges.run checkResults
+                let additionalCalls =
+                    if Map.isEmpty srtpResult.AdditionalCalls then None
+                    else Some srtpResult.AdditionalCalls
+
+                // Step 6: Perform reachability analysis (narrows the graph)
+                let reachabilityResult = performReachabilityAnalysis psg additionalCalls
+
+                // Step 7: Enrichment nanopasses on narrowed graph
+                if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                    enableNanopassIntermediates config.IntermediatesDir.Value
+
+                let enrichedPSG = runEnrichmentPasses reachabilityResult.MarkedPSG checkResults
+
+                disableNanopassIntermediates()
+
+                // Step 8: Generate pruned PSG debug assets
+                if config.OutputIntermediates && config.IntermediatesDir.IsSome then
+                    generatePSGDebugOutput enrichedPSG config.IntermediatesDir.Value
+
+                    let prunedSymbols = generatePrunedSymbolData enrichedPSG reachabilityResult
+                    let comparisonData = generateComparisonData enrichedPSG reachabilityResult
+                    let callGraphData = generateCallGraphData reachabilityResult
+                    let libraryBoundaryData = generateLibraryBoundaryData reachabilityResult
+
+                    writeJsonAsset config.IntermediatesDir.Value "psg.pruned.symbols.json" prunedSymbols
+                    writeJsonAsset config.IntermediatesDir.Value "reachability.analysis.json" comparisonData
+                    writeJsonAsset config.IntermediatesDir.Value "psg.callgraph.pruned.json" callGraphData
+                    writeJsonAsset config.IntermediatesDir.Value "library.boundaries.json" libraryBoundaryData
+
+                // Step 9: Validate native types
+                let nativeValidation = validateReachable enrichedPSG
+
+                if nativeValidation.HasErrors then
+                    nativeValidation.Errors |> List.iter (fun err ->
+                        diagnostics.Add {
+                            Severity = DiagError
+                            Message = err.Message
+                            Location = Some (sprintf "Node %s (%s)" err.NodeId err.SyntaxKind)
+                        })
+
+                    {
+                        Success = false
+                        ProjectResults = None
+                        ProgramSemanticGraph = Some enrichedPSG
+                        ReachabilityAnalysis = Some reachabilityResult
+                        BakerResult = None
+                        Diagnostics = List.ofSeq diagnostics
+                    }
+                else
+                    // Step 10: Run Baker enrichment
+                    let bakerResult = Baker.Baker.enrich enrichedPSG checkResults
+
+                    {
+                        Success = true
+                        ProjectResults = None
+                        ProgramSemanticGraph = Some enrichedPSG
+                        ReachabilityAnalysis = Some reachabilityResult
+                        BakerResult = Some bakerResult
+                        Diagnostics = List.ofSeq diagnostics
+                    }
+
+    with ex ->
+        diagnostics.Add {
+            Severity = DiagError
+            Message = sprintf "Pipeline execution failed: %s" ex.Message
+            Location = None
+        }
+        {
+            Success = false
+            ProjectResults = None
+            ProgramSemanticGraph = None
+            ReachabilityAnalysis = None
+            BakerResult = None
+            Diagnostics = List.ofSeq diagnostics
+        }
 
 // ============================================================================
 // OPTIMIZED PIPELINE (Structural reachability pre-filter)
@@ -460,7 +673,7 @@ let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<
 
         if projectResults.CheckResults.HasCriticalErrors then
             diagnostics.Add {
-                Severity = Error
+                Severity = DiagError
                 Message = "Project has critical compilation errors"
                 Location = Some projectPath
             }
@@ -488,7 +701,7 @@ let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<
 
             if psg.Nodes.Count = 0 then
                 diagnostics.Add {
-                    Severity = Error
+                    Severity = DiagError
                     Message = "PSG construction resulted in empty graph"
                     Location = Some projectPath
                 }
@@ -549,7 +762,7 @@ let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<
                 if nativeValidation.HasErrors then
                     nativeValidation.Errors |> List.iter (fun err ->
                         diagnostics.Add {
-                            Severity = Error
+                            Severity = DiagError
                             Message = err.Message
                             Location = Some (sprintf "Node %s (%s)" err.NodeId err.SyntaxKind)
                         })
@@ -585,7 +798,7 @@ let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<
 
     with ex ->
         diagnostics.Add {
-            Severity = Error
+            Severity = DiagError
             Message = sprintf "Optimized pipeline failed: %s" ex.Message
             Location = Some projectPath
         }

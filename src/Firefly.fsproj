@@ -30,6 +30,9 @@
       <Compile Include="Core/Types/Dialects.fs" />
       <Compile Include="Core/Types/MLIRTypes.fs" />
 
+      <!-- Toolchain (needs OutputKind from MLIRTypes) -->
+      <Compile Include="Core/Toolchain.fs" />
+
       <!-- Parser Foundation (kept from existing) -->
       <Compile Include="Core/XParsec/Foundation.fs" />  
       
@@ -37,6 +40,8 @@
       <Compile Include="Core/FCS/Helpers.fs" />
       <Compile Include="Core/FCS/ProjectContext.fs" />
       <Compile Include="Core/FCS/TypedASTAccess.fs" />
+      <Compile Include="Core/FCS/ProjectConfig.fs" />
+      <Compile Include="Core/FCS/FidprojLoader.fs" />
       
       <!-- Program Semantic Graph (new) -->
       <Compile Include="Core/PSG/Types.fs" />
@@ -65,6 +70,7 @@
       <Compile Include="Core/PSG/Nanopass/ResolveSRTP.fs" />
       <Compile Include="Core/PSG/Nanopass/ValidateNativeTypes.fs" />
       <Compile Include="Core/PSG/Nanopass/DetectPlatformBindings.fs" />
+      <Compile Include="Core/PSG/Nanopass/DetectInlineFunctions.fs" />
 
       <!-- PSG Builder (refactored into sub-modules) -->
       <Compile Include="Core/PSG/Builder/Types.fs" />
@@ -115,7 +121,6 @@
       <Compile Include="Alex/Patterns/PSGPatterns.fs" />
 
       <!-- Alex Generation (uses Zipper + XParsec + Patterns) -->
-      <Compile Include="Alex/Generation/MLIRTransfer.fs" />
       <Compile Include="Alex/Generation/Transfer.fs" />
 
       <!-- Alex Pipeline Types -->
@@ -125,11 +130,8 @@
       <Compile Include="Alex/Pipeline/CompilationOrchestrator.fs" />
 
       <!-- CLI Infrastructure -->
-      <Compile Include="CLI/Configurations/ProjectConfig.fs" />
-      <Compile Include="CLI/Configurations/FidprojLoader.fs" />
       <Compile Include="CLI/Diagnostics/EnvironmentInfo.fs" />
       <Compile Include="CLI/Diagnostics/ToolChainVerification.fs" />
-      <Compile Include="CLI/Commands/CompileCommand.fs" />
       <Compile Include="CLI/Commands/VerifyCommand.fs" />
       <Compile Include="CLI/Commands/DoctorCommand.fs" />
 

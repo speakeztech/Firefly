@@ -1,10 +1,10 @@
-module CLI.Configurations.FidprojLoader
+module Core.FCS.FidprojLoader
 
 open System
 open System.IO
 open FSharp.Compiler.CodeAnalysis
 open Core.XParsec.Foundation
-open CLI.Configurations.ProjectConfig
+open Core.FCS.ProjectConfig
 
 open Core.Types.MLIRTypes
 

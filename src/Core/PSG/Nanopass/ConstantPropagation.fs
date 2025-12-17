@@ -9,6 +9,7 @@
 module Core.PSG.Nanopass.ConstantPropagation
 
 open Core.PSG.Types
+open Core.PSG.NavigationUtils
 
 /// Follow def-use edges to find the defining node for an identifier
 let private findDefinition (psg: ProgramSemanticGraph) (nodeId: NodeId) : PSGNode option =
@@ -34,15 +35,6 @@ let private resolveConstantValue (psg: ProgramSemanticGraph) (node: PSGNode) : C
             | None -> None
         | _ -> None
 
-/// Get children of a node
-let private getChildren (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode list =
-    psg.Edges
-    |> List.choose (fun edge ->
-        if edge.Kind = ChildOf && edge.Target = node.Id then
-            Map.tryFind edge.Source.Value psg.Nodes
-        else
-            None)
-
 /// Propagate constants through PropertyAccess:Length nodes
 let private propagateStringLength (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
     let updatedNodes =
@@ -52,7 +44,7 @@ let private propagateStringLength (psg: ProgramSemanticGraph) : ProgramSemanticG
             match node.Kind with
             | SKExpr EPropertyAccess when node.Symbol |> Option.exists (fun s -> s.DisplayName = "Length") ->
                 // Get the receiver (child node)
-                let children = getChildren psg node
+                let children = getChildNodes psg node
                 match children with
                 | [receiver] ->
                     // Resolve the receiver's constant value
