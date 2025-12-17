@@ -78,28 +78,6 @@ module private ReflectionCache =
 // SRTP Resolution Extraction
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Attempt to extract SRTP resolution from a TraitCall's internal traitInfo
-let private tryExtractResolution (traitCallExpr: FSharpExpr) : SRTPResolution option =
-    try
-        // The FSharpExpr has an internal E property that holds the expression variant
-        let eProperty = traitCallExpr.GetType().GetProperty("E", BindingFlags.Public ||| BindingFlags.Instance)
-        match eProperty with
-        | null -> None
-        | prop ->
-            let eValue = prop.GetValue(traitCallExpr)
-            if isNull eValue then None
-            else
-                // The E value is a discriminated union, check if it's TraitCall
-                let eType = eValue.GetType()
-                if eType.Name.Contains("TraitCall") then
-                    // This approach won't work because E.TraitCall doesn't store the internal traitInfo
-                    // The conversion from internal Expr to E.TraitCall discards the Solution
-                    None
-                else
-                    None
-    with _ ->
-        None
-
 /// Walk FSharpExpr tree looking for TraitCall expressions and extract their resolutions
 let private extractTraitCallResolutions (checkResults: FSharpCheckProjectResults) : Map<string, SRTPResolution> =
     let mutable resolutions = Map.empty

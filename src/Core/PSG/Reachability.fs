@@ -3,6 +3,7 @@ module Core.PSG.Reachability
 open System
 open FSharp.Compiler.Symbols
 open Core.PSG.Types
+open Core.CompilerConfig
 
 /// Semantic reachability context based on type-aware analysis
 type SemanticReachabilityContext = {
@@ -169,7 +170,7 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
                     | Some childNode ->
                         match childNode.Symbol with
                         | Some sym ->
-                            if sym.DisplayName = "op_Dollar" || sym.DisplayName = "($)" then
+                            if isReachabilityVerbose() && (sym.DisplayName = "op_Dollar" || sym.DisplayName = "($)") then
                                 let typ = sym.GetType().Name
                                 match sym with
                                 | :? FSharpMemberOrFunctionOrValue as mfv ->
@@ -196,7 +197,8 @@ let private buildSemanticCallGraph (psg: ProgramSemanticGraph) : Map<string, str
             | None -> ()
         | _ -> ()
 
-    printfn "[REACH] App nodes: %d, with caller: %d" appCount appWithCallerCount
+    if isReachabilityVerbose() then
+        printfn "[REACH] App nodes: %d, with caller: %d" appCount appWithCallerCount
     callGraph
 
 /// Compute reachable symbols using semantic analysis
@@ -353,7 +355,8 @@ let analyzeReachability
         match additionalCalls with
         | None -> psgCallGraph
         | Some srtpCalls ->
-            printfn "[REACH] Merging %d SRTP call relationships into call graph" srtpCalls.Count
+            if isReachabilityVerbose() then
+                printfn "[REACH] Merging %d SRTP call relationships into call graph" srtpCalls.Count
             // Merge SRTP-discovered calls into the call graph
             (psgCallGraph, srtpCalls)
             ||> Map.fold (fun acc caller newCallees ->
@@ -362,7 +365,8 @@ let analyzeReachability
                     newCallees
                     |> List.filter (fun c -> not (List.contains c existingCallees))
                     |> List.append existingCallees
-                printfn "[REACH] SRTP: %s -> %A" caller newCallees
+                if isReachabilityVerbose() then
+                    printfn "[REACH] SRTP: %s -> %A" caller newCallees
                 Map.add caller mergedCallees acc)
 
     // Compute semantic reachability

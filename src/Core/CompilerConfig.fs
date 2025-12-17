@@ -8,8 +8,14 @@ type CompilerSettings = {
     VerboseTypeIntegration: bool
     /// Enable verbose reachability analysis output
     VerboseReachability: bool
+    /// Enable verbose SRTP extraction output
+    VerboseSRTP: bool
     /// Enable all verbose outputs
     VerboseAll: bool
+    /// Emit nanopass intermediate files
+    EmitNanopassIntermediates: bool
+    /// Output directory for nanopass intermediates
+    NanopassOutputDir: string
 }
 
 /// Default compiler settings (quiet mode)
@@ -17,7 +23,10 @@ let defaultSettings = {
     VerboseCorrelation = false
     VerboseTypeIntegration = false
     VerboseReachability = false
+    VerboseSRTP = false
     VerboseAll = false
+    EmitNanopassIntermediates = false
+    NanopassOutputDir = ""
 }
 
 /// Mutable global settings
@@ -31,6 +40,14 @@ let enableVerboseMode() =
 let disableVerboseMode() =
     settings <- defaultSettings
 
+/// Enable nanopass intermediate emission
+let enableNanopassIntermediates (outputDir: string) =
+    settings <- { settings with EmitNanopassIntermediates = true; NanopassOutputDir = outputDir }
+
+/// Disable nanopass intermediate emission
+let disableNanopassIntermediates() =
+    settings <- { settings with EmitNanopassIntermediates = false; NanopassOutputDir = "" }
+
 /// Check if correlation verbosity is enabled
 let isCorrelationVerbose() =
     settings.VerboseAll || settings.VerboseCorrelation
@@ -42,3 +59,15 @@ let isTypeIntegrationVerbose() =
 /// Check if reachability verbosity is enabled
 let isReachabilityVerbose() =
     settings.VerboseAll || settings.VerboseReachability
+
+/// Check if SRTP extraction verbosity is enabled
+let isSRTPVerbose() =
+    settings.VerboseAll || settings.VerboseSRTP
+
+/// Check if nanopass intermediates should be emitted
+let shouldEmitNanopassIntermediates() =
+    settings.EmitNanopassIntermediates && settings.NanopassOutputDir <> ""
+
+/// Get nanopass output directory
+let getNanopassOutputDir() =
+    settings.NanopassOutputDir

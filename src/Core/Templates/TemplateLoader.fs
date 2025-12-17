@@ -175,7 +175,7 @@ let private tomlToTemplate (toml: Map<string, TomlParser.TomlValue>) : TomlResul
             Platform = platform
             MemoryRegions = regions
             Capabilities = capabilities
-            Profiles = []  // TODO: Parse profiles
+            Profiles = []  // Profile parsing not yet implemented - templates work without profiles
         }
     with ex ->
         ParseError $"Failed to convert TOML to template: {ex.Message}"

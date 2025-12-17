@@ -40,6 +40,7 @@
       
       <!-- Program Semantic Graph (new) -->
       <Compile Include="Core/PSG/Types.fs" />
+      <Compile Include="Core/PSG/NavigationUtils.fs" />
       <Compile Include="Core/PSG/TypeIntegration.fs" />
       <Compile Include="Core/PSG/Correlation.fs" />
       <Compile Include="Core/PSG/SymbolAnalysis.fs" />

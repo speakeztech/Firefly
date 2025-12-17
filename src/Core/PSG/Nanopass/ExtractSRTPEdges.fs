@@ -22,6 +22,7 @@ open FSharp.Compiler.Symbols.FSharpExprPatterns
 open FSharp.Compiler.Text
 open FSharp.Compiler.CodeAnalysis
 open Core.PSG.Types
+open Core.CompilerConfig
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Range-based Key Generation (same as ResolveSRTP for consistency)
@@ -37,21 +38,6 @@ let private rangeToKey (range: range) : string =
 // ═══════════════════════════════════════════════════════════════════════════
 // SRTP Target Resolution
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Information about a resolved SRTP target
-type SRTPTargetInfo = {
-    /// Range key of the TraitCall site (source of edge)
-    CallSiteKey: string
-    /// Range of the TraitCall expression (for source node lookup)
-    CallSiteRange: range
-    /// Full name of the resolved SRTP member (e.g., "WritableString.op_Dollar")
-    ResolvedMemberFullName: string
-    /// The functions called by the resolved member's body (the REAL targets!)
-    /// These are the functions we need to mark reachable
-    BodyCallTargets: (string * range) list  // (fullName, declarationLocation)
-    /// Display name of the trait (e.g., "op_Dollar")
-    TraitName: string
-}
 
 /// Build a map of member full names to their body expressions
 /// This allows us to find what functions a resolved SRTP member calls
@@ -102,91 +88,6 @@ let private extractCallsFromBody (body: FSharpExpr) : (string * range) list =
     walkExpr body
     calls |> List.distinct
 
-/// Extract SRTP resolutions from the typed tree
-/// For each TraitCall, finds what functions the resolved member's body calls
-let private extractSRTPTargets (checkResults: FSharpCheckProjectResults) : SRTPTargetInfo list =
-    // First, build a map of all member bodies
-    let memberBodies = buildMemberBodyMap checkResults
-    printfn "[ExtractSRTP] Built member body map with %d entries" memberBodies.Count
-
-    let mutable targets = []
-    let mutable exprCount = 0
-
-    let assemblyContents = checkResults.AssemblyContents
-
-    for implFile in assemblyContents.ImplementationFiles do
-        let rec processDecl (decl: FSharpImplementationFileDeclaration) =
-            try
-                match decl with
-                | FSharpImplementationFileDeclaration.Entity (_, subDecls) ->
-                    subDecls |> List.iter processDecl
-                | FSharpImplementationFileDeclaration.MemberOrFunctionOrValue (_, _, expr) ->
-                    walkExpr expr
-                | FSharpImplementationFileDeclaration.InitAction expr ->
-                    walkExpr expr
-            with _ -> ()
-
-        and walkExpr (expr: FSharpExpr) =
-            exprCount <- exprCount + 1
-            try
-                match expr with
-                | FSharpExprPatterns.TraitCall (sourceTypes, traitName, _memberFlags, _paramTypes, _retTypes, traitArgs) ->
-                    // Resolve the trait call to its concrete implementation
-                    match sourceTypes with
-                    | firstType :: _ when firstType.HasTypeDefinition ->
-                        let entity = firstType.TypeDefinition
-                        let members = entity.MembersFunctionsAndValues
-
-                        // Find member matching the trait name
-                        let candidate =
-                            members
-                            |> Seq.tryFind (fun m ->
-                                m.LogicalName = traitName || m.CompiledName = traitName)
-
-                        match candidate with
-                        | Some resolvedMember ->
-                            let callSiteKey = rangeToKey expr.Range
-                            let resolvedFullName = resolvedMember.FullName
-
-                            // KEY CHANGE: Get the member's body and find what IT calls
-                            let bodyCallTargets =
-                                match Map.tryFind resolvedFullName memberBodies with
-                                | Some body ->
-                                    let calls = extractCallsFromBody body
-                                    printfn "[ExtractSRTP] Resolved %s -> %s, body calls: %A"
-                                        traitName resolvedFullName (calls |> List.map fst)
-                                    calls
-                                | None ->
-                                    printfn "[ExtractSRTP] Resolved %s -> %s (no body found in map)"
-                                        traitName resolvedFullName
-                                    []
-
-                            if not (List.isEmpty bodyCallTargets) then
-                                targets <- {
-                                    CallSiteKey = callSiteKey
-                                    CallSiteRange = expr.Range
-                                    ResolvedMemberFullName = resolvedFullName
-                                    BodyCallTargets = bodyCallTargets
-                                    TraitName = traitName
-                                } :: targets
-                        | None -> ()
-                    | _ -> ()
-
-                    // Continue walking arguments
-                    for arg in traitArgs do
-                        try walkExpr arg with _ -> ()
-
-                | _ ->
-                    // Walk sub-expressions
-                    for subExpr in expr.ImmediateSubExpressions do
-                        try walkExpr subExpr with _ -> ()
-            with _ -> ()
-
-        implFile.Declarations |> List.iter processDecl
-
-    printfn "[ExtractSRTP] Walked %d expressions, found %d SRTP resolutions with body calls" exprCount targets.Length
-    targets
-
 // ═══════════════════════════════════════════════════════════════════════════
 // SRTP Call Relationships
 // ═══════════════════════════════════════════════════════════════════════════
@@ -208,7 +109,8 @@ let private extractSRTPCallRelationships
 
     // First, build a map of all member bodies
     let memberBodies = buildMemberBodyMap checkResults
-    printfn "[ExtractSRTP] Built member body map with %d entries" memberBodies.Count
+    if isSRTPVerbose() then
+        printfn "[ExtractSRTP] Built member body map with %d entries" memberBodies.Count
 
     let mutable relationships: Map<string, string list> = Map.empty
     let mutable exprCount = 0
@@ -255,12 +157,14 @@ let private extractSRTPCallRelationships
                                 match Map.tryFind resolvedFullName memberBodies with
                                 | Some body ->
                                     let calls = extractCallsFromBody body
-                                    printfn "[ExtractSRTP] %s calls %s (trait: %s), which calls: %A"
-                                        caller resolvedFullName traitName (calls |> List.map fst)
+                                    if isSRTPVerbose() then
+                                        printfn "[ExtractSRTP] %s calls %s (trait: %s), which calls: %A"
+                                            caller resolvedFullName traitName (calls |> List.map fst)
                                     calls |> List.map fst
                                 | None ->
-                                    printfn "[ExtractSRTP] %s calls %s (trait: %s) - no body found"
-                                        caller resolvedFullName traitName
+                                    if isSRTPVerbose() then
+                                        printfn "[ExtractSRTP] %s calls %s (trait: %s) - no body found"
+                                            caller resolvedFullName traitName
                                     // Even if no body, the resolved member itself should be reachable
                                     [resolvedFullName]
 
@@ -289,8 +193,9 @@ let private extractSRTPCallRelationships
 
         implFile.Declarations |> List.iter (processDecl None)
 
-    printfn "[ExtractSRTP] Walked %d expressions, found %d callers with SRTP relationships"
-        exprCount relationships.Count
+    if isSRTPVerbose() then
+        printfn "[ExtractSRTP] Walked %d expressions, found %d callers with SRTP relationships"
+            exprCount relationships.Count
     relationships
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -315,7 +220,7 @@ let run (checkResults: FSharpCheckProjectResults) : ExtractSRTPResult =
     let relationships = extractSRTPCallRelationships checkResults
 
     // Debug: print what we found
-    if not (Map.isEmpty relationships) then
+    if isSRTPVerbose() && not (Map.isEmpty relationships) then
         printfn "[SRTP] Found SRTP call relationships:"
         for KeyValue(caller, callees) in relationships do
             printfn "  %s -> %A" caller callees

@@ -19,18 +19,11 @@
 module Core.PSG.Nanopass.ReduceAlloyOperators
 
 open Core.PSG.Types
+open Core.PSG.NavigationUtils
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Alloy Operator Detection
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Get child nodes for a given node
-let private getChildNodes (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode list =
-    match node.Children with
-    | Parent childIds ->
-        childIds
-        |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
-    | _ -> []
 
 /// Check if a node is Alloy's $ (direct application) operator
 /// The $ operator is defined as: let inline ($) f x = f x

@@ -181,6 +181,44 @@ module SyntaxKindT =
     /// Extract pattern kind if present
     let tryGetPattern = function SKPattern p -> Some p | _ -> None
 
+    // ═══════════════════════════════════════════════════════════════════
+    // Expression Kind Helpers - for gradual migration from SyntaxKind strings
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Check if this is an App expression
+    let isApp = function SKExpr EApp -> true | _ -> false
+
+    /// Check if this is a TypeApp expression
+    let isTypeApp = function SKExpr ETypeApp -> true | _ -> false
+
+    /// Check if this is an Ident expression
+    let isIdent = function SKExpr EIdent -> true | _ -> false
+
+    /// Check if this is a LongIdent expression
+    let isLongIdent = function SKExpr ELongIdent -> true | _ -> false
+
+    /// Check if this is a Const expression
+    let isConst = function SKExpr EConst -> true | _ -> false
+
+    /// Check if this is a TraitCall expression
+    let isTraitCall = function SKExpr ETraitCall -> true | _ -> false
+
+    /// Check if this is a MutableSet expression
+    let isMutableSet = function SKExpr EMutableSet -> true | _ -> false
+
+    /// Check if this is an InterpolatedString expression
+    let isInterpolatedString = function SKExpr EInterpolatedString -> true | _ -> false
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Pattern Kind Helpers
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Check if this is a Named pattern
+    let isNamedPattern = function SKPattern PNamed -> true | _ -> false
+
+    /// Check if this is a LongIdent pattern
+    let isLongIdentPattern = function SKPattern PLongIdent -> true | _ -> false
+
 // ═══════════════════════════════════════════════════════════════════
 // Library Operation Classifications
 // These types describe the semantic operation at an App node,

@@ -9,20 +9,13 @@ module Core.PSG.Nanopass.IntermediateEmission
 open System
 open System.IO
 open System.Text.Json
-open System.Text.Json.Serialization
 open System.Threading.Tasks
 open FSharp.Compiler.Symbols
 open Core.PSG.Types
+open Core.Utilities.IntermediateWriter
 
-// ═══════════════════════════════════════════════════════════════════════════
-// JSON Configuration
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Configure JSON serialization with F# support
-let private jsonOptions =
-    let options = JsonSerializerOptions(WriteIndented = true)
-    options.Converters.Add(JsonFSharpConverter())
-    options
+/// JSON options with F# support (reuse from IntermediateWriter)
+let private jsonOptions = jsonOptionsWithFSharpSupport
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Labeled Nanopass Intermediate Emission
@@ -101,9 +94,9 @@ let emitNanopassIntermediate (psg: ProgramSemanticGraph) (phaseLabel: string) (o
 
         File.WriteAllText(filepath, JsonSerializer.Serialize(phaseData, jsonOptions))
 
-    with _ ->
-        // Failed to emit intermediate - continue silently
-        ()
+    with ex ->
+        // Log emission failure to stderr, don't crash compilation
+        eprintfn "[EMIT] Warning: Failed to emit nanopass intermediate '%s': %s" phaseLabel ex.Message
 
 /// Emit a diff summary between two PSG phases
 let emitNanopassDiff (before: ProgramSemanticGraph) (after: ProgramSemanticGraph) (fromPhase: string) (toPhase: string) (outputDir: string) =
@@ -172,9 +165,9 @@ let emitNanopassDiff (before: ProgramSemanticGraph) (after: ProgramSemanticGraph
 
         File.WriteAllText(filepath, JsonSerializer.Serialize(diffData, jsonOptions))
 
-    with _ ->
-        // Failed to emit diff - continue silently
-        ()
+    with ex ->
+        // Log diff emission failure to stderr, don't crash compilation
+        eprintfn "[EMIT] Warning: Failed to emit diff '%s' -> '%s': %s" fromPhase toPhase ex.Message
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Parallel write task collection

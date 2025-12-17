@@ -1,4 +1,10 @@
 /// Binding processing for PSG construction
+///
+/// Note: This module has a mutual dependency with ExpressionProcessing.
+/// - BindingProcessing calls processExpression (to process let body expressions)
+/// - ExpressionProcessing calls processBindingWithUseFlag (to process let expressions)
+/// F#'s module system requires these to be separate files; the dependency is resolved
+/// at initialization time via ensureInitialized().
 module Core.PSG.Construction.BindingProcessing
 
 open FSharp.Compiler.Text

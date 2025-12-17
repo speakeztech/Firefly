@@ -3,8 +3,8 @@ module Core.IngestionPipeline
 open System
 open System.IO
 open System.Text.Json
-open System.Text.Json.Serialization
 open FSharp.Compiler.CodeAnalysis
+open Core.CompilerConfig
 open Core.FCS.ProjectContext
 open Core.PSG.Types
 open Core.PSG.Builder
@@ -15,14 +15,8 @@ open Core.Utilities.IntermediateWriter
 open Core.Utilities.RemoveIntermediates
 open Core.PSG.Nanopass.ValidateNativeTypes
 
-/// Configure JSON serialization with F# support
-let private createJsonOptions() =
-    let options = JsonSerializerOptions(WriteIndented = true)
-    options.Converters.Add(JsonFSharpConverter())
-    options
-
-/// Global JSON options for the pipeline
-let private jsonOptions = createJsonOptions()
+/// JSON options with F# support (reuse from IntermediateWriter)
+let private jsonOptions = jsonOptionsWithFSharpSupport
 
 /// Pipeline configuration
 type PipelineConfig = {
@@ -266,13 +260,12 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
 
             // Enable nanopass intermediate emission if outputting intermediates
             if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-                Core.PSG.Construction.Main.emitNanopassIntermediates <- true
-                Core.PSG.Construction.Main.nanopassOutputDir <- config.IntermediatesDir.Value
+                enableNanopassIntermediates config.IntermediatesDir.Value
 
             let psg = buildProgramSemanticGraph projectResults.CheckResults projectResults.ParseResults
 
             // Reset nanopass emission flags
-            Core.PSG.Construction.Main.emitNanopassIntermediates <- false
+            disableNanopassIntermediates()
             
             // Basic validation of PSG structure
             if psg.Nodes.Count = 0 then
@@ -301,11 +294,12 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
                 // Step 5: Generate initial PSG debug outputs (before reachability)
                 if config.OutputIntermediates && config.IntermediatesDir.IsSome then
                     let correlationContext = createContext projectResults.CheckResults
-                    let correlations = 
+                    let correlations =
                         projectResults.ParseResults
                         |> Array.collect (fun pr -> correlateFile pr.ParseTree correlationContext)
-                    let stats = generateStats correlationContext correlations
-                    
+                    // Generate stats (result not currently used but function may have side effects)
+                    generateStats correlationContext correlations |> ignore
+
                     // Generate correlations and initial summary
                     generateCorrelationDebugOutput correlations config.IntermediatesDir.Value
                     writePSGSummary psg config.IntermediatesDir.Value
@@ -323,12 +317,11 @@ let runPipeline (projectPath: string) (config: PipelineConfig) : Async<PipelineR
 
                 // Enrichment nanopasses on narrowed graph
                 if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-                    Core.PSG.Construction.Main.emitNanopassIntermediates <- true
-                    Core.PSG.Construction.Main.nanopassOutputDir <- config.IntermediatesDir.Value
+                    enableNanopassIntermediates config.IntermediatesDir.Value
 
                 let enrichedPSG = runEnrichmentPasses reachabilityResult.MarkedPSG projectResults.CheckResults
 
-                Core.PSG.Construction.Main.emitNanopassIntermediates <- false
+                disableNanopassIntermediates()
 
                 // Step 7: Generate pruned PSG debug assets
                 if config.OutputIntermediates && config.IntermediatesDir.IsSome then
@@ -487,12 +480,11 @@ let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<
 
             // Step 8: Build full PSG with symbol correlation (on reduced file set)
             if config.OutputIntermediates && config.IntermediatesDir.IsSome then
-                Core.PSG.Construction.Main.emitNanopassIntermediates <- true
-                Core.PSG.Construction.Main.nanopassOutputDir <- config.IntermediatesDir.Value
+                enableNanopassIntermediates config.IntermediatesDir.Value
 
             let psg = buildProgramSemanticGraph projectResults.CheckResults projectResults.ParseResults
 
-            Core.PSG.Construction.Main.emitNanopassIntermediates <- false
+            disableNanopassIntermediates()
 
             if psg.Nodes.Count = 0 then
                 diagnostics.Add {
@@ -534,7 +526,8 @@ let runOptimizedPipeline (projectPath: string) (config: PipelineConfig) : Async<
                     let correlations =
                         projectResults.ParseResults
                         |> Array.collect (fun pr -> correlateFile pr.ParseTree correlationContext)
-                    let _stats = generateStats correlationContext correlations
+                    // Generate stats (result not currently used but function may have side effects)
+                    generateStats correlationContext correlations |> ignore
 
                     generateCorrelationDebugOutput correlations config.IntermediatesDir.Value
                     writePSGSummary psg config.IntermediatesDir.Value

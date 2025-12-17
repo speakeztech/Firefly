@@ -3,18 +3,15 @@ module Core.PSG.DebugOutput
 open System
 open System.IO
 open System.Text.Json
-open System.Text.Json.Serialization
 open FSharp.Compiler.Text
 open FSharp.Compiler.Symbols
 open Core.PSG.Types
 open Core.PSG.Correlation
 open Core.PSG.Reachability
+open Core.Utilities.IntermediateWriter
 
-/// Configure JSON serialization with F# support
-let private jsonOptions = 
-    let options = JsonSerializerOptions(WriteIndented = true)
-    options.Converters.Add(JsonFSharpConverter())
-    options
+/// JSON options with F# support (reuse from IntermediateWriter)
+let private jsonOptions = jsonOptionsWithFSharpSupport
 
 /// Helper to convert range to simple object for JSON
 let private rangeToJson (range: range) = {|

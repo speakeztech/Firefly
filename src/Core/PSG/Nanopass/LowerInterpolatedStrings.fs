@@ -17,24 +17,11 @@
 module Core.PSG.Nanopass.LowerInterpolatedStrings
 
 open Core.PSG.Types
+open Core.PSG.NavigationUtils
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Get child nodes for a given node
-let private getChildNodes (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode list =
-    match node.Children with
-    | Parent childIds ->
-        childIds
-        |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
-    | _ -> []
-
-/// Get child node IDs
-let private getChildIds (node: PSGNode) : NodeId list =
-    match node.Children with
-    | Parent childIds -> childIds
-    | _ -> []
 
 /// Extract hash from InterpolatedStringPart:String:hash syntax kind
 let private extractStringHash (syntaxKind: string) : uint32 option =

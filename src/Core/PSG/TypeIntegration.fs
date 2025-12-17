@@ -308,8 +308,9 @@ let integrateTypesWithCheckResults (psg: ProgramSemanticGraph) (checkResults: FS
 let extractTypedAST (checkResults: FSharpCheckProjectResults) : FSharpImplementationFileContents list =
     checkResults.AssemblyContents.ImplementationFiles
 
-/// LEGACY integration point maintained for backwards compatibility - now uses CANONICAL approach
+/// Legacy integration point - kept for backwards compatibility.
+/// Use `integrateTypesWithCheckResults` instead, which provides full constraint resolution.
 let integrateTypesIntoPSG (psg: ProgramSemanticGraph) (typedFiles: FSharpImplementationFileContents list) : ProgramSemanticGraph =
-    // Cannot perform canonical constraint resolution without FSharpCheckProjectResults
-    // Return PSG unchanged to maintain interface compatibility
+    // Cannot perform constraint resolution without FSharpCheckProjectResults
+    // Return PSG unchanged
     psg

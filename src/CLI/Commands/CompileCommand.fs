@@ -7,6 +7,7 @@ open Argu
 open CLI.Configurations.FidprojLoader
 open Core.PSG.Builder
 open Core.PSG.Reachability
+open Core.CompilerConfig
 open Alex.Generation.MLIRTransfer
 
 /// Command line arguments for compile command
@@ -195,6 +196,10 @@ let execute (args: ParseResults<CompileArgs>) =
     // Enable timing if requested
     Core.Timing.setEnabled showTiming
 
+    // Enable verbose mode for compiler subsystems if requested
+    if verbose then
+        enableVerboseMode()
+
     report verbose "INIT" (sprintf "Loading project: %s" projectPath)
 
     printfn "Firefly Compiler v0.4.164"
@@ -245,16 +250,14 @@ let execute (args: ParseResults<CompileArgs>) =
         report verbose "PSG" "Building Program Semantic Graph..."
 
         match intermediatesDir with
-        | Some dir ->
-            Core.PSG.Construction.Main.emitNanopassIntermediates <- true
-            Core.PSG.Construction.Main.nanopassOutputDir <- dir
+        | Some dir -> enableNanopassIntermediates dir
         | None -> ()
 
         let psg =
             Core.Timing.timePhase "PSG" "Structural + Symbol Correlation" (fun () ->
                 buildProgramSemanticGraph checkResults parseResults)
 
-        Core.PSG.Construction.Main.emitNanopassIntermediates <- false
+        disableNanopassIntermediates()
 
         printfn "[PSG] Built: %d nodes, %d edges, %d entry points, %d symbols"
             psg.Nodes.Count psg.Edges.Length psg.EntryPoints.Length psg.SymbolTable.Count
@@ -290,16 +293,14 @@ let execute (args: ParseResults<CompileArgs>) =
         report verbose "ENRICH" "Running enrichment nanopasses..."
 
         match intermediatesDir with
-        | Some dir ->
-            Core.PSG.Construction.Main.emitNanopassIntermediates <- true
-            Core.PSG.Construction.Main.nanopassOutputDir <- dir
+        | Some dir -> enableNanopassIntermediates dir
         | None -> ()
 
         let enrichedPSG =
             Core.Timing.timePhase "ENRICH" "Enrichment" (fun () ->
                 runEnrichmentPasses reachabilityResult.MarkedPSG checkResults)
 
-        Core.PSG.Construction.Main.emitNanopassIntermediates <- false
+        disableNanopassIntermediates()
 
         // Baker: Type resolution and member body correlation
         report verbose "BAKER" "Running Baker enrichment..."

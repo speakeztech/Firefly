@@ -22,18 +22,11 @@
 module Core.PSG.Nanopass.ReducePipeOperators
 
 open Core.PSG.Types
+open Core.PSG.NavigationUtils
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pipe Operator Detection
 // ═══════════════════════════════════════════════════════════════════════════
-
-/// Get child nodes for a given node
-let private getChildNodes (psg: ProgramSemanticGraph) (node: PSGNode) : PSGNode list =
-    match node.Children with
-    | Parent childIds ->
-        childIds
-        |> List.choose (fun id -> Map.tryFind id.Value psg.Nodes)
-    | _ -> []
 
 /// Check if a node is a forward pipe operator (|>)
 let private isForwardPipe (node: PSGNode) : bool =

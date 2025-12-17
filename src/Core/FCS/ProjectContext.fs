@@ -107,7 +107,8 @@ let parseProjectFile (projectPath: string) =
             ProjectReferences = projectReferences
         }
     with ex ->
-        // Error parsing project file - returning None
+        // Log error parsing project file before returning None
+        eprintfn "[ProjectContext] Warning: Failed to parse project file '%s': %s" projectPath ex.Message
         None
 
 /// Create a properly configured FSharpChecker for the platform
