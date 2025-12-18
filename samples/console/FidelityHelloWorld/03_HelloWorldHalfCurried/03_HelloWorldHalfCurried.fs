@@ -1,7 +1,6 @@
 module Examples.HelloWorldHalfCurried
 
 open Alloy
-open Alloy.NativeTypes
 
 /// Demonstrates HALF-CURRIED patterns:
 /// - Pipe operator: `x |> f`

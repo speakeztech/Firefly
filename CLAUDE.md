@@ -12,6 +12,7 @@ The Serena MCP server maintains authoritative memories about architectural decis
 
 **STOP and consult these Serena memories:**
 - `architecture_principles` - Core architectural constraints
+- `fncs_architecture` - FNCS (F# Native Compiler Services) design
 - `alex_zipper_architecture` - The correct Zipper + XParsec + Bindings model
 - `baker_component` - Type resolution layer (Phase 4), SRTP handling
 - `negative_examples` - Real mistakes to avoid repeating
@@ -543,6 +544,7 @@ Before making changes, review these documents in `/docs/`:
 
 | Document | Purpose |
 |----------|---------|
+| **`FNCS_Architecture.md`** | **CRITICAL: F# Native Compiler Services - native type resolution at source** |
 | **`Architecture_Canonical.md`** | **AUTHORITATIVE: Two-layer model, platform bindings (BCL-free), nanopass pipeline** |
 | **`PSG_Nanopass_Architecture.md`** | **CANONICAL: True nanopass pipeline, typed tree overlay, SRTP** |
 | **`TypedTree_Zipper_Design.md`** | **Zipper implementation for FSharpExpr/PSG correlation** |

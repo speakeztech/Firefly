@@ -6,8 +6,10 @@ These resources are ESSENTIAL for understanding the project architecture and mak
 
 | Resource | Path | Purpose |
 |----------|------|---------|
-| **F# Compiler Source** | `~/repos/fsharp` | F# compiler implementation, FSharp.Compiler.Service internals, AST structures |
-| **F# Language Specification** | `~/repos/fslang-spec` | Authoritative F# language semantics, type system, evaluation rules |
+| **F# Native Compiler** | `~/repos/fsnative` | **PRIMARY**: Active fork of F# compiler for native compilation, FNCS implementation |
+| **F# Native Spec** | `~/repos/fsnative-spec` | F# Native language specification and extensions for native targets |
+| **F# Compiler Source** | `~/repos/fsharp` | REFERENCE ONLY: Upstream F# compiler for comparison, not active development |
+| **F# Language Specification** | `~/repos/fslang-spec` | Standard F# language semantics (reference for deviations in fsnative-spec) |
 
 ## MLIR & Code Generation References
 
@@ -21,6 +23,7 @@ These resources are ESSENTIAL for understanding the project architecture and mak
 | Resource | Path | Purpose |
 |----------|------|---------|
 | **Alloy** | `~/repos/Alloy` | Native F# library - ACTIVE TARGET. BCL-sympathetic API, native types, extern primitives |
+| **XParsec** | `~/repos/XParsec` | Parser combinator library fork - basis for PSG traversal and pattern matching in Alex |
 | **BAREWire** | `~/repos/BAREWire` | Binary serialization - FUTURE. Memory-efficient wire protocol |
 | **Farscape** | `~/repos/Farscape` | Distributed compute - FUTURE. Native F# distributed processing |
 
@@ -33,8 +36,11 @@ These resources are ESSENTIAL for understanding the project architecture and mak
 
 ## When to Use Each Resource
 
-- **Encountering F# AST/syntax issues**: Explore `~/repos/fsharp` for FCS implementation details
-- **Type system questions**: Reference `~/repos/fslang-spec` for language semantics
+- **Encountering F# AST/syntax issues**: Explore `~/repos/fsnative` for FCS implementation (active fork)
+- **Comparing against upstream F#**: Use `~/repos/fsharp` only for reference/comparison
+- **Type system questions**: Reference `~/repos/fslang-spec` for standard semantics, `~/repos/fsnative-spec` for native extensions
+- **Defining new native semantics**: Document in `~/repos/fsnative-spec`
+- **FNCS modifications**: Implement in `~/repos/fsnative`
 - **MLIR dialect patterns**: Look at `~/triton-cpu` for production examples
 - **Native type implementation**: Study `~/repos/Alloy` - this is the pattern library
 - **Architectural decisions**: Read `/docs/Architecture_Canonical.md` first

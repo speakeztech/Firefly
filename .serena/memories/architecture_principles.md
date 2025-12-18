@@ -156,16 +156,53 @@ FCS Output → [PSG Phase 1-3] → [BAKER] → [PSG Enriched] → [ALEX] → MLI
 
 See `docs/Baker_Architecture.md` for full design.
 
+## FNCS: Native Type Resolution at the Source
+
+**CRITICAL**: BCL type contamination cannot be fixed downstream. The fix must happen in the type system.
+
+**FNCS (F# Native Compiler Services)** is a minimal FCS fork that provides native-first types:
+- String literals → `NativeStr` (not `System.String`)
+- Option → `voption<'T>` (not nullable `option<'T>`)
+- SRTP → Native witness hierarchy
+
+**Layer Separation with FNCS**:
+| Layer | Responsibility |
+|-------|---------------|
+| **FNCS** | Type universe, literal typing, SRTP, null-free |
+| **Alloy** | Library implementations using FNCS types |
+| **Firefly/PSG** | Semantic graph from FNCS output |
+| **Firefly/Alex** | Platform-aware MLIR generation |
+
+See `fncs_architecture` memory, `fncs_ecosystem` memory, and:
+- `/docs/FNCS_Architecture.md` - Integration with Firefly
+- `~/repos/fsnative/docs/fidelity/FNCS_Pruning_Plan.md` - Implementation roadmap
+- `~/repos/fsnative-spec/docs/fidelity/FNCS_Specification.md` - Normative specification
+- `/docs/FNCS_Ecosystem.md` - Three-repository architecture overview
+- `~/repos/SpeakEZ/hugo/content/proposals/From Bridged To Self Hosted.md` - Full strategic proposal
+
+**Absorption Strategy** (December 2025 update):
+- **fsil** patterns become intrinsic: inline-by-default, implicit SRTP, collection protocols
+- **UMX** patterns become intrinsic: non-numeric measures, memory regions, access kinds
+- See `fsil_inline_semantics` and `umx_phantom_types` memories for details
+
+**Alloy Evolution** (clarified December 2025):
+- As FNCS absorbs primitives and native types, Alloy transforms from "everything bundled" into focused BCL replacement
+- **There is NO separate "fsnative library"** - Alloy IS the library, it evolves
+- After FNCS: Primitives/native types become compiler intrinsics; Alloy provides BCL-sympathetic API + Platform.Bindings
+- BCL Sympathy means API idioms (not runtime semantics) - null-free, voption, Result-based errors
+
 ## The Extern Primitive Surface
 
-The ONLY acceptable "stubs" are extern declarations:
+Extern primitives use the BCL-free `Platform.Bindings` module convention:
 
 ```fsharp
-[<DllImport("__fidelity", EntryPoint = "fidelity_write_bytes")>]
-extern int writeBytes(int fd, nativeptr<byte> buffer, int count)
+// In Alloy Platform.fs - BCL-free platform bindings
+module Platform.Bindings =
+    let writeBytes fd buffer count : int = Unchecked.defaultof<int>
+    let readBytes fd buffer maxCount : int = Unchecked.defaultof<int>
 ```
 
-The `"__fidelity"` library is a marker. `ExternDispatch` looks up bindings by entry point.
+Alex recognizes calls to `Platform.Bindings.*` and generates platform-specific MLIR. NO DllImport (that's BCL!).
 
 ## Coeffects and Codata
 
