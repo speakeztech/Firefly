@@ -1,130 +1,202 @@
 # Fidelity Tooling Roadmap
 
-## Overview
+## Introduction
 
-This document outlines the tooling ecosystem needed to support the Fidelity framework with fsnative (FNCS) as a distinct frontend. It covers editor integration, language server architecture, and the path from .NET-hosted tooling to eventual self-hosting.
+If you've developed in F# with Visual Studio Code, you've used Ionide. You hover over a symbol and see its type. You press Ctrl+Click and jump to a definition. You see red squiggles under errors before you even save the file. This is the modern developer experience, and it's powered by a sophisticated stack of tooling that most developers never think about.
 
-## Current F# Tooling Architecture
+Fidelity will need its own tooling stack. We cannot simply reuse Ionide because Ionide is built on FSharp.Compiler.Service (FCS), which assumes .NET types and .NET semantics. When you hover over a string in Ionide, it shows `string` (which is `System.String`). In Fidelity, that same code would have type `NativeStr`, a UTF-8 encoded, deterministically managed native string. The tooling must understand this difference.
 
-The existing F# tooling stack:
+This document explains what Fidelity tooling would need to provide, why existing tooling doesn't work directly, and how we plan to build a complete development environment for F# Native. Along the way, we explain the underlying concepts for developers who haven't needed to think about language server protocols or compiler services before.
 
-```
-Editor (VSCode/Vim/Emacs)
-    ↓
-Editor Plugin (Ionide-vscode-fsharp / Ionide-vim)
-    ↓ LSP
-FsAutoComplete (FSAC)
-    ↓
-├── FSharp.Compiler.Service (FCS) ← Type checking, parsing
-├── Ionide.ProjInfo ← MSBuild project loading
-├── FSharpLint ← Linting
-├── Fantomas ← Formatting
-└── FSharp.Analyzers.SDK ← Custom analyzers
-```
+This is a forward-looking design document. The implementation work lies ahead.
 
-### Key Dependencies
+---
 
-| Component | Version | Purpose |
-|-----------|---------|---------|
-| FSharp.Compiler.Service | >= 43.10.100 | Core compiler services |
-| Ionide.ProjInfo | >= 0.74.1 | MSBuild project evaluation |
-| Ionide.LanguageServerProtocol | Latest | LSP implementation library |
-| FSharp.Analyzers.SDK | 0.34.1 | Custom analyzer framework |
+## Part 1: Understanding F# Tooling Today
 
-## Fidelity Tooling Architecture
+Before we can build new tooling, we need to understand how existing F# tooling works.
 
-### Target Architecture
+### What Happens When You Open an F# File
 
-```
-Editor (VSCode/Vim/Emacs)
-    ↓
-Editor Plugin (Fidelity-vscode / Fidelity-vim)
-    ↓ LSP
-FsNativeAutoComplete (FSNAC)
-    ↓
-├── fsnative (FNCS) ← Native type resolution, SRTP
-├── Fidelity.ProjInfo ← .fidproj loading (TOML-based)
-├── Native-aware linting (future)
-└── Fidelity.Analyzers.SDK ← Memory/ownership analyzers
-```
+When you open an F# file in VS Code with Ionide installed, a remarkable amount of machinery springs into action:
 
-### Bootstrap Strategy: .NET-Hosted First
+1. **Ionide Extension Activates**: VS Code loads the Ionide extension (JavaScript/TypeScript code running in VS Code's extension host)
 
-**Critical insight**: Firefly itself is a .NET CLI tool. This provides a "get out of jail free" card for tooling bootstrap:
+2. **Language Server Starts**: Ionide spawns a separate process running FsAutoComplete (FSAC), a program written in F# that provides language intelligence
 
-```
-Phase 1: .NET-hosted tooling
-├── FSNAC runs on .NET (like FSAC)
-├── Uses fsnative (FNCS) which is .NET-hosted
-├── Editor plugins communicate via standard LSP
-└── Firefly compiles to native, but tooling runs on .NET
+3. **Project Loading**: FSAC reads your `.fsproj` file using Ionide.ProjInfo, which invokes MSBuild to understand your project structure, references, and compilation options
 
-Phase 2: Partial self-hosting (future)
-├── Core FSNAC logic compiled via Firefly
-├── LSP transport layer remains .NET (or native via platform bindings)
-└── Gradual migration of components
+4. **Initial Analysis**: FSAC uses FSharp.Compiler.Service to parse and type-check your files, building an in-memory representation of your code
 
-Phase 3: Full self-hosting (distant future)
-├── FSNAC compiled entirely by Firefly
-├── Native binary, no .NET dependency
-└── Fidelity tooling dogfoods Fidelity
+5. **Communication Begins**: Ionide and FSAC communicate over the Language Server Protocol (LSP), a standardized JSON-RPC protocol for editor-language tool communication
+
+6. **UI Updates**: As FSAC reports diagnostics, symbols, and type information, Ionide updates the VS Code UI. Squiggles appear, the outline view populates, hover information becomes available.
+
+This happens in seconds, and then continues as you edit. Every keystroke can trigger re-analysis, new diagnostics, and updated completions.
+
+### The Language Server Protocol
+
+The Language Server Protocol (LSP) is a crucial piece of modern tooling infrastructure. Before LSP, every editor needed custom integration with every language. Vim had its own Rust plugin, VS Code had its own Rust plugin, Emacs had its own Rust plugin, and they all reimplemented similar logic.
+
+LSP standardizes this. A language server is a separate process that receives notifications about file changes, responds to requests for hover information, completions, and definitions, sends diagnostics (errors and warnings) to the editor, and handles refactoring operations like rename.
+
+Any editor that speaks LSP can use any language server. This is why you can use Ionide with VS Code, Vim (via Ionide-vim), Emacs, or any other LSP-capable editor.
+
+The protocol looks like this (simplified):
+
+```json
+// Editor → Server: "What's the type at position 10:5 in Main.fs?"
+{
+    "method": "textDocument/hover",
+    "params": {
+        "textDocument": { "uri": "file:///path/to/Main.fs" },
+        "position": { "line": 10, "character": 5 }
+    }
+}
+
+// Server → Editor: "It's a function from string to int"
+{
+    "result": {
+        "contents": {
+            "kind": "markdown",
+            "value": "```fsharp\nval myFunction: string -> int\n```"
+        }
+    }
+}
 ```
 
-This mirrors the rust-analyzer approach: the tooling doesn't need to be self-hosted to be useful. rust-analyzer is written in Rust but that's orthogonal to its function as an IDE backend.
+### The F# Compiler Services (FCS)
 
-## Required New Projects
+At the heart of F# tooling is FSharp.Compiler.Service, a library form of the F# compiler. It provides parsing (converting F# source text to Abstract Syntax Trees), type checking (inferring types, resolving overloads, checking constraints), symbol resolution (finding definitions, references, implementations), and semantic information (what is this identifier, what are its members).
 
-### 1. FsNativeAutoComplete (FSNAC)
+FCS is the same code that compiles your F# programs. This is important. It means the tooling and the compiler have identical understanding of your code. If FCS says a symbol is a string, the compiler will treat it as a string.
 
-**Repository**: `fsnative-autocomplete` (or `fsnac`)
+### The Tooling Stack
 
-**Purpose**: LSP server for Fidelity/F# Native development
+Here's the complete picture:
 
-**Architecture**:
 ```
-fsnative-autocomplete/
-├── src/
-│   ├── FsNativeAutoComplete.Core/     # Core analysis logic
-│   │   ├── FNCSIntegration.fs         # fsnative API wrapper
-│   │   ├── NativeTypeDisplay.fs       # Type formatting for UI
-│   │   ├── MemoryRegionInfo.fs        # Region/access kind display
-│   │   └── Diagnostics.fs             # Native-specific errors
-│   ├── FsNativeAutoComplete.Lsp/      # LSP handlers
-│   │   ├── Server.fs                  # Main LSP server
-│   │   ├── Handlers/                  # LSP method handlers
-│   │   └── Extensions/                # Fidelity-specific LSP extensions
-│   └── FsNativeAutoComplete/          # CLI entry point
-├── tests/
-└── paket.dependencies
+┌────────────────────────────────────────────────────────────────────────────┐
+│                         F# Tooling Architecture                             │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                          User Interface                              │   │
+│  │  ┌─────────────────┐ ┌───────────────┐ ┌─────────────────────────┐  │   │
+│  │  │ VS Code + Ionide │ │ Vim + LSP    │ │ Emacs + eglot          │  │   │
+│  │  │                  │ │              │ │                        │  │   │
+│  │  │ Syntax highlight │ │ Same features│ │ Same features          │  │   │
+│  │  │ Hover info       │ │ via LSP      │ │ via LSP                │  │   │
+│  │  │ Go to definition │ │              │ │                        │  │   │
+│  │  │ Error squiggles  │ │              │ │                        │  │   │
+│  │  └────────┬─────────┘ └──────┬───────┘ └───────────┬─────────────┘  │   │
+│  │           │                  │                     │                │   │
+│  │           └──────────────────┼─────────────────────┘                │   │
+│  │                              │                                      │   │
+│  │                              ▼ LSP (JSON-RPC)                       │   │
+│  └──────────────────────────────┼──────────────────────────────────────┘   │
+│                                 │                                          │
+│  ┌──────────────────────────────▼──────────────────────────────────────┐   │
+│  │                       FsAutoComplete (FSAC)                          │   │
+│  │                                                                      │   │
+│  │  A long-running process that provides language intelligence          │   │
+│  │                                                                      │   │
+│  │  ┌────────────────────────────────────────────────────────────────┐ │   │
+│  │  │ LSP Server Implementation (Ionide.LanguageServerProtocol)      │ │   │
+│  │  │ - Receives requests from editors                               │ │   │
+│  │  │ - Routes to appropriate handlers                               │ │   │
+│  │  │ - Formats and sends responses                                  │ │   │
+│  │  └────────────────────────────────────────────────────────────────┘ │   │
+│  │                                                                      │   │
+│  │  ┌────────────────────────────────────────────────────────────────┐ │   │
+│  │  │ Analysis Engine                                                 │ │   │
+│  │  │                                                                 │ │   │
+│  │  │  ┌──────────────┐ ┌──────────────┐ ┌───────────────────────┐  │ │   │
+│  │  │  │ Ionide       │ │ FSharp       │ │ Additional Tools      │  │ │   │
+│  │  │  │ .ProjInfo    │ │ .Compiler    │ │                       │  │ │   │
+│  │  │  │              │ │ .Service     │ │ FSharpLint            │  │ │   │
+│  │  │  │ Loads .fsproj│ │              │ │ Fantomas (formatting) │  │ │   │
+│  │  │  │ via MSBuild  │ │ Type checks  │ │ Analyzers SDK         │  │ │   │
+│  │  │  │              │ │ Resolves     │ │                       │  │ │   │
+│  │  │  │ Returns file │ │ symbols      │ │                       │  │ │   │
+│  │  │  │ list, refs   │ │              │ │                       │  │ │   │
+│  │  │  └──────────────┘ └──────────────┘ └───────────────────────┘  │ │   │
+│  │  └────────────────────────────────────────────────────────────────┘ │   │
+│  │                                                                      │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Key differences from FSAC**:
+---
 
-| Aspect | FSAC | FSNAC |
-|--------|------|-------|
-| Compiler backend | FSharp.Compiler.Service | fsnative (FNCS) |
-| Project files | .fsproj (MSBuild) | .fidproj (TOML) |
-| Type display | BCL types | Native types |
-| String type | `System.String` | `NativeStr` |
-| Option type | `'T option` | `'T voption` |
-| Diagnostics | FS0001-FS9999 | FS0001-FS7999 + FS8xxx (native) |
-| SRTP info | .NET method tables | Alloy witness resolution |
+## Part 2: Why Fidelity Would Need Its Own Tooling
 
-**Leverage points**:
-- [Ionide.LanguageServerProtocol](https://github.com/ionide/LanguageServerProtocol) - Use directly, no changes needed
-- FSAC structure - Follow same patterns for LSP handlers
-- fsnative APIs - Consume `FNCSPublicAPI` stability layer
+Given the sophistication of existing F# tooling, why can't we just use it? The answer lies in the fundamental differences between .NET F# and F# Native.
 
-### 2. Fidelity.ProjInfo
+### The Type System Difference
 
-**Repository**: Part of `fsnative-autocomplete` or separate
-
-**Purpose**: Parse and evaluate `.fidproj` files
-
-**This is dramatically simpler than Ionide.ProjInfo**:
+Consider this simple code:
 
 ```fsharp
-// .fidproj is TOML - trivial to parse
+let greeting = "Hello, World!"
+```
+
+In standard F#, `greeting` has type `string`, which is `System.String`. This type is UTF-16 encoded, garbage collected, a reference type (lives on the heap), and immutable (contents can't change, but new strings can be created).
+
+In Fidelity, `greeting` would have type `NativeStr`. This type would be UTF-8 encoded, deterministically managed (no GC), a fat pointer (pointer + length), and would live wherever the memory model specifies (stack, arena, etc.).
+
+If you use Ionide with Fidelity code, it will tell you `greeting: string`. That's wrong. It would be `NativeStr`. This incorrect information would confuse developers and undermine the tooling's usefulness.
+
+### The Option Type Example
+
+The difference is even more significant with option types:
+
+```fsharp
+let maybeValue = Some 42
+```
+
+In standard F#, the type is `int option`. It's a reference type, allocated on the heap. `None` is a singleton object. `Some 42` allocates a heap object.
+
+In Fidelity, the type would be `int voption` (value option). It would be a value type that can live on the stack. `ValueNone` would be a struct with a tag bit. `ValueSome 42` would be a struct with no allocation.
+
+This isn't just a display difference. It affects how you think about the code. In Fidelity, creating a `Some` wouldn't allocate. Returning `ValueNone` wouldn't create a reference. The memory model is fundamentally different.
+
+### SRTP Resolution
+
+Statically Resolved Type Parameters (SRTP) behave the same syntactically but resolve differently:
+
+```fsharp
+let inline double x = x + x
+```
+
+In standard F#, `(+)` resolves against .NET method tables. The compiler finds `System.Int32.op_Addition` for integers, `System.String.Concat` for strings, and so on.
+
+In Fidelity, `(+)` would resolve against Alloy's witness hierarchy. The compiler would find `Alloy.BasicOps.add` witnesses that provide native implementations.
+
+When you hover over `double`, the tooling should show the constraint. But it would need to show resolution against Alloy witnesses, not .NET types.
+
+### Project Format
+
+Standard F# uses `.fsproj` files with MSBuild:
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" Version="8.0.0" />
+  </ItemGroup>
+</Project>
+```
+
+Fidelity uses `.fidproj` files with TOML:
+
+```toml
 [package]
 name = "my_app"
 version = "1.0.0"
@@ -142,184 +214,580 @@ output = "my_app"
 output_kind = "console"
 ```
 
-**No MSBuild complexity**:
-- No SDK resolution
-- No NuGet package restoration
-- No target framework negotiation
-- No props/targets evaluation
-- Source files listed explicitly
+Ionide.ProjInfo doesn't understand `.fidproj`. It expects MSBuild, SDK resolution, and NuGet packages. None of that applies to Fidelity.
 
-**Implementation**:
+### The Bottom Line
+
+We would need tooling that understands Fidelity's native type system, shows correct types (`NativeStr`, `voption`, etc.), resolves SRTP against Alloy witnesses, loads `.fidproj` project files, and reports Fidelity-specific diagnostics (FS8xxx codes).
+
+This means building a new language server that uses fsnative (FNCS) instead of FCS.
+
+---
+
+## Part 3: The Proposed Fidelity Tooling Architecture
+
+Here's what we anticipate building:
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│                       Fidelity Tooling Architecture                         │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                          User Interface                              │   │
+│  │  ┌─────────────────────┐ ┌───────────────┐ ┌──────────────────────┐ │   │
+│  │  │ VS Code             │ │ Neovim        │ │ Other LSP Editors    │ │   │
+│  │  │ + Fidelity Extension│ │ + Fidelity    │ │                      │ │   │
+│  │  │                     │ │   plugin      │ │ Emacs, Helix, etc.   │ │   │
+│  │  │ Reuses F# syntax    │ │               │ │                      │ │   │
+│  │  │ (language unchanged)│ │ Uses built-in │ │ Standard LSP works   │ │   │
+│  │  │                     │ │ LSP client    │ │                      │ │   │
+│  │  └─────────┬───────────┘ └───────┬───────┘ └───────────┬──────────┘ │   │
+│  │            │                     │                     │            │   │
+│  │            └─────────────────────┼─────────────────────┘            │   │
+│  │                                  │                                  │   │
+│  │                                  ▼ LSP (JSON-RPC)                   │   │
+│  └──────────────────────────────────┼──────────────────────────────────┘   │
+│                                     │                                      │
+│  ┌──────────────────────────────────▼──────────────────────────────────┐   │
+│  │                  FsNativeAutoComplete (FSNAC)                        │   │
+│  │                                                                      │   │
+│  │  The language server for Fidelity development                        │   │
+│  │                                                                      │   │
+│  │  ┌────────────────────────────────────────────────────────────────┐ │   │
+│  │  │ LSP Server (Ionide.LanguageServerProtocol)                     │ │   │
+│  │  │                                                                 │ │   │
+│  │  │ We would reuse Ionide's LSP library directly. It's generic     │ │   │
+│  │  │ infrastructure that handles the JSON-RPC protocol.             │ │   │
+│  │  │ Only the handlers that call into the compiler would differ.    │ │   │
+│  │  └────────────────────────────────────────────────────────────────┘ │   │
+│  │                                                                      │   │
+│  │  ┌────────────────────────────────────────────────────────────────┐ │   │
+│  │  │ FSNAC Core                                                      │ │   │
+│  │  │                                                                 │ │   │
+│  │  │  ┌──────────────────┐ ┌──────────────────────────────────────┐ │ │   │
+│  │  │  │ Fidelity.ProjInfo│ │ fsnative (FNCS)                      │ │ │   │
+│  │  │  │                  │ │                                      │ │ │   │
+│  │  │  │ Loads .fidproj   │ │ Native type resolution               │ │ │   │
+│  │  │  │ (TOML parsing)   │ │ NativeStr, voption, etc.            │ │ │   │
+│  │  │  │                  │ │                                      │ │ │   │
+│  │  │  │ No MSBuild       │ │ SRTP against Alloy witnesses         │ │ │   │
+│  │  │  │ No NuGet         │ │                                      │ │ │   │
+│  │  │  │ Much simpler     │ │ Memory region tracking               │ │ │   │
+│  │  │  │                  │ │ Access kind enforcement              │ │ │   │
+│  │  │  └──────────────────┘ └──────────────────────────────────────┘ │ │   │
+│  │  │                                                                 │ │   │
+│  │  │  ┌──────────────────────────────────────────────────────────┐  │ │   │
+│  │  │  │ Future: Fidelity.Analyzers.SDK                           │  │ │   │
+│  │  │  │                                                          │  │ │   │
+│  │  │  │ Custom analyzers for:                                    │  │ │   │
+│  │  │  │ - Memory safety (lifetime violations)                    │  │ │   │
+│  │  │  │ - Region misuse (stack escape, etc.)                     │  │ │   │
+│  │  │  │ - Platform binding validation                            │  │ │   │
+│  │  │  └──────────────────────────────────────────────────────────┘  │ │   │
+│  │  └────────────────────────────────────────────────────────────────┘ │   │
+│  │                                                                      │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+### What We Would Build New
+
+**FsNativeAutoComplete (FSNAC)**: A new language server that uses FNCS instead of FCS. This would be the main effort.
+
+**Fidelity.ProjInfo**: A simple TOML parser for `.fidproj` files. Much simpler than Ionide.ProjInfo because we don't have MSBuild complexity.
+
+**Fidelity-vscode**: A VS Code extension that connects to FSNAC. Simpler than Ionide because we would delegate most work to the LSP server.
+
+**Fidelity-vim**: A Neovim plugin that configures the built-in LSP client to use FSNAC.
+
+### What We Would Reuse
+
+**Ionide.LanguageServerProtocol**: The F# library that implements the LSP protocol. This is generic infrastructure. It handles JSON-RPC serialization, message routing, and the protocol mechanics. We expect to use it directly.
+
+**ionide-fsgrammar**: The TextMate grammar for F# syntax highlighting. Since Fidelity uses F# syntax (just with different semantics), we could reuse syntax highlighting unchanged.
+
+**Fantomas**: The F# code formatter. It operates on syntax, not semantics, so it should work with Fidelity code unchanged.
+
+---
+
+## Part 4: Why .NET-Hosted Tooling First
+
+You might wonder: "If Fidelity compiles to native, shouldn't the tooling be native too?"
+
+This is a reasonable question, and the answer is nuanced. We believe tooling should be .NET-hosted initially, with self-hosting as a long-term goal.
+
+### The Bootstrap Problem
+
+Consider what it takes to build a language server. You need to parse F# code, type-check it, respond to LSP requests, and handle file I/O, JSON serialization, and networking.
+
+FNCS (the fsnative compiler services) is written in F# and runs on .NET. To build FSNAC, we would need to call FNCS APIs. If FSNAC must be native, we would need to either make FNCS itself native-compilable (a massive effort) or build a separate native implementation of type checking (duplicated effort).
+
+Neither makes sense when we can just run FSNAC on .NET.
+
+### The rust-analyzer Precedent
+
+The Rust community faced this exact question with rust-analyzer (the Rust language server). rust-analyzer is written in Rust, which compiles to native code. But that's somewhat incidental. It's written in Rust because Rust is a good language for this kind of software, and because it can share code with the Rust compiler.
+
+What we take from this: rust-analyzer being native isn't why it's good. It's good because it's well-designed, fast, and accurate. If rust-analyzer were written in Java but provided the same functionality at the same speed, users wouldn't care.
+
+Similarly, FSNAC running on .NET shouldn't harm the developer experience. What would matter is that it provides accurate type information (using FNCS), responds quickly to requests, and understands Fidelity's semantics.
+
+### The Self-Hosting Path
+
+That said, self-hosting (building Fidelity tools with Fidelity) is a worthy long-term goal. Using Fidelity to build Fidelity tools would validate the platform. Native tooling would be easier to distribute (no .NET SDK required). And it would demonstrate that Fidelity can build real-world tools.
+
+Here's how we envision the path:
+
+```
+Phase 1: .NET-Hosted (Current Target)
+─────────────────────────────────────
+FSNAC runs on .NET
+Uses FNCS (which is .NET-based)
+Editor plugins communicate via LSP
+Firefly compiles user code to native, but tooling runs on .NET
+
+Phase 2: Partial Self-Hosting (Future)
+──────────────────────────────────────
+Core analysis logic compiled by Firefly
+Type resolution, SRTP solving done in native code
+LSP layer still .NET (JSON-RPC is convenient in .NET)
+
+Phase 3: Full Self-Hosting (Distant Future)
+───────────────────────────────────────────
+FSNAC is a Fidelity-compiled native binary
+No .NET runtime required
+Single executable distribution
+```
+
+What we take from this: Phase 1 would give developers a working environment. Phase 2 and 3 are optimization and validation.
+
+---
+
+## Part 5: Fidelity.ProjInfo and Why It Would Be Simple
+
+One of the nice aspects of Fidelity tooling is how much simpler project loading could become.
+
+### The MSBuild Complexity
+
+Ionide.ProjInfo has to deal with MSBuild, which is extraordinarily complex. It must handle SDK resolution (finding the right .NET SDK version), project evaluation (running MSBuild's evaluation phase to expand properties and items), NuGet restoration (downloading packages, resolving dependencies), target framework negotiation (handling multi-targeting, conditional compilation), import resolution (processing `<Import>` statements, props/targets files), and reference resolution (turning package references into actual file paths).
+
+This is necessary because `.fsproj` files are essentially programs written in a declarative configuration language. They can have conditions, imports, and computed values. They require execution to understand.
+
+### The Fidelity Simplicity
+
+`.fidproj` files are just data. TOML is a straightforward configuration format:
+
+```toml
+[package]
+name = "my_app"
+version = "1.0.0"
+
+[compilation]
+memory_model = "stack_only"
+target = "native"
+
+[dependencies]
+alloy = { path = "/home/hhh/repos/Alloy/src" }
+
+[build]
+sources = ["Main.fs", "Helpers.fs"]
+output = "my_app"
+output_kind = "console"
+```
+
+Parsing this would be trivial. Read the file, parse TOML (standard library), extract the fields, done.
+
+No SDK resolution (there's no SDK; Firefly is the compiler). No NuGet (dependencies are paths, or will use a simpler package format). No target framework (we target native). No complex import machinery.
+
 ```fsharp
 module Fidelity.ProjInfo
 
-open Tomlyn  // or similar TOML library
+open Tomlyn
+
+type MemoryModel = StackOnly | ArenaOwned | Full
+type OutputKind = Console | Freestanding | Library
 
 type FidProject = {
     Name: string
     Version: string option
     MemoryModel: MemoryModel
-    Target: CompilationTarget
+    Target: string
     Dependencies: Map<string, DependencySpec>
     Sources: string list
     Output: string
     OutputKind: OutputKind
 }
 
-let parse (path: string) : Result<FidProject, ParseError> =
-    // Simple TOML parsing - no MSBuild evaluation needed
-    ...
+let load (path: string) : Result<FidProject, string> =
+    let content = File.ReadAllText path
+    let doc = Toml.Parse content
+
+    // Extract fields directly - no evaluation needed
+    let package = doc.["package"]
+    let compilation = doc.["compilation"]
+    let build = doc.["build"]
+
+    Ok {
+        Name = package.["name"].AsString
+        Version = package.TryGet("version") |> Option.map (fun v -> v.AsString)
+        MemoryModel = parseMemoryModel compilation.["memory_model"].AsString
+        Target = compilation.["target"].AsString
+        Dependencies = parseDependencies doc.["dependencies"]
+        Sources = build.["sources"].AsArray |> Seq.map (fun s -> s.AsString) |> List.ofSeq
+        Output = build.["output"].AsString
+        OutputKind = parseOutputKind build.["output_kind"].AsString
+    }
 ```
 
-### 3. Fidelity-vscode
+This could be the entire project loading logic. Compare to Ionide.ProjInfo's thousands of lines dealing with MSBuild's complexity.
 
-**Repository**: `fidelity-vscode`
+---
 
-**Purpose**: VS Code extension for Fidelity development
+## Part 6: FSNAC Design
 
-**Structure**:
+FsNativeAutoComplete would be the heart of Fidelity tooling. Here's how we anticipate it would work.
+
+### Architecture Overview
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│                            FSNAC Architecture                               │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                         LSP Protocol Layer                             │ │
+│  │                    (Ionide.LanguageServerProtocol)                     │ │
+│  │                                                                        │ │
+│  │  Receives:                          Sends:                             │ │
+│  │  - textDocument/hover               - textDocument/publishDiagnostics  │ │
+│  │  - textDocument/definition          - window/showMessage               │ │
+│  │  - textDocument/completion          - etc.                             │ │
+│  │  - textDocument/references                                             │ │
+│  │  - etc.                                                                │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                    │                                       │
+│                                    ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                          Request Handlers                              │ │
+│  │                                                                        │ │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐  │ │
+│  │  │ HoverHandler │ │ DefHandler   │ │ CompHandler  │ │ DiagHandler  │  │ │
+│  │  │              │ │              │ │              │ │              │  │ │
+│  │  │ Get symbol   │ │ Find def     │ │ Get options  │ │ Get errors   │  │ │
+│  │  │ Format type  │ │ at position  │ │ at position  │ │ Format them  │  │ │
+│  │  │ Return MD    │ │ Return loc   │ │ Return list  │ │ Publish      │  │ │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘  │ │
+│  │                                                                        │ │
+│  │  Handlers would call into FNCS Integration Layer                      │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                    │                                       │
+│                                    ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                      FNCS Integration Layer                            │ │
+│  │                                                                        │ │
+│  │  Wraps fsnative (FNCS) APIs in a convenient interface                 │ │
+│  │                                                                        │ │
+│  │  ┌──────────────────────────────────────────────────────────────────┐ │ │
+│  │  │ Project State                                                     │ │ │
+│  │  │                                                                   │ │ │
+│  │  │  Loaded projects: Map<projectPath, FidProject>                   │ │ │
+│  │  │  File contents: Map<filePath, sourceText * version>              │ │ │
+│  │  │  Checked files: Map<filePath, FNCSCheckResults>                  │ │ │
+│  │  └──────────────────────────────────────────────────────────────────┘ │ │
+│  │                                                                        │ │
+│  │  ┌──────────────────────────────────────────────────────────────────┐ │ │
+│  │  │ Analysis Functions                                                │ │ │
+│  │  │                                                                   │ │ │
+│  │  │  getTypeAtPosition: file * pos -> NativeType option              │ │ │
+│  │  │  getSymbolAtPosition: file * pos -> FNCSSymbol option            │ │ │
+│  │  │  getDefinition: symbol -> location option                        │ │ │
+│  │  │  getReferences: symbol -> location list                          │ │ │
+│  │  │  getDiagnostics: file -> FNCSError list                          │ │ │
+│  │  │  getCompletions: file * pos -> CompletionItem list               │ │ │
+│  │  └──────────────────────────────────────────────────────────────────┘ │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                    │                                       │
+│                                    ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │                         fsnative (FNCS)                                │ │
+│  │                                                                        │ │
+│  │  F# Native Compiler Services - the compiler as a library              │ │
+│  │                                                                        │ │
+│  │  - Parsing (same as FCS - F# syntax unchanged)                        │ │
+│  │  - Type checking with native types                                    │ │
+│  │  - SRTP resolution against Alloy witnesses                            │ │
+│  │  - Symbol resolution and semantic information                         │ │
+│  │  - Diagnostic generation (including FS8xxx native-specific)           │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Expected Differences from FSAC
+
+| Aspect | FSAC | FSNAC |
+|--------|------|-------|
+| **Compiler backend** | FSharp.Compiler.Service | fsnative (FNCS) |
+| **Project files** | `.fsproj` (MSBuild) | `.fidproj` (TOML) |
+| **Type display** | BCL types (`string`, `option`) | Native types (`NativeStr`, `voption`) |
+| **String literal type** | `System.String` | `NativeStr` |
+| **Option type** | `'T option` (reference) | `'T voption` (value) |
+| **SRTP resolution** | .NET method tables | Alloy witness hierarchy |
+| **Diagnostics** | FS0001-FS9999 | FS0001-FS7999 + FS8xxx (native-specific) |
+| **Memory info** | N/A | Regions, access kinds |
+
+### Native Type Display
+
+When you hover over a value, FSNAC would format its type for display. This would include native-specific information:
+
+```fsharp
+module NativeTypeDisplay =
+
+    let formatType (typ: NativeType) : string =
+        match typ with
+        | NativeType.Int32 -> "int"
+        | NativeType.Int64 -> "int64"
+        | NativeType.Float64 -> "float"
+        | NativeType.NativeStr -> "NativeStr"
+        | NativeType.ValueOption inner -> sprintf "%s voption" (formatType inner)
+        | NativeType.Array (elem, region) ->
+            sprintf "%s[] <%s>" (formatType elem) (formatRegion region)
+        | NativeType.Ptr (pointee, region, access) ->
+            sprintf "Ptr<%s, %s, %s>" (formatType pointee) (formatRegion region) (formatAccess access)
+        | NativeType.Function (args, ret) ->
+            let argStr = args |> List.map formatType |> String.concat " -> "
+            sprintf "%s -> %s" argStr (formatType ret)
+        | NativeType.Record name -> name
+        | NativeType.Union name -> name
+        | _ -> typ.ToString()
+
+    let formatRegion (region: MemoryRegion) : string =
+        match region with
+        | MemoryRegion.Stack -> "stack"
+        | MemoryRegion.Heap -> "heap"
+        | MemoryRegion.Arena name -> sprintf "arena:%s" name
+        | MemoryRegion.Peripheral -> "peripheral"
+        | MemoryRegion.Flash -> "flash"
+
+    let formatAccess (access: AccessKind) : string =
+        match access with
+        | AccessKind.ReadOnly -> "ro"
+        | AccessKind.WriteOnly -> "wo"
+        | AccessKind.ReadWrite -> "rw"
+```
+
+When you hover over a pointer variable, you might see:
+
+```
+val gpioPtr: Ptr<uint32, peripheral, rw>
+```
+
+This would tell you it's a pointer to a 32-bit unsigned integer, in peripheral memory (memory-mapped I/O), with read-write access. This kind of information would be crucial for embedded development.
+
+### Memory Region Information
+
+FSNAC could provide additional information about memory layout:
+
+```
+type Person = {
+    Name: NativeStr  // offset 0, size 16 (fat pointer)
+    Age: int         // offset 16, size 4
+}
+// Total size: 24 bytes (with padding)
+// Alignment: 8 bytes
+```
+
+This visibility into memory layout would help developers understand the native representation of their types.
+
+---
+
+## Part 7: Editor Extensions
+
+### Fidelity-vscode
+
+The VS Code extension would be relatively thin because most intelligence would come from the LSP server.
+
+**What it would provide:**
+
+1. **Syntax Highlighting**: Reuses ionide-fsgrammar (F# syntax unchanged)
+2. **LSP Client**: Connects to FSNAC, routes requests/responses
+3. **Commands**: Build with Firefly, run native binary
+4. **Status Bar**: Shows project info, FSNAC status
+5. **Configuration**: Extension settings for FSNAC path, Firefly path, etc.
+
+**Structure:**
+
 ```
 fidelity-vscode/
 ├── src/
-│   ├── extension.ts           # Entry point
-│   ├── client.ts              # LSP client setup
-│   ├── commands/              # Fidelity-specific commands
-│   │   ├── compile.ts         # Invoke Firefly
-│   │   └── run.ts             # Run native binary
-│   └── views/                 # Custom UI elements
-│       ├── memoryRegions.ts   # Memory region visualization
-│       └── platformBindings.ts
-├── syntaxes/                  # Can reuse ionide-fsgrammar
-├── package.json
+│   ├── extension.ts           # Extension entry point
+│   ├── client.ts              # LSP client configuration
+│   ├── commands/
+│   │   ├── build.ts           # Invoke Firefly
+│   │   ├── run.ts             # Run native binary
+│   │   └── clean.ts           # Clean build artifacts
+│   └── views/
+│       └── status.ts          # Status bar item
+├── syntaxes/
+│   └── fsharp.tmLanguage.json # Symlink to ionide-fsgrammar
+├── package.json               # Extension manifest
 └── tsconfig.json
 ```
 
-**Key features**:
-- LSP client connecting to FSNAC
-- Native type display in hover/completion
-- Memory region annotations
-- Firefly build integration
-- Native binary execution
+**Example command (build):**
 
-**Leverage points**:
-- [ionide-fsgrammar](https://github.com/ionide/ionide-fsgrammar) - Reuse directly (syntax unchanged)
-- ionide-vscode-fsharp patterns - Similar extension structure
+```typescript
+import * as vscode from 'vscode';
+import * as path from 'path';
+import { spawn } from 'child_process';
 
-### 4. Fidelity-vim
+export async function buildProject() {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) return;
 
-**Repository**: `fidelity-vim`
+    // Find .fidproj file
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+    if (!workspaceFolder) return;
 
-**Purpose**: Vim/Neovim plugin for Fidelity development
+    const fidprojFiles = await vscode.workspace.findFiles(
+        new vscode.RelativePattern(workspaceFolder, '*.fidproj'),
+        null, 1
+    );
 
-**Structure**:
+    if (fidprojFiles.length === 0) {
+        vscode.window.showErrorMessage('No .fidproj file found');
+        return;
+    }
+
+    // Run Firefly
+    const fireflyPath = vscode.workspace.getConfiguration('fidelity').get<string>('fireflyPath', 'Firefly');
+    const terminal = vscode.window.createTerminal('Fidelity Build');
+    terminal.sendText(`${fireflyPath} compile "${fidprojFiles[0].fsPath}"`);
+    terminal.show();
+}
 ```
-fidelity-vim/
-├── autoload/
-│   └── fidelity.vim
-├── ftplugin/
-│   └── fsharp.vim           # F# filetype settings
-├── lua/                     # Neovim-specific (optional)
-│   └── fidelity/
-│       └── init.lua
-├── plugin/
-│   └── fidelity.vim
-└── README.md
+
+### Fidelity-vim
+
+For Vim/Neovim users, we would provide a minimal plugin that configures LSP:
+
+```lua
+-- lua/fidelity/init.lua
+
+local M = {}
+
+function M.setup(opts)
+    opts = opts or {}
+
+    -- Path to FSNAC binary
+    local fsnac_path = opts.fsnac_path or "fsnac"
+
+    -- Configure LSP
+    local lspconfig = require('lspconfig')
+    local configs = require('lspconfig.configs')
+
+    if not configs.fsnac then
+        configs.fsnac = {
+            default_config = {
+                cmd = { fsnac_path },
+                filetypes = { 'fsharp' },
+                root_dir = function(fname)
+                    return lspconfig.util.root_pattern('*.fidproj')(fname)
+                        or lspconfig.util.find_git_ancestor(fname)
+                end,
+                settings = {},
+            },
+        }
+    end
+
+    lspconfig.fsnac.setup({
+        on_attach = function(client, bufnr)
+            -- Standard LSP keybindings
+            local opts = { buffer = bufnr, noremap = true, silent = true }
+            vim.keymap.set('n', 'gd', vim.lsp.buf.definition, opts)
+            vim.keymap.set('n', 'K', vim.lsp.buf.hover, opts)
+            vim.keymap.set('n', 'gr', vim.lsp.buf.references, opts)
+            vim.keymap.set('n', '<leader>rn', vim.lsp.buf.rename, opts)
+
+            -- Fidelity-specific
+            vim.keymap.set('n', '<leader>fb', ':!Firefly compile *.fidproj<CR>', opts)
+        end,
+    })
+end
+
+return M
 ```
 
-**Integration approach**:
-- Configure nvim-lspconfig to use FSNAC
-- Minimal plugin - mostly LSP configuration
-- Reuse existing F# syntax highlighting
+Usage in user's Neovim config:
 
-**Simpler than Ionide-vim** because:
-- No need for custom FSI integration (native binaries)
-- LSP handles most functionality
-- Neovim's built-in LSP client does heavy lifting
+```lua
+require('fidelity').setup({
+    fsnac_path = '/home/user/.local/bin/fsnac'
+})
+```
 
-### 5. Fidelity.Analyzers.SDK (Future)
+Neovim's built-in LSP client handles the protocol; we would just configure it to use FSNAC.
 
-**Repository**: `fidelity-analyzers-sdk`
+---
 
-**Purpose**: Framework for custom Fidelity-specific analyzers
-
-**Native-specific analyzers**:
-- Memory region misuse detection
-- Access kind violations
-- Ownership/borrowing errors (when implemented)
-- Platform binding validation
-- Unsafe pointer usage warnings
-
-**Deferred until**:
-- FNCS API is stable
-- Core tooling (FSNAC) is functional
-- Real-world usage patterns emerge
-
-## Reusable Components
-
-### Can Use Directly
-
-| Component | Repository | Reason |
-|-----------|------------|--------|
-| **LanguageServerProtocol** | ionide/LanguageServerProtocol | Generic LSP infrastructure |
-| **ionide-fsgrammar** | ionide/ionide-fsgrammar | F# syntax unchanged |
-| **Fantomas** | fsprojects/fantomas | Formatting is syntax-level |
-
-### Need Adaptation
-
-| Component | Original | Changes Needed |
-|-----------|----------|----------------|
-| **FSAC patterns** | ionide/FsAutoComplete | Replace FCS with FNCS |
-| **FSharpLint rules** | fsprojects/FSharpLint | Native-specific rules |
-| **Analyzers SDK** | ionide/FSharp.Analyzers.SDK | FNCS typed trees |
-
-## Implementation Phases
+## Part 8: Implementation Plan
 
 ### Phase 1: Minimal Viable FSNAC
 
-**Goal**: Basic LSP server that provides hover and go-to-definition
+**Goal**: Basic LSP server with hover and go-to-definition
 
 **Tasks**:
-1. Create fsnative-autocomplete repository
+1. Create fsnac repository with F# project structure
 2. Add Ionide.LanguageServerProtocol dependency
-3. Implement minimal FNCS integration
-4. Basic .fidproj parsing (hardcoded paths acceptable)
-5. Hover provider showing native types
-6. Go-to-definition for local symbols
+3. Implement project loading (Fidelity.ProjInfo)
+4. Create FNCS integration wrapper
+5. Implement hover handler (show native types)
+6. Implement go-to-definition handler
 
 **Validation**:
-- Test with VS Code using generic LSP extension
-- Hover over `let x = "hello"` shows `NativeStr`
+- Use VS Code's generic LSP extension to connect to FSNAC
+- Open a Fidelity project
+- Hover over `let x = "hello"` and see `val x: NativeStr`
+- Ctrl+Click on a function call, jump to its definition
 
-### Phase 2: Editor Integration
+**Estimated effort**: This would be the largest phase because it establishes the foundation.
 
-**Goal**: Dedicated VS Code extension with native type awareness
+### Phase 2: VS Code Extension
+
+**Goal**: Dedicated VS Code extension for Fidelity development
 
 **Tasks**:
 1. Create fidelity-vscode repository
-2. LSP client configuration
-3. Syntax highlighting (reuse fsgrammar)
-4. Status bar integration
-5. Basic Firefly build command
+2. Set up TypeScript extension project
+3. Configure LSP client to use FSNAC
+4. Reuse ionide-fsgrammar for syntax highlighting
+5. Add "Build with Firefly" command
+6. Add status bar item showing project/FSNAC status
 
 **Validation**:
-- Full editing experience in VS Code
-- Compile via extension command
+- Install extension in VS Code
+- Full editing experience with correct type information
+- Build project from VS Code command
+- Status bar shows project name and build status
 
 ### Phase 3: Rich Features
 
-**Goal**: Full-featured development environment
+**Goal**: Feature parity with core FSAC functionality
 
 **Tasks**:
-1. Complete Fidelity.ProjInfo implementation
-2. Memory region display in hover
-3. SRTP resolution information
-4. Go-to-definition across Alloy sources
-5. Find all references
-6. Symbol rename
+1. Find all references
+2. Rename symbol (across project)
+3. Document symbols (outline view)
+4. Workspace symbols (search by name)
+5. Signature help (function parameters)
+6. Completion with type information
 
 **Validation**:
-- Navigate through FidelityHelloWorld samples
-- Rename symbol updates all references
+- Navigate through FidelityHelloWorld samples using all features
+- Rename a function, verify all call sites updated
+- Use outline view to navigate large files
 
 ### Phase 4: Vim/Neovim Support
 
@@ -327,99 +795,73 @@ fidelity-vim/
 
 **Tasks**:
 1. Create fidelity-vim repository
-2. nvim-lspconfig integration
-3. Vim 8+ ALE/CoC integration
-4. Documentation and examples
+2. Create nvim-lspconfig integration
+3. Add Vim 8+ support (ALE or CoC)
+4. Write documentation and examples
 
 **Validation**:
 - Full LSP features in Neovim
-- Completion, hover, diagnostics working
+- Hover, completion, go-to-definition all working
+- Diagnostics shown inline
 
-### Phase 5: Advanced Tooling
+### Phase 5: Advanced Analysis
 
-**Goal**: Production-ready tooling ecosystem
+**Goal**: Fidelity-specific analysis beyond basic type checking
 
 **Tasks**:
-1. Fidelity.Analyzers.SDK
-2. Custom analyzers for memory safety
-3. Integration with Firefly diagnostics
-4. Performance optimization
-5. Caching and incremental analysis
+1. Design Fidelity.Analyzers.SDK API
+2. Implement memory safety analyzer (detect potential lifetime issues)
+3. Implement region analyzer (detect stack escapes)
+4. Implement platform binding validator
+5. Integrate analyzers with FSNAC diagnostic pipeline
 
 **Validation**:
-- Analyzers catch memory region violations
-- Responsive on large codebases
-
-## Self-Hosting Considerations
-
-### What Blocks Self-Hosting
-
-1. **FNCS itself** - Currently FCS-based, needs .NET
-2. **LSP transport** - JSON-RPC over stdio, needs runtime
-3. **File I/O** - Project loading, source reading
-4. **Process management** - Editor spawns LSP server
-
-### Self-Hosting Roadmap
-
-```
-Current: Everything .NET-hosted
-    ↓
-Step 1: FNCS core logic native-compiled
-    - Type resolution
-    - SRTP solving
-    - Diagnostic generation
-    ↓
-Step 2: Analysis engine native-compiled
-    - Symbol lookup
-    - Reference finding
-    - Completion generation
-    ↓
-Step 3: LSP layer native-compiled
-    - JSON-RPC via Platform.Bindings
-    - Stdio via Platform.Bindings
-    ↓
-Step 4: Full self-hosting
-    - FSNAC is a Fidelity-compiled native binary
-    - Dogfooding complete
-```
-
-### Why Self-Hosting Matters
-
-1. **Dogfooding**: Using Fidelity to build Fidelity tools validates the platform
-2. **Performance**: Native tooling can be faster than .NET-hosted
-3. **Distribution**: Single binary, no .NET SDK required
-4. **Credibility**: Demonstrates Fidelity's capability for real-world tools
-
-### Why Self-Hosting Can Wait
-
-1. **Tooling needs to exist first** - Can't self-host what doesn't exist
-2. **.NET hosting is fine** - rust-analyzer runs on Rust, but that's not why it's good
-3. **Iteration speed** - .NET development is faster for tooling iteration
-4. **Ecosystem integration** - .NET tooling integrates with existing F# ecosystem
-
-## Related Resources
-
-| Resource | Purpose |
-|----------|---------|
-| [rust-analyzer](https://github.com/rust-lang/rust-analyzer) | Reference for IDE-focused compiler frontend |
-| [Ionide.LanguageServerProtocol](https://github.com/ionide/LanguageServerProtocol) | LSP library to use |
-| [FsAutoComplete](https://github.com/ionide/FsAutoComplete) | Patterns to follow |
-| [MLIR LSP](https://mlir.llvm.org/docs/Tools/MLIRLSP/) | Example of compiler-integrated LSP |
-
-## Summary
-
-The Fidelity tooling ecosystem requires:
-
-| Project | Priority | Complexity | Self-Hosting Phase |
-|---------|----------|------------|-------------------|
-| **fsnative-autocomplete** | Critical | High | Phase 3 |
-| **Fidelity.ProjInfo** | Critical | Low | Phase 2 |
-| **fidelity-vscode** | High | Medium | N/A (TypeScript) |
-| **fidelity-vim** | Medium | Low | N/A (VimScript) |
-| **Fidelity.Analyzers.SDK** | Future | Medium | Phase 4 |
-
-The key insight is that .NET-hosted tooling is the correct starting point. Self-hosting is a long-term goal that validates the platform, but functional tooling that helps developers today is the priority.
+- Analyzer detects when a stack-allocated value might escape
+- Analyzer warns about peripheral access from wrong context
+- All warnings appear as LSP diagnostics with suggested fixes
 
 ---
 
-*Tooling that works today. Self-hosting that proves tomorrow.*
+## Part 9: Reusable Components
+
+To summarize what we expect to reuse versus what we would build:
+
+### Reuse Directly (No Changes Expected)
+
+| Component | Source | Why It Should Work |
+|-----------|--------|-------------------|
+| **Ionide.LanguageServerProtocol** | ionide/LanguageServerProtocol | Generic LSP infrastructure, not F#-specific |
+| **ionide-fsgrammar** | ionide/ionide-fsgrammar | F# syntax unchanged in Fidelity |
+| **Fantomas** | fsprojects/fantomas | Code formatting is syntax-level |
+
+### Build New
+
+| Component | Purpose | Estimated Effort |
+|-----------|---------|------------------|
+| **fsnative-autocomplete (FSNAC)** | Language server using FNCS | High |
+| **Fidelity.ProjInfo** | `.fidproj` parser | Low |
+| **fidelity-vscode** | VS Code extension | Medium |
+| **fidelity-vim** | Vim/Neovim plugin | Low |
+| **Fidelity.Analyzers.SDK** | Custom analyzer framework | Medium (future) |
+
+### Adapt Patterns
+
+| Source | What We Would Learn |
+|--------|---------------------|
+| **FSAC architecture** | Handler patterns, caching strategies, incremental checking |
+| **FSharpLint patterns** | How to integrate linting with LSP diagnostics |
+| **Ionide-vscode-fsharp** | Extension structure, command patterns, UI integration |
+
+---
+
+## Conclusion
+
+Fidelity tooling would require a new stack because Fidelity has different semantics than .NET F#. We can't show `string` when the type is `NativeStr`. We can't load `.fsproj` files when projects use `.fidproj`.
+
+But the problem appears tractable. We would reuse generic infrastructure (LSP protocol, syntax grammar). We would build on FNCS (which already understands native types). We would start .NET-hosted (avoiding the bootstrap problem). And we would simplify where possible (TOML projects, no MSBuild).
+
+The result we envision is a complete development environment for F# Native: type information, navigation, refactoring, diagnostics, all aware of native types, memory regions, and Fidelity's unique capabilities.
+
+When you hover over a string and see `NativeStr`, you would know you're writing native code. When you see a pointer annotated with its memory region and access kind, you would understand the hardware you're targeting. The tooling would make Fidelity's power accessible.
+
+The implementation work lies ahead.
