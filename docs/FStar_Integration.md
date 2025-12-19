@@ -108,7 +108,7 @@ fsnative, despite its F# syntax, has more in common semantically with OCaml than
 - Both treat strings as byte sequences with explicit encoding
 - Both support algebraic data types as values, not heap objects
 
-For OCaml developers considering contributing to Fidelity: the type system you would implement in `ulib/fsnative` mirrors what you already know from `ulib/ml`. The syntax is F#, but the semantics are familiar.
+For OCaml developers considering contributing to Fidelity: the type system in `fsnative/` would have considerable overlap with what you know from `ulib/ml`. The syntax is F#, but many of the semantic concepts should feel familiar.
 
 ## The Integration Architecture
 
