@@ -141,7 +141,7 @@ ML Intermediate Syntax
                               Native Binary
 ```
 
-The new `PrintFSNative` backend emits F# code that uses Alloy types instead of BCL types. The emitted code compiles with fsnative (FNCS) and flows through Firefly's standard pipeline.
+The new `PrintFSNative` backend emits F# code targeting native types. By the time F* integration is implemented, the native type system currently prototyped in Alloy would be intrinsic to FNCS itself. When you write `string` in fsnative, FNCS resolves it to `NativeStr`; when you write `option`, FNCS resolves it to `voption`. The extracted code compiles with FNCS and flows through Firefly's standard pipeline.
 
 ### Runtime Library: fsnative/
 
@@ -189,7 +189,7 @@ fsnative/                # NEW: peer to fsharp/, not inside it
 └── ulibfsnative.fidproj     # Fidelity project file
 ```
 
-Each file implements the same interface as its OCaml and .NET counterparts but uses Alloy's native types and operations. The parallel structure to `fsharp/` makes the relationship clear: two distinct extraction targets for F# syntax, one targeting .NET, one targeting native.
+Each file implements the same interface as its OCaml and .NET counterparts. The types are FNCS native types (resolved by the compiler), and the implementations use Alloy library functions. The parallel structure to `fsharp/` makes the relationship clear: two distinct extraction targets for F# syntax, one targeting .NET, one targeting native.
 
 ### Type Mappings
 
@@ -294,7 +294,7 @@ Fidelity-specific additions remain in the `fidelity` branch:
 
 ### Phase 1: Runtime Library
 
-Create `fsnative/` (as a top-level peer to `fsharp/`) with implementations of F* primitives using Alloy types. This work can proceed independently of extraction changes by manually writing fsnative-compatible code that matches the interfaces expected by F* extracted output. The existing `fsharp/base/` files provide a template for what interfaces need implementation.
+Create `fsnative/` (as a top-level peer to `fsharp/`) with implementations of F* primitives using FNCS native types. This work can proceed independently of extraction changes by manually writing fsnative-compatible code that matches the interfaces expected by F* extracted output. The existing `fsharp/base/` files provide a template for what interfaces need implementation.
 
 Deliverables:
 - `Prims.fs`: Primitive types and operations
@@ -399,13 +399,13 @@ This mapping enables F* proofs about memory safety to carry through to native co
 
 ### OCaml Developers
 
-If you work in OCaml and are curious about Fidelity: the `fsnative/` implementation is essentially porting OCaml code to F# syntax with Alloy types. The semantics are familiar. Pattern matching, algebraic data types, explicit effects, value semantics for small types. The main adjustment is syntax: `let` bindings look slightly different, modules use different keywords, but the concepts translate directly.
+If you work in OCaml and are curious about Fidelity: F* itself is implemented in OCaml, and its extraction infrastructure is OCaml code. Modifications to the F# extraction backend (`PrintFS.fst`) or creation of a new `PrintFSNative.fst` backend happen in F*, which reads much like OCaml with dependent types. If you can write OCaml, you can contribute to the extraction machinery.
 
-The F* extraction infrastructure is OCaml code. Modifications to `PrintFS.fst` or creation of `PrintFSNative.fst` happen in F* (which reads much like OCaml with dependent types). If you can write OCaml, you can contribute here.
+The fsnative target shares semantic affinity with OCaml: value semantics for small types, explicit memory management, no reliance on garbage collection semantics for correctness, UTF-8 strings. The type representations that F* expects align more naturally with fsnative than with .NET's BCL.
 
 ### F# Developers
 
-If you work in F# on .NET: fsnative is still F#. The syntax is identical. What changes is what types mean. When you write `string`, fsnative resolves it to `NativeStr` rather than `System.String`. When you write `Some x`, you get a value-type option rather than a heap-allocated reference.
+If you work in F# on .NET: fsnative aims for a developer experience with high correspondence to standard F#. The syntax is largely the same, and we're working to ensure the transition feels familiar. What changes is what types mean: when you write `string`, FNCS resolves it to `NativeStr` rather than `System.String`; when you write `Some x`, you get a value-type option rather than a heap-allocated reference. Some BCL reflexes won't be available, and there are additional options for proof annotations that don't exist in standard F#.
 
 The F* integration adds verification. You write F# with annotations, the framework generates proofs, and those proofs guide compilation. You do not need to learn F* to benefit from verification; the tooling handles the translation.
 
