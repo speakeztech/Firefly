@@ -9,19 +9,16 @@ The goal was to compile this F# program to a native Linux executable without lib
 ```fsharp
 module HelloWorld
 
-open FSharp.NativeInterop
 open Alloy
+
+let hello() =
+    Console.Write "Enter your name: "
+    let name = Console.ReadLine()
+    Console.WriteLine $"Hello, {name}!"
 
 [<EntryPoint>]
 let main argv =
-    Console.writeLine "What is your name?"
-
-    let mutable buffer = NativePtr.stackalloc<byte> 64
-    let bytesRead = Console.readLine buffer 64
-
-    Console.write "Hello, "
-    Console.writeLine "!"
-
+    hello()
     0
 ```
 
