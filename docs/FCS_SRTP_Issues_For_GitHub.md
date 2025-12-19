@@ -125,7 +125,7 @@ This is fragile because it relies on syntax structure rather than semantic infor
 
 ## Context
 
-These issues were discovered while developing [Firefly](https://github.com/speakez-llc/Firefly), an AOT F# compiler targeting native binaries without the .NET runtime. The compiler uses FCS for parsing and type checking, then builds a semantic graph for code generation.
+These issues were discovered while developing [Firefly](https://github.com/speakeztech/Firefly), an AOT F# compiler targeting native binaries without the .NET runtime. The compiler uses FCS for parsing and type checking, then builds a semantic graph for code generation.
 
 For SRTP specifically, we need to:
 1. Identify all SRTP calls
