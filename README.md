@@ -1,15 +1,14 @@
 # Firefly: F# to Native Compiler with Deterministic Memory Management
 
-<table>
-  <tr>
-    <td align="center" width="100%">
-      <strong>⚠️ Caution: Experimental ⚠️</strong><br>
-      This project is in early development and <i>not</i> intended for production use.
-    </td>
-  </tr>
-</table>
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![License: Commercial](https://img.shields.io/badge/License-Commercial-orange.svg)](Commercial.md)
 
-Firefly is a novel F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies or garbage collection. Built as an orchestrating .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly started by leveraging [F# Compiler Services](https://fsharp.github.io/fsharp-compiler-docs/fcs/) (FCS). However we found that to be too limiting for our purposes, so we're moving forward with our own front end called [fsnative](https://github.com/speakeztech/fsnative) for parsing and type checking, custom transformations to generate MLIR, and LLVM for native code generation. `fsnative` (FNCS) is a fork of FCS, and makes for a much more direct path through MLIR dialects, producing efficient native executables with deterministic memory management and compile-time resolution of operations.
+<p align="center">
+🚧 <strong>Under Active Development</strong> 🚧<br>
+<em>This project is in early development and not intended for production use.</em>
+</p>
+
+Firefly is a novel F# compiler that brings the expressiveness and safety of functional programming directly to native code without runtime dependencies or garbage collection. Built as an orchestrating .NET CLI tool (similar to [Fable](https://github.com/fable-compiler/Fable)), Firefly leverages [F# Compiler Services](https://fsharp.github.io/fsharp-compiler-docs/fcs/) for parsing and type checking, custom transformations to generate MLIR, and LLVM for native code generation. The compilation pipeline progressively lowers F# through MLIR dialects, producing efficient native executables with deterministic memory management and compile-time resolution of operations.
 
 ## 🎯 Vision
 
@@ -248,9 +247,21 @@ We will welcome contributions after establishing a solid baseline. Areas of part
 - **Platform targets** - Backend support for new architectures
 - **Verification** - Formal proofs of memory safety properties
 
-## 📄 License
+## License
 
-Dual Apache 2.0 and Commercial License - see [LICENSE](LICENSE) for details.
+Firefly is dual-licensed under both the Apache License 2.0 and a Commercial License.
+
+### Open Source License
+
+For open source projects, academic use, non-commercial applications, and internal tools, use Firefly under the **Apache License 2.0**.
+
+### Commercial License
+
+A Commercial License is required for incorporating Firefly into commercial products or services. See [Commercial.md](Commercial.md) for details.
+
+### Patent Notice
+
+Firefly is part of the Fidelity Framework, which includes technology covered by U.S. Patent Application No. 63/786,247 "System and Method for Zero-Copy Inter-Process Communication Using BARE Protocol". See [PATENTS.md](PATENTS.md) for licensing details.
 
 ## 🙏 Acknowledgments
 
