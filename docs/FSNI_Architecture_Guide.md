@@ -962,6 +962,79 @@ FSNI would target the same platforms as Firefly: Linux x86_64, Linux ARM64, macO
 
 ---
 
+## Part 9: Alternative Approaches Considered
+
+In designing FSNI, we considered several alternative architectures before settling on the ORC JIT approach.
+
+### Interpreter Mode
+
+**Idea**: Build a pure interpreter that executes F# without compilation.
+
+**Why we don't favor this**:
+- An interpreter would not exercise native semantics; behavior would differ from compiled code
+- We would need to maintain two execution models (interpreter + compiler)
+- Performance would be poor for compute-intensive explorations
+- The whole point of Fidelity is native compilation; an interpreter contradicts this
+
+### Dynamic Library Approach (Evcxr-style)
+
+**Idea**: Compile each evaluation to a shared library (`.so` or `.dylib`), then dynamically load it.
+
+**Trade-offs**:
+- Higher latency than JIT due to file I/O and the linker
+- Symbol management across libraries is complex
+- However, this approach is well-understood and could serve as a fallback if JIT proves difficult
+
+We may revisit this approach if ORC JIT integration proves more challenging than expected.
+
+### Full Recompilation
+
+**Idea**: Recompile the entire session (all accumulated definitions) on each input.
+
+**Why we don't favor this**:
+- Latency would grow linearly with session size
+- A session with 50 definitions would take 50x longer than the first evaluation
+- This would be unacceptable for interactive use
+
+The incremental approach, where we only compile the new fragment and link against previous definitions, should scale much better.
+
+---
+
+## Part 10: Comparison Summary
+
+Here's a direct comparison of FSI and FSNI:
+
+| Aspect | FSI | FSNI |
+|--------|-----|------|
+| Compilation | .NET JIT (IL → machine code) | LLVM ORC JIT (MLIR → LLVM IR → machine code) |
+| Type system | .NET types (`System.String`, etc.) | Native types (`NativeStr`, etc.) |
+| Memory model | Garbage collected | Arena/Stack with deterministic lifetimes |
+| Startup time | ~1 second | ~100ms (warm), longer cold |
+| String type | `System.String` (UTF-16) | `NativeStr` (UTF-8) |
+| Option types | `option<T>` (reference type) | `voption<T>` (value type) |
+| Library access | .NET BCL, NuGet packages | Alloy, Fidelity-compatible libraries |
+| Reflection | Full runtime reflection | None (types erased after compilation) |
+| Script files | `.fsx` | `.fsnx` (planned) |
+| Memory visibility | Hidden (GC managed) | Explicit (`:memory` command) |
+
+---
+
+## Related Resources
+
+These resources informed our design thinking:
+
+| Resource | Purpose |
+|----------|---------|
+| [Evcxr](https://github.com/evcxr/evcxr) | Rust REPL reference implementation |
+| [Clang-Repl](https://clang.llvm.org/docs/ClangRepl.html) | C++ incremental JIT REPL |
+| [Swift REPL](https://www.swift.org/documentation/lldb/) | Debugger-integrated REPL |
+| [LLVM ORC JIT](https://llvm.org/docs/ORCv2.html) | LLVM's JIT compilation infrastructure |
+| [MLIR ExecutionEngine](https://mlir.llvm.org/docs/Tutorials/Toy/Ch-6/) | MLIR JIT compilation tutorial |
+| [jank](https://jank-lang.org/) | Clojure dialect using LLVM JIT |
+| [LFortran](https://lfortran.org/) | Fortran with REPL via LLVM JIT |
+
+---
+
 ## Conclusion
 
 FSNI appears achievable by leveraging LLVM's ORC JIT for low-latency code generation, incremental FNCS for fragment-by-fragment type checking, session-scoped arenas for memory management, and warm compiler state for responsive evaluation.
