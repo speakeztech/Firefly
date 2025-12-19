@@ -42,13 +42,15 @@ When building a JellyJar solution, the hypergraph would be constructed first. Je
 
 ### BAREWire Contract Enforcement
 
-BAREWire provides zero-copy binary encoding for Fidelity. A BAREWire schema defines exact byte layouts: field order, alignment, endianness, and serialization rules.
+BAREWire provides zero-copy binary encoding for Fidelity. A BAREWire schema defines the logical structure of messages: field names, types, ordering, and serialization rules. The schema serves as a contract that all participants agree to honor.
 
-In a distributed system, multiple components would need to agree on these layouts. If the sensor firmware encoded a timestamp as a 64-bit little-endian integer at offset 8, the cloud processor would need to read it the same way.
+Here's the nuance: different targets may have different native representations. A big-endian ARM microcontroller and a little-endian x86_64 server store integers differently in memory. A 32-bit embedded target and a 64-bit cloud processor have different pointer sizes and alignment requirements. The byte-level representation of a structure in memory would not be identical across these targets.
 
-We expect JellyJar would track BAREWire contracts across the solution. It would verify that every project using a particular message type agrees on its encoding. If the edge aggregator referenced `SensorReading` and the firmware defined it, JellyJar would confirm they have identical BAREWire representations.
+But the BAREWire contract doesn't require identical memory layouts. It requires that when data crosses a boundary (network, IPC, file), all participants serialize and deserialize according to the same rules. The schema specifies the wire format. Each target's compiler generates architecture-appropriate code that correctly translates between native representation and wire format.
 
-This would happen at solution build time, before any individual project compiles. A mismatch would produce an error, not a runtime bug on a deployed device.
+We expect JellyJar would track BAREWire contracts across the solution. It would verify that every project using a particular message type shares the same logical structure and references the same schema. If the edge aggregator referenced `SensorReading` and the firmware defined it, JellyJar would confirm they have corresponding BAREWire representations: the same fields, the same types, the same schema governing serialization. Each target would then compile serialization code appropriate for its architecture, but the wire format would be consistent.
+
+This would happen at solution build time, before any individual project compiles. A structural mismatch (different fields, incompatible types, missing schema reference) would produce an error. The architecture-specific details of how each target implements the serialization would be handled by Firefly during individual project compilation.
 
 ### Cross-Target Type Compatibility
 
