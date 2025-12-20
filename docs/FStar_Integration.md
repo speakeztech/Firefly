@@ -390,7 +390,7 @@ This mapping enables F* proofs about memory safety to carry through to native co
 |-----------|----------------------|
 | **fsnative (FNCS)** | Compiles extracted F# with native type resolution |
 | **Firefly** | Orchestrates compilation, generates MLIR with proof information |
-| **Alloy** | Provides runtime types that F* extraction targets |
+| **Alloy** | Provides "base class library" style functions common to all applications |
 | **Alex** | Generates MLIR including SMT dialect operations |
 | **BAREWire** | Binary encoding; F* could verify protocol implementations |
 | **JellyJar** | Solution coherence; could verify contracts across projects |
