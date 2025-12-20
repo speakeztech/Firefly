@@ -2,11 +2,11 @@
 
 ## Introduction
 
-Modern numerical computation rests on a foundation that most developers never question: IEEE-754 floating-point arithmetic. This standard, formalized in 1985 and revised in 2008 and 2019, defines how computers represent and manipulate real numbers. It works well enough that entire industries—graphics, finance, scientific computing, machine learning—build upon it without much thought.
+Modern numerical computation rests on a foundation that most developers never question: IEEE-754 floating-point arithmetic. This standard, formalized in 1985 and revised in 2008 and 2019, defines how computers represent and manipulate real numbers. It works well enough that entire industries, graphics, finance, scientific computing, machine learning, build upon it without much thought.
 
-But "well enough" hides a quiet crisis. As computations grow more ambitious—deeper neural networks, longer simulations, more extreme parameter ranges—IEEE-754's limitations surface as mysterious failures. Training runs diverge. Simulations accumulate drift. Iterative algorithms produce nonsense after enough iterations. The standard response is to add precision: move from 32-bit to 64-bit floats, or to 128-bit, or to arbitrary precision libraries. This delays failure but doesn't prevent it.
+But "well enough" hides a quiet crisis. As computations grow more ambitious, deeper neural networks, longer simulations, more extreme parameter ranges, IEEE-754's limitations surface as mysterious failures. Training runs diverge. Simulations accumulate drift. Iterative algorithms produce nonsense after enough iterations. The standard response is to add precision: move from 32-bit to 64-bit floats, or to 128-bit, or to arbitrary precision libraries. This delays failure but doesn't prevent it.
 
-The Fidelity framework takes a different approach. Rather than treating numerical representation as a fixed constraint that developers must work around, Firefly treats numerical stability as a first-class compilation concern. The compiler understands what the developer intends mathematically and chooses how to realize that intent on available hardware—whether through alternative number formats like posits, through algorithmic transformations that preserve stability in IEEE-754, or through intelligent distribution of computation across heterogeneous processors.
+The Fidelity framework takes a different approach. Rather than treating numerical representation as a fixed constraint that developers must work around, Firefly treats numerical stability as a first-class compilation concern. The compiler understands what the developer intends mathematically and chooses how to realize that intent on available hardware, whether through alternative number formats like posits, through algorithmic transformations that preserve stability in IEEE-754, or through intelligent distribution of computation across heterogeneous processors.
 
 This document explains the problem, the solutions, and how Firefly's architecture enables numerical strategies impossible in conventional compilation.
 
@@ -34,7 +34,7 @@ b = 1.234567890123455
 a - b = 0.000000000000001
 ```
 
-Both `a` and `b` are represented with 15-16 significant digits. But their difference has only 1 significant digit. The other 14-15 digits of the result are meaningless—artifacts of the representation, not information about the mathematical value.
+Both `a` and `b` are represented with 15-16 significant digits. But their difference has only 1 significant digit. The other 14-15 digits of the result are meaningless, artifacts of the representation, not information about the mathematical value.
 
 This is catastrophic cancellation: when subtracting nearly equal values, most significant digits vanish. The relative error of the result can be arbitrarily large even when the inputs are exact.
 
@@ -49,7 +49,7 @@ for i in range(1000000):
     x = x - 0.0000001
 ```
 
-Mathematically, `x` should remain exactly 1.0. In IEEE-754, it drifts. Each addition rounds. Each subtraction rounds. The rounding errors don't cancel—they accumulate. After enough iterations, `x` bears little relation to 1.0.
+Mathematically, `x` should remain exactly 1.0. In IEEE-754, it drifts. Each addition rounds. Each subtraction rounds. The rounding errors don't cancel, they accumulate. After enough iterations, `x` bears little relation to 1.0.
 
 This pattern appears everywhere: numerical integration, iterative solvers, gradient descent, physical simulation. Every iteration introduces rounding error. Over enough iterations, the errors dominate the signal.
 
@@ -79,12 +79,12 @@ The Mandelbrot iteration is simple:
 z(n+1) = z(n)² + c
 ```
 
-At modest zoom levels, this works fine in standard floats. But at extreme magnification—10^16× and beyond—two problems emerge:
+At modest zoom levels, this works fine in standard floats. But at extreme magnification, 10^16× and beyond, two problems emerge:
 
 1. The coordinates `c` become extremely small (we're zoomed into a tiny region)
 2. The iterated values `z` can grow large before escaping
 
-Each iteration involves arithmetic between numbers differing by many orders of magnitude. Catastrophic cancellation destroys precision. Even Double-Double arithmetic eventually fails—not because 31 digits is insufficient, but because the arithmetic itself is unstable.
+Each iteration involves arithmetic between numbers differing by many orders of magnitude. Catastrophic cancellation destroys precision. Even Double-Double arithmetic eventually fails, not because 31 digits is insufficient, but because the arithmetic itself is unstable.
 
 Stebel's solution: **perturbation theory**. Instead of computing each pixel's orbit independently, he computes one high-precision reference orbit, then tracks how each pixel's orbit *deviates* from the reference.
 
@@ -109,13 +109,13 @@ This is a general principle: **precision delays failure; stability prevents it**
 
 ### The Audio Engineering Parallel
 
-Engineers trained in digital audio recognize this pattern immediately. When mastering for CD (16-bit linear PCM), converting from 32-bit float production formats requires discarding precision. Naive truncation creates quantization distortion—harmonically related to the signal, audible as harshness.
+Engineers trained in digital audio recognize this pattern immediately. When mastering for CD (16-bit linear PCM), converting from 32-bit float production formats requires discarding precision. Naive truncation creates quantization distortion, harmonically related to the signal, audible as harshness.
 
 The solution is dithering: adding carefully shaped noise before truncation. This trades coherent distortion for incoherent noise. The ear forgives random hiss far more than harmonic distortion.
 
-But step back: why is any of this necessary? Because 16-bit linear PCM allocates precision uniformly across the amplitude range. A whisper and a scream get the same step size. But human hearing is logarithmic—we're more sensitive to quiet sounds. The representation doesn't match the perceptual domain.
+But step back: why is any of this necessary? Because 16-bit linear PCM allocates precision uniformly across the amplitude range. A whisper and a scream get the same step size. But human hearing is logarithmic, we're more sensitive to quiet sounds. The representation doesn't match the perceptual domain.
 
-Audio engineers spend enormous effort managing this mismatch. Dithering algorithms, noise shaping, psychoacoustic models—all to hide the fact that the representation is wrong for the domain.
+Audio engineers spend enormous effort managing this mismatch. Dithering algorithms, noise shaping, psychoacoustic models, all to hide the fact that the representation is wrong for the domain.
 
 The same pattern appears in numerical computing. IEEE-754 allocates precision uniformly across the exponent range. But most computations cluster around certain magnitudes. We burn cycles managing precision at magnitudes we rarely use while running out of precision where we need it.
 
@@ -132,7 +132,7 @@ posit<32, 2>  // 32 bits total, 2-bit exponent field
 posit<64, 3>  // 64 bits total, 3-bit exponent field
 ```
 
-The variable-length exponent encoding means that numbers near 1.0—where most computation happens—get more mantissa bits than numbers near zero or infinity. This isn't a fixed trade-off; the format adapts to the magnitude being represented.
+The variable-length exponent encoding means that numbers near 1.0, where most computation happens, get more mantissa bits than numbers near zero or infinity. This isn't a fixed trade-off; the format adapts to the magnitude being represented.
 
 For iterative computations, this is transformative. The operating point of most algorithms is near 1.0 (or can be normalized to be). Posits give maximum precision exactly where the computation lives.
 
@@ -149,7 +149,7 @@ for (int i = 0; i < 1000000; i++) {
 posit<32, 2> result = q.to_posit();  // Single rounding at the end
 ```
 
-One million multiply-accumulates with a single rounding at the end. Compare to IEEE-754, which rounds after every operation—a million roundings, each introducing error that can compound.
+One million multiply-accumulates with a single rounding at the end. Compare to IEEE-754, which rounds after every operation, a million roundings, each introducing error that can compound.
 
 The quire makes dot products, sums, and iterative accumulations exact up to the final conversion. For algorithms that suffer from accumulation drift, this is decisive.
 
@@ -245,7 +245,7 @@ numerical_capability = "ieee754"
 compute_units = ["cpu", "gpu"]
 ```
 
-When compiling for NextSilicon, the compiler generates native posit operations. The `stable { }` blocks lower to quire-based accumulation. No transformation needed—the hardware provides stability natively.
+When compiling for NextSilicon, the compiler generates native posit operations. The `stable { }` blocks lower to quire-based accumulation. No transformation needed, the hardware provides stability natively.
 
 When compiling for AMD HSA (Heterogeneous System Architecture), the compiler transforms `stable { }` blocks using perturbation mechanics. The same source code generates IEEE-754 operations restructured for stability:
 
@@ -307,7 +307,7 @@ let pixels =
     }
 ```
 
-The Mandelbrot Metal pattern—high-precision reference on CPU, low-precision perturbation on GPU—becomes expressible directly in the language. The compiler understands the numerical contract and can verify that the distribution preserves stability guarantees.
+The Mandelbrot Metal pattern, high-precision reference on CPU, low-precision perturbation on GPU, becomes expressible directly in the language. The compiler understands the numerical contract and can verify that the distribution preserves stability guarantees.
 
 ## Verification: Proving Numerical Properties
 
@@ -332,7 +332,7 @@ The F* verifier can prove:
 2. The perturbation transformation preserves the bound (possibly with a different constant)
 3. The two implementations are equivalent within the specified tolerance
 
-This proof flows through the compilation pipeline. When the compiler selects a numerical strategy, it's not guessing—it's choosing from proven-equivalent alternatives.
+This proof flows through the compilation pipeline. When the compiler selects a numerical strategy, it's not guessing, it's choosing from proven-equivalent alternatives.
 
 ### SMT-Based Bound Checking
 
@@ -351,7 +351,7 @@ let sumLargeArray (arr: float[]) =
     }
 ```
 
-The compiler generates verification conditions that Z3 checks. If the bounds can't be proven, compilation fails with a clear error—not a runtime surprise.
+The compiler generates verification conditions that Z3 checks. If the bounds can't be proven, compilation fails with a clear error, not a runtime surprise.
 
 ## Architectural Integration: The Hypergraph View
 
@@ -433,7 +433,7 @@ Same source semantics. Radically different machine code. Both provably correct.
 
 The industry's default response to numerical problems is brute force: more precision, more memory, more compute. This works until it doesn't, and when it doesn't, debugging is nightmarish. Was the algorithm wrong? The implementation? The accumulation of rounding errors over a million iterations?
 
-Firefly offers a different path. Numerical stability becomes a property the compiler understands and guarantees. When you write `stable { }`, you're not hoping for stability—you're specifying it. The compiler either proves it can deliver or tells you why it can't.
+Firefly offers a different path. Numerical stability becomes a property the compiler understands and guarantees. When you write `stable { }`, you're not hoping for stability, you're specifying it. The compiler either proves it can deliver or tells you why it can't.
 
 This shifts numerical correctness from runtime mystery to compile-time contract.
 
@@ -468,11 +468,11 @@ No other technology stack contemplates this integration:
 
 Fidelity offers something new: mathematical intent as source code, with compiler-managed numerical strategy selection, proven equivalence across representations, and automatic distribution across heterogeneous hardware.
 
-For domains where numerical stability matters—scientific computing, financial modeling, machine learning, physical simulation—this is transformative.
+For domains where numerical stability matters, scientific computing, financial modeling, machine learning, physical simulation, this is transformative.
 
 ## Conclusion
 
-IEEE-754 floating-point arithmetic has served computing well for four decades. But its limitations are increasingly apparent as computations grow more ambitious. The conventional response—add more bits—delays problems without solving them.
+IEEE-754 floating-point arithmetic has served computing well for four decades. But its limitations are increasingly apparent as computations grow more ambitious. The conventional response, add more bits, delays problems without solving them.
 
 Fidelity takes a different approach. By treating numerical stability as a compiler concern, Firefly can:
 
