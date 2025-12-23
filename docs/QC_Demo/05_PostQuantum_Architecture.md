@@ -42,28 +42,28 @@ The quad avalanche circuit design provides multiple benefits:
 
 Each device samples four independent noise sources, producing parallel entropy streams that must be validated and combined before use in cryptographic operations.
 
-### Parallel Sampling and Inet Compilation
+### Parallel Sampling
 
-The quad-channel architecture maps directly to the DCont/Inet duality in Fidelity's compilation model. Sampling four independent noise sources is a pure parallel operation:
+The quad-channel architecture maps directly to the quad-core processor. Sampling four independent noise sources is a pure parallel operation ideal for `scf.parallel`:
 
 - **Referentially transparent**: Each channel's sample is independent
 - **No cross-channel dependencies**: No operation needs another's result
 - **Pure data transformation**: Voltage reading to entropy bits
 - **Perfect core mapping**: 4 ADC channels to 4 CPU cores
 
-The Firefly compiler recognizes this pattern and generates Inet dialect code for true parallel execution:
+The Firefly compiler emits `scf.parallel` for this pattern:
 
 ```fsharp
 // Conceptual: quad-channel parallel sampling
 let sampleAllChannels () =
-    // Inet compilation: executes simultaneously on 4 cores
+    // scf.parallel: executes simultaneously on 4 cores
     let samples = [| 0..3 |] |> Array.Parallel.map (fun ch ->
         readAdcChannel ch
     )
     interleaveEntropy samples
 ```
 
-This demonstrates that Inet compilation applies not just to GPU workloads but to constrained embedded systems with quad-core processors.
+See [03_MLIR_Dialect_Strategy.md](./03_MLIR_Dialect_Strategy.md) for details on the standard MLIR dialect approach used for the demo.
 
 ### Entropy Validation Pipeline
 
@@ -78,7 +78,7 @@ Raw ADC samples are not directly usable as cryptographic entropy. The validation
 4. **Accumulation**: Pool conditioned entropy until sufficient for key generation
 5. **Rate Limiting**: Ensure adequate entropy per cryptographic operation
 
-The interleaving and conditioning steps are also pure operations suitable for Inet compilation, allowing the entire entropy pipeline to benefit from parallel execution.
+The interleaving and conditioning steps are also pure operations suitable for parallel execution via `scf.parallel`, allowing the entire entropy pipeline to benefit from multi-core processing.
 
 This pipeline is implemented in Fidelity F#, compiled by Firefly, with the statistical tests and hash functions either implemented natively or bound via Farscape.
 

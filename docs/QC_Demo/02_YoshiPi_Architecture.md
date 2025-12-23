@@ -65,9 +65,9 @@ The YoshiPi carrier provides 4 ADC channels, enabling a quad avalanche circuit d
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Parallel Sampling and the Inet Compilation Path
+### Parallel Sampling
 
-The quad avalanche architecture provides an opportunity to validate Fidelity's DCont/Inet duality at the embedded level. Sampling four independent noise sources is a textbook case for interaction net (Inet) compilation:
+The quad avalanche architecture enables true parallel execution on the quad-core processor. Sampling four independent noise sources is ideal for `scf.parallel`:
 
 | Characteristic | Implication |
 |----------------|-------------|
@@ -76,7 +76,7 @@ The quad avalanche architecture provides an opportunity to validate Fidelity's D
 | **Pure data transformation** | Voltage reading to entropy bits |
 | **Perfect core mapping** | 4 ADC channels to 4 Cortex-A53 cores |
 
-The Firefly compiler can recognize this pattern and generate parallel sampling code that executes simultaneously across all four cores, with no synchronization overhead. This demonstrates that Inet compilation applies not just to GPU workloads but to constrained embedded systems.
+The Firefly compiler emits `scf.parallel` for this pattern, generating code that executes simultaneously across all four cores with no synchronization overhead. See [03_MLIR_Dialect_Strategy.md](./03_MLIR_Dialect_Strategy.md) for details on the standard MLIR dialect approach.
 
 ### Interleaved Entropy
 
@@ -397,6 +397,6 @@ vc4
 ## Cross-References
 
 - [01_YoshiPi_Demo_Strategy](./01_YoshiPi_Demo_Strategy.md) - Overall strategy
-- [02_MLIR_Dialect_Strategy](./02_MLIR_Dialect_Strategy.md) - Compilation path and parallel execution
+- [03_MLIR_Dialect_Strategy](./03_MLIR_Dialect_Strategy.md) - Compilation path and parallel execution
 - [04_Linux_Hardware_Bindings](./04_Linux_Hardware_Bindings.md) - Alloy Platform.Bindings for Linux hardware
 - [05_PostQuantum_Architecture](./05_PostQuantum_Architecture.md) - PQC algorithms

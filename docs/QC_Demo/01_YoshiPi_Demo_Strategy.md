@@ -356,8 +356,8 @@ output_kind = "desktop"
 ## Cross-References
 
 ### This Folder
-- [02_MLIR_Dialect_Strategy](./02_MLIR_Dialect_Strategy.md) - Compilation path: standard dialects for demo
-- [03_YoshiPi_Architecture](./03_YoshiPi_Architecture.md) - Hardware details, GPIO, ADC
+- [02_YoshiPi_Architecture](./02_YoshiPi_Architecture.md) - Hardware details, GPIO, ADC
+- [03_MLIR_Dialect_Strategy](./03_MLIR_Dialect_Strategy.md) - Compilation path: standard dialects for demo
 - [04_Linux_Hardware_Bindings](./04_Linux_Hardware_Bindings.md) - Alloy patterns for Linux hardware
 - [05_PostQuantum_Architecture](./05_PostQuantum_Architecture.md) - PQC algorithms, entropy design
 - [06_January_Roadmap](./06_January_Roadmap.md) - Timeline and sprints

@@ -11,8 +11,8 @@
 | # | Document | Purpose |
 |---|----------|---------|
 | 01 | [YoshiPi_Demo_Strategy](./01_YoshiPi_Demo_Strategy.md) | **START HERE** - Linux symmetry strategy, architecture overview |
-| 02 | [MLIR_Dialect_Strategy](./02_MLIR_Dialect_Strategy.md) | Core compilation path: standard dialects now, DCont/Inet vision later |
-| 03 | [YoshiPi_Architecture](./03_YoshiPi_Architecture.md) | Hardware details: Pi Zero 2 W, YoshiPi carrier, quad avalanche circuit |
+| 02 | [YoshiPi_Architecture](./02_YoshiPi_Architecture.md) | Hardware details: Pi Zero 2 W, YoshiPi carrier, quad avalanche circuit |
+| 03 | [MLIR_Dialect_Strategy](./03_MLIR_Dialect_Strategy.md) | Compilation path: standard dialects for demo, full vision for future |
 | 04 | [Linux_Hardware_Bindings](./04_Linux_Hardware_Bindings.md) | Alloy Platform.Bindings for GPIO, ADC, USB gadget |
 | 05 | [PostQuantum_Architecture](./05_PostQuantum_Architecture.md) | PQC algorithms (ML-KEM, ML-DSA), parallel entropy conditioning |
 | 06 | [January_Roadmap](./06_January_Roadmap.md) | Timeline, risk assessment, sprint plan |

@@ -516,7 +516,7 @@ let EntropyWaveform (samples: Accessor<uint16 array>) =
 ## Cross-References
 
 - [01_YoshiPi_Demo_Strategy](./01_YoshiPi_Demo_Strategy.md) - Core demo strategy
-- [02_MLIR_Dialect_Strategy](./02_MLIR_Dialect_Strategy.md) - Compilation path and parallel execution
-- [03_YoshiPi_Architecture](./03_YoshiPi_Architecture.md) - YoshiPi hardware details
+- [02_YoshiPi_Architecture](./02_YoshiPi_Architecture.md) - YoshiPi hardware details
+- [03_MLIR_Dialect_Strategy](./03_MLIR_Dialect_Strategy.md) - Compilation path and parallel execution
 - [04_Linux_Hardware_Bindings](./04_Linux_Hardware_Bindings.md) - Platform bindings
 - [05_PostQuantum_Architecture](./05_PostQuantum_Architecture.md) - PQC algorithms

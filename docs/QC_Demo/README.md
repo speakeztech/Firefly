@@ -70,11 +70,9 @@ module Platform.Bindings =
 // Future bare-metal: direct register manipulation
 ```
 
-### DCont/Inet Duality: Parallel Entropy Sampling
+### Parallel Entropy Sampling
 
-The quad-channel avalanche circuit provides an opportunity to validate Fidelity's compilation duality at the embedded level. The Firefly compiler analyzes referential transparency to determine whether code should compile to delimited continuations (DCont) for sequential effects or interaction nets (Inet) for true parallelism.
-
-Sampling four independent noise sources is a textbook case for Inet compilation:
+The quad-channel avalanche circuit enables true parallel execution on the quad-core processor. Sampling four independent noise sources is ideal for `scf.parallel`:
 
 | Characteristic | Implication |
 |----------------|-------------|
@@ -84,16 +82,14 @@ Sampling four independent noise sources is a textbook case for Inet compilation:
 | **Perfect core mapping** | 4 ADC channels to 4 Cortex-A53 cores |
 
 ```fsharp
-// Conceptual: Inet compilation for parallel sampling
+// Parallel sampling via scf.parallel
 let sampleQuadAvalanche () =
     [| 0..3 |] |> Array.Parallel.map readAdcChannel
     |> interleaveEntropy
     |> conditionWithShake256
 ```
 
-The compiler generates code that executes simultaneously across all four cores with no synchronization overhead. This demonstrates that Inet compilation applies not just to GPU workloads but to constrained embedded systems, validating the broader vision of automatic parallelization based on mathematical properties rather than programmer annotations.
-
-For the demo, this parallel execution is achieved using standard MLIR dialects (`scf.parallel`) rather than custom DCont/Inet dialects. The conceptual model remains valid; the implementation is pragmatic. See [02_MLIR_Dialect_Strategy.md](./02_MLIR_Dialect_Strategy.md) for the full progression path from demo to vision.
+The Firefly compiler emits `scf.parallel` for this pattern, generating code that executes simultaneously across all four cores with no synchronization overhead. See [03_MLIR_Dialect_Strategy.md](./03_MLIR_Dialect_Strategy.md) for details on the standard MLIR dialect approach.
 
 ## Hardware Strategy
 
@@ -117,9 +113,9 @@ The STM32L5 bare-metal path remains documented in the Phase2_STM32L5 subdirector
 
 **[01_YoshiPi_Demo_Strategy.md](./01_YoshiPi_Demo_Strategy.md)** establishes the symmetric architecture where credential generator and keystation share code through common Linux targeting. The document explains how Alloy APIs, WebView rendering, and Platform.Bindings work identically across both devices.
 
-**[02_MLIR_Dialect_Strategy.md](./02_MLIR_Dialect_Strategy.md)** documents the core compilation path: standard MLIR dialects (scf, func, arith, memref) provide parallel execution semantics for the demo without requiring custom DCont/Inet dialect infrastructure. The document captures the progression path from pragmatic demo implementation to the full dialect vision.
+**[02_YoshiPi_Architecture.md](./02_YoshiPi_Architecture.md)** details the hardware integration including the quad-channel avalanche circuit connection to ADC inputs, GPIO control via the Linux gpiochip interface, and display rendering through WebKitGTK. Memory layout diagrams show how stack-based allocation serves the demo's needs.
 
-**[03_YoshiPi_Architecture.md](./03_YoshiPi_Architecture.md)** details the hardware integration including the quad-channel avalanche circuit connection to ADC inputs, GPIO control via the Linux gpiochip interface, and display rendering through WebKitGTK. Memory layout diagrams show how stack-based allocation serves the demo's needs.
+**[03_MLIR_Dialect_Strategy.md](./03_MLIR_Dialect_Strategy.md)** documents the compilation path: standard MLIR dialects (scf, func, arith, memref) provide parallel execution semantics for the demo. The document captures the progression from pragmatic implementation to the full dialect vision.
 
 **[04_Linux_Hardware_Bindings.md](./04_Linux_Hardware_Bindings.md)** documents the Platform.Bindings extensions for Linux hardware access: device file operations, ioctl for GPIO control, sysfs reading for ADC sampling, and USB gadget mode for credential transfer. Code examples demonstrate the quotation-based constraint pattern even within the Linux context.
 
@@ -137,11 +133,11 @@ The STM32L5 bare-metal path remains documented in the Phase2_STM32L5 subdirector
 
 | Component | Capability Validated |
 |-----------|---------------------|
-| **Firefly** | ARM64 cross-compilation, build orchestration, DCont/Inet dialect selection |
+| **Firefly** | ARM64 cross-compilation, build orchestration |
 | **Alloy** | NativeStr, NativeArray, Platform.Bindings pattern |
-| **Alex** | Linux syscall emission, WebKitGTK library bindings, Inet parallel code generation |
+| **Alex** | Linux syscall emission, WebKitGTK library bindings, scf.parallel code generation |
 | **BAREWire** | Credential serialization, memory-mapped descriptors |
-| **fsnative** | Quotation attachment, constraint validation nanopasses, referential transparency analysis |
+| **fsnative** | Quotation attachment, constraint validation nanopasses |
 
 The demo provides concrete validation that the architectural principles documented in Quotation_Based_Memory_Architecture.md operate correctly in practice, even when the target platform is Linux rather than bare-metal. The nanopass pipeline processes quotation-based constraints identically regardless of whether the ultimate emission is a Linux syscall or a direct register write.
 
