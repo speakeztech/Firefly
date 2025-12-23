@@ -143,7 +143,7 @@ let emitNode (acc: EmitAcc) (zipper: PSGZipper) : EmitAcc =
 
 The `BuilderState` is threaded through the entire fold via the accumulator. Each node's emission mutates it (appending to Output, incrementing SSACounter).
 
-### Component Roles
+### Component Roles: Right Tool for Right Job
 
 **The Zipper:**
 - Provides "attention" - focus on current node with full context
@@ -151,11 +151,40 @@ The `BuilderState` is threaded through the entire fold via the accumulator. Each
 - Carries state through traversal (SSA counters, emitted blocks)
 - NO dispatch logic, NO routing decisions
 
-**XParsec Combinators:**
-- Match PSG node structure at each position
+**Active Patterns (for single-node recognition):**
+- F#'s native idiom for structural matching
+- Single-node classification: `|App|_|`, `|BindingNode|_|`, `|ArithOp|_|`
+- Composable with `&` and `|` in match expressions
+- Extract typed data: `|StringConst of string|_|`, `|FieldAccess of FieldAccessInfo|_|`
+- Used in `witnessNode` dispatch and predicate functions
+- Baker already uses FCS's `FSharpExprPatterns` active patterns correctly
+
+**XParsec Combinators (for sequential child parsing):**
+- Sequential child sequence parsing with backtracking
 - Composable patterns via `pMap`, `pBind`, `pOr`, `pMany`, etc.
-- Local decision-making based on node data
+- Variable-length matching: `pMany1 argExpr`, `pSepBy`
+- Complex sequential patterns: `pTuple3 operand operator operand`
+- NOT for single-node classification (use active patterns)
 - NOT a routing table
+
+**The Principle: Use the simplest tool that expresses the intent.**
+
+| Concern | Right Tool | Why |
+|---------|-----------|-----|
+| **Single-node classification** | Active patterns | Structure is known; recognition is local |
+| **Sequential child parsing** | XParsec combinators | Sequential; may need backtracking |
+| **Tree navigation** | Zipper | Bidirectional; context-preserving |
+| **State threading** | Accumulator in fold | Functional; explicit |
+
+**Current State (Transfer.fs):** Already uses typed DU matching correctly:
+```fsharp
+match node.Kind with
+| SKExpr EConst -> witnessConst acc node
+| SKExpr EIdent | SKExpr ELongIdent -> witnessIdent acc node
+| SKBinding _ -> witnessBinding acc node
+```
+
+This is the RIGHT approach. The `SyntaxKindT` discriminated union provides typed recognition without string matching.
 
 **The Bindings:**
 - Contain platform-specific MLIR generation
@@ -310,16 +339,46 @@ The current refactoring from `transferNodeDirect` (direct recursion) to `foldPos
 
 ## Key Files
 
-| File | Role |
-|------|------|
-| `Alex/Generation/Transfer.fs` | Principled dual-zipper transfer pipeline (ONLY MLIR generation file) |
-| `Alex/Traversal/PSGZipper.fs` | INPUT zipper - Bidirectional PSG traversal |
-| `Alex/Traversal/MLIRZipper.fs` | **NEW**: OUTPUT zipper - MLIR composition |
-| `Alex/Traversal/PSGXParsec.fs` | XParsec combinators, EmitContext with correlations |
-| `Alex/Bindings/BindingTypes.fs` | ExternDispatch registry, platform types |
-| `Alex/Bindings/Console/ConsoleBindings.fs` | Console I/O platform bindings (data) |
-| `Alex/CodeGeneration/MLIRBuilder.fs` | MLIR accumulation (correct centralization point) |
-| `Alex/Patterns/PSGPatterns.fs` | Predicates and extractors for PSG nodes |
+| File | Role | Tool Philosophy |
+|------|------|-----------------|
+| `Alex/Generation/Transfer.fs` | MLIR generation (ONLY file) | DU matching for dispatch |
+| `Alex/Traversal/PSGZipper.fs` | INPUT zipper - PSG traversal | Tree navigation |
+| `Alex/Traversal/MLIRZipper.fs` | OUTPUT zipper - MLIR composition | State accumulation |
+| `Alex/Traversal/PSGXParsec.fs` | XParsec bridge + EmitContext | Sequential child parsing |
+| `Alex/Patterns/PSGPatterns.fs` | Predicates and extractors | **Should become active patterns** |
+| `Alex/Bindings/BindingTypes.fs` | ExternDispatch, platform types | Data, not routing |
+| `Alex/Bindings/Console/ConsoleBindings.fs` | Console I/O bindings | Platform data |
+| `Alex/CodeGeneration/MLIRBuilder.fs` | MLIR accumulation | Correct centralization |
+
+## Future: PSGPatterns.fs Evolution
+
+`PSGPatterns.fs` currently provides predicates (`isApp`, `isConst`, etc.) for use with `satisfyChild`.
+These should evolve into proper F# active patterns:
+
+```fsharp
+// Current (predicate style)
+let isApp (node: PSGNode) : bool = SyntaxKindT.isApp node.Kind
+
+// Better (active pattern style)  
+let (|App|_|) (node: PSGNode) =
+    match node.Kind with SKExpr EApp -> Some node | _ -> None
+
+let (|ArithOp|_|) (node: PSGNode) =
+    match node.Operation with
+    | Some (Arithmetic op) -> Some op
+    | _ -> None
+
+let (|WithSymbol|_|) (node: PSGNode) =
+    node.Symbol |> Option.map (fun s -> node, s)
+```
+
+Active patterns compose naturally in match expressions:
+```fsharp
+match node with
+| App & WithSymbol (_, sym) -> // App with symbol
+| ArithOp Add -> // Addition operation  
+| _ -> // Default
+```
 
 ## Removed Files (Antipatterns)
 
@@ -332,6 +391,42 @@ The correct implementation must pass these tests:
 1. NO handler registry or dispatch table
 2. NO pattern matching on symbol/function names
 3. Zipper provides traversal only
-4. XParsec provides local pattern matching only
-5. Bindings are looked up by extern entry point only
-6. MLIR Builder is the single accumulation point
+4. Active patterns for single-node classification
+5. XParsec for sequential child parsing with backtracking
+6. Bindings are looked up by extern entry point only
+7. MLIR Builder is the single accumulation point
+
+## PSGXParsec.fs: Slim Down Guidance
+
+The current PSGXParsec.fs (~900 lines) is heavier than necessary. Slim down to:
+
+**KEEP:**
+- `PSGChildSlice` (the `IReadable` implementation for XParsec)
+- `PSGParseState` (minimal state: SSA counters, focus ID)
+- `parseChildren` / `tryParseChildren` (bridge functions)
+- `EmitContext` (emission state - though consider moving to separate file)
+- Genuine sequential parsers: `pMany`, `pTuple*`, `pSepBy` for child sequences
+
+**REMOVE/SIMPLIFY:**
+- Combinator wrappers (`pMap`, `pBind`, etc.) - users can import XParsec directly
+- Single-node child matchers that just wrap predicates - use active patterns instead
+
+**Example of over-abstraction to remove:**
+```fsharp
+// This wraps a predicate in XParsec - unnecessary indirection
+let appChild : PSGChildParser<PSGNode> =
+    satisfyChild (fun n -> SyntaxKindT.isApp n.Kind)
+
+// When a simple active pattern suffices for single-node matching
+let (|AppNode|_|) (node: PSGNode) =
+    if SyntaxKindT.isApp node.Kind then Some node else None
+```
+
+**When XParsec IS appropriate:**
+```fsharp
+// Parsing argument list with variable length - genuinely sequential
+let pCallArgs = pMany1 (pOr pArgExpr pIdentExpr)
+
+// Matching specific child pattern with backtracking
+let pBinaryOp = pTuple3 pOperand pOperator pOperand
+```

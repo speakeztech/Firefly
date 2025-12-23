@@ -1,5 +1,11 @@
 # Firefly Architecture: Canonical Reference
 
+> **Memory Architecture**: For hardware targets (CMSIS, embedded), see [Quotation_Based_Memory_Architecture.md](./Quotation_Based_Memory_Architecture.md)
+> which describes the quotation + active pattern infrastructure spanning fsnative, BAREWire, and Farscape.
+>
+> **Desktop UI Stack**: For WebView-based desktop applications, see [WebView_Desktop_Architecture.md](./WebView_Desktop_Architecture.md)
+> which describes Partas.Solid frontend + Firefly native backend with system webview rendering.
+
 ## The Pipeline Model
 
 ```
@@ -159,8 +165,13 @@ Alex recognizes functions in the `Platform.Bindings` module and provides platfor
 | getMonotonicTicks | clock_gettime(MONOTONIC) | () → i64 |
 | getTickFrequency | constant (platform-specific) | () → i64 |
 | sleep | nanosleep/Sleep | (i32) → void |
+| createWebview | webview_create | (i32, ptr) → ptr |
+| setWebviewHtml | webview_set_html | (ptr, ptr) → i32 |
+| runWebview | webview_run | (ptr) → i32 |
 
 Alex provides implementations for each `(binding, platform)` pair. The module structure (`Platform.Bindings`) serves as the recognition marker - no attributes required.
+
+> **Note**: Webview bindings call library functions (WebKitGTK, WebView2, WKWebView) rather than syscalls. See [WebView_Desktop_Architecture.md](./WebView_Desktop_Architecture.md) for the full desktop UI stack architecture.
 
 ## File Organization
 
@@ -187,7 +198,8 @@ Firefly/src/Alex/
 │   ├── BindingTypes.fs    # ExternDispatch registry, platform types
 │   ├── Console/ConsoleBindings.fs  # Console extern bindings (data)
 │   ├── Time/TimeBindings.fs        # Time extern bindings (data)
-│   └── Process/ProcessBindings.fs  # Process extern bindings (data)
+│   ├── Process/ProcessBindings.fs  # Process extern bindings (data)
+│   └── Webview/WebviewBindings.fs  # Webview extern bindings (library calls)
 ├── CodeGeneration/
 │   ├── MLIRBuilder.fs     # MLIR accumulation (correct centralization)
 │   └── TypeMapping.fs     # F# → MLIR type mapping
@@ -295,3 +307,24 @@ The samples use Alloy's BCL-sympathetic API. Firefly compiles them via the nanop
 3. Reachability prunes dead code
 4. Alex/Zipper traverses enriched PSG → MLIR
 5. MLIR → LLVM → native binary
+
+---
+
+## Cross-References
+
+### Core Architecture
+- [PSG_Nanopass_Architecture.md](./PSG_Nanopass_Architecture.md) - PSG construction phases
+- [Baker_Architecture.md](./Baker_Architecture.md) - Type resolution layer (Phase 4)
+- [Quotation_Based_Memory_Architecture.md](./Quotation_Based_Memory_Architecture.md) - Memory model for embedded targets
+
+### Desktop UI Stack
+- [WebView_Desktop_Architecture.md](./WebView_Desktop_Architecture.md) - Partas.Solid + webview architecture
+- [WebView_Build_Integration.md](./WebView_Build_Integration.md) - Firefly as unified build orchestrator
+- [WebView_Desktop_Design.md](./WebView_Desktop_Design.md) - Implementation details (callbacks, IPC)
+
+### QuantumCredential Demo
+- [QC_Demo/](./QC_Demo/) - Demo documentation folder
+- [QC_Demo/01_Demo_Strategy_Integrated.md](./QC_Demo/01_Demo_Strategy_Integrated.md) - Integrated demo strategy (desktop + embedded)
+
+### Platform Bindings
+- [Native_Library_Binding_Architecture.md](./Native_Library_Binding_Architecture.md) - Platform binding patterns

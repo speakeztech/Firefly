@@ -165,13 +165,18 @@ def patch_ls_config(solidlsp_path: Path, dry_run: bool = False) -> bool:
     # 2. Add to is_experimental() check - LLVM_IR is experimental
     if "LLVM_IR" in content and "self.LLVM_IR" not in content.split("is_experimental")[1].split("def ")[0]:
         # Find is_experimental method and add LLVM_IR to the set
-        experimental_pattern = r'(return self in \{[^}]+)'
+        # Match the closing brace of the set to insert before it
+        experimental_pattern = r'(return self in \{[^}]+)(,?\s*\})'
         experimental_match = re.search(experimental_pattern, content)
         if experimental_match:
             # Check if LLVM_IR is already there
             if "self.LLVM_IR" not in experimental_match.group(1):
-                insert_pos = experimental_match.end()
-                content = content[:insert_pos] + ", self.LLVM_IR" + content[insert_pos:]
+                # Insert LLVM_IR before the closing brace, preserving formatting
+                set_content = experimental_match.group(1)
+                closing = experimental_match.group(2)
+                # Add comma after last element if needed, then new element
+                new_set = set_content.rstrip(',') + ",\n            self.LLVM_IR,\n        }"
+                content = content[:experimental_match.start()] + new_set + content[experimental_match.end():]
                 print("  Added LLVM_IR to experimental languages")
 
     # 3. Add file matchers in get_source_fn_matcher()
