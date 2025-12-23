@@ -70,6 +70,31 @@ module Platform.Bindings =
 // Future bare-metal: direct register manipulation
 ```
 
+### DCont/Inet Duality: Parallel Entropy Sampling
+
+The quad-channel avalanche circuit provides an opportunity to validate Fidelity's compilation duality at the embedded level. The Firefly compiler analyzes referential transparency to determine whether code should compile to delimited continuations (DCont) for sequential effects or interaction nets (Inet) for true parallelism.
+
+Sampling four independent noise sources is a textbook case for Inet compilation:
+
+| Characteristic | Implication |
+|----------------|-------------|
+| **Referentially transparent** | Each channel's sample is independent |
+| **No cross-channel dependencies** | No operation needs another's result |
+| **Pure data transformation** | Voltage reading to entropy bits |
+| **Perfect core mapping** | 4 ADC channels to 4 Cortex-A53 cores |
+
+```fsharp
+// Conceptual: Inet compilation for parallel sampling
+let sampleQuadAvalanche () =
+    [| 0..3 |] |> Array.Parallel.map readAdcChannel
+    |> interleaveEntropy
+    |> conditionWithShake256
+```
+
+The compiler generates code that executes simultaneously across all four cores with no synchronization overhead. This demonstrates that Inet compilation applies not just to GPU workloads but to constrained embedded systems, validating the broader vision of automatic parallelization based on mathematical properties rather than programmer annotations.
+
+For the demo, this parallel execution is achieved using standard MLIR dialects (`scf.parallel`) rather than custom DCont/Inet dialects. The conceptual model remains valid; the implementation is pragmatic. See [07_MLIR_Dialect_Strategy.md](./07_MLIR_Dialect_Strategy.md) for the full progression path from demo to vision.
+
 ## Hardware Strategy
 
 The demo runs on the YoshiPi carrier board (Raspberry Pi Zero 2 W running Debian) rather than bare-metal microcontrollers. This choice reflects pragmatic risk management for demo timelines while preserving the architectural validity of the demonstration.
@@ -77,10 +102,10 @@ The demo runs on the YoshiPi carrier board (Raspberry Pi Zero 2 W running Debian
 Both the YoshiPi (credential generator) and the Sweet Potato (keystation) are Linux/ARM64 systems. They share the same compilation target as desktop development machines, enabling code sharing across the UI, cryptographic, and communication layers. The Firefly compiler produces ARM64 binaries with only a target triple change from x86_64 development.
 
 The hardware platforms share identical analog front ends:
-- Avalanche circuit for quantum-grade entropy generation
+- Quad-channel avalanche circuit for quantum-grade entropy generation
+- Four ADC inputs for parallel entropy sampling (one per CPU core)
 - Infrared transceiver for air-gapped credential transfer
 - Touchscreen interface for user interaction
-- ADC inputs for entropy sampling
 
 This symmetry means the role distinction between credential generator and keystation is purely software-defined. Any device with the entropy circuit can serve as its own certificate authority, a capability exposed through the connected desktop interface for advanced users.
 
@@ -102,6 +127,8 @@ The STM32L5 bare-metal path remains documented in the Phase2_STM32L5 subdirector
 
 **[06_Stretch_Goals.md](./06_Stretch_Goals.md)** describes enhanced demo capabilities including real-time entropy visualization, bidirectional IR credential transfer, and the self-sovereign CA functionality that transforms individual devices into decentralized PKI infrastructure.
 
+**[07_MLIR_Dialect_Strategy.md](./07_MLIR_Dialect_Strategy.md)** documents the pragmatic approach to MLIR code generation for the demo. Standard dialects (scf, func, arith, memref) provide parallel execution semantics without requiring custom DCont/Inet dialect infrastructure. The document captures the progression path from demo implementation to the full dialect vision.
+
 ### Future Development
 
 **[Phase2_STM32L5/](./Phase2_STM32L5/)** preserves documentation for the bare-metal path: NuttX RTOS integration, Farscape-generated CMSIS bindings, and the complete quotation-based memory architecture operating without an OS layer.
@@ -110,11 +137,11 @@ The STM32L5 bare-metal path remains documented in the Phase2_STM32L5 subdirector
 
 | Component | Capability Validated |
 |-----------|---------------------|
-| **Firefly** | ARM64 cross-compilation, build orchestration |
+| **Firefly** | ARM64 cross-compilation, build orchestration, DCont/Inet dialect selection |
 | **Alloy** | NativeStr, NativeArray, Platform.Bindings pattern |
-| **Alex** | Linux syscall emission, WebKitGTK library bindings |
+| **Alex** | Linux syscall emission, WebKitGTK library bindings, Inet parallel code generation |
 | **BAREWire** | Credential serialization, memory-mapped descriptors |
-| **fsnative** | Quotation attachment, constraint validation nanopasses |
+| **fsnative** | Quotation attachment, constraint validation nanopasses, referential transparency analysis |
 
 The demo provides concrete validation that the architectural principles documented in Quotation_Based_Memory_Architecture.md operate correctly in practice, even when the target platform is Linux rather than bare-metal. The nanopass pipeline processes quotation-based constraints identically regardless of whether the ultimate emission is a Linux syscall or a direct register write.
 
@@ -138,6 +165,14 @@ These criteria validate both the immediate demo goals and the underlying archite
 | [Architecture_Canonical.md](../Architecture_Canonical.md) | Platform.Bindings pattern and nanopass pipeline |
 | [WebView_Desktop_Architecture.md](../WebView_Desktop_Architecture.md) | WebView integration shared between demo devices |
 | [Native_Library_Binding_Architecture.md](../Native_Library_Binding_Architecture.md) | Binding design principles for hardware access |
+
+### Related SpeakEZ Articles
+
+| Article | Relevance |
+|---------|-----------|
+| Seeking Referential Transparency | DCont/Inet duality and purity analysis |
+| The DCont/Inet Duality | Computation expressions decomposed to compilation patterns |
+| Delimited Continuations: Fidelity's Turning Point | Continuation preservation through compilation |
 
 ## Intellectual Property
 

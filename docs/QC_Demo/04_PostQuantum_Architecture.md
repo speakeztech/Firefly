@@ -8,9 +8,9 @@ QuantumCredential and Keystation are air-gapped devices that communicate exclusi
 
 The core insight: **true randomness from physics, processed by mathematically-proven algorithms, transmitted over an air-gapped optical channel**.
 
-## Hardware Entropy: Zener Avalanche Noise
+## Hardware Entropy: Quad-Channel Zener Avalanche Noise
 
-Both devices incorporate analog circuits based on zener diode avalanche breakdown - a quantum mechanical phenomenon that produces true random noise. This is fundamentally different from:
+Both devices incorporate analog circuits based on zener diode avalanche breakdown, a quantum mechanical phenomenon that produces true random noise. The YoshiPi demo uses a quad-channel design with four independent avalanche sources feeding four ADC inputs. This is fundamentally different from:
 
 - **PRNGs**: Deterministic algorithms that expand a seed (predictable given the seed)
 - **Clock jitter**: Timing variations that can be influenced by environmental factors
@@ -21,25 +21,66 @@ Zener avalanche noise originates from quantum tunneling effects in the semicondu
 - Resistant to environmental manipulation
 - Continuously available (no "entropy exhaustion")
 
+### Quad-Channel Advantage
+
+The quad avalanche circuit design provides multiple benefits:
+
+| Benefit | Description |
+|---------|-------------|
+| **Bias Reduction** | Independent sources cancel systematic biases |
+| **Autocorrelation Breaking** | Interleaving bits disrupts temporal patterns |
+| **Redundancy** | Circuit drift in one channel doesn't compromise quality |
+| **Parallel Validation** | Health tests can run concurrently on each channel |
+
 ### Data Path: Analog to Digital
 
-| Device | ADC Source | Resolution | Notes |
-|--------|-----------|------------|-------|
-| QuantumCredential (STM32L5) | Native ADC | 12-bit | Up to 5.33 Msamples/s, 16 external channels |
-| Keystation (Sweet Potato) | Piggyback ADC | 12-bit+ | I2C/SPI connected (ADS1115, MCP3008, or similar) |
+| Device | ADC Source | Resolution | Channels | Notes |
+|--------|-----------|------------|----------|-------|
+| QuantumCredential (YoshiPi) | Carrier ADC | 10-bit | 4 | Quad avalanche to 4 ADC inputs |
+| QuantumCredential (STM32L5) | Native ADC | 12-bit | 4+ | Up to 16 external channels |
+| Keystation (Sweet Potato) | Piggyback ADC | 12-bit+ | 4 | I2C/SPI (ADS1115 or similar) |
 
-The ADC samples the conditioned zener noise, producing a stream of raw entropy that must be validated before use in cryptographic operations.
+Each device samples four independent noise sources, producing parallel entropy streams that must be validated and combined before use in cryptographic operations.
+
+### Parallel Sampling and Inet Compilation
+
+The quad-channel architecture maps directly to the DCont/Inet duality in Fidelity's compilation model. Sampling four independent noise sources is a pure parallel operation:
+
+- **Referentially transparent**: Each channel's sample is independent
+- **No cross-channel dependencies**: No operation needs another's result
+- **Pure data transformation**: Voltage reading to entropy bits
+- **Perfect core mapping**: 4 ADC channels to 4 CPU cores
+
+The Firefly compiler recognizes this pattern and generates Inet dialect code for true parallel execution:
+
+```fsharp
+// Conceptual: quad-channel parallel sampling
+let sampleAllChannels () =
+    // Inet compilation: executes simultaneously on 4 cores
+    let samples = [| 0..3 |] |> Array.Parallel.map (fun ch ->
+        readAdcChannel ch
+    )
+    interleaveEntropy samples
+```
+
+This demonstrates that Inet compilation applies not just to GPU workloads but to constrained embedded systems with quad-core processors.
 
 ### Entropy Validation Pipeline
 
-Raw ADC samples are not directly usable as cryptographic entropy. The validation pipeline:
+Raw ADC samples are not directly usable as cryptographic entropy. The validation pipeline processes all four channels:
 
-1. **Statistical Testing**: NIST SP 800-90B health tests (repetition count, adaptive proportion)
-2. **Conditioning**: Hash-based extraction (SHA-3 or SHAKE) to remove bias
-3. **Accumulation**: Pool entropy until sufficient for key generation
-4. **Rate Limiting**: Ensure adequate entropy per cryptographic operation
+1. **Per-Channel Health Tests**: NIST SP 800-90B tests (repetition count, adaptive proportion) run in parallel on each channel
+2. **Interleaving**: Combine bits from all four sources to break autocorrelation
+   ```
+   Interleaved: a₁ b₁ c₁ d₁ a₂ b₂ c₂ d₂ ...
+   ```
+3. **Conditioning**: SHAKE-256 extraction to produce uniform output from interleaved input
+4. **Accumulation**: Pool conditioned entropy until sufficient for key generation
+5. **Rate Limiting**: Ensure adequate entropy per cryptographic operation
 
-This pipeline would be implemented in Fidelity F#, compiled by Firefly, with the statistical tests and hash functions either implemented natively or bound via Farscape.
+The interleaving and conditioning steps are also pure operations suitable for Inet compilation, allowing the entire entropy pipeline to benefit from parallel execution.
+
+This pipeline is implemented in Fidelity F#, compiled by Firefly, with the statistical tests and hash functions either implemented natively or bound via Farscape.
 
 ## NIST Post-Quantum Cryptography Standards
 

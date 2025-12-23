@@ -33,38 +33,69 @@
 
 ## Avalanche Circuit Integration
 
-### Physical Connection
+### Quad-Channel Architecture
+
+The YoshiPi carrier provides 4 ADC channels, enabling a quad avalanche circuit design. Four independent noise sources feed four ADC inputs, allowing parallel entropy sampling that maps directly to the Pi Zero 2 W's quad-core processor.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │  YoshiPi Carrier Board                                               │
 │  ┌───────────────────────────────────────────────────────────────┐  │
 │  │                                                               │  │
-│  │  ┌─────────────┐                      ┌──────────────────┐   │  │
-│  │  │ Proto Area  │                      │ Analog Input 0   │   │  │
-│  │  │             │  ──────────────────► │ (ADC Channel 0)  │   │  │
-│  │  │ Avalanche   │  Signal wire         │                  │   │  │
-│  │  │ Circuit     │                      └──────────────────┘   │  │
-│  │  │             │                                              │  │
-│  │  │  ┌───┐      │                      ┌──────────────────┐   │  │
-│  │  │  │ Z │◄─┐   │                      │ 3.3V Power       │   │  │
-│  │  │  └───┘  │   │  ◄─────────────────  │                  │   │  │
-│  │  │    │    │   │  Power               └──────────────────┘   │  │
-│  │  │    ▼    │   │                                              │  │
-│  │  │  Noise  │   │                      ┌──────────────────┐   │  │
-│  │  │  Amp    │   │                      │ GND              │   │  │
-│  │  │    │    │   │  ◄─────────────────  │                  │   │  │
-│  │  │    └────┘   │  Ground              └──────────────────┘   │  │
-│  │  └─────────────┘                                              │  │
+│  │  ┌─────────────────────────────────────────────────────────┐  │  │
+│  │  │ Proto Area: Quad Avalanche Circuit                      │  │  │
+│  │  │                                                         │  │  │
+│  │  │   ┌───┐    ┌───┐    ┌───┐    ┌───┐                     │  │  │
+│  │  │   │Z0 │    │Z1 │    │Z2 │    │Z3 │  Avalanche Diodes   │  │  │
+│  │  │   └─┬─┘    └─┬─┘    └─┬─┘    └─┬─┘                     │  │  │
+│  │  │     │        │        │        │                        │  │  │
+│  │  │   ┌─▼─┐    ┌─▼─┐    ┌─▼─┐    ┌─▼─┐                     │  │  │
+│  │  │   │Amp│    │Amp│    │Amp│    │Amp│  Quad Op-Amp        │  │  │
+│  │  │   └─┬─┘    └─┬─┘    └─┬─┘    └─┬─┘                     │  │  │
+│  │  │     │        │        │        │                        │  │  │
+│  │  └─────┼────────┼────────┼────────┼────────────────────────┘  │  │
+│  │        │        │        │        │                            │  │
+│  │        ▼        ▼        ▼        ▼                            │  │
+│  │   ┌────────┬────────┬────────┬────────┐                       │  │
+│  │   │ ADC 0  │ ADC 1  │ ADC 2  │ ADC 3  │  4x 10-bit channels   │  │
+│  │   └────────┴────────┴────────┴────────┘                       │  │
 │  │                                                               │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Avalanche Circuit (Simplified)
+### Parallel Sampling and the Inet Compilation Path
 
-The multi-tiered avalanche circuit generates true random noise from quantum mechanical effects (electron tunneling through reverse-biased PN junctions).
+The quad avalanche architecture provides an opportunity to validate Fidelity's DCont/Inet duality at the embedded level. Sampling four independent noise sources is a textbook case for interaction net (Inet) compilation:
+
+| Characteristic | Implication |
+|----------------|-------------|
+| **Referentially transparent** | Each channel's sample is independent |
+| **No cross-channel dependencies** | No operation needs another's result |
+| **Pure data transformation** | Voltage reading to entropy bits |
+| **Perfect core mapping** | 4 ADC channels to 4 Cortex-A53 cores |
+
+The Firefly compiler can recognize this pattern and generate parallel sampling code that executes simultaneously across all four cores, with no synchronization overhead. This demonstrates that Inet compilation applies not just to GPU workloads but to constrained embedded systems.
+
+### Interleaved Entropy
+
+Rather than treating four channels as a simple throughput multiplier, interleaving bits from independent quantum sources improves statistical properties:
+
+```
+Channel 0: a₁ a₂ a₃ a₄ ...
+Channel 1: b₁ b₂ b₃ b₄ ...
+Channel 2: c₁ c₂ c₃ c₄ ...
+Channel 3: d₁ d₂ d₃ d₄ ...
+
+Interleaved: a₁ b₁ c₁ d₁ a₂ b₂ c₂ d₂ ...
+```
+
+This breaks any temporal autocorrelation within a single circuit's output stream. The interleaving operation itself is also pure and parallelizable.
+
+### Single-Channel Avalanche (Simplified Reference)
+
+Each of the four channels uses an identical avalanche circuit topology:
 
 ```
      3.3V
@@ -77,14 +108,16 @@ The multi-tiered avalanche circuit generates true random noise from quantum mech
       │  │                               │     │
      ┌┴┐ │                               ▼     │
      │Z│ ▼                           ┌───────┐ │
-     │1│ Avalanche                   │ Final │ │
+     │ │ Avalanche                   │ Final │ │
      └┬┘ Diode                       │ Stage │─┴──► To ADC
       │                               │ Amp   │
       ▼                               └───────┘
      GND
 ```
 
-The amplified noise signal (0-3.3V range) connects to Analog Input 0.
+The quad op-amp (e.g., TL074, LM324) provides four matched amplifier stages. Zener diodes and capacitors are commodity parts, making the quad circuit only marginally more complex than a single-channel design.
+
+The amplified noise signals (0-3.3V range) connect to Analog Inputs 0-3.
 
 ---
 
