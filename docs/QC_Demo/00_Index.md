@@ -11,12 +11,12 @@
 | # | Document | Purpose |
 |---|----------|---------|
 | 01 | [YoshiPi_Demo_Strategy](./01_YoshiPi_Demo_Strategy.md) | **START HERE** - Linux symmetry strategy, architecture overview |
-| 02 | [YoshiPi_Architecture](./02_YoshiPi_Architecture.md) | Hardware details: Pi Zero 2 W, YoshiPi carrier, quad avalanche circuit |
-| 03 | [Linux_Hardware_Bindings](./03_Linux_Hardware_Bindings.md) | Alloy Platform.Bindings for GPIO, ADC, USB gadget |
-| 04 | [PostQuantum_Architecture](./04_PostQuantum_Architecture.md) | PQC algorithms (ML-KEM, ML-DSA), parallel entropy conditioning |
-| 05 | [January_Roadmap](./05_January_Roadmap.md) | Timeline, risk assessment, sprint plan |
-| 06 | [Stretch_Goals](./06_Stretch_Goals.md) | Sweet Potato Keystation, touch UI, QR/IR transfer |
-| 07 | [MLIR_Dialect_Strategy](./07_MLIR_Dialect_Strategy.md) | Standard dialects for demo, DCont/Inet vision for future |
+| 02 | [MLIR_Dialect_Strategy](./02_MLIR_Dialect_Strategy.md) | Core compilation path: standard dialects now, DCont/Inet vision later |
+| 03 | [YoshiPi_Architecture](./03_YoshiPi_Architecture.md) | Hardware details: Pi Zero 2 W, YoshiPi carrier, quad avalanche circuit |
+| 04 | [Linux_Hardware_Bindings](./04_Linux_Hardware_Bindings.md) | Alloy Platform.Bindings for GPIO, ADC, USB gadget |
+| 05 | [PostQuantum_Architecture](./05_PostQuantum_Architecture.md) | PQC algorithms (ML-KEM, ML-DSA), parallel entropy conditioning |
+| 06 | [January_Roadmap](./06_January_Roadmap.md) | Timeline, risk assessment, sprint plan |
+| 07 | [Stretch_Goals](./07_Stretch_Goals.md) | Sweet Potato Keystation, touch UI, QR/IR transfer |
 
 ---
 

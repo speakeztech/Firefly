@@ -503,7 +503,8 @@ With these bindings, the YoshiPi demo can:
 ## Cross-References
 
 - [01_YoshiPi_Demo_Strategy](./01_YoshiPi_Demo_Strategy.md) - Overall strategy
-- [02_YoshiPi_Architecture](./02_YoshiPi_Architecture.md) - Hardware details
-- [04_PostQuantum_Architecture](./04_PostQuantum_Architecture.md) - PQC algorithms
+- [02_MLIR_Dialect_Strategy](./02_MLIR_Dialect_Strategy.md) - Compilation path and parallel execution
+- [03_YoshiPi_Architecture](./03_YoshiPi_Architecture.md) - Hardware details
+- [05_PostQuantum_Architecture](./05_PostQuantum_Architecture.md) - PQC algorithms
 - [Architecture_Canonical](../Architecture_Canonical.md) - Platform binding pattern
 - [Native_Library_Binding_Architecture](../Native_Library_Binding_Architecture.md) - Binding design principles

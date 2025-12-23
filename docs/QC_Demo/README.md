@@ -93,7 +93,7 @@ let sampleQuadAvalanche () =
 
 The compiler generates code that executes simultaneously across all four cores with no synchronization overhead. This demonstrates that Inet compilation applies not just to GPU workloads but to constrained embedded systems, validating the broader vision of automatic parallelization based on mathematical properties rather than programmer annotations.
 
-For the demo, this parallel execution is achieved using standard MLIR dialects (`scf.parallel`) rather than custom DCont/Inet dialects. The conceptual model remains valid; the implementation is pragmatic. See [07_MLIR_Dialect_Strategy.md](./07_MLIR_Dialect_Strategy.md) for the full progression path from demo to vision.
+For the demo, this parallel execution is achieved using standard MLIR dialects (`scf.parallel`) rather than custom DCont/Inet dialects. The conceptual model remains valid; the implementation is pragmatic. See [02_MLIR_Dialect_Strategy.md](./02_MLIR_Dialect_Strategy.md) for the full progression path from demo to vision.
 
 ## Hardware Strategy
 
@@ -117,17 +117,17 @@ The STM32L5 bare-metal path remains documented in the Phase2_STM32L5 subdirector
 
 **[01_YoshiPi_Demo_Strategy.md](./01_YoshiPi_Demo_Strategy.md)** establishes the symmetric architecture where credential generator and keystation share code through common Linux targeting. The document explains how Alloy APIs, WebView rendering, and Platform.Bindings work identically across both devices.
 
-**[02_YoshiPi_Architecture.md](./02_YoshiPi_Architecture.md)** details the hardware integration including the avalanche circuit connection to ADC inputs, GPIO control via the Linux gpiochip interface, and display rendering through WebKitGTK. Memory layout diagrams show how stack-based allocation serves the demo's needs.
+**[02_MLIR_Dialect_Strategy.md](./02_MLIR_Dialect_Strategy.md)** documents the core compilation path: standard MLIR dialects (scf, func, arith, memref) provide parallel execution semantics for the demo without requiring custom DCont/Inet dialect infrastructure. The document captures the progression path from pragmatic demo implementation to the full dialect vision.
 
-**[03_Linux_Hardware_Bindings.md](./03_Linux_Hardware_Bindings.md)** documents the Platform.Bindings extensions for Linux hardware access: device file operations, ioctl for GPIO control, sysfs reading for ADC sampling, and USB gadget mode for credential transfer. Code examples demonstrate the quotation-based constraint pattern even within the Linux context.
+**[03_YoshiPi_Architecture.md](./03_YoshiPi_Architecture.md)** details the hardware integration including the quad-channel avalanche circuit connection to ADC inputs, GPIO control via the Linux gpiochip interface, and display rendering through WebKitGTK. Memory layout diagrams show how stack-based allocation serves the demo's needs.
 
-**[04_PostQuantum_Architecture.md](./04_PostQuantum_Architecture.md)** covers the cryptographic design: ML-KEM for key encapsulation, ML-DSA for digital signatures, SHAKE-256 for entropy conditioning. The credential structure and signing flow implement the patent-protected air-gapped distribution architecture.
+**[04_Linux_Hardware_Bindings.md](./04_Linux_Hardware_Bindings.md)** documents the Platform.Bindings extensions for Linux hardware access: device file operations, ioctl for GPIO control, sysfs reading for ADC sampling, and USB gadget mode for credential transfer. Code examples demonstrate the quotation-based constraint pattern even within the Linux context.
 
-**[05_January_Roadmap.md](./05_January_Roadmap.md)** contains timeline planning, sprint structure, risk assessment, and contingency strategies for demo delivery.
+**[05_PostQuantum_Architecture.md](./05_PostQuantum_Architecture.md)** covers the cryptographic design: ML-KEM for key encapsulation, ML-DSA for digital signatures, SHAKE-256 for entropy conditioning. The credential structure and signing flow implement the patent-protected air-gapped distribution architecture.
 
-**[06_Stretch_Goals.md](./06_Stretch_Goals.md)** describes enhanced demo capabilities including real-time entropy visualization, bidirectional IR credential transfer, and the self-sovereign CA functionality that transforms individual devices into decentralized PKI infrastructure.
+**[06_January_Roadmap.md](./06_January_Roadmap.md)** contains timeline planning, sprint structure, risk assessment, and contingency strategies for demo delivery.
 
-**[07_MLIR_Dialect_Strategy.md](./07_MLIR_Dialect_Strategy.md)** documents the pragmatic approach to MLIR code generation for the demo. Standard dialects (scf, func, arith, memref) provide parallel execution semantics without requiring custom DCont/Inet dialect infrastructure. The document captures the progression path from demo implementation to the full dialect vision.
+**[07_Stretch_Goals.md](./07_Stretch_Goals.md)** describes enhanced demo capabilities including real-time entropy visualization, bidirectional IR credential transfer, and the self-sovereign CA functionality that transforms individual devices into decentralized PKI infrastructure.
 
 ### Future Development
 

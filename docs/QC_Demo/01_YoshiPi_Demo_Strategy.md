@@ -356,10 +356,11 @@ output_kind = "desktop"
 ## Cross-References
 
 ### This Folder
-- [02_YoshiPi_Architecture](./02_YoshiPi_Architecture.md) - Hardware details, GPIO, ADC
-- [03_Linux_Hardware_Bindings](./03_Linux_Hardware_Bindings.md) - Alloy patterns for Linux hardware
-- [04_PostQuantum_Architecture](./04_PostQuantum_Architecture.md) - PQC algorithms, entropy design
-- [05_January_Roadmap](./05_January_Roadmap.md) - Timeline and sprints
+- [02_MLIR_Dialect_Strategy](./02_MLIR_Dialect_Strategy.md) - Compilation path: standard dialects for demo
+- [03_YoshiPi_Architecture](./03_YoshiPi_Architecture.md) - Hardware details, GPIO, ADC
+- [04_Linux_Hardware_Bindings](./04_Linux_Hardware_Bindings.md) - Alloy patterns for Linux hardware
+- [05_PostQuantum_Architecture](./05_PostQuantum_Architecture.md) - PQC algorithms, entropy design
+- [06_January_Roadmap](./06_January_Roadmap.md) - Timeline and sprints
 
 ### Phase 2 (STM32L5 Path)
 - [Phase2_STM32L5/](./Phase2_STM32L5/) - Future bare-metal path documentation

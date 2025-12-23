@@ -267,8 +267,8 @@ What it defers:
 
 | Document | Relevance |
 |----------|-----------|
-| [02_YoshiPi_Architecture.md](./02_YoshiPi_Architecture.md) | Quad-channel hardware design |
-| [04_PostQuantum_Architecture.md](./04_PostQuantum_Architecture.md) | Parallel entropy pipeline |
+| [03_YoshiPi_Architecture.md](./03_YoshiPi_Architecture.md) | Quad-channel hardware design |
+| [05_PostQuantum_Architecture.md](./05_PostQuantum_Architecture.md) | Parallel entropy pipeline |
 | [README.md](./README.md) | DCont/Inet duality overview |
 
 ### SpeakEZ Articles
