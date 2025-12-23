@@ -1,59 +1,66 @@
 # QuantumCredential Demo
 
-The QuantumCredential demo brings together hardware entropy, post-quantum cryptography, and native F# compilation in a way that makes the abstract tangible. A small device samples quantum noise from an avalanche circuit, conditions that entropy, and generates cryptographic credentials that will remain secure even when quantum computers mature. Another device receives those credentials, verifies the signatures, and stores them. Both devices run the same F# code, compiled to native ARM binaries, displaying their status through WebView-based touchscreen interfaces.
+The QuantumCredential demo brings together hardware entropy, post-quantum cryptography, and native F# compilation in a way that makes the abstract tangible. A small device samples quantum noise from an avalanche circuit, conditions that entropy, and generates cryptographic credentials that will remain secure even when quantum computers reach maturity. A second device receives those credentials, verifies the signatures, and stores them for later use. Both devices run the same F# code, compiled to native ARM binaries, displaying their status through WebView-based touchscreen interfaces.
 
-What makes this demo architecturally interesting is the symmetry. The credential generator and the keystation share identical hardware - the same avalanche circuit, the same IR transceiver, the same touchscreen. The only difference is software configuration. And because both devices run Linux (Raspberry Pi OS on the YoshiPi carrier board), they share the same compilation target as the desktop development machine. The Firefly compiler that produces x86_64 Linux binaries produces ARM64 Linux binaries with a target triple change. The Alloy library that provides console I/O and timing on desktop provides GPIO and ADC access on the embedded device through the same Platform.Bindings pattern. The WebKitGTK library that renders the desktop UI renders the touchscreen UI with identical Partas.Solid components.
+The architectural foundation of this demo rests on symmetry. The credential generator and the keystation share identical hardware: the same avalanche circuit, the same IR transceiver, the same touchscreen. The only difference between them is software configuration. Because both devices run Linux (Raspberry Pi OS on the YoshiPi carrier board), they share the same compilation target as the desktop development machine. The Firefly compiler that produces x86_64 Linux binaries produces ARM64 Linux binaries with nothing more than a target triple change. The Alloy library that provides console I/O and timing on desktop provides GPIO and ADC access on the embedded device through the same Platform.Bindings pattern. The WebKitGTK library that renders the desktop UI renders the touchscreen UI with identical Partas.Solid components.
 
-This "it's just Linux" insight transformed what could have been a high-risk embedded systems project into a tractable cross-compilation exercise. The STM32L5 bare-metal path remains documented for future work, but the demo will ship on hardware that lets us focus on the cryptographic and UI story rather than fighting with RTOS bring-up.
+This recognition that both platforms are simply Linux transformed what could have been a high-risk embedded systems project into a tractable cross-compilation exercise. The STM32L5 bare-metal path remains documented for future work, but the demo will ship on hardware that allows the team to focus on the cryptographic and UI narrative rather than contending with RTOS integration.
 
 ---
 
-## What's in This Folder
+## Document Overview
 
 ### [01_YoshiPi_Demo_Strategy.md](./01_YoshiPi_Demo_Strategy.md)
-The strategic foundation. This document explains why running Debian on a Raspberry Pi Zero 2 W is not a compromise but an advantage. It walks through the symmetric architecture where the same Firefly pipeline, the same Alloy APIs, and the same WebView approach work identically on the embedded device and the desktop. The comparison tables showing what's shared across platforms make the "write once, compile twice" story concrete.
+
+This document establishes the strategic foundation for the demo. It explains why running Debian on a Raspberry Pi Zero 2 W represents an advantage rather than a compromise, walking through the symmetric architecture where the same Firefly pipeline, the same Alloy APIs, and the same WebView approach work identically on the embedded device and the desktop. Comparison tables showing what components are shared across platforms make the "write once, compile twice" proposition concrete.
 
 ### [02_YoshiPi_Architecture.md](./02_YoshiPi_Architecture.md)
-The hardware story. The YoshiPi carrier board provides analog inputs for the avalanche circuit, GPIO for status LEDs, and a touchscreen for the monitor UI. This document details the physical connections, the Linux device interfaces (`/dev/gpiochip0`, `/sys/bus/iio/devices/`), and how the display subsystem options (WebKitGTK preferred, framebuffer fallback) map to the UI architecture. The ASCII diagrams showing the avalanche circuit connection and the memory layout ground the abstract in the physical.
+
+This document tells the hardware story. The YoshiPi carrier board provides analog inputs for the avalanche circuit, GPIO for status LEDs, and a touchscreen for the monitor UI. The document details the physical connections, the Linux device interfaces (`/dev/gpiochip0` for GPIO, `/sys/bus/iio/devices/` for ADC), and how the display subsystem options map to the UI architecture. WebKitGTK is the preferred rendering path, with framebuffer access available as a fallback. ASCII diagrams showing the avalanche circuit connection and the process memory layout ground the abstract in the physical.
 
 ### [03_Linux_Hardware_Bindings.md](./03_Linux_Hardware_Bindings.md)
-The bridge between Alloy and Linux hardware. Platform.Bindings functions like `openDevice`, `ioctl`, and `readBytes` provide the vocabulary for hardware access. This document shows how GPIO control flows from F# through the binding pattern to Linux ioctl calls, how ADC sampling reads from sysfs files, and how USB gadget mode enables credential transfer. The code examples are complete enough to implement, with the understanding that Alex provides the syscall emission.
+
+This document serves as the bridge between Alloy and Linux hardware. Platform.Bindings functions such as `openDevice`, `ioctl`, and `readBytes` provide the vocabulary for hardware access. The document shows how GPIO control flows from F# through the binding pattern to Linux ioctl calls, how ADC sampling reads from sysfs files, and how USB gadget mode enables credential transfer. Code examples are complete enough to implement directly, with the understanding that Alex provides the platform-specific syscall emission.
 
 ### [04_PostQuantum_Architecture.md](./04_PostQuantum_Architecture.md)
-The cryptographic heart. ML-KEM for key encapsulation, ML-DSA for digital signatures, SHAKE-256 for entropy conditioning. This document covers the NIST-selected algorithms, their security levels, and how hardware entropy from the avalanche circuit seeds the entire cryptographic pipeline. The credential structure and signing flow show how the pieces compose into a complete post-quantum credential system.
+
+This document addresses the cryptographic core of the system. ML-KEM provides key encapsulation, ML-DSA provides digital signatures, and SHAKE-256 provides entropy conditioning. The document covers the NIST-selected algorithms, their security levels, and how hardware entropy from the avalanche circuit seeds the entire cryptographic pipeline. The credential structure and signing flow demonstrate how these pieces compose into a complete post-quantum credential system.
 
 ### [05_January_Roadmap.md](./05_January_Roadmap.md)
-The timeline and risk assessment. Sprint breakdowns, dependency identification, and contingency planning for demo day. This document is honest about what's known, what's uncertain, and what would constitute acceptable fallback positions if stretch goals don't materialize.
+
+This document contains the timeline and risk assessment. It includes sprint breakdowns, dependency identification, and contingency planning for demo day. The document maintains honesty about what is known, what remains uncertain, and what would constitute acceptable fallback positions if stretch goals do not materialize.
 
 ### [06_Stretch_Goals.md](./06_Stretch_Goals.md)
-The vision beyond minimum viable demo. The Libre Sweet Potato as an embedded keystation with an ultra-wide touchscreen. Touch interaction that WebKitGTK provides for free. IR credential beaming between devices. Real-time entropy visualization. This document also captures the deeper insights: that both devices share identical analog front ends (making roles software-defined), and that any device with the entropy circuit can serve as its own certificate authority. The CA capability stays hidden behind the connected desktop interface, but it transforms the narrative from "credential generator" to "decentralized PKI infrastructure."
+
+This document describes the vision beyond the minimum viable demo. Topics include the Libre Sweet Potato as an embedded keystation with an ultra-wide touchscreen, touch interaction that WebKitGTK provides without additional implementation effort, IR credential transmission between devices, and real-time entropy visualization. The document also captures deeper architectural observations: that both devices share identical analog front ends (making their roles purely software-defined), and that any device with the entropy circuit can serve as its own certificate authority. The CA capability remains accessible through the connected desktop interface rather than the touchscreen UI, but its presence transforms the narrative from "credential generator" to "decentralized PKI infrastructure."
 
 ### [Phase2_STM32L5/](./Phase2_STM32L5/)
-The future path, preserved. When the demo ships and attention turns to bare-metal targets, these documents provide the starting point. NuttX RTOS integration, Farscape-generated CMSIS bindings, the full quotation-based memory architecture. This work informed the YoshiPi approach and will benefit from lessons learned during demo development.
+
+This directory preserves the future path. When the demo ships and attention turns to bare-metal targets, these documents provide the starting point: NuttX RTOS integration, Farscape-generated CMSIS bindings, and the full quotation-based memory architecture. This preparatory work informed the YoshiPi approach and will benefit from lessons learned during demo development.
 
 ---
 
-## How the Pieces Connect
+## Architectural Integration
 
-The reactive UI model will feel familiar to anyone who has worked with Elmish, MVU, or similar architectures. Partas.Solid compiles F# component definitions to SolidJS, which runs in WebKitGTK's JavaScript engine. State management follows the signal/effect pattern - `createSignal` for reactive state, `createEffect` for side effects, `createStore` for complex state trees. The TanStack-style store patterns work naturally here; the mental model of reactive derivations and fine-grained updates translates directly.
+The reactive UI model will be familiar to developers who have worked with Elmish, MVU, or similar architectures. Partas.Solid compiles F# component definitions to SolidJS, which executes in WebKitGTK's JavaScript engine. State management follows the signal and effect pattern: `createSignal` for reactive state, `createEffect` for side effects, and `createStore` for complex state trees. Developers accustomed to TanStack-style store patterns will find the mental model of reactive derivations and fine-grained updates translates directly.
 
-The native backend communicates with the UI through WebView bindings. When a button tap needs to trigger credential generation, the JavaScript handler calls a bound function that the native code registered. The native code does the heavy lifting - sampling the ADC, running the PQC algorithms, framing the credential - and sends results back to the UI for display. This split keeps the UI responsive while cryptographic operations run at native speed.
+The native backend communicates with the UI through WebView bindings. When a button tap needs to trigger credential generation, the JavaScript handler calls a bound function that the native code registered at startup. The native code performs the computationally intensive work: sampling the ADC, executing the PQC algorithms, and framing the credential for transfer. Results return to the UI for display. This separation keeps the UI responsive while cryptographic operations execute at native speed.
 
-The Platform.Bindings pattern provides the hardware abstraction. Functions in Alloy's `Platform.Bindings` module have placeholder implementations (`Unchecked.defaultof<T>`). Alex recognizes these during compilation and emits platform-specific code - Linux syscalls for the YoshiPi, different syscalls or API calls for other platforms. This pattern extends naturally to new hardware interfaces: declare the binding signature in Alloy, implement the emission in Alex.
+The Platform.Bindings pattern provides hardware abstraction. Functions in Alloy's `Platform.Bindings` module carry placeholder implementations using `Unchecked.defaultof<T>`. Alex recognizes these declarations during compilation and emits platform-specific code: Linux syscalls for the YoshiPi, different syscalls or API calls for other platforms. This pattern extends naturally to new hardware interfaces. Adding support for a new peripheral requires declaring the binding signature in Alloy and implementing the corresponding emission logic in Alex.
 
 ---
 
-## What This Demo Exercises in Fidelity
+## Fidelity Components Exercised
 
-| Component | Capability | Demo Usage |
-|-----------|------------|------------|
+| Component | Capability | Application in Demo |
+|-----------|------------|---------------------|
 | **Firefly CLI** | ARM64 cross-compilation | Target triple: `aarch64-unknown-linux-gnu` |
-| **Alloy** | Native types, Platform.Bindings | NativeStr, NativeArray, GPIO/ADC bindings |
-| **Alex** | Linux syscall emission, WebView bindings | ioctl, read, write + webview library calls |
+| **Alloy** | Native types and Platform.Bindings | NativeStr, NativeArray, GPIO and ADC bindings |
+| **Alex** | Linux syscall emission and library bindings | ioctl, read, write, and WebKitGTK function calls |
 | **Partas.Solid** | Reactive UI components | Touchscreen monitor interface |
 | **BAREWire** | Binary serialization | Credential framing for transfer |
 
-### New Bindings Required
+### New Platform.Bindings Required
 
 ```
 Platform.Bindings.openDevice    : nativeint -> int -> int
@@ -63,44 +70,44 @@ Platform.Bindings.createWebview : int -> nativeint -> nativeint
 Platform.Bindings.setWebviewHtml: nativeint -> nativeint -> int
 ```
 
-These follow the established pattern. The binding declarations exist in Alloy; Alex provides platform-specific emission.
+These bindings follow the established pattern. The binding declarations reside in Alloy; Alex provides platform-specific emission for each target.
 
 ---
 
-## Honest Accounting
+## Technical Debt Assessment
 
-### What's Built Properly
+### Components Built According to Architecture
 
-The Platform.Bindings pattern, the Alex dispatch architecture, the WebView integration design, the cross-compilation approach - these follow the documented Fidelity architecture. The work done here directly informs and validates the design for future platforms.
+The Platform.Bindings pattern, the Alex dispatch architecture, the WebView integration design, and the cross-compilation approach all follow the documented Fidelity architecture. Work completed for this demo directly informs and validates the design for future platforms.
 
-### What's Expedient for Demo Day
+### Expedient Choices for Demo Timeline
 
-WebView and hardware bindings are hand-written rather than Farscape-generated. PQC algorithms may initially wrap reference C implementations rather than pure F#. These shortcuts follow correct patterns (the binding signatures are right, the dispatch logic is right) but involve manual implementation that would eventually be automated.
+WebView and hardware bindings are hand-written rather than Farscape-generated. PQC algorithms may initially wrap reference C implementations rather than pure F# implementations. These shortcuts follow correct patterns (binding signatures are correct, dispatch logic is correct) but involve manual implementation work that would eventually be automated through Farscape code generation.
 
-### What's Deferred to Phase 2
+### Work Deferred to Phase 2
 
-The STM32L5 bare-metal path requires the full quotation-based memory architecture: Farscape generating bindings from CMSIS headers, fsnative nanopasses validating memory constraints, the complete stack-discipline enforcement. That infrastructure isn't needed for the Linux-based demo and remains future work.
-
----
-
-## The Narrative
-
-Two small devices sit on a table. One samples quantum noise and generates credentials. The other receives and verifies them. Both show their status on touchscreens. An IR beam carries the credential from one to the other.
-
-Under the surface: F# compiled to native ARM binaries. No runtime, no garbage collector. Hardware entropy from avalanche breakdown. Post-quantum cryptography that will survive the quantum computing transition. A UI framework that runs identically on embedded touchscreens and desktop monitors.
-
-The demo answers a question that sounds impossible: can a statically-typed functional language with rich type inference compile to efficient bare-metal code while providing memory safety guarantees? The answer is yes, and here's the device running it.
+The STM32L5 bare-metal path requires the full quotation-based memory architecture: Farscape generating bindings from CMSIS headers, fsnative nanopasses validating memory constraints, and complete stack-discipline enforcement. That infrastructure is not required for the Linux-based demo and remains future work.
 
 ---
 
-## Quick Links
+## The Demo Narrative
 
-| Need | Document |
-|------|----------|
-| Understand the strategy | [01_YoshiPi_Demo_Strategy.md](./01_YoshiPi_Demo_Strategy.md) |
-| See the hardware details | [02_YoshiPi_Architecture.md](./02_YoshiPi_Architecture.md) |
+Two small devices sit on a table. One samples quantum noise and generates credentials. The other receives and verifies them. Both display their status on touchscreens. An IR beam carries credentials from one device to the other.
+
+Beneath the surface: F# compiled to native ARM binaries with no runtime and no garbage collector. Hardware entropy derived from avalanche breakdown in reverse-biased semiconductor junctions. Post-quantum cryptography designed to survive the transition to quantum computing. A UI framework that executes identically on embedded touchscreens and desktop monitors.
+
+The demo answers a question that initially sounds impossible: can a statically-typed functional language with rich type inference compile to efficient native code while providing memory safety guarantees? The answer is yes. Here is the device running it.
+
+---
+
+## Document Navigation
+
+| Purpose | Document |
+|---------|----------|
+| Understand the overall strategy | [01_YoshiPi_Demo_Strategy.md](./01_YoshiPi_Demo_Strategy.md) |
+| Review hardware specifications | [02_YoshiPi_Architecture.md](./02_YoshiPi_Architecture.md) |
 | Implement hardware bindings | [03_Linux_Hardware_Bindings.md](./03_Linux_Hardware_Bindings.md) |
-| Understand the cryptography | [04_PostQuantum_Architecture.md](./04_PostQuantum_Architecture.md) |
-| Check the timeline | [05_January_Roadmap.md](./05_January_Roadmap.md) |
+| Study the cryptographic design | [04_PostQuantum_Architecture.md](./04_PostQuantum_Architecture.md) |
+| Review timeline and milestones | [05_January_Roadmap.md](./05_January_Roadmap.md) |
 | Explore stretch goals | [06_Stretch_Goals.md](./06_Stretch_Goals.md) |
-| Plan for bare-metal future | [Phase2_STM32L5/](./Phase2_STM32L5/) |
+| Prepare for bare-metal targets | [Phase2_STM32L5/](./Phase2_STM32L5/) |
