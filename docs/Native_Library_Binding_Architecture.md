@@ -168,49 +168,42 @@ let Interrupts : (string * int) list = [
 ]
 ```
 
-#### Category C: Extern Declarations (HAL Function Bindings)
+#### Category C: Platform Bindings (HAL Function Bindings)
 
-F# extern declarations that map to compiled library functions:
+Platform.Bindings module functions that Alex recognizes and provides platform-specific MLIR emission:
 
 ```fsharp
 // Fidelity.STM32L5/HAL.fs
 module Fidelity.STM32L5.HAL
 
-open System.Runtime.InteropServices
-
 /// HAL status codes
 type HAL_StatusTypeDef = HAL_OK = 0 | HAL_ERROR = 1 | HAL_BUSY = 2 | HAL_TIMEOUT = 3
 
-// GPIO HAL functions
-[<DllImport("stm32l5xx_hal", CallingConvention = CallingConvention.Cdecl)>]
-extern HAL_StatusTypeDef HAL_GPIO_Init(nativeint GPIOx, nativeint GPIO_Init)
+// GPIO HAL functions - Platform.Bindings pattern (BCL-free)
+// Alex provides MLIR emission that links against HAL library
+module Platform.Bindings.HAL.GPIO =
+    let init (gpioX: nativeint) (gpioInit: nativeint) : HAL_StatusTypeDef =
+        Unchecked.defaultof<HAL_StatusTypeDef>
 
-[<DllImport("stm32l5xx_hal", CallingConvention = CallingConvention.Cdecl)>]
-extern HAL_StatusTypeDef HAL_GPIO_DeInit(nativeint GPIOx, uint32 GPIO_Pin)
+    let deInit (gpioX: nativeint) (gpioPin: uint32) : HAL_StatusTypeDef =
+        Unchecked.defaultof<HAL_StatusTypeDef>
 
-[<DllImport("stm32l5xx_hal", CallingConvention = CallingConvention.Cdecl)>]
-extern void HAL_GPIO_WritePin(nativeint GPIOx, uint16 GPIO_Pin, int PinState)
+    let writePin (gpioX: nativeint) (gpioPin: uint16) (pinState: int) : unit =
+        ()
 
-[<DllImport("stm32l5xx_hal", CallingConvention = CallingConvention.Cdecl)>]
-extern int HAL_GPIO_ReadPin(nativeint GPIOx, uint16 GPIO_Pin)
+    let readPin (gpioX: nativeint) (gpioPin: uint16) : int =
+        Unchecked.defaultof<int>
 
 // UART HAL functions
-[<DllImport("stm32l5xx_hal", CallingConvention = CallingConvention.Cdecl)>]
-extern HAL_StatusTypeDef HAL_UART_Init(nativeint huart)
+module Platform.Bindings.HAL.UART =
+    let init (huart: nativeint) : HAL_StatusTypeDef =
+        Unchecked.defaultof<HAL_StatusTypeDef>
 
-[<DllImport("stm32l5xx_hal", CallingConvention = CallingConvention.Cdecl)>]
-extern HAL_StatusTypeDef HAL_UART_Transmit(
-    nativeint huart,
-    nativeint pData,
-    uint16 Size,
-    uint32 Timeout)
+    let transmit (huart: nativeint) (pData: nativeint) (size: uint16) (timeout: uint32) : HAL_StatusTypeDef =
+        Unchecked.defaultof<HAL_StatusTypeDef>
 
-[<DllImport("stm32l5xx_hal", CallingConvention = CallingConvention.Cdecl)>]
-extern HAL_StatusTypeDef HAL_UART_Receive(
-    nativeint huart,
-    nativeint pData,
-    uint16 Size,
-    uint32 Timeout)
+    let receive (huart: nativeint) (pData: nativeint) (size: uint16) (timeout: uint32) : HAL_StatusTypeDef =
+        Unchecked.defaultof<HAL_StatusTypeDef>
 ```
 
 ### Phase 3: Compilation (Firefly)
@@ -260,10 +253,10 @@ Alex traverses the PSG and makes code generation decisions based on semantic mar
 
 #### Extern Function Calls
 
-When Alex encounters an extern declaration with `DllImport`:
+When Alex encounters a Platform.Bindings function call:
 
 ```fsharp
-// PSG shows: FunctionCall to HAL_GPIO_Init with DllImport("stm32l5xx_hal")
+// PSG shows: FunctionCall to Platform.Bindings.HAL.GPIO.init
 ```
 
 Alex emits:
@@ -357,9 +350,9 @@ Output: A standalone `.elf` binary ready to flash to the microcontroller.
 │         ┌─────────────┼─────────────┐                                       │
 │         ▼             ▼             ▼                                       │
 │  ┌─────────────┐ ┌──────────────┐ ┌──────────────┐                          │
-│  │ Fidelity.   │ │ BAREWire.    │ │ HAL Extern   │                          │
-│  │ STM32L5     │ │ STM32L5      │ │ Declarations │                          │
-│  │ (F# API)    │ │ (Descriptors)│ │ (DllImport)  │                          │
+│  │ Fidelity.   │ │ BAREWire.    │ │ Platform.    │                          │
+│  │ STM32L5     │ │ STM32L5      │ │ Bindings     │                          │
+│  │ (F# API)    │ │ (Descriptors)│ │ (BCL-free)   │                          │
 │  └─────────────┘ └──────────────┘ └──────────────┘                          │
 │         │             │                   │                                 │
 └─────────┼─────────────┼───────────────────┼─────────────────────────────────┘
@@ -476,14 +469,13 @@ binding.static_override = ["crypto_lib"]
 
 For static binding, the library function becomes a **direct call** with external linkage resolved at link time.
 
-**Step 1: PSG captures DllImport with static binding strategy**
+**Step 1: PSG captures Platform.Binding with static binding strategy**
 
 ```
 PSG Node: FunctionCall
-  Target: HAL_GPIO_Init
+  Target: Platform.Bindings.HAL.GPIO.init
   Attributes:
-    - DllImport("stm32l5_hal")
-    - CallingConvention: Cdecl
+    - PlatformBinding: { module: HAL.GPIO, function: init }
     - BindingStrategy: Static  ← from project config
 ```
 
@@ -543,14 +535,13 @@ The linker:
 
 For dynamic binding, the library function is called through a **runtime-resolved reference**.
 
-**Step 1: PSG captures DllImport with dynamic binding strategy**
+**Step 1: PSG captures Platform.Binding with dynamic binding strategy**
 
 ```
 PSG Node: FunctionCall
-  Target: gtk_window_new
+  Target: Platform.Bindings.GTK.Window.create
   Attributes:
-    - DllImport("gtk-4")
-    - CallingConvention: Cdecl
+    - PlatformBinding: { module: GTK.Window, function: create }
     - BindingStrategy: Dynamic  ← from project config
 ```
 
@@ -741,36 +732,39 @@ While the January demo targets STM32L5, the architecture supports any native lib
 ### Desktop Libraries
 
 ```fsharp
-// Generated by Farscape from sqlite3.h
-[<DllImport("sqlite3", CallingConvention = CallingConvention.Cdecl)>]
-extern int sqlite3_open(string filename, nativeint* ppDb)
+// Generated by Farscape from sqlite3.h - Platform.Bindings pattern
+module Platform.Bindings.SQLite =
+    let open' (filename: nativeint) (ppDb: nativeint) : int =
+        Unchecked.defaultof<int>
 
-[<DllImport("sqlite3", CallingConvention = CallingConvention.Cdecl)>]
-extern int sqlite3_exec(nativeint db, string sql, nativeint callback, nativeint arg, nativeint* errmsg)
+    let exec (db: nativeint) (sql: nativeint) (callback: nativeint) (arg: nativeint) (errmsg: nativeint) : int =
+        Unchecked.defaultof<int>
 ```
 
 ### System Libraries
 
 ```fsharp
-// Generated by Farscape from unistd.h / windows.h
-[<DllImport("libc", CallingConvention = CallingConvention.Cdecl)>]
-extern int write(int fd, nativeint buf, unativeint count)
+// Alloy Platform.Bindings (already in Alloy/Platform.fs)
+module Platform.Bindings =
+    let writeBytes (fd: int) (buf: nativeint) (count: int) : int =
+        Unchecked.defaultof<int>
 
-[<DllImport("kernel32", CallingConvention = CallingConvention.StdCall)>]
-extern bool WriteFile(nativeint hFile, nativeint lpBuffer, uint32 nNumberOfBytesToWrite, nativeint* lpNumberOfBytesWritten, nativeint lpOverlapped)
+// Windows bindings would be in a Platform.Bindings.Windows module
+// Alex provides platform-specific MLIR emission for each
 ```
 
 ### Graphics/Compute Libraries
 
 ```fsharp
-// Generated by Farscape from vulkan.h
-[<DllImport("vulkan", CallingConvention = CallingConvention.Cdecl)>]
-extern VkResult vkCreateInstance(nativeint pCreateInfo, nativeint pAllocator, nativeint* pInstance)
+// Generated by Farscape from vulkan.h - Platform.Bindings pattern
+module Platform.Bindings.Vulkan =
+    let createInstance (pCreateInfo: nativeint) (pAllocator: nativeint) (pInstance: nativeint) : VkResult =
+        Unchecked.defaultof<VkResult>
 ```
 
 The pattern is consistent:
-1. **Farscape** parses headers → generates F# externs + types
-2. **Firefly** compiles F# → LLVM objects with external references
+1. **Farscape** parses headers → generates Platform.Bindings modules (BCL-free)
+2. **Firefly** compiles F# → LLVM objects with external references (Alex provides MLIR)
 3. **Linker** resolves references → final binary
 
 ---

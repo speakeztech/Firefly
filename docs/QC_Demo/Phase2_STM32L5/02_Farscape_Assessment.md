@@ -302,8 +302,9 @@ type Declaration =
 
 **Impact**: High. Generated code won't work with Firefly.
 
-**Current Output** (P/Invoke for .NET runtime):
+**Current Output** (P/Invoke for .NET runtime - INCOMPATIBLE with Fidelity):
 ```fsharp
+// WRONG: DllImport is a BCL dependency Fidelity cannot use
 module CMSIS.NativeBindings
 open System.Runtime.InteropServices
 
@@ -311,14 +312,12 @@ open System.Runtime.InteropServices
 extern void HAL_GPIO_Init(nativeint GPIOx, nativeint GPIO_Init)
 ```
 
-**Required Output** (Alloy-style for Firefly):
+**Required Output** (Platform.Bindings pattern for Fidelity):
 ```fsharp
 namespace CMSIS.STM32L5
 
-open System.Runtime.InteropServices
-
 module GPIO =
-    [<Struct; StructLayout(LayoutKind.Sequential)>]
+    [<Struct>]
     type GPIO_InitTypeDef = {
         Pin: uint32
         Mode: uint32
@@ -327,17 +326,22 @@ module GPIO =
         Alternate: uint32
     }
 
-    [<DllImport("__cmsis", CallingConvention = CallingConvention.Cdecl,
-                EntryPoint = "HAL_GPIO_Init")>]
-    extern void halGpioInit(nativeptr<GPIO_TypeDef> gpio,
-                            nativeptr<GPIO_InitTypeDef> init)
+// Platform.Bindings - BCL-free, Alex provides MLIR emission
+module Platform.Bindings.HAL.GPIO =
+    /// Initialize GPIO peripheral
+    let init (gpio: nativeint) (initStruct: nativeint) : unit =
+        ()  // Alex emits register writes or HAL calls
+
+    /// Write GPIO pin
+    let writePin (gpio: nativeint) (pin: uint16) (state: int) : unit =
+        ()  // Alex emits BSRR register write
 ```
 
 **Key Differences**:
-1. Library name `"__cmsis"` as marker for Alex (like `"__fidelity"`)
-2. Uses `nativeptr<T>` for typed pointers, not raw `nativeint`
+1. NO BCL dependencies (no `System.Runtime.InteropServices`)
+2. `Unchecked.defaultof<T>` or `()` as placeholder for Alex-provided implementation
 3. Structs use `[<Struct>]` attribute for value semantics
-4. Entry point explicitly named for binding dispatch
+4. Module naming follows `Platform.Bindings.*` convention for Alex recognition
 
 **Fix Complexity**: Medium. New generator mode or separate `FidelityCodeGenerator.fs`.
 
@@ -463,21 +467,26 @@ The F# binding doesn't need to resolve these; they're passed at runtime.
 
 ### 6.1 How Alloy/Alex Bindings Work
 
-Firefly's current binding system (for console I/O, time, etc.) follows this pattern:
+Firefly's current binding system (for console I/O, time, etc.) follows the **Platform.Bindings pattern** (BCL-free):
 
-**Step 1: Alloy declares extern primitives**
+**Step 1: Alloy declares Platform.Bindings** (no DllImport!)
 ```fsharp
-// Alloy/Primitives.fs
-[<DllImport("__fidelity", CallingConvention = CallingConvention.Cdecl,
-            EntryPoint = "fidelity_write_bytes")>]
-extern int writeBytes(int fd, nativeint buffer, int count)
+// Alloy/Platform.fs - BCL-free platform bindings
+module Platform.Bindings =
+    /// Write bytes to file descriptor
+    let writeBytes (fd: int) (buffer: nativeint) (count: int) : int =
+        Unchecked.defaultof<int>  // Placeholder - Alex provides implementation
+
+    /// Read bytes from file descriptor
+    let readBytes (fd: int) (buffer: nativeint) (maxCount: int) : int =
+        Unchecked.defaultof<int>
 ```
 
-**Step 2: Alex registers bindings by entry point**
+**Step 2: Alex registers bindings by module/function name**
 ```fsharp
 // Alex/Bindings/Console/ConsoleBindings.fs
 let registerBindings () =
-    ExternDispatch.register Linux X86_64 "fidelity_write_bytes"
+    ExternDispatch.register Linux X86_64 "writeBytes"
         (fun ext -> bindWriteBytes TargetPlatform.linux_x86_64 ext)
 ```
 
@@ -497,32 +506,35 @@ let bindWriteBytes (platform: TargetPlatform) (prim: ExternPrimitive) = mlir {
 
 ### 6.2 What Farscape Must Generate for CMSIS
 
-Following the same pattern:
+Following the Platform.Bindings pattern (BCL-free):
 
-**Farscape generates** (like Alloy/Primitives.fs):
+**Farscape generates** (like Alloy/Platform.fs):
 ```fsharp
 // Generated: CMSIS.STM32L5.GPIO.fs
 namespace CMSIS.STM32L5
 
-module GPIO =
-    [<DllImport("__cmsis", CallingConvention = CallingConvention.Cdecl,
-                EntryPoint = "HAL_GPIO_Init")>]
-    extern void halGpioInit(nativeptr<GPIO_TypeDef> gpio,
-                            nativeptr<GPIO_InitTypeDef> init)
+/// Platform.Bindings for HAL GPIO - Alex provides MLIR emission
+module Platform.Bindings.HAL.GPIO =
+    /// Initialize GPIO peripheral
+    let init (gpio: nativeint) (initStruct: nativeint) : unit =
+        ()  // Alex emits HAL_GPIO_Init call or direct register access
 
-    [<DllImport("__cmsis", CallingConvention = CallingConvention.Cdecl,
-                EntryPoint = "HAL_GPIO_WritePin")>]
-    extern void halGpioWritePin(nativeptr<GPIO_TypeDef> gpio,
-                                uint16 pin, GPIO_PinState state)
+    /// Write GPIO pin state
+    let writePin (gpio: nativeint) (pin: uint16) (state: int) : unit =
+        ()  // Alex emits HAL_GPIO_WritePin or BSRR register write
+
+    /// Read GPIO pin state
+    let readPin (gpio: nativeint) (pin: uint16) : int =
+        Unchecked.defaultof<int>
 ```
 
 **Alex provides ARM bindings** (new module):
 ```fsharp
 // Alex/Bindings/ARM/GPIOBindings.fs
 let registerGPIOBindings () =
-    ExternDispatch.register BareMetal ARM32_Thumb "HAL_GPIO_Init"
+    ExternDispatch.register BareMetal ARM32_Thumb "Platform.Bindings.HAL.GPIO.init"
         (fun ext -> bindGpioInit ext)
-    ExternDispatch.register BareMetal ARM32_Thumb "HAL_GPIO_WritePin"
+    ExternDispatch.register BareMetal ARM32_Thumb "Platform.Bindings.HAL.GPIO.writePin"
         (fun ext -> bindGpioWritePin ext)
 ```
 
@@ -578,11 +590,11 @@ macros |> List.exists (fun m -> m.Name = "GPIO_PIN_0") |> should be true
 - **B) Mode flag**: Add `OutputFormat` option (PInvoke | Fidelity)
 
 **Tasks**:
-1. Design output format matching Alloy patterns
-2. Generate `[<DllImport("__cmsis", ...)>]` declarations
-3. Use `nativeptr<T>` for typed pointers
+1. Design output format matching Alloy Platform.Bindings pattern
+2. Generate `Platform.Bindings.*` module functions with `Unchecked.defaultof<T>`
+3. Use `nativeint` for pointer arguments (BCL-free)
 4. Emit proper struct definitions with `[<Struct>]`
-5. Generate module structure matching namespace conventions
+5. Generate module structure following `Platform.Bindings.*` convention
 
 ### 7.4 Phase 4: ARM/BareMetal Bindings (Week 3-4)
 

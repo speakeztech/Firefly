@@ -249,34 +249,37 @@ let emitFunctionCall (zipper: PSGZipper) : MLIR<Val> = mlir {
 }
 ```
 
-### Extern Primitive Detection
+### Platform Binding Detection
 
-Extern primitives are detected by examining the FCS symbol's attributes:
+Platform bindings are detected by examining the FCS symbol's containing module. The `Platform.Bindings` module convention (BCL-free) replaces the old DllImport pattern:
 
 ```fsharp
-/// Extract extern primitive info from a PSG node if it represents a DllImport
-let tryExtractExternPrimitive (node: PSGNode) : ExternPrimitive option =
+/// Extract platform binding info from a PSG node if it's in Platform.Bindings module
+let tryExtractPlatformBinding (node: PSGNode) : PlatformBinding option =
     match node.Symbol with
     | Some (:? FSharpMemberOrFunctionOrValue as mfv) ->
-        // Look for DllImport attribute
-        mfv.Attributes
-        |> Seq.tryFind (fun attr ->
-            attr.AttributeType.FullName = "System.Runtime.InteropServices.DllImportAttribute")
-        |> Option.bind (fun attr ->
-            // Extract library name and entry point from attribute arguments
-            let libraryName = extractLibraryName attr
-            let entryPoint = extractEntryPoint attr
-            let callingConv = extractCallingConvention attr
+        // Check if function is in a Platform.Bindings module
+        let containingModule = mfv.DeclaringEntity
+        match containingModule with
+        | Some entity when isPlatformBindingsModule entity.FullName ->
+            // Extract binding info from module structure
+            // e.g., "Platform.Bindings.Console.writeBytes" → module: Console, function: writeBytes
+            let modulePath = extractModulePath entity.FullName
+            let functionName = mfv.LogicalName
 
             Some {
-                EntryPoint = entryPoint
-                Library = libraryName
-                CallingConvention = callingConv
-                Args = []  // Populated during emission
+                ModulePath = modulePath      // e.g., ["Console"] or ["HAL"; "GPIO"]
+                FunctionName = functionName  // e.g., "writeBytes" or "init"
+                Args = []                    // Populated during emission
                 ReturnType = mapType mfv.ReturnParameter.Type
-                BindingStrategy = Static  // From project config
-            })
+            }
+        | _ -> None
     | _ -> None
+
+/// Check if a module path indicates Platform.Bindings
+let isPlatformBindingsModule (fullName: string) : bool =
+    fullName.StartsWith("Platform.Bindings") ||
+    fullName.StartsWith("Alloy.Platform.Bindings")
 ```
 
 ### Inlining Strategy

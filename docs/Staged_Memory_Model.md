@@ -136,10 +136,13 @@ type GPIO_TypeDef = {
 let GPIO_PIN_5 = 0x0020us
 let GPIO_MODE_OUTPUT_PP = 0x01u
 
-// HAL functions become extern declarations
-[<DllImport("__cmsis", EntryPoint = "HAL_GPIO_Init")>]
-extern void halGpioInit(NativePtr<GPIO_TypeDef, peripheral, readWrite> gpio,
-                        NativePtr<GPIO_InitTypeDef, stack, readOnly> init)
+// HAL functions use Platform.Bindings pattern (BCL-free)
+// Farscape generates these; Alex provides MLIR emission
+module Platform.Bindings.HAL.GPIO =
+    /// Initialize GPIO peripheral
+    let init (gpio: NativePtr<GPIO_TypeDef, peripheral, readWrite>)
+             (initStruct: NativePtr<GPIO_InitTypeDef, stack, readOnly>) : unit =
+        ()  // Alex emits register writes or HAL call
 ```
 
 **Memory Semantics Preservation:**

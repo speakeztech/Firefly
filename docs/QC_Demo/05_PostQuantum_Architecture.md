@@ -143,31 +143,48 @@ Implementation variants in pqm4:
 - `m4`: Cortex-M4 assembly optimizations
 - `m4f`: Cortex-M4F floating-point register optimizations
 
-## Farscape Binding Strategy
+## Platform Bindings for PQC Libraries
 
-Following the principles in "The Farscape Bridge" and "Binding F# to C++ in Farscape," bindings are generated in three layers.
+Fidelity uses the Platform.Bindings pattern (BCL-free) rather than DllImport. Alloy declares function signatures with `Unchecked.defaultof<T>` placeholders, and Alex provides platform-specific MLIR emission that links against the native PQC libraries.
 
-### Layer 1: Extern Declarations
+### Layer 1: Platform Bindings (BCL-Free)
 
-Raw P/Invoke signatures from the C headers:
+Farscape generates Platform.Bindings module functions from C headers:
 
 ```fsharp
-// Auto-generated from liboqs or pq-crystals headers
-module Fidelity.PQC.Native.Kyber
+// Farscape-generated from liboqs or pq-crystals headers
+module Platform.Bindings.Kyber =
+    /// Generate Kyber-512 keypair
+    let keypair (pk: nativeint) (sk: nativeint) : int =
+        Unchecked.defaultof<int>
 
-[<DllImport("libpqc", EntryPoint = "pqcrystals_kyber512_ref_keypair")>]
-extern int kyber512_keypair(nativeptr<byte> pk, nativeptr<byte> sk)
+    /// Encapsulate shared secret
+    let encapsulate (ct: nativeint) (ss: nativeint) (pk: nativeint) : int =
+        Unchecked.defaultof<int>
 
-[<DllImport("libpqc", EntryPoint = "pqcrystals_kyber512_ref_enc")>]
-extern int kyber512_enc(nativeptr<byte> ct, nativeptr<byte> ss, nativeptr<byte> pk)
+    /// Decapsulate shared secret
+    let decapsulate (ss: nativeint) (ct: nativeint) (sk: nativeint) : int =
+        Unchecked.defaultof<int>
 
-[<DllImport("libpqc", EntryPoint = "pqcrystals_kyber512_ref_dec")>]
-extern int kyber512_dec(nativeptr<byte> ss, nativeptr<byte> ct, nativeptr<byte> sk)
+module Platform.Bindings.Dilithium =
+    /// Generate Dilithium-2 keypair
+    let keypair (pk: nativeint) (sk: nativeint) : int =
+        Unchecked.defaultof<int>
+
+    /// Sign message
+    let sign (sig: nativeint) (siglen: nativeint) (msg: nativeint) (msglen: int) (sk: nativeint) : int =
+        Unchecked.defaultof<int>
+
+    /// Verify signature
+    let verify (sig: nativeint) (siglen: int) (msg: nativeint) (msglen: int) (pk: nativeint) : int =
+        Unchecked.defaultof<int>
 ```
+
+Alex recognizes calls to `Platform.Bindings.Kyber.*` and emits LLVM declarations that link against the PQC library (liboqs, pq-crystals, or pqm4 depending on target).
 
 ### Layer 2: Type Definitions
 
-Safe wrappers with proper sizing:
+Safe wrappers with proper sizing (using BAREWire FixedArray):
 
 ```fsharp
 module Fidelity.PQC.Types
@@ -200,6 +217,8 @@ Idiomatic F# API with proper entropy integration:
 ```fsharp
 module Fidelity.PQC.Kyber
 
+open Platform.Bindings
+
 /// Generate a Kyber-512 keypair using hardware entropy
 let generateKeypair (entropy: EntropyPool) : Result<Kyber512PublicKey * Kyber512SecretKey, PQCError> =
     if entropy.Available < 64 then
@@ -209,7 +228,7 @@ let generateKeypair (entropy: EntropyPool) : Result<Kyber512PublicKey * Kyber512
         let sk = Kyber512SecretKey.Allocate()
         // Seed the internal RNG with hardware entropy
         seedRng entropy 64
-        match kyber512_keypair(pk.Pointer, sk.Pointer) with
+        match Kyber.keypair(pk.Pointer, sk.Pointer) with
         | 0 -> Ok (pk, sk)
         | e -> Error (KeyGenFailed e)
 

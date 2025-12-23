@@ -81,22 +81,24 @@ This ecosystem means a single Farscape GIR parser unlocks bindings for the entir
 
 As established in "Farscape's Modular Entry Points," Farscape generates bindings in three layers. This architecture applies equally to GIR-based generation:
 
-### Layer 1: Extern Declarations
+### Layer 1: Platform Bindings
 
-The raw P/Invoke signatures extracted from GIR's `c:identifier` attributes:
+Platform.Bindings modules extracted from GIR's `c:identifier` attributes. Alex provides MLIR emission that links against GTK4:
 
 ```fsharp
-// Auto-generated from Gtk-4.0.gir
-module Fidelity.GTK4.Native.Button
+// Auto-generated from Gtk-4.0.gir - Platform.Bindings pattern (BCL-free)
+module Platform.Bindings.GTK.Button =
+    /// Create a new button widget
+    let create () : nativeint =
+        Unchecked.defaultof<nativeint>
 
-[<DllImport("libgtk-4.so.1", EntryPoint = "gtk_button_new")>]
-extern nativeptr<GtkWidget> gtk_button_new()
+    /// Create a button with a text label
+    let createWithLabel (label: nativeint) : nativeint =
+        Unchecked.defaultof<nativeint>
 
-[<DllImport("libgtk-4.so.1", EntryPoint = "gtk_button_new_with_label")>]
-extern nativeptr<GtkWidget> gtk_button_new_with_label(nativeptr<byte> label)
-
-[<DllImport("libgtk-4.so.1", EntryPoint = "gtk_button_set_label")>]
-extern void gtk_button_set_label(nativeptr<GtkButton> button, nativeptr<byte> label)
+    /// Set the button's label text
+    let setLabel (button: nativeint) (label: nativeint) : unit =
+        ()
 ```
 
 ### Layer 2: Type Definitions
@@ -208,7 +210,7 @@ Understanding the GIR schema helps clarify what Farscape's parser must handle.
            c:symbol-prefixes="gtk">
 ```
 
-This provides everything needed for the module structure and `DllImport` attributes.
+This provides everything needed for the Platform.Bindings module structure.
 
 ### Class Definitions
 
