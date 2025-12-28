@@ -70,3 +70,4 @@ src/.claude/settings.local.json
 **/target
 **/helpers
 .serena
+docs/QC_Demo/scripts/deliberate_sample.py
