@@ -168,10 +168,12 @@ See `docs/Baker_Architecture.md` for full design.
 
 **CRITICAL**: BCL type contamination cannot be fixed downstream. The fix must happen in the type system.
 
-**FNCS (F# Native Compiler Services)** is a minimal FCS fork that provides native-first types:
-- String literals → `NativeStr` (not `System.String`)
-- Option → `voption<'T>` (not nullable `option<'T>`)
+**FNCS (F# Native Compiler Services)** is a minimal FCS fork that provides native-first type semantics:
+- String literals → `string` with native semantics (UTF-8 fat pointer, not `System.String`)
+- Option → `option<'T>` with value semantics (stack-allocated, non-nullable)
 - SRTP → Native witness hierarchy
+
+**Key Principle**: Users write standard F# type names. FNCS provides native semantics transparently. There are NO wrapper types like `NativeStr`.
 
 **Layer Separation with FNCS**:
 | Layer | Responsibility |
@@ -184,7 +186,7 @@ See `docs/Baker_Architecture.md` for full design.
 See `fncs_architecture` memory, `fncs_ecosystem` memory, and:
 - `/docs/FNCS_Architecture.md` - Integration with Firefly
 - `~/repos/fsnative/docs/fidelity/FNCS_Pruning_Plan.md` - Implementation roadmap
-- `~/repos/fsnative-spec/docs/fidelity/FNCS_Specification.md` - Normative specification
+- `~/repos/fsnative-spec/spec/` - Normative specification chapters
 - `/docs/FNCS_Ecosystem.md` - Three-repository architecture overview
 - `~/repos/SpeakEZ/hugo/content/proposals/From Bridged To Self Hosted.md` - Full strategic proposal
 
@@ -196,10 +198,10 @@ See `fncs_architecture` memory, `fncs_ecosystem` memory, and:
 > **Note on UMX**: Memory region types are NOT "phantom types" that vanish early. They carry semantic meaning through the ENTIRE pipeline, guiding code generation. Erasure happens at the LAST possible lowering stage. See the Fidelity principle above.
 
 **Alloy Evolution** (clarified December 2025):
-- As FNCS absorbs primitives and native types, Alloy transforms from "everything bundled" into focused BCL replacement
+- As FNCS provides native type semantics, Alloy transforms from workaround-heavy into focused BCL replacement
 - **There is NO separate "fsnative library"** - Alloy IS the library, it evolves
-- After FNCS: Primitives/native types become compiler intrinsics; Alloy provides BCL-sympathetic API + Platform.Bindings
-- BCL Sympathy means API idioms (not runtime semantics) - null-free, voption, Result-based errors
+- With FNCS: Standard F# types have native semantics; Alloy provides BCL-sympathetic API + Platform.Bindings
+- BCL Sympathy means API idioms (not runtime semantics) - null-free, `option` with value semantics, Result-based errors
 
 ## The Extern Primitive Surface
 

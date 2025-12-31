@@ -259,7 +259,7 @@ let ctx = EmitContext.create psg correlations
 let fieldInfo = EmitContext.lookupFieldAccess ctx nodeId
 ```
 
-`FieldAccessInfo` enables correct `llvm.extractvalue` emission for struct fields like `NativeStr.Length`.
+`FieldAccessInfo` enables correct `llvm.extractvalue` emission for struct fields like `string.Length`.
 
 ## THE DEEPER "WHY": DCont/Inet Duality and Waypoints
 

@@ -27,7 +27,7 @@ Run `./helpers/sync.sh` to update from source repos.
 - Core.fs, Math.fs, Memory.fs, Text.fs, Utf8.fs
 - Primitives.fs (extern declarations for `__fidelity`)
 - Console.fs, Time.fs (I/O using primitives)
-- NativeTypes/ (NativeInt, NativePtr, NativeSpan, NativeArray, NativeString)
+- NativeTypes/ (VESTIGIAL - wrapper types to be removed; FNCS provides native semantics for standard F# types)
 - Has shadow Alloy.fsproj for F# LSP indexing
 
 **XParsec** (`helpers/XParsec/src/XParsec/`) - Parser combinators

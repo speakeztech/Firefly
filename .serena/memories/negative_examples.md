@@ -30,7 +30,7 @@ let inline WriteLine (s: string) : unit =
 **The fix**: Real implementation that decomposes to primitives:
 ```fsharp
 // RIGHT - Real implementation using lower-level functions
-let inline WriteLine (s: NativeStr) : unit =
+let inline WriteLine (s: string) : unit =
     writeln s  // Calls writeStrOut -> writeBytes (the actual syscall primitive)
 ```
 
