@@ -3,7 +3,7 @@ module Core.IngestionPipeline
 open System
 open System.IO
 open System.Text.Json
-open FSharp.Compiler.CodeAnalysis
+open FSharp.Native.Compiler.CodeAnalysis
 open Core.CompilerConfig
 open Core.FCS.ProjectContext
 open Core.PSG.Types

@@ -15,7 +15,7 @@
 /// rather than attempting to call a constructor method.
 module Core.PSG.Nanopass.LowerStructConstructors
 
-open FSharp.Compiler.Symbols
+open FSharp.Native.Compiler.Symbols
 open Core.PSG.Types
 
 /// Check if a node's symbol is a struct constructor

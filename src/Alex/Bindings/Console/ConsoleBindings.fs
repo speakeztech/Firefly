@@ -1,6 +1,13 @@
+/// ConsoleBindings - Platform-specific console I/O bindings (witness-based)
+///
+/// ARCHITECTURAL FOUNDATION (December 2025):
+/// Uses the codata accumulator pattern from MLIRZipper.
+/// Bindings are witness functions that take primitive info and zipper,
+/// returning an updated zipper with the witnessed MLIR operations.
 module Alex.Bindings.Console.ConsoleBindings
 
-open Alex.CodeGeneration.MLIRBuilder
+open Alex.CodeGeneration.MLIRTypes
+open Alex.Traversal.MLIRZipper
 open Alex.Bindings.BindingTypes
 
 // ===================================================================
@@ -27,136 +34,142 @@ module SyscallData =
         | _ -> None
 
 // ===================================================================
-// MLIR Generation for Console Primitives
+// Helper Witness Functions
 // ===================================================================
 
-/// Emit write syscall for Unix-like systems (Linux, macOS)
-let emitUnixWriteSyscall (syscallNum: int64) (fd: Val) (buf: Val) (count: Val) : MLIR<Val> = mlir {
-    // Extend fd from i32 to i64 if needed
-    let! fdExt =
-        match fd.Type with
-        | Integer I32 -> arith.extsi fd I64
-        | _ -> mlir { return fd }
+/// Witness sign extension (extsi) if needed
+let witnessExtSIIfNeeded (ssaName: string) (fromType: MLIRType) (toWidth: IntegerBitWidth) (zipper: MLIRZipper) : string * MLIRZipper =
+    match fromType with
+    | Integer fromWidth when fromWidth <> toWidth ->
+        let resultSSA, zipper' = MLIRZipper.yieldSSA zipper
+        let fromStr = Serialize.integerBitWidth fromWidth
+        let toStr = Serialize.integerBitWidth toWidth
+        let text = sprintf "%s = arith.extsi %s : %s to %s" resultSSA ssaName fromStr toStr
+        resultSSA, MLIRZipper.witnessOpWithResult text resultSSA (Integer toWidth) zipper'
+    | _ ->
+        // No extension needed
+        ssaName, zipper
+
+/// Witness truncation (trunci)
+let witnessTruncI (ssaName: string) (fromType: MLIRType) (toWidth: IntegerBitWidth) (zipper: MLIRZipper) : string * MLIRZipper =
+    let resultSSA, zipper' = MLIRZipper.yieldSSA zipper
+    let fromStr = Serialize.mlirType fromType
+    let toStr = Serialize.integerBitWidth toWidth
+    let text = sprintf "%s = arith.trunci %s : %s to %s" resultSSA ssaName fromStr toStr
+    resultSSA, MLIRZipper.witnessOpWithResult text resultSSA (Integer toWidth) zipper'
+
+// ===================================================================
+// MLIR Generation for Console Primitives (Witness-Based)
+// ===================================================================
+
+/// Witness write syscall for Unix-like systems (Linux, macOS)
+let witnessUnixWriteSyscall (syscallNum: int64) (fd: string) (fdType: MLIRType) (buf: string) (count: string) (countType: MLIRType) (zipper: MLIRZipper) : string * MLIRZipper =
+    // Extend fd to i64 if needed
+    let fdExt, zipper1 = witnessExtSIIfNeeded fd fdType I64 zipper
 
     // Extend count to i64 if needed
-    let! countExt =
-        match count.Type with
-        | Integer I32 -> arith.extsi count I64
-        | _ -> mlir { return count }
+    let countExt, zipper2 = witnessExtSIIfNeeded count countType I64 zipper1
 
-    // Syscall number
-    let! sysNum = arith.constant syscallNum I64
+    // Witness syscall number constant
+    let sysNumSSA, zipper3 = MLIRZipper.witnessConstant syscallNum I64 zipper2
 
-    // Execute syscall: write(fd, buf, count)
+    // Witness syscall: write(fd, buf, count)
     // rax = syscall number, rdi = fd, rsi = buf, rdx = count
-    let! result = llvm.inlineAsm "syscall" "={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}"
-                    [{ SSA = sysNum.SSA; Type = Integer I64 }
-                     fdExt
-                     buf
-                     countExt] (Integer I64)
+    let args = [
+        (fdExt, "i64")
+        (buf, "!llvm.ptr")  // Buffer is always a pointer
+        (countExt, "i64")
+    ]
+    MLIRZipper.witnessSyscall sysNumSSA args (Integer I64) zipper3
 
-    return result
-}
-
-/// Emit read syscall for Unix-like systems (Linux, macOS)
-let emitUnixReadSyscall (syscallNum: int64) (fd: Val) (buf: Val) (count: Val) : MLIR<Val> = mlir {
-    // Extend fd from i32 to i64 if needed
-    let! fdExt =
-        match fd.Type with
-        | Integer I32 -> arith.extsi fd I64
-        | _ -> mlir { return fd }
+/// Witness read syscall for Unix-like systems (Linux, macOS)
+let witnessUnixReadSyscall (syscallNum: int64) (fd: string) (fdType: MLIRType) (buf: string) (maxCount: string) (countType: MLIRType) (zipper: MLIRZipper) : string * MLIRZipper =
+    // Extend fd to i64 if needed
+    let fdExt, zipper1 = witnessExtSIIfNeeded fd fdType I64 zipper
 
     // Extend count to i64 if needed
-    let! countExt =
-        match count.Type with
-        | Integer I32 -> arith.extsi count I64
-        | _ -> mlir { return count }
+    let countExt, zipper2 = witnessExtSIIfNeeded maxCount countType I64 zipper1
 
-    // Syscall number
-    let! sysNum = arith.constant syscallNum I64
+    // Witness syscall number constant
+    let sysNumSSA, zipper3 = MLIRZipper.witnessConstant syscallNum I64 zipper2
 
-    // Execute syscall: read(fd, buf, count)
-    let! result = llvm.inlineAsm "syscall" "={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}"
-                    [{ SSA = sysNum.SSA; Type = Integer I64 }
-                     fdExt
-                     buf
-                     countExt] (Integer I64)
-
-    return result
-}
+    // Witness syscall: read(fd, buf, count)
+    let args = [
+        (fdExt, "i64")
+        (buf, "!llvm.ptr")  // Buffer is always a pointer
+        (countExt, "i64")
+    ]
+    MLIRZipper.witnessSyscall sysNumSSA args (Integer I64) zipper3
 
 // ===================================================================
-// Platform Bindings (BCL-Free Pattern)
+// Platform Bindings (Witness-Based Pattern)
 // ===================================================================
 
 /// writeBytes - write bytes to file descriptor
-/// Bound from Alloy.Platform.Bindings.writeBytes
-let bindWriteBytes (platform: TargetPlatform) (prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
+/// Witness binding from Alloy.Platform.Bindings.writeBytes
+let witnessWriteBytes (platform: TargetPlatform) (prim: PlatformPrimitive) (zipper: MLIRZipper) : MLIRZipper * EmissionResult =
     match prim.Args with
-    | [fd; buf; count] ->
+    | [(fd, fdType); (buf, _bufType); (count, countType)] ->
         match platform.OS with
         | Linux ->
-            let! result = emitUnixWriteSyscall 1L fd buf count
-            let! truncated = arith.trunci result I32
-            return Emitted truncated
+            let resultSSA, zipper1 = witnessUnixWriteSyscall 1L fd fdType buf count countType zipper
+            let truncSSA, zipper2 = witnessTruncI resultSSA (Integer I64) I32 zipper1
+            zipper2, WitnessedValue (truncSSA, Integer I32)
         | MacOS ->
-            let! result = emitUnixWriteSyscall 0x2000004L fd buf count
-            let! truncated = arith.trunci result I32
-            return Emitted truncated
+            let resultSSA, zipper1 = witnessUnixWriteSyscall 0x2000004L fd fdType buf count countType zipper
+            let truncSSA, zipper2 = witnessTruncI resultSSA (Integer I64) I32 zipper1
+            zipper2, WitnessedValue (truncSSA, Integer I32)
         | Windows ->
-            // TODO: Windows uses WriteFile API call
-            return NotSupported "Windows console not yet implemented"
+            zipper, NotSupported "Windows console not yet implemented"
         | _ ->
-            return NotSupported $"Console not supported on {platform.OS}"
+            zipper, NotSupported (sprintf "Console not supported on %A" platform.OS)
     | _ ->
-        return NotSupported "writeBytes requires (fd, buffer, count) arguments"
-}
+        zipper, NotSupported "writeBytes requires (fd, buffer, count) arguments"
 
 /// readBytes - read bytes from file descriptor
-/// Bound from Alloy.Platform.Bindings.readBytes
-let bindReadBytes (platform: TargetPlatform) (prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
+/// Witness binding from Alloy.Platform.Bindings.readBytes
+let witnessReadBytes (platform: TargetPlatform) (prim: PlatformPrimitive) (zipper: MLIRZipper) : MLIRZipper * EmissionResult =
     match prim.Args with
-    | [fd; buf; maxCount] ->
+    | [(fd, fdType); (buf, _bufType); (maxCount, countType)] ->
         match platform.OS with
         | Linux ->
-            let! result = emitUnixReadSyscall 0L fd buf maxCount
-            let! truncated = arith.trunci result I32
-            return Emitted truncated
+            let resultSSA, zipper1 = witnessUnixReadSyscall 0L fd fdType buf maxCount countType zipper
+            let truncSSA, zipper2 = witnessTruncI resultSSA (Integer I64) I32 zipper1
+            zipper2, WitnessedValue (truncSSA, Integer I32)
         | MacOS ->
-            let! result = emitUnixReadSyscall 0x2000003L fd buf maxCount
-            let! truncated = arith.trunci result I32
-            return Emitted truncated
+            let resultSSA, zipper1 = witnessUnixReadSyscall 0x2000003L fd fdType buf maxCount countType zipper
+            let truncSSA, zipper2 = witnessTruncI resultSSA (Integer I64) I32 zipper1
+            zipper2, WitnessedValue (truncSSA, Integer I32)
         | Windows ->
-            return NotSupported "Windows console not yet implemented"
+            zipper, NotSupported "Windows console not yet implemented"
         | _ ->
-            return NotSupported $"Console not supported on {platform.OS}"
+            zipper, NotSupported (sprintf "Console not supported on %A" platform.OS)
     | _ ->
-        return NotSupported "readBytes requires (fd, buffer, maxCount) arguments"
-}
+        zipper, NotSupported "readBytes requires (fd, buffer, maxCount) arguments"
 
 // ===================================================================
-// Registration
+// Registration (Witness-Based)
 // ===================================================================
 
 /// Register all console bindings for all platforms
-/// Entry points match Platform.Bindings function names (e.g., "writeBytes", "readBytes")
+/// Entry points match Platform.Bindings function names
 let registerBindings () =
     // Register for Linux
     PlatformDispatch.register Linux X86_64 "writeBytes"
-        (fun ext -> bindWriteBytes TargetPlatform.linux_x86_64 ext)
+        (fun prim zipper -> witnessWriteBytes TargetPlatform.linux_x86_64 prim zipper)
     PlatformDispatch.register Linux X86_64 "readBytes"
-        (fun ext -> bindReadBytes TargetPlatform.linux_x86_64 ext)
+        (fun prim zipper -> witnessReadBytes TargetPlatform.linux_x86_64 prim zipper)
     PlatformDispatch.register Linux ARM64 "writeBytes"
-        (fun ext -> bindWriteBytes { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
+        (fun prim zipper -> witnessWriteBytes { TargetPlatform.linux_x86_64 with Arch = ARM64 } prim zipper)
     PlatformDispatch.register Linux ARM64 "readBytes"
-        (fun ext -> bindReadBytes { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
+        (fun prim zipper -> witnessReadBytes { TargetPlatform.linux_x86_64 with Arch = ARM64 } prim zipper)
 
     // Register for macOS
     PlatformDispatch.register MacOS X86_64 "writeBytes"
-        (fun ext -> bindWriteBytes TargetPlatform.macos_x86_64 ext)
+        (fun prim zipper -> witnessWriteBytes TargetPlatform.macos_x86_64 prim zipper)
     PlatformDispatch.register MacOS X86_64 "readBytes"
-        (fun ext -> bindReadBytes TargetPlatform.macos_x86_64 ext)
+        (fun prim zipper -> witnessReadBytes TargetPlatform.macos_x86_64 prim zipper)
     PlatformDispatch.register MacOS ARM64 "writeBytes"
-        (fun ext -> bindWriteBytes TargetPlatform.macos_arm64 ext)
+        (fun prim zipper -> witnessWriteBytes TargetPlatform.macos_arm64 prim zipper)
     PlatformDispatch.register MacOS ARM64 "readBytes"
-        (fun ext -> bindReadBytes TargetPlatform.macos_arm64 ext)
+        (fun prim zipper -> witnessReadBytes TargetPlatform.macos_arm64 prim zipper)

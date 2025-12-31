@@ -7,8 +7,8 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
-    <Version>0.4.164</Version>
-    <Description>Firefly F# Compiler - Deep FCS Integration</Description>
+    <Version>0.5.0</Version>
+    <Description>Firefly F# Compiler - Native Type Universe via FNCS</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
 
@@ -18,10 +18,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-      <!-- Core Utilities (kept from existing) -->
+      <!-- Core Utilities -->
       <Compile Include="Core/Utilities/IntermediateWriter.fs" />
       <Compile Include="Core/Utilities/RemoveIntermediates.fs" />
-      
+
       <!-- Compiler Configuration -->
       <Compile Include="Core/CompilerConfig.fs" />
       <Compile Include="Core/Timing.fs" />
@@ -33,95 +33,48 @@
       <!-- Toolchain (needs OutputKind from MLIRTypes) -->
       <Compile Include="Core/Toolchain.fs" />
 
-      <!-- Parser Foundation (kept from existing) -->
-      <Compile Include="Core/XParsec/Foundation.fs" />  
-      
-      <!-- Deep FCS Integration (new) -->
-      <Compile Include="Core/FCS/Helpers.fs" />
-      <Compile Include="Core/FCS/ProjectContext.fs" />
-      <Compile Include="Core/FCS/TypedASTAccess.fs" />
-      <Compile Include="Core/FCS/ProjectConfig.fs" />
-      <Compile Include="Core/FCS/FidprojLoader.fs" />
-      
-      <!-- Program Semantic Graph (new) -->
-      <Compile Include="Core/PSG/Types.fs" />
-      <Compile Include="Core/PSG/NavigationUtils.fs" />
-      <Compile Include="Core/PSG/TypeIntegration.fs" />
-      <Compile Include="Core/PSG/Correlation.fs" />
-      <Compile Include="Core/PSG/SymbolAnalysis.fs" />
+      <!-- Core Foundation Types -->
+      <Compile Include="Core/XParsec/Foundation.fs" />
 
-      <!-- PSG Nanopass (small, single-purpose transformations) -->
-      <Compile Include="Core/PSG/Nanopass/IntermediateEmission.fs" />
-      <Compile Include="Core/PSG/Nanopass/ProvisionalCallGraph.fs" />
-      <Compile Include="Core/PSG/Nanopass/ExtractSRTPEdges.fs" />
+      <!-- FNCS Integration (thin layer receiving SemanticGraph) -->
+      <Compile Include="Core/FNCS/Integration.fs" />
+      <Compile Include="Core/FNCS/ProjectLoader.fs" />
 
-      <!-- Reachability (must come after ProvisionalCallGraph and ExtractSRTPEdges) -->
-      <Compile Include="Core/PSG/Reachability.fs" />
-      <Compile Include="Core/PSG/Nanopass/FlattenApplications.fs" />
-      <Compile Include="Core/PSG/Nanopass/ReducePipeOperators.fs" />
-      <Compile Include="Core/PSG/Nanopass/ReduceAlloyOperators.fs" />
-      <Compile Include="Core/PSG/Nanopass/DefUseEdges.fs" />
-      <Compile Include="Core/PSG/Nanopass/ConstantPropagation.fs" />
-      <Compile Include="Core/PSG/Nanopass/LowerStringLength.fs" />
-      <Compile Include="Core/PSG/Nanopass/LowerStructConstructors.fs" />
-      <Compile Include="Core/PSG/Nanopass/ParameterAnnotation.fs" />
-      <Compile Include="Core/PSG/Nanopass/ClassifyOperations.fs" />
-      <Compile Include="Core/PSG/Nanopass/LowerInterpolatedStrings.fs" />
-      <Compile Include="Core/PSG/Nanopass/ResolveSRTP.fs" />
-      <Compile Include="Core/PSG/Nanopass/ValidateNativeTypes.fs" />
-      <Compile Include="Core/PSG/Nanopass/DetectPlatformBindings.fs" />
-      <Compile Include="Core/PSG/Nanopass/DetectInlineFunctions.fs" />
+      <!-- Lowering Nanopasses - TODO: Port to FNCS types -->
+      <!-- NOTE: Nanopasses temporarily excluded pending FNCS integration -->
+      <!-- Obsolete (absorbed into FNCS): DetectPlatformBindings, ProvisionalCallGraph, DefUseEdges, ClassifyOperations -->
+      <!-- Pending port: FlattenApplications, ReducePipeOperators, ReduceAlloyOperators, ConstantPropagation -->
+      <!-- Pending port: LowerStringLength, LowerStructConstructors, LowerInterpolatedStrings, DetectInlineFunctions -->
 
-      <!-- PSG Builder (refactored into sub-modules) -->
-      <Compile Include="Core/PSG/Builder/Types.fs" />
-      <Compile Include="Core/PSG/Builder/SymbolCorrelation.fs" />
-      <Compile Include="Core/PSG/Builder/PatternProcessing.fs" />
-      <Compile Include="Core/PSG/Builder/ExpressionProcessing.fs" />
-      <Compile Include="Core/PSG/Builder/BindingProcessing.fs" />
-      <Compile Include="Core/PSG/Builder/DeclarationProcessing.fs" />
-      <Compile Include="Core/PSG/Builder/Main.fs" />
-      <Compile Include="Core/PSG/Builder.fs" />
+      <!-- Metadata Processing - TODO: Port to FNCS -->
+      <!-- <Compile Include="Core/Meta/Parser.fs" /> -->
+      <!-- <Compile Include="Core/Meta/AlloyHints.fs" /> -->
 
-      <Compile Include="Core/PSG/DebugOutput.fs" />
-      
-      <!-- Metadata Processing (new) -->
-      <Compile Include="Core/Meta/Parser.fs" />
-      <Compile Include="Core/Meta/AlloyHints.fs" />
-      
-      <!-- Platform Templates (new) -->
+      <!-- Platform Templates -->
       <Compile Include="Core/Templates/TemplateTypes.fs" />
       <Compile Include="Core/Templates/TemplateLoader.fs" />
 
-      <!-- Baker - Post-Reachability Type Resolution (Phase 4) -->
-      <!-- MUST be compiled before IngestionPipeline which uses Baker -->
-      <Compile Include="Baker/Types.fs" />
-      <Compile Include="Baker/TypedTreeZipper.fs" />
-      <Compile Include="Baker/MemberBodyMapper.fs" />
-      <Compile Include="Baker/Baker.fs" />
+      <!-- Ingestion Pipeline (orchestrates FNCS + lowering nanopasses) -->
+      <!-- Original IngestionPipeline.fs depends on FCS - needs complete rewrite -->
+      <!-- <Compile Include="Core/IngestionPipeline.fs" /> -->
 
-      <!-- FCS Ingestion Pipeline (uses Baker) -->
-      <Compile Include="Core/IngestionPipeline.fs" />
+      <!-- Alex CodeGeneration (types first, then zipper, then type mapping) -->
+      <Compile Include="Alex/CodeGeneration/MLIRTypes.fs" />
 
-      <!-- Alex CodeGeneration -->
-      <Compile Include="Alex/CodeGeneration/MLIRBuilder.fs" />
-      <Compile Include="Alex/CodeGeneration/TypeMapping.fs" />
+      <!-- Alex Traversal - MLIRZipper MUST come before bindings that use it -->
+      <Compile Include="Alex/Traversal/MLIRZipper.fs" />
 
-      <!-- Alex Bindings (consolidated - platform as data, not separate files) -->
+      <!-- Alex Bindings (platform as data, uses MLIRZipper) -->
       <Compile Include="Alex/Bindings/BindingTypes.fs" />
       <Compile Include="Alex/Bindings/Console/ConsoleBindings.fs" />
       <Compile Include="Alex/Bindings/Time/TimeBindings.fs" />
       <Compile Include="Alex/Bindings/Process/ProcessBindings.fs" />
 
-      <!-- Alex Traversal -->
-      <Compile Include="Alex/Traversal/PSGZipper.fs" />
-      <Compile Include="Alex/Traversal/PSGXParsec.fs" />
-      <Compile Include="Alex/Traversal/MLIRZipper.fs" />
+      <!-- Alex CodeGeneration - TypeMapping uses FNCS types -->
+      <Compile Include="Alex/CodeGeneration/TypeMapping.fs" />
 
-      <!-- Alex Patterns -->
-      <Compile Include="Alex/Patterns/PSGPatterns.fs" />
-
-      <!-- Alex Generation (uses Zipper + XParsec + Patterns) -->
-      <Compile Include="Alex/Generation/Transfer.fs" />
+      <!-- Alex Generation - FNCS-based MLIR emission -->
+      <Compile Include="Alex/Generation/FNCSEmitter.fs" />
 
       <!-- Alex Pipeline Types -->
       <Compile Include="Alex/Pipeline/CompilationTypes.fs" />
@@ -136,162 +89,16 @@
       <Compile Include="CLI/Commands/DoctorCommand.fs" />
 
       <!-- CLI - Firefly Entry Point -->
-      <Compile Include="CLI/Program.fs" />                       
+      <Compile Include="CLI/Program.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Update="FSharp.Core" Version="[9.0.300]" />
-    <PackageReference Include="FSharp.Compiler.Service" Version="43.9.300" />
+    <!-- FNCS: F# Native Compiler Services (native type universe) -->
+    <ProjectReference Include="../../fsnative/src/Compiler/FSharp.Native.Compiler.Service.fsproj" />
     <PackageReference Include="XParsec" Version="0.1.0" />
     <PackageReference Include="Argu" Version="6.1.1" />
     <PackageReference Include="FSharp.SystemTextJson" Version="1.2.42" />
   </ItemGroup>
 
 </Project>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

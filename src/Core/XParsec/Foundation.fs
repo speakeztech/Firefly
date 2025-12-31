@@ -1,8 +1,9 @@
-﻿module Core.XParsec.Foundation
+﻿/// Core types for Firefly compiler pipeline.
+/// Uses FNCS types for source locations.
+module Core.XParsec.Foundation
 
 open System
-open FSharp.Compiler.Symbols
-open FSharp.Compiler.Text
+open FSharp.Native.Compiler.Text
 
 // ===================================================================
 // Core Position and Error Types - Single Source of Truth

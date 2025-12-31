@@ -1,150 +1,173 @@
-/// TypeMapping - F# to MLIR type conversion
+/// TypeMapping - FNCS NativeType to MLIR type conversion
 ///
-/// Maps F# types (from FCS) to their MLIR representations.
+/// Maps FNCS native types to their MLIR representations.
 /// Handles primitives, functions, tuples, options, lists, and arrays.
 ///
-/// Extracted from Core.MLIR.Emitter to support the Alex architecture.
+/// FNCS-native: Uses NativeType from FSharp.Native.Compiler.Checking.Native
 module Alex.CodeGeneration.TypeMapping
 
-open FSharp.Compiler.Symbols
+open FSharp.Native.Compiler.Checking.Native.NativeTypes
 
-/// Convert an F# type to its MLIR representation
-let rec fsharpTypeToMLIR (ftype: FSharpType) : string =
-    try
-        // Check for nativeptr early - it may not have HasTypeDefinition = true
-        // but its string representation contains "nativeptr"
-        let typeStr = ftype.ToString()
-        if typeStr.Contains("nativeptr") then
+/// Convert a FNCS NativeType to its MLIR representation
+let rec nativeTypeToMLIR (ty: NativeType) : string =
+    match ty with
+    // Function types: domain -> range
+    | NativeType.TFun(domain, range) ->
+        let paramType = nativeTypeToMLIR domain
+        let retType = nativeTypeToMLIR range
+        sprintf "(%s) -> %s" paramType retType
+
+    // Tuple types
+    | NativeType.TTuple(elements, _isStruct) ->
+        let elemTypes =
+            elements
+            |> List.map nativeTypeToMLIR
+            |> String.concat ", "
+        sprintf "tuple<%s>" elemTypes
+
+    // Byref types (pointer-like)
+    | NativeType.TByref(_, _) ->
+        "!llvm.ptr"
+
+    // Native pointers
+    | NativeType.TNativePtr _ ->
+        "!llvm.ptr"
+
+    // Type applications (e.g., int, string, option<'T>, list<'T>)
+    | NativeType.TApp(conRef, args) ->
+        mapTypeApp conRef args
+
+    // Type variables (generic parameters)
+    | NativeType.TVar _ ->
+        // For now, assume generic types are pointers (common in Alloy)
+        "!llvm.ptr"
+
+    // Forall types (polymorphic)
+    | NativeType.TForall(_, body) ->
+        // Instantiate body (generic erased at runtime)
+        nativeTypeToMLIR body
+
+    // Measure types (used for UMX phantom types)
+    | NativeType.TMeasure _ ->
+        // Measures are erased at runtime, use the underlying type
+        "i32"
+
+    // Anonymous record types
+    | NativeType.TAnon fields ->
+        let fieldTypes =
+            fields
+            |> List.map (fun (_, ty) -> nativeTypeToMLIR ty)
+            |> String.concat ", "
+        sprintf "!llvm.struct<(%s)>" fieldTypes
+
+    // Record types
+    | NativeType.TRecord(_, fields) ->
+        let fieldTypes =
+            fields
+            |> List.map (fun (_, ty) -> nativeTypeToMLIR ty)
+            |> String.concat ", "
+        sprintf "!llvm.struct<(%s)>" fieldTypes
+
+    // Union types (discriminated unions)
+    | NativeType.TUnion(_, _cases) ->
+        // For now, represent as tagged union (tag + max payload)
+        "!llvm.struct<(i32, i64)>"
+
+    // Error types (shouldn't reach code generation)
+    | NativeType.TError _ ->
+        "i32"
+
+/// Map a type constructor application to MLIR
+and mapTypeApp (conRef: TypeConRef) (args: NativeType list) : string =
+    match conRef.Name with
+    // Integral types
+    | "int" | "int32" | "Int32" -> "i32"
+    | "int64" | "Int64" -> "i64"
+    | "int16" | "Int16" -> "i16"
+    | "byte" | "Byte" | "uint8" -> "i8"
+    | "sbyte" | "SByte" | "int8" -> "i8"
+    | "uint32" | "UInt32" -> "i32"
+    | "uint64" | "UInt64" -> "i64"
+    | "uint16" | "UInt16" -> "i16"
+
+    // Boolean
+    | "bool" | "Boolean" -> "i1"
+
+    // Floating point
+    | "float32" | "Single" -> "f32"
+    | "float" | "float64" | "Double" -> "f64"
+
+    // Strings - native string is fat pointer (ptr + length)
+    | "string" | "String" -> "!llvm.struct<(ptr, i64)>"
+
+    // Native pointers
+    | "nativeint" | "IntPtr" -> "!llvm.ptr"
+    | "unativeint" | "UIntPtr" -> "!llvm.ptr"
+    | "nativeptr" | "Ptr" -> "!llvm.ptr"
+
+    // Char (Unicode codepoint)
+    | "char" | "Char" -> "i32"
+
+    // Unit / Void
+    | "unit" | "Unit" | "Void" -> "()"
+
+    // Option type - value type in native (tag + payload)
+    | "option" | "Option" | "voption" | "ValueOption" ->
+        let innerType =
+            match args with
+            | [arg] -> nativeTypeToMLIR arg
+            | _ -> "i32"
+        sprintf "!llvm.struct<(i1, %s)>" innerType  // tag + payload
+
+    // Result type
+    | "Result" ->
+        "!llvm.struct<(i32, i64, i64)>"  // tag + ok_payload + error_payload
+
+    // List type
+    | "list" | "List" ->
+        "!llvm.ptr"  // Lists are pointers to cons cells
+
+    // Array type
+    | "array" | "Array" ->
+        let elemType =
+            match args with
+            | [arg] -> nativeTypeToMLIR arg
+            | _ -> "i32"
+        sprintf "memref<?x%s>" elemType
+
+    // Memory types from Alloy
+    | "StackBuffer" | "Span" | "ReadOnlySpan" ->
+        "!llvm.ptr"
+
+    // Default fallback
+    | _ ->
+        // Check if it's a pointer-like type by name
+        if conRef.Name.Contains("ptr") || conRef.Name.Contains("Ptr") ||
+           conRef.Name.Contains("Buffer") || conRef.Name.Contains("Span") then
             "!llvm.ptr"
-        // Check for unit first, before other patterns
-        elif ftype.HasTypeDefinition && ftype.TypeDefinition.DisplayName = "unit" then
-            "()"
-        elif ftype.IsAbbreviation then
-            fsharpTypeToMLIR ftype.AbbreviatedType
-        elif ftype.IsFunctionType then
-            let args = ftype.GenericArguments
-            if args.Count >= 2 then
-                let paramType = fsharpTypeToMLIR args.[0]
-                let retType = fsharpTypeToMLIR args.[1]
-                sprintf "(%s) -> %s" paramType retType
-            else "() -> i32"
-        elif ftype.IsTupleType then
-            let elemTypes =
-                ftype.GenericArguments
-                |> Seq.map fsharpTypeToMLIR
-                |> String.concat ", "
-            sprintf "tuple<%s>" elemTypes
-        elif ftype.HasTypeDefinition then
-            match ftype.TypeDefinition.TryFullName with
-            // Integral types
-            | Some "System.Int32" -> "i32"
-            | Some "System.Int64" -> "i64"
-            | Some "System.Int16" -> "i16"
-            | Some "System.Byte" -> "i8"
-            | Some "System.SByte" -> "i8"
-            | Some "System.UInt32" -> "i32"  // Unsigned same size
-            | Some "System.UInt64" -> "i64"
-            | Some "System.UInt16" -> "i16"
+        else
+            "i32"
 
-            // Boolean
-            | Some "System.Boolean" -> "i1"
-
-            // Floating point
-            | Some "System.Single" -> "f32"
-            | Some "System.Double" -> "f64"
-
-            // Strings and pointers
-            | Some "System.String" -> "!llvm.ptr"
-            | Some "System.IntPtr" | Some "System.UIntPtr" -> "!llvm.ptr"
-            | Some "System.Char" -> "i32"  // Unicode codepoint
-
-            // Unit / Void
-            | Some "System.Void" | Some "Microsoft.FSharp.Core.unit" -> "()"
-
-            // Native pointer
-            | Some name when name.StartsWith("Microsoft.FSharp.Core.nativeptr") -> "!llvm.ptr"
-
-            // Alloy StackBuffer - stack-allocated byte buffer, represented as pointer
-            | Some name when name.Contains("Alloy.Memory.StackBuffer") -> "!llvm.ptr"
-
-            // Alloy Span/ReadOnlySpan - memory spans, represented as pointer
-            | Some name when name.Contains("Alloy.Memory.Span") -> "!llvm.ptr"
-            | Some name when name.Contains("Alloy.Memory.ReadOnlySpan") -> "!llvm.ptr"
-
-            // Alloy NativeStr - fat pointer struct (ptr + length)
-            // Emitted as !llvm.struct<(ptr, i64)> per NativeString.fs docs
-            | Some name when name.Contains("Alloy.NativeTypes.NativeStr") ||
-                            name.Contains("NativeStr") ->
-                "!llvm.struct<(ptr, i64)>"
-
-            // Option type
-            | Some name when name.StartsWith("Microsoft.FSharp.Core.FSharpOption") ->
-                let innerType =
-                    if ftype.GenericArguments.Count > 0 then
-                        fsharpTypeToMLIR ftype.GenericArguments.[0]
-                    else "i32"
-                sprintf "!variant<Some: %s, None: ()>" innerType
-
-            // Result type (from Alloy.Core or Microsoft.FSharp.Core)
-            // Represented as struct<(tag: i32, payload1: i64, payload2: i64)>
-            // Tag 0 = Ok, Tag 1 = Error
-            | Some name when name.Contains("Result`2") || name.Contains("Result<") ->
-                "!llvm.struct<(i32, i64, i64)>"
-
-            // List type
-            | Some name when name.StartsWith("Microsoft.FSharp.Collections.FSharpList") ->
-                "!llvm.ptr"  // Lists are pointers to cons cells
-
-            // Array type
-            | Some _ when ftype.TypeDefinition.IsArrayType ->
-                let elemType =
-                    if ftype.GenericArguments.Count > 0 then
-                        fsharpTypeToMLIR ftype.GenericArguments.[0]
-                    else "i32"
-                sprintf "memref<?x%s>" elemType
-
-            // Fallback - print type info for debugging (comment out in production)
-            | Some name ->
-                // Check if it looks like a pointer/buffer type by name
-                if name.Contains("nativeptr") || name.Contains("Ptr") ||
-                   name.Contains("Buffer") || name.Contains("Span") then
-                    "!llvm.ptr"
-                else
-                    "i32"
-            | None -> "i32"
-        // Generic parameters (SRTP type variables) - check if pointer-like
-        elif ftype.IsGenericParameter then
-            // For now, assume SRTP buffer types are pointers
-            // This covers common patterns in Alloy library
-            "!llvm.ptr"
-        else "i32"
-    with _ -> "i32"
-
-/// Extract return type from a function type (stored in PSG node.Type)
+/// Extract return type from a function type
 /// Walks through curried function type to get the final return type
-let getReturnTypeFromFSharpType (ftype: FSharpType) : string =
-    try
-        let rec getReturnType (t: FSharpType) =
-            if t.IsFunctionType && t.GenericArguments.Count >= 2 then
-                getReturnType t.GenericArguments.[1]
-            else
-                t
-        fsharpTypeToMLIR (getReturnType ftype)
-    with _ -> "i32"
+let getReturnType (ty: NativeType) : string =
+    let rec getReturn t =
+        match t with
+        | NativeType.TFun(_, range) -> getReturn range
+        | _ -> t
+    nativeTypeToMLIR (getReturn ty)
 
-/// Extract parameter types from a function type (stored in PSG node.Type)
+/// Extract parameter types from a function type
 /// Returns list of MLIR types for each curried parameter
-let getParamTypesFromFSharpType (ftype: FSharpType) : string list =
-    try
-        let rec extractParamTypes (funcType: FSharpType) (acc: string list) =
-            if funcType.IsFunctionType && funcType.GenericArguments.Count >= 2 then
-                let argType = funcType.GenericArguments.[0]
-                let paramType = fsharpTypeToMLIR argType
-                extractParamTypes funcType.GenericArguments.[1] (paramType :: acc)
-            else
-                List.rev acc
-        extractParamTypes ftype []
-    with _ -> []
+let getParamTypes (ty: NativeType) : string list =
+    let rec extractParams funcType acc =
+        match funcType with
+        | NativeType.TFun(domain, range) ->
+            let paramType = nativeTypeToMLIR domain
+            extractParams range (paramType :: acc)
+        | _ ->
+            List.rev acc
+    extractParams ty []
 
 /// Check if a type is a primitive MLIR type (i32, i64, f32, etc.)
 let isPrimitive (mlirType: string) : bool =

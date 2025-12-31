@@ -168,6 +168,18 @@ See `docs/Baker_Architecture.md` for full design.
 
 **CRITICAL**: BCL type contamination cannot be fixed downstream. The fix must happen in the type system.
 
+### The IL Dependency Cone Discovery (December 2025)
+
+Cascade deletion analysis revealed a fundamental truth: **the IL import assumption permeates the ENTIRE F# compiler type-checking layer** - 3.2MB across 59 files.
+
+This means FNCS cannot be created by pruning. The type checker must be **rebuilt** for the native type universe.
+
+**Why reducing surface area matters**:
+- Every IL assumption is cognitive overhead for the entire framework
+- Native type purity enables clean architectural decisions that ripple positively
+- BCL contamination ripples negatively; removing it enables organic growth
+- Focused surface area = focused development = sustainable platform
+
 **FNCS (F# Native Compiler Services)** is a minimal FCS fork that provides native-first type semantics:
 - String literals → `string` with native semantics (UTF-8 fat pointer, not `System.String`)
 - Option → `option<'T>` with value semantics (stack-allocated, non-nullable)

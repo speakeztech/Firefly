@@ -1,6 +1,13 @@
+/// TimeBindings - Platform-specific time bindings (witness-based)
+///
+/// ARCHITECTURAL FOUNDATION (December 2025):
+/// Uses the codata accumulator pattern from MLIRZipper.
+/// Bindings are witness functions that take primitive info and zipper,
+/// returning an updated zipper with the witnessed MLIR operations.
 module Alex.Bindings.Time.TimeBindings
 
-open Alex.CodeGeneration.MLIRBuilder
+open Alex.CodeGeneration.MLIRTypes
+open Alex.Traversal.MLIRZipper
 open Alex.Bindings.BindingTypes
 
 // ===================================================================
@@ -14,9 +21,6 @@ module SyscallData =
         "nanosleep", 35L
     ]
 
-    /// macOS uses library calls, not direct syscalls for time
-    /// These are placeholder - actual implementation uses function calls
-
     /// Clock IDs (POSIX standard)
     let CLOCK_REALTIME = 0L
     let CLOCK_MONOTONIC = 1L
@@ -28,148 +32,202 @@ module SyscallData =
 let timespecType = Struct [Integer I64; Integer I64]  // { tv_sec: i64, tv_nsec: i64 }
 
 // ===================================================================
-// Linux Time Implementation
+// Helper Witness Functions (Memory Operations)
 // ===================================================================
 
-/// Emit clock_gettime syscall for Linux
-let emitLinuxClockGettime (clockId: int64) : MLIR<Val> = mlir {
+/// Witness stack allocation
+let witnessAlloca (elemType: MLIRType) (zipper: MLIRZipper) : string * MLIRZipper =
+    // First witness constant 1 for the count
+    let oneSSA, zipper1 = MLIRZipper.witnessConstant 1L I64 zipper
+    let resultSSA, zipper2 = MLIRZipper.yieldSSA zipper1
+    let typeStr = Serialize.mlirType elemType
+    let text = sprintf "%s = llvm.alloca %s x %s : (i64) -> !llvm.ptr" resultSSA oneSSA typeStr
+    resultSSA, MLIRZipper.witnessOpWithResult text resultSSA Pointer zipper2
+
+/// Witness GEP (get element pointer)
+let witnessGEP (base_: string) (baseType: MLIRType) (indices: string list) (zipper: MLIRZipper) : string * MLIRZipper =
+    let resultSSA, zipper' = MLIRZipper.yieldSSA zipper
+    let typeStr = Serialize.mlirType baseType
+    let indicesStr = String.concat ", " indices
+    let text = sprintf "%s = llvm.getelementptr %s[%s] : (!llvm.ptr, i64, i64) -> !llvm.ptr, %s"
+                   resultSSA base_ indicesStr typeStr
+    resultSSA, MLIRZipper.witnessOpWithResult text resultSSA Pointer zipper'
+
+/// Witness load from memory
+let witnessLoad (resultType: MLIRType) (ptr: string) (zipper: MLIRZipper) : string * MLIRZipper =
+    let resultSSA, zipper' = MLIRZipper.yieldSSA zipper
+    let typeStr = Serialize.mlirType resultType
+    let text = sprintf "%s = llvm.load %s : !llvm.ptr -> %s" resultSSA ptr typeStr
+    resultSSA, MLIRZipper.witnessOpWithResult text resultSSA resultType zipper'
+
+/// Witness store to memory
+let witnessStore (value: string) (valueType: MLIRType) (ptr: string) (zipper: MLIRZipper) : MLIRZipper =
+    let typeStr = Serialize.mlirType valueType
+    let text = sprintf "llvm.store %s, %s : %s, !llvm.ptr" value ptr typeStr
+    MLIRZipper.witnessVoidOp text zipper
+
+/// Witness integer multiplication
+let witnessMuli (lhs: string) (rhs: string) (ty: MLIRType) (zipper: MLIRZipper) : string * MLIRZipper =
+    MLIRZipper.witnessArith "arith.muli" lhs rhs ty zipper
+
+/// Witness signed integer division
+let witnessDivsi (lhs: string) (rhs: string) (ty: MLIRType) (zipper: MLIRZipper) : string * MLIRZipper =
+    MLIRZipper.witnessArith "arith.divsi" lhs rhs ty zipper
+
+/// Witness signed integer remainder
+let witnessRemsi (lhs: string) (rhs: string) (ty: MLIRType) (zipper: MLIRZipper) : string * MLIRZipper =
+    MLIRZipper.witnessArith "arith.remsi" lhs rhs ty zipper
+
+/// Witness integer addition
+let witnessAddi (lhs: string) (rhs: string) (ty: MLIRType) (zipper: MLIRZipper) : string * MLIRZipper =
+    MLIRZipper.witnessArith "arith.addi" lhs rhs ty zipper
+
+/// Witness sign extension if needed
+let witnessExtSIIfNeeded (ssaName: string) (fromType: MLIRType) (toWidth: IntegerBitWidth) (zipper: MLIRZipper) : string * MLIRZipper =
+    match fromType with
+    | Integer fromWidth when fromWidth <> toWidth ->
+        let resultSSA, zipper' = MLIRZipper.yieldSSA zipper
+        let fromStr = Serialize.integerBitWidth fromWidth
+        let toStr = Serialize.integerBitWidth toWidth
+        let text = sprintf "%s = arith.extsi %s : %s to %s" resultSSA ssaName fromStr toStr
+        resultSSA, MLIRZipper.witnessOpWithResult text resultSSA (Integer toWidth) zipper'
+    | _ ->
+        ssaName, zipper
+
+// ===================================================================
+// Linux Time Implementation (Witness-Based)
+// ===================================================================
+
+/// Witness clock_gettime syscall for Linux
+/// Returns ticks (100-nanosecond intervals)
+let witnessLinuxClockGettime (clockId: int64) (zipper: MLIRZipper) : string * MLIRZipper =
     // Allocate timespec on stack
-    let! one = arith.constant 1L I64
-    let! timespec = llvm.alloca one timespecType
+    let timespecSSA, zipper1 = witnessAlloca timespecType zipper
 
     // Prepare syscall arguments
-    let! clockIdVal = arith.constant clockId I64
-    let! syscallNum = arith.constant 228L I64  // clock_gettime
+    let clockIdSSA, zipper2 = MLIRZipper.witnessConstant clockId I64 zipper1
+    let sysNumSSA, zipper3 = MLIRZipper.witnessConstant 228L I64 zipper2
 
-    // Execute syscall
-    let! _result = llvm.inlineAsm "syscall" "={rax},{rax},{rdi},{rsi},~{rcx},~{r11},~{memory}"
-                    [{ SSA = syscallNum.SSA; Type = Integer I64 }
-                     { SSA = clockIdVal.SSA; Type = Integer I64 }
-                     timespec] (Integer I64)
+    // Execute syscall (clock_gettime)
+    let args = [
+        (clockIdSSA, "i64")
+        (timespecSSA, "!llvm.ptr")
+    ]
+    let _resultSSA, zipper4 = MLIRZipper.witnessSyscall sysNumSSA args (Integer I64) zipper3
 
-    // Extract seconds and nanoseconds
-    let! zeroIdx = arith.constant 0L I64
-    let! oneIdx = arith.constant 1L I64
-    let! secPtr = llvm.getelementptr timespec timespecType [zeroIdx; zeroIdx]
-    let! nsecPtr = llvm.getelementptr timespec timespecType [zeroIdx; oneIdx]
-    let! sec = llvm.load (Integer I64) secPtr
-    let! nsec = llvm.load (Integer I64) nsecPtr
+    // Extract seconds and nanoseconds via GEP
+    let zeroSSA, zipper5 = MLIRZipper.witnessConstant 0L I64 zipper4
+    let oneSSA, zipper6 = MLIRZipper.witnessConstant 1L I64 zipper5
+    let secPtrSSA, zipper7 = witnessGEP timespecSSA timespecType [zeroSSA; zeroSSA] zipper6
+    let nsecPtrSSA, zipper8 = witnessGEP timespecSSA timespecType [zeroSSA; oneSSA] zipper7
+    let secSSA, zipper9 = witnessLoad (Integer I64) secPtrSSA zipper8
+    let nsecSSA, zipper10 = witnessLoad (Integer I64) nsecPtrSSA zipper9
 
     // Convert to 100-nanosecond ticks
-    let! ticksPerSec = arith.constant 10000000L I64
-    let! secTicks = arith.muli sec ticksPerSec
-    let! nsecDiv = arith.constant 100L I64
-    let! nsecTicks = arith.divsi nsec nsecDiv
-    let! totalTicks = arith.addi secTicks nsecTicks
+    let ticksPerSecSSA, zipper11 = MLIRZipper.witnessConstant 10000000L I64 zipper10
+    let secTicksSSA, zipper12 = witnessMuli secSSA ticksPerSecSSA (Integer I64) zipper11
+    let nsecDivSSA, zipper13 = MLIRZipper.witnessConstant 100L I64 zipper12
+    let nsecTicksSSA, zipper14 = witnessDivsi nsecSSA nsecDivSSA (Integer I64) zipper13
+    let totalTicksSSA, zipper15 = witnessAddi secTicksSSA nsecTicksSSA (Integer I64) zipper14
 
-    return totalTicks
-}
+    totalTicksSSA, zipper15
 
-/// Emit nanosleep syscall for Linux
-let emitLinuxNanosleep (milliseconds: Val) : MLIR<unit> = mlir {
+/// Witness nanosleep syscall for Linux
+let witnessLinuxNanosleep (msSSA: string) (msType: MLIRType) (zipper: MLIRZipper) : MLIRZipper =
     // Convert milliseconds to seconds and nanoseconds
-    let! thousand = arith.constant 1000L I64
-    let! million = arith.constant 1000000L I64
+    let thousandSSA, zipper1 = MLIRZipper.witnessConstant 1000L I64 zipper
+    let millionSSA, zipper2 = MLIRZipper.witnessConstant 1000000L I64 zipper1
 
-    let! msExtended =
-        match milliseconds.Type with
-        | Integer I32 -> arith.extsi milliseconds I64
-        | _ -> mlir { return milliseconds }
+    // Extend ms to i64 if needed
+    let msExtSSA, zipper3 = witnessExtSIIfNeeded msSSA msType I64 zipper2
 
-    let! seconds = arith.divsi msExtended thousand
-    let! remainder = arith.remsi msExtended thousand
-    let! nanoseconds = arith.muli remainder million
+    let secondsSSA, zipper4 = witnessDivsi msExtSSA thousandSSA (Integer I64) zipper3
+    let remainderSSA, zipper5 = witnessRemsi msExtSSA thousandSSA (Integer I64) zipper4
+    let nanosecondsSSA, zipper6 = witnessMuli remainderSSA millionSSA (Integer I64) zipper5
 
     // Allocate timespec structs
-    let! one = arith.constant 1L I64
-    let! reqTimespec = llvm.alloca one timespecType
-    let! remTimespec = llvm.alloca one timespecType
+    let reqTimespecSSA, zipper7 = witnessAlloca timespecType zipper6
+    let remTimespecSSA, zipper8 = witnessAlloca timespecType zipper7
 
     // Store seconds and nanoseconds
-    let! zeroIdx = arith.constant 0L I64
-    let! oneIdx = arith.constant 1L I64
-    let! secPtr = llvm.getelementptr reqTimespec timespecType [zeroIdx; zeroIdx]
-    let! nsecPtr = llvm.getelementptr reqTimespec timespecType [zeroIdx; oneIdx]
-    do! llvm.store seconds secPtr
-    do! llvm.store nanoseconds nsecPtr
+    let zeroSSA, zipper9 = MLIRZipper.witnessConstant 0L I64 zipper8
+    let oneSSA, zipper10 = MLIRZipper.witnessConstant 1L I64 zipper9
+    let secPtrSSA, zipper11 = witnessGEP reqTimespecSSA timespecType [zeroSSA; zeroSSA] zipper10
+    let nsecPtrSSA, zipper12 = witnessGEP reqTimespecSSA timespecType [zeroSSA; oneSSA] zipper11
+    let zipper13 = witnessStore secondsSSA (Integer I64) secPtrSSA zipper12
+    let zipper14 = witnessStore nanosecondsSSA (Integer I64) nsecPtrSSA zipper13
 
     // Call nanosleep syscall
-    let! syscallNum = arith.constant 35L I64  // nanosleep
-    let! _result = llvm.inlineAsm "syscall" "={rax},{rax},{rdi},{rsi},~{rcx},~{r11},~{memory}"
-                    [{ SSA = syscallNum.SSA; Type = Integer I64 }
-                     reqTimespec
-                     remTimespec] (Integer I64)
-    return ()
-}
+    let sysNumSSA, zipper15 = MLIRZipper.witnessConstant 35L I64 zipper14
+    let args = [
+        (reqTimespecSSA, "!llvm.ptr")
+        (remTimespecSSA, "!llvm.ptr")
+    ]
+    let _resultSSA, zipper16 = MLIRZipper.witnessSyscall sysNumSSA args (Integer I64) zipper15
+    zipper16
 
 // ===================================================================
-// Platform Primitive Bindings (Platform-Dispatched)
+// Platform Primitive Bindings (Witness-Based)
 // ===================================================================
 
 /// getCurrentTicks - get current time in .NET ticks format
-/// Bound from Alloy.Platform.Bindings.getCurrentTicks
-let bindGetCurrentTicks (platform: TargetPlatform) (_prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
+/// Witness binding from Alloy.Platform.Bindings.getCurrentTicks
+let witnessGetCurrentTicks (platform: TargetPlatform) (_prim: PlatformPrimitive) (zipper: MLIRZipper) : MLIRZipper * EmissionResult =
     match platform.OS with
     | Linux ->
-        let! ticks = emitLinuxClockGettime SyscallData.CLOCK_REALTIME
+        let ticksSSA, zipper1 = witnessLinuxClockGettime SyscallData.CLOCK_REALTIME zipper
         // Add Unix epoch offset to convert to .NET ticks (since 0001-01-01)
-        let! epochOffset = arith.constant 621355968000000000L I64
-        let! result = arith.addi ticks epochOffset
-        return Emitted result
+        let epochOffsetSSA, zipper2 = MLIRZipper.witnessConstant 621355968000000000L I64 zipper1
+        let resultSSA, zipper3 = witnessAddi ticksSSA epochOffsetSSA (Integer I64) zipper2
+        zipper3, WitnessedValue (resultSSA, Integer I64)
     | MacOS ->
-        // TODO: macOS implementation using gettimeofday
-        return NotSupported "macOS time not yet implemented"
+        zipper, NotSupported "macOS time not yet implemented"
     | Windows ->
-        // TODO: Windows implementation using GetSystemTimeAsFileTime
-        return NotSupported "Windows time not yet implemented"
+        zipper, NotSupported "Windows time not yet implemented"
     | _ ->
-        return NotSupported $"Time not supported on {platform.OS}"
-}
+        zipper, NotSupported (sprintf "Time not supported on %A" platform.OS)
 
 /// getMonotonicTicks - get high-resolution monotonic ticks
-/// Bound from Alloy.Platform.Bindings.getMonotonicTicks
-let bindGetMonotonicTicks (platform: TargetPlatform) (_prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
+/// Witness binding from Alloy.Platform.Bindings.getMonotonicTicks
+let witnessGetMonotonicTicks (platform: TargetPlatform) (_prim: PlatformPrimitive) (zipper: MLIRZipper) : MLIRZipper * EmissionResult =
     match platform.OS with
     | Linux ->
-        let! ticks = emitLinuxClockGettime SyscallData.CLOCK_MONOTONIC
-        return Emitted ticks
+        let ticksSSA, zipper1 = witnessLinuxClockGettime SyscallData.CLOCK_MONOTONIC zipper
+        zipper1, WitnessedValue (ticksSSA, Integer I64)
     | MacOS ->
-        return NotSupported "macOS monotonic time not yet implemented"
+        zipper, NotSupported "macOS monotonic time not yet implemented"
     | Windows ->
-        return NotSupported "Windows monotonic time not yet implemented"
+        zipper, NotSupported "Windows monotonic time not yet implemented"
     | _ ->
-        return NotSupported $"Monotonic time not supported on {platform.OS}"
-}
+        zipper, NotSupported (sprintf "Monotonic time not supported on %A" platform.OS)
 
 /// getTickFrequency - get ticks per second
-/// Bound from Alloy.Platform.Bindings.getTickFrequency
-let bindGetTickFrequency (_platform: TargetPlatform) (_prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
+/// Witness binding from Alloy.Platform.Bindings.getTickFrequency
+let witnessGetTickFrequency (_platform: TargetPlatform) (_prim: PlatformPrimitive) (zipper: MLIRZipper) : MLIRZipper * EmissionResult =
     // All platforms use 100-nanosecond ticks = 10,000,000 per second
-    let! freq = arith.constant 10000000L I64
-    return Emitted freq
-}
+    let freqSSA, zipper1 = MLIRZipper.witnessConstant 10000000L I64 zipper
+    zipper1, WitnessedValue (freqSSA, Integer I64)
 
 /// sleep - sleep for specified milliseconds
-/// Bound from Alloy.Platform.Bindings.sleep
-let bindSleep (platform: TargetPlatform) (prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
+/// Witness binding from Alloy.Platform.Bindings.sleep
+let witnessSleep (platform: TargetPlatform) (prim: PlatformPrimitive) (zipper: MLIRZipper) : MLIRZipper * EmissionResult =
     match prim.Args with
-    | [msArg] ->
+    | [(msSSA, msType)] ->
         match platform.OS with
         | Linux ->
-            do! emitLinuxNanosleep msArg
-            return EmittedVoid
+            let zipper1 = witnessLinuxNanosleep msSSA msType zipper
+            zipper1, WitnessedVoid
         | MacOS ->
-            return NotSupported "macOS sleep not yet implemented"
+            zipper, NotSupported "macOS sleep not yet implemented"
         | Windows ->
-            return NotSupported "Windows sleep not yet implemented"
+            zipper, NotSupported "Windows sleep not yet implemented"
         | _ ->
-            return NotSupported $"Sleep not supported on {platform.OS}"
+            zipper, NotSupported (sprintf "Sleep not supported on %A" platform.OS)
     | _ ->
-        return NotSupported "sleep requires milliseconds argument"
-}
+        zipper, NotSupported "sleep requires milliseconds argument"
 
 // ===================================================================
-// Registration
+// Registration (Witness-Based)
 // ===================================================================
 
 /// Register all time bindings for all platforms
@@ -177,30 +235,30 @@ let bindSleep (platform: TargetPlatform) (prim: PlatformPrimitive) : MLIR<Emissi
 let registerBindings () =
     // Linux bindings
     PlatformDispatch.register Linux X86_64 "getCurrentTicks"
-        (fun ext -> bindGetCurrentTicks TargetPlatform.linux_x86_64 ext)
+        (fun prim zipper -> witnessGetCurrentTicks TargetPlatform.linux_x86_64 prim zipper)
     PlatformDispatch.register Linux X86_64 "getMonotonicTicks"
-        (fun ext -> bindGetMonotonicTicks TargetPlatform.linux_x86_64 ext)
+        (fun prim zipper -> witnessGetMonotonicTicks TargetPlatform.linux_x86_64 prim zipper)
     PlatformDispatch.register Linux X86_64 "getTickFrequency"
-        (fun ext -> bindGetTickFrequency TargetPlatform.linux_x86_64 ext)
+        (fun prim zipper -> witnessGetTickFrequency TargetPlatform.linux_x86_64 prim zipper)
     PlatformDispatch.register Linux X86_64 "sleep"
-        (fun ext -> bindSleep TargetPlatform.linux_x86_64 ext)
+        (fun prim zipper -> witnessSleep TargetPlatform.linux_x86_64 prim zipper)
 
     // Linux ARM64 (same implementation, different arch tag)
     PlatformDispatch.register Linux ARM64 "getCurrentTicks"
-        (fun ext -> bindGetCurrentTicks { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
+        (fun prim zipper -> witnessGetCurrentTicks { TargetPlatform.linux_x86_64 with Arch = ARM64 } prim zipper)
     PlatformDispatch.register Linux ARM64 "getMonotonicTicks"
-        (fun ext -> bindGetMonotonicTicks { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
+        (fun prim zipper -> witnessGetMonotonicTicks { TargetPlatform.linux_x86_64 with Arch = ARM64 } prim zipper)
     PlatformDispatch.register Linux ARM64 "getTickFrequency"
-        (fun ext -> bindGetTickFrequency { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
+        (fun prim zipper -> witnessGetTickFrequency { TargetPlatform.linux_x86_64 with Arch = ARM64 } prim zipper)
     PlatformDispatch.register Linux ARM64 "sleep"
-        (fun ext -> bindSleep { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
+        (fun prim zipper -> witnessSleep { TargetPlatform.linux_x86_64 with Arch = ARM64 } prim zipper)
 
     // macOS bindings (placeholder - will return NotSupported until implemented)
     PlatformDispatch.register MacOS X86_64 "getCurrentTicks"
-        (fun ext -> bindGetCurrentTicks TargetPlatform.macos_x86_64 ext)
+        (fun prim zipper -> witnessGetCurrentTicks TargetPlatform.macos_x86_64 prim zipper)
     PlatformDispatch.register MacOS X86_64 "sleep"
-        (fun ext -> bindSleep TargetPlatform.macos_x86_64 ext)
+        (fun prim zipper -> witnessSleep TargetPlatform.macos_x86_64 prim zipper)
     PlatformDispatch.register MacOS ARM64 "getCurrentTicks"
-        (fun ext -> bindGetCurrentTicks TargetPlatform.macos_arm64 ext)
+        (fun prim zipper -> witnessGetCurrentTicks TargetPlatform.macos_arm64 prim zipper)
     PlatformDispatch.register MacOS ARM64 "sleep"
-        (fun ext -> bindSleep TargetPlatform.macos_arm64 ext)
+        (fun prim zipper -> witnessSleep TargetPlatform.macos_arm64 prim zipper)

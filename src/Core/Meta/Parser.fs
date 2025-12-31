@@ -2,7 +2,7 @@ module Core.Meta.Parser
 
 open System
 open System.Xml.Linq
-open FSharp.Compiler.Symbols
+open FSharp.Native.Compiler.Symbols
 
 /// MLIR hint extracted from XML documentation
 type MLIRHint = {
@@ -20,7 +20,7 @@ and MemoryStrategy =
 
 /// Pattern recognition for common F# constructs
 module Patterns =
-    open FSharp.Compiler.Symbols
+    open FSharp.Native.Compiler.Symbols
     
     /// Suggest hints for recursive functions
     let suggestForRecursion (mfv: FSharpMemberOrFunctionOrValue) =

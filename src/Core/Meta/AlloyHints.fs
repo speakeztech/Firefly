@@ -1,6 +1,6 @@
 module Core.Meta.AlloyHints
 
-open FSharp.Compiler.Symbols
+open FSharp.Native.Compiler.Symbols
 open Core.Meta.Parser
 
 /// Validated MLIR hint with platform compatibility

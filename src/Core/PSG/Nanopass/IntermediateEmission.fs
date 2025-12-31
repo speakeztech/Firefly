@@ -10,7 +10,7 @@ open System
 open System.IO
 open System.Text.Json
 open System.Threading.Tasks
-open FSharp.Compiler.Symbols
+open FSharp.Native.Compiler.Symbols
 open Core.PSG.Types
 open Core.Utilities.IntermediateWriter
 

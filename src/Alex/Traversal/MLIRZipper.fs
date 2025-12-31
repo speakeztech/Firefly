@@ -21,7 +21,7 @@
 /// 5. NO string pattern matching on symbol names
 module Alex.Traversal.MLIRZipper
 
-open Alex.CodeGeneration.MLIRBuilder
+open Alex.CodeGeneration.MLIRTypes
 
 // ═══════════════════════════════════════════════════════════════════
 // MLIR Structure Types - What we're building
@@ -464,13 +464,7 @@ module MLIRZipper =
     // This is the ONLY place where MLIR text is actually produced
     // ─────────────────────────────────────────────────────────────────
 
-    /// Escape string content for MLIR literals
-    let private escapeString (s: string) : string =
-        s.Replace("\\", "\\\\")
-         .Replace("\"", "\\\"")
-         .Replace("\n", "\\0A")
-         .Replace("\r", "\\0D")
-         .Replace("\t", "\\09")
+    // Use Serialize.escape from MLIRTypes for string escaping
 
     /// Extract: comonad operation that collapses zipper to complete MLIR text
     /// This is the final observation - the accumulated context becomes a value
@@ -483,7 +477,7 @@ module MLIRZipper =
         for glb in List.rev zipper.Globals do
             match glb with
             | StringLiteral (name, content, len) ->
-                let escaped = escapeString content
+                let escaped = Serialize.escape content
                 sb.AppendLine(sprintf "  llvm.mlir.global internal constant @%s(\"%s\\00\") : !llvm.array<%d x i8>"
                     name escaped len) |> ignore
             | ExternFunc (name, signature) ->

@@ -10,7 +10,7 @@
 /// Run AFTER reachability to only process reachable nodes.
 module Core.PSG.Nanopass.DetectInlineFunctions
 
-open FSharp.Compiler.Symbols
+open FSharp.Native.Compiler.Symbols
 open Core.PSG.Types
 
 // ═══════════════════════════════════════════════════════════════════════════

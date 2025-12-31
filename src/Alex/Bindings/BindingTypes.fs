@@ -1,7 +1,18 @@
+/// BindingTypes - Platform binding types for witness-based MLIR generation
+///
+/// ARCHITECTURAL FOUNDATION (December 2025):
+/// This module uses the codata accumulator pattern from MLIRZipper.
+/// Bindings are witness functions that take primitive info and zipper,
+/// returning an updated zipper with the witnessed MLIR operations.
+///
+/// Key vocabulary (from Coeffects & Codata):
+/// - **witness** - Record observation of computation
+/// - **observe** - Note context requirement (coeffect)
+/// - **yield** - Produce on demand (codata production)
 module Alex.Bindings.BindingTypes
 
-open Core.PSG.Types
-open Alex.CodeGeneration.MLIRBuilder
+open Alex.CodeGeneration.MLIRTypes
+open Alex.Traversal.MLIRZipper
 
 // ===================================================================
 // Target Platform Identification
@@ -117,10 +128,20 @@ type BindingStrategy =
     | Dynamic  // Record symbol reference, resolve via PLT/GOT at runtime
 
 // ===================================================================
+// Emission Result (Witness-Based Pattern)
+// ===================================================================
+
+/// Result of witnessing a platform binding
+type EmissionResult =
+    | WitnessedValue of ssaName: string * mlirType: MLIRType
+    | WitnessedVoid
+    | NotSupported of reason: string
+
+// ===================================================================
 // Platform Primitive Types
 // ===================================================================
 
-/// Represents a platform primitive call extracted from PSG
+/// Represents a platform primitive call extracted from FNCS SemanticGraph
 /// Platform primitives are functions in Alloy.Platform.Bindings that
 /// Alex provides platform-specific implementations for
 type PlatformPrimitive = {
@@ -130,19 +151,13 @@ type PlatformPrimitive = {
     Library: string
     /// Calling convention
     CallingConvention: string
-    /// Argument values (already evaluated)
-    Args: Val list
+    /// Argument SSA names and types (already witnessed by post-order)
+    Args: (string * MLIRType) list
     /// Return type
     ReturnType: MLIRType
     /// Binding strategy (from project configuration)
     BindingStrategy: BindingStrategy
 }
-
-/// Result of attempting to emit a binding
-type EmissionResult =
-    | Emitted of resultVal: Val
-    | EmittedVoid
-    | NotSupported of reason: string
 
 /// External function declaration needed by a binding
 type ExternalDeclaration = {
@@ -152,32 +167,33 @@ type ExternalDeclaration = {
 }
 
 // ===================================================================
-// Binding Function Signature
+// Witness-Based Binding Signature
 // ===================================================================
 
-/// A binding is a function that takes a platform primitive and returns MLIR
-/// The MLIR<Val> monad handles all state threading
-type PlatformBinding = PlatformPrimitive -> MLIR<EmissionResult>
+/// A witness-based binding takes a platform primitive and zipper,
+/// returns updated zipper and emission result
+/// This replaces the old monad-based: PlatformPrimitive -> MLIR<EmissionResult>
+type WitnessBinding = PlatformPrimitive -> MLIRZipper -> MLIRZipper * EmissionResult
 
 // ===================================================================
-// Platform Dispatch Registry
+// Platform Dispatch Registry (Witness-Based)
 // ===================================================================
 
 /// Registry for platform primitive bindings
-/// Dispatches based on (platform, entry_point) to platform-specific MLIR generators
+/// Dispatches based on (platform, entry_point) to platform-specific witness functions
 module PlatformDispatch =
 
-    /// Binding registration: (platform, entry_point) -> binding function
-    let mutable private bindings: Map<(OSFamily * Architecture * string), PlatformBinding> = Map.empty
+    /// Binding registration: (platform, entry_point) -> witness binding function
+    let mutable private bindings: Map<(OSFamily * Architecture * string), WitnessBinding> = Map.empty
     let mutable private currentPlatform: TargetPlatform option = None
 
-    /// Register a binding for a specific platform and entry point
-    let register (os: OSFamily) (arch: Architecture) (entryPoint: string) (binding: PlatformBinding) =
+    /// Register a witness binding for a specific platform and entry point
+    let register (os: OSFamily) (arch: Architecture) (entryPoint: string) (binding: WitnessBinding) =
         let key = (os, arch, entryPoint)
         bindings <- Map.add key binding bindings
 
     /// Register a binding for all architectures of an OS
-    let registerForOS (os: OSFamily) (entryPoint: string) (binding: PlatformBinding) =
+    let registerForOS (os: OSFamily) (entryPoint: string) (binding: WitnessBinding) =
         // Register for common architectures
         register os X86_64 entryPoint binding
         register os ARM64 entryPoint binding
@@ -190,20 +206,20 @@ module PlatformDispatch =
     let getTargetPlatform () =
         currentPlatform |> Option.defaultValue (TargetPlatform.detectHost())
 
-    /// Dispatch a platform primitive to its platform binding
-    let dispatch (prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
+    /// Dispatch a platform primitive to its witness binding
+    /// Returns updated zipper and emission result
+    let dispatch (prim: PlatformPrimitive) (zipper: MLIRZipper) : MLIRZipper * EmissionResult =
         let platform = getTargetPlatform()
         let key = (platform.OS, platform.Arch, prim.EntryPoint)
         match Map.tryFind key bindings with
         | Some binding ->
-            return! binding prim
+            binding prim zipper
         | None ->
             // Try without architecture specificity (OS-level binding)
             let fallbackKey = (platform.OS, X86_64, prim.EntryPoint)
             match Map.tryFind fallbackKey bindings with
-            | Some binding -> return! binding prim
-            | None -> return NotSupported $"No binding for {prim.EntryPoint} on {platform.OS}/{platform.Arch}"
-    }
+            | Some binding -> binding prim zipper
+            | None -> zipper, NotSupported $"No binding for {prim.EntryPoint} on {platform.OS}/{platform.Arch}"
 
     /// Check if an entry point has a registered binding
     let hasBinding (entryPoint: string) : bool =

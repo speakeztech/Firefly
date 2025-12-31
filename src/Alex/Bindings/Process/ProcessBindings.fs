@@ -1,7 +1,13 @@
-/// ProcessBindings - Platform-specific MLIR generation for process operations (exit, etc.)
+/// ProcessBindings - Platform-specific process bindings (witness-based)
+///
+/// ARCHITECTURAL FOUNDATION (December 2025):
+/// Uses the codata accumulator pattern from MLIRZipper.
+/// Bindings are witness functions that take primitive info and zipper,
+/// returning an updated zipper with the witnessed MLIR operations.
 module Alex.Bindings.Process.ProcessBindings
 
-open Alex.CodeGeneration.MLIRBuilder
+open Alex.CodeGeneration.MLIRTypes
+open Alex.Traversal.MLIRZipper
 open Alex.Bindings.BindingTypes
 
 // ===================================================================
@@ -27,59 +33,66 @@ module SyscallData =
         | _ -> None
 
 // ===================================================================
-// MLIR Generation for Process Primitives
+// Helper Witness Functions
 // ===================================================================
 
-/// Emit exit syscall for Unix-like systems (Linux, macOS)
-let emitUnixExitSyscall (syscallNum: int64) (exitCode: Val) : MLIR<unit> = mlir {
+/// Witness sign extension if needed
+let witnessExtSIIfNeeded (ssaName: string) (fromType: MLIRType) (toWidth: IntegerBitWidth) (zipper: MLIRZipper) : string * MLIRZipper =
+    match fromType with
+    | Integer fromWidth when fromWidth <> toWidth ->
+        let resultSSA, zipper' = MLIRZipper.yieldSSA zipper
+        let fromStr = Serialize.integerBitWidth fromWidth
+        let toStr = Serialize.integerBitWidth toWidth
+        let text = sprintf "%s = arith.extsi %s : %s to %s" resultSSA ssaName fromStr toStr
+        resultSSA, MLIRZipper.witnessOpWithResult text resultSSA (Integer toWidth) zipper'
+    | _ ->
+        ssaName, zipper
+
+// ===================================================================
+// MLIR Generation for Process Primitives (Witness-Based)
+// ===================================================================
+
+/// Witness exit syscall for Unix-like systems (Linux, macOS)
+let witnessUnixExitSyscall (syscallNum: int64) (exitCodeSSA: string) (exitCodeType: MLIRType) (zipper: MLIRZipper) : MLIRZipper =
     // Extend exit code to i64 if needed
-    let! codeExt =
-        match exitCode.Type with
-        | Integer I32 -> arith.extsi exitCode I64
-        | _ -> mlir { return exitCode }
+    let codeExtSSA, zipper1 = witnessExtSIIfNeeded exitCodeSSA exitCodeType I64 zipper
 
     // Syscall number
-    let! sysNum = arith.constant syscallNum I64
+    let sysNumSSA, zipper2 = MLIRZipper.witnessConstant syscallNum I64 zipper1
 
     // Execute syscall: exit(code)
     // rax = syscall number, rdi = exit code
-    let! _ = llvm.inlineAsm "syscall" "=r,{rax},{rdi},~{rcx},~{r11},~{memory}"
-                [{ SSA = sysNum.SSA; Type = Integer I64 }
-                 codeExt] (Integer I64)
+    let args = [(codeExtSSA, "i64")]
+    let _resultSSA, zipper3 = MLIRZipper.witnessSyscall sysNumSSA args (Integer I64) zipper2
 
     // Mark as unreachable (exit never returns)
-    do! llvm.unreachable
-
-    return ()
-}
+    MLIRZipper.witnessUnreachable zipper3
 
 // ===================================================================
-// Platform Primitive Bindings
+// Platform Primitive Bindings (Witness-Based)
 // ===================================================================
 
 /// exit - terminate process with exit code
-/// Bound from Alloy.Platform.Bindings.exit
-let bindExit (platform: TargetPlatform) (prim: PlatformPrimitive) : MLIR<EmissionResult> = mlir {
+/// Witness binding from Alloy.Platform.Bindings.exit
+let witnessExit (platform: TargetPlatform) (prim: PlatformPrimitive) (zipper: MLIRZipper) : MLIRZipper * EmissionResult =
     match prim.Args with
-    | [exitCode] ->
+    | [(exitCodeSSA, exitCodeType)] ->
         match platform.OS with
         | Linux ->
-            do! emitUnixExitSyscall 60L exitCode
-            return EmittedVoid
+            let zipper1 = witnessUnixExitSyscall 60L exitCodeSSA exitCodeType zipper
+            zipper1, WitnessedVoid
         | MacOS ->
-            do! emitUnixExitSyscall 0x2000001L exitCode
-            return EmittedVoid
+            let zipper1 = witnessUnixExitSyscall 0x2000001L exitCodeSSA exitCodeType zipper
+            zipper1, WitnessedVoid
         | Windows ->
-            // TODO: Windows uses ExitProcess API call
-            return NotSupported "Windows exit not yet implemented"
+            zipper, NotSupported "Windows exit not yet implemented"
         | _ ->
-            return NotSupported $"Exit not supported on {platform.OS}"
+            zipper, NotSupported (sprintf "Exit not supported on %A" platform.OS)
     | _ ->
-        return NotSupported "exit requires (exitCode) argument"
-}
+        zipper, NotSupported "exit requires (exitCode) argument"
 
 // ===================================================================
-// Registration
+// Registration (Witness-Based)
 // ===================================================================
 
 /// Register all process bindings for all platforms
@@ -87,12 +100,12 @@ let bindExit (platform: TargetPlatform) (prim: PlatformPrimitive) : MLIR<Emissio
 let registerBindings () =
     // Register for Linux
     PlatformDispatch.register Linux X86_64 "exit"
-        (fun ext -> bindExit TargetPlatform.linux_x86_64 ext)
+        (fun prim zipper -> witnessExit TargetPlatform.linux_x86_64 prim zipper)
     PlatformDispatch.register Linux ARM64 "exit"
-        (fun ext -> bindExit { TargetPlatform.linux_x86_64 with Arch = ARM64 } ext)
+        (fun prim zipper -> witnessExit { TargetPlatform.linux_x86_64 with Arch = ARM64 } prim zipper)
 
     // Register for macOS
     PlatformDispatch.register MacOS X86_64 "exit"
-        (fun ext -> bindExit TargetPlatform.macos_x86_64 ext)
+        (fun prim zipper -> witnessExit TargetPlatform.macos_x86_64 prim zipper)
     PlatformDispatch.register MacOS ARM64 "exit"
-        (fun ext -> bindExit TargetPlatform.macos_arm64 ext)
+        (fun prim zipper -> witnessExit TargetPlatform.macos_arm64 prim zipper)

@@ -41,4 +41,17 @@ F# Source → FCS → PSG → Nanopasses → Alex/Zipper → MLIR → LLVM → N
 
 ## External Dependencies
 - **Alloy** - `/home/hhh/repos/Alloy/src/` - Self-contained F# standard library for native compilation
+- **FNCS** - `~/repos/fsnative` - F# Native Compiler Services (FCS fork with native type universe)
 - Reference resources at `~/repos/fsharp`, `~/repos/fslang-spec`, `~/triton-cpu`, `~/repos/mlir-hs`
+
+## The Native Type Universe (Critical Insight)
+
+The entire Fidelity framework depends on a **clean native type universe**:
+- UTF-8 strings (not System.String)
+- Value-type options (not nullable references)
+- No `null`, no `obj` base type
+- No BCL dependencies
+
+**Key Finding (December 2025)**: The IL import assumption in FCS permeates its entire type-checking layer (3.2MB, 59 files). FNCS cannot be created by pruning - the type checker must be rebuilt. This surface area reduction is essential for Fidelity's success and organic growth as a platform.
+
+Reducing surface area to focus solely on the native type universe enables clean architectural decisions that ripple positively throughout the framework.
