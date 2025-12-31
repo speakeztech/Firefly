@@ -284,12 +284,12 @@ type ProgramSemanticGraph = {
 Consider the Alloy Console code:
 
 ```fsharp
-// In Alloy/Console.fs
+// In Alloy/Console.fs (with FNCS - string has native semantics)
 let inline Write s = WritableString $ s
 
 // In WritableString type
-static member inline ( $ ) (_, s: string) = writeSystemString s
-static member inline ( $ ) (_, s: NativeStr) = writeNativeStr s
+// Note: With FNCS, string has native semantics - single overload handles all strings
+static member inline ( $ ) (_, s: string) = writeString s
 ```
 
 **Current Problem:**
@@ -303,6 +303,7 @@ static member inline ( $ ) (_, s: NativeStr) = writeNativeStr s
 1. **TypedTreeZipper** walks `Write s` call in typed tree:
    - Finds `TraitCall` for `$` operator
    - Extracts resolution: `WritableString.op_Dollar` with `^a = string`
+   - Note: With FNCS, `string` has native semantics (UTF-8 fat pointer)
 
 2. **SRTPResolver** records:
    ```fsharp
@@ -313,9 +314,8 @@ static member inline ( $ ) (_, s: NativeStr) = writeNativeStr s
    }
    ```
 
-3. **MemberBodyMapper** maps `WritableString.op_Dollar` overloads:
-   - For string: body = `writeSystemString s`
-   - For NativeStr: body = `writeNativeStr s`
+3. **MemberBodyMapper** maps `WritableString.op_Dollar`:
+   - For string (with native semantics): body = `writeString s`
    - Correlates by declaration range
 
 4. **Alex** emission:

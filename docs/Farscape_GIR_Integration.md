@@ -35,7 +35,7 @@ Consider how a simple constructor appears in GIR:
 
 This tells Farscape everything needed for safe Fidelity bindings:
 - The returned widget pointer is managed by GTK (no cleanup needed)
-- The label string is copied by GTK (safe to pass stack-allocated `NativeStr`)
+- The label string is copied by GTK (safe to pass stack-allocated `string`)
 
 This metadata is exactly what Fidelity requires for deterministic memory management without a garbage collector.
 
@@ -128,11 +128,11 @@ The idiomatic F# API that developers actually use. This layer transforms imperat
 module Fidelity.GTK4.Button
 
 /// Create a button with a text label
-let withLabel (text: NativeStr) : Button =
+let withLabel (text: string) : Button =
     { Handle = gtk_button_new_with_label(text.Pointer) |> NativePtr.cast }
 
 /// Set the button's label text (returns button for chaining)
-let setLabel (text: NativeStr) (button: Button) : Button =
+let setLabel (text: string) (button: Button) : Button =
     gtk_button_set_label(button.Handle, text.Pointer)
     button
 

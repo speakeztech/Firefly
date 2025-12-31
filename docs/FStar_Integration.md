@@ -90,8 +90,8 @@ fsnative resolves this mismatch by providing native types that align with F*'s e
 
 | Concept | F* (OCaml extraction) | fsnative |
 |---------|----------------------|----------|
-| Strings | UTF-8, via BatUTF8 | NativeStr (UTF-8, deterministic lifetime) |
-| Options | Value ADT | voption (value type, stack-allocated) |
+| Strings | UTF-8, via BatUTF8 | `string` (UTF-8, deterministic lifetime) |
+| Options | Value ADT | `option` (value type, stack-allocated) |
 | Integers | Explicit width | Explicit width, no boxing |
 | Memory | No GC assumptions | Arena/stack, explicit lifetimes |
 
@@ -141,7 +141,7 @@ ML Intermediate Syntax
                               Native Binary
 ```
 
-The new `PrintFSNative` backend emits F# code targeting native types. By the time F* integration is implemented, the native type system currently prototyped in Alloy would be intrinsic to FNCS itself. When you write `string` in fsnative, FNCS resolves it to `NativeStr`; when you write `option`, FNCS resolves it to `voption`. The extracted code compiles with FNCS and flows through Firefly's standard pipeline.
+The new `PrintFSNative` backend emits F# code targeting native types. By the time F* integration is implemented, the native type system would be intrinsic to FNCS itself. When you write `string` in fsnative, FNCS understands it with native semantics (UTF-8, fat pointer); when you write `option`, FNCS understands it as a value type. The type NAMES stay the same as standard F# - only the SEMANTICS are native. The extracted code compiles with FNCS and flows through Firefly's standard pipeline.
 
 ### Runtime Library: fsnative/
 
@@ -178,8 +178,8 @@ The fsnative extraction would add a new top-level directory, peer to `fsharp/`:
 ```
 fsnative/                # NEW: peer to fsharp/, not inside it
 ├── base/
-│   ├── FStar_String.fs      # String operations via Alloy.Text (NativeStr)
-│   ├── FStar_Option.fs      # voption operations
+│   ├── FStar_String.fs      # String operations via Alloy.Text (string with native semantics)
+│   ├── FStar_Option.fs      # option operations (value type semantics)
 │   ├── FStar_List.fs        # List operations via Alloy.Collections
 │   ├── FStar_Bytes.fs       # Byte handling via Alloy
 │   ├── FStar_IO.fs          # I/O via Alloy.Console, Alloy.IO
@@ -197,10 +197,10 @@ The following table shows how F* types would map to fsnative types:
 
 | F* Type | OCaml (current) | fsnative (proposed) |
 |---------|-----------------|---------------------|
-| `string` | `string` + BatUTF8 | `NativeStr` |
-| `'a option` | `'a option` | `'a voption` |
+| `string` | `string` + BatUTF8 | `string` (UTF-8, native semantics) |
+| `'a option` | `'a option` | `'a option` (value type semantics) |
 | `'a list` | `'a list` | `'a list` (Alloy) |
-| `'a array` | `'a array` | `NativeArray<'a>` |
+| `'a array` | `'a array` | `'a array` (native array) |
 | `int` | `Z.t` (arbitrary precision) | `bigint` or explicit width |
 | `int32` | `Int32.t` | `int32` |
 | `uint8` | `Uint8.t` | `uint8` |
@@ -405,7 +405,7 @@ The fsnative target shares semantic affinity with OCaml: value semantics for sma
 
 ### F# Developers
 
-If you work in F# on .NET: fsnative aims for a developer experience with high correspondence to standard F#. The syntax is largely the same, and we're working to ensure the transition feels familiar. What changes is what types mean: when you write `string`, FNCS resolves it to `NativeStr` rather than `System.String`; when you write `Some x`, you get a value-type option rather than a heap-allocated reference. Some BCL reflexes won't be available, and there are additional options for proof annotations that don't exist in standard F#.
+If you work in F# on .NET: fsnative aims for a developer experience with high correspondence to standard F#. The syntax is identical, the type NAMES are the same, and we're working to ensure the transition feels familiar. What changes is what types MEAN: when you write `string`, FNCS understands it with native semantics (UTF-8, fat pointer) rather than BCL semantics (UTF-16, heap-allocated); when you write `Some x`, you get a value-type option rather than a heap-allocated reference. Some BCL patterns won't be available, and there are additional options for proof annotations that don't exist in standard F#.
 
 The F* integration adds verification. You write F# with annotations, the framework generates proofs, and those proofs guide compilation. You do not need to learn F* to benefit from verification; the tooling handles the translation.
 

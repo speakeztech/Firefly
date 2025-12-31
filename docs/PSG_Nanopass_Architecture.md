@@ -309,18 +309,18 @@ let pruneUnreachable (psg: ProgramSemanticGraph) : ProgramSemanticGraph =
 ### The Problem
 
 ```fsharp
-// Alloy/Console.fs
+// Alloy/Console.fs (with FNCS - string has native semantics)
 type WritableString =
     | WritableString
-    static member inline ($) (WritableString, s: NativeStr) = writeNativeStr s
-    static member inline ($) (WritableString, s: string) = writeSystemString s
+    static member inline ($) (WritableString, s: string) = writeString s
 
 let inline Write s = WritableString $ s
 ```
 
 When we call `Console.Write "hello"`:
 - Syntax sees: `App [op_Dollar, WritableString, "hello"]`
-- Types resolve: `$` → `WritableString.op_Dollar(WritableString, string)` → `writeSystemString`
+- Types resolve: `$` → `WritableString.op_Dollar(WritableString, string)` → `writeString`
+- Note: With FNCS, `string` has native semantics (UTF-8 fat pointer) - no separate overloads needed
 
 ### The Solution
 

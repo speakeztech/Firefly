@@ -74,17 +74,17 @@ val compare : a:nativeptr<byte> -> b:nativeptr<byte> -> length:int -> bool
 For string operations specifically:
 
 ```fsharp
-module Alloy.NativeTypes.NativeStr
+module Alloy.Text.String
 
-/// Concatenate multiple NativeStr values into a destination buffer
+/// Concatenate multiple strings into a destination buffer
 /// Semantic: "Combine these strings sequentially"
 /// Implementation: Target-dependent series of copy operations
-val concat : dest:nativeptr<byte> -> parts:NativeStr list -> NativeStr
+val concat : dest:nativeptr<byte> -> parts:string list -> string
 
-/// Copy a NativeStr to a destination buffer
+/// Copy a string to a destination buffer
 /// Semantic: "Duplicate this string's content"
 /// Implementation: Single Memory.copy operation
-val copyTo : src:NativeStr -> dest:nativeptr<byte> -> NativeStr
+val copyTo : src:string -> dest:nativeptr<byte> -> string
 ```
 
 ### Simplified Sample Code
@@ -98,22 +98,22 @@ let hello() =
     Console.writeB "Enter your name: "B
 
     let nameLen = Console.readLine inputBuffer 256
-    let name = NativeStr(inputBuffer, nameLen)
+    let name = String.fromBuffer(inputBuffer, nameLen)
 
     let outputBuffer = NativePtr.stackalloc<byte> 512
 
     // Express INTENT, not implementation
-    let greeting = NativeStr.concat outputBuffer [
-        NativeStr.fromBytes "Hello, "B
+    let greeting = String.concat outputBuffer [
+        "Hello, "
         name
-        NativeStr.fromBytes "!"B
+        "!"
     ]
 
     greeting |> Console.writeln
 ```
 
 This version:
-- **Tests the intended patterns**: Pipe operator, curried functions, NativeStr construction
+- **Tests the intended patterns**: Pipe operator, curried functions, string construction
 - **Hides implementation complexity**: No explicit loops in user code
 - **Enables target-aware optimization**: Alex can select optimal copy strategy
 - **Maintains F# idioms**: Clean, functional style without exposing native pointer arithmetic
@@ -122,7 +122,7 @@ This version:
 
 ### Stage 1: PSG Construction
 
-The Program Semantic Graph captures the semantic structure. For `NativeStr.concat`, the PSG would represent:
+The Program Semantic Graph captures the semantic structure. For `String.concat`, the PSG would represent:
 
 ```
 App:FunctionCall [concat]
@@ -329,7 +329,7 @@ Alex's multi-target design already supports the pattern:
 
 ### Required Additions
 
-1. **Alloy primitives**: `Memory.copy`, `Memory.zero`, `NativeStr.concat`
+1. **Alloy primitives**: `Memory.copy`, `Memory.zero`, `String.concat`
 2. **PSG patterns**: Recognition of semantic memory operations
 3. **Alex bindings**: Target-specific lowering for memory primitives
 4. **Coeffect integration**: Classification of memory operations as `Pure`

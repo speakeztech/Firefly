@@ -22,7 +22,7 @@ Memory concerns enter the Fidelity compilation pipeline through three distinct l
 │                                                                         │
 │  Layer 1: fsnative Primitives                                          │
 │  ┌───────────────────────────────────────────────────────────────────┐ │
-│  │ NativeStr, NativePtr, NativeSpan, NativeArray, voption            │ │
+│  │ string, nativeptr, Span, array, option (all with native semantics) │ │
 │  │ Memory region measures: peripheral, sram, flash, stack            │ │
 │  │ Access kind measures: readOnly, writeOnly, readWrite              │ │
 │  │ Lifetime expressions: Compile-time verified scopes                │ │
@@ -54,18 +54,18 @@ FNCS provides the type foundation for memory-safe native compilation. The key in
 
 **Native Type Resolution:**
 
-When FNCS encounters a string literal, it resolves to `NativeStr`, not `System.String`. This is not a shadow or workaround; it is the fundamental type. The fat pointer representation (pointer + length) carries through the entire compilation pipeline:
+When FNCS encounters a string literal, it provides native semantics: UTF-8 fat pointer representation (pointer + length) instead of BCL's System.String. Users write `string`, FNCS provides native semantics transparently:
 
 ```fsharp
 // Source code
 let greeting = "Hello, World!"
 
-// FNCS resolves type
-// Type: NativeStr  (NOT System.String)
+// FNCS provides native semantics for string
+// Type: string (with native semantics - NOT System.String)
 
 // PSG captures
 // Node: Const:String
-// Type: NativeStr
+// Type: string (UTF-8 fat pointer)
 // Layout: { ptr: nativeptr<byte>, len: int }
 
 // MLIR generated
@@ -208,7 +208,7 @@ All pointer types use fat pointer representation for safety:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  NativeStr (Fat Pointer)                                    │
+│  string (Fat Pointer - Native Semantics)                    │
 │  ┌─────────────────────┬─────────────────────────────────┐ │
 │  │ ptr: nativeptr<byte>│ len: int                        │ │
 │  │ (8 bytes on 64-bit) │ (8 bytes)                       │ │
@@ -307,11 +307,11 @@ The compiler assigns regions based on:
 ```fsharp
 // Implicit region assignment
 let x = 42                  // stack: int
-let s = "Hello"             // flash: NativeStr (data section)
+let s = "Hello"             // flash: string (data section, UTF-8)
 let mutable counter = 0     // stack: int (mutable)
 
 // Explicit region annotation (future)
-let buffer : NativeArray<byte, sram, readWrite> = ...
+let buffer : array<byte, sram, readWrite> = ...
 ```
 
 ## Stage 3: Cache-Aware and CPU-Aware Compilation
@@ -463,7 +463,7 @@ BAREWire enables zero-copy message passing between actors:
 ```fsharp
 // Message sent between actors
 type TradeMessage = {
-    Symbol: NativeStr
+    Symbol: string  // native semantics: UTF-8 fat pointer
     Quantity: int
     Price: float
 }
@@ -588,7 +588,7 @@ The insight: **actors provide natural ownership boundaries**. An actor owns its 
 | Milestone | Status | Description |
 |-----------|--------|-------------|
 | Stack-only allocation | In Progress | All values on stack, no heap |
-| Fat pointer strings | In Progress | NativeStr with (ptr, len) |
+| Fat pointer strings | In Progress | string with (ptr, len) native semantics |
 | Platform bindings | Working | Console I/O via syscalls |
 | Peripheral access | Needed | Farscape + Alex ARM bindings |
 | STM32L5 blink demo | Goal | GPIO toggle via CMSIS HAL |
@@ -637,9 +637,9 @@ This pattern corresponds to fsnative:
 
 ```fsharp
 // fsnative with compile-time bounds
-let inline get (v: NativeArray<'a>) (i: int) =
+let inline get (v: array<'a>) (i: int) =
     // Compiler proves i < v.Length from context
-    NativeArray.get v i
+    Array.get v i
 ```
 
 ### Proof Hyperedges in PSG

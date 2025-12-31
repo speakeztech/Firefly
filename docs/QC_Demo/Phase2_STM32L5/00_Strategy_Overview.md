@@ -229,7 +229,7 @@ Both demo paths employ strategic shortcuts. Understanding these shortcuts - what
 ```fsharp
 // Alloy code (same as desktop console I/O pattern)
 module Platform.Bindings =
-    let openDevice (path: NativeStr) : int = Unchecked.defaultof<int>
+    let openDevice (path: string) : int = Unchecked.defaultof<int>
     let closeDevice (fd: int) : int = Unchecked.defaultof<int>
     let read (fd: int) (buffer: nativeptr<byte>) (count: int) : int = Unchecked.defaultof<int>
     let write (fd: int) (buffer: nativeptr<byte>) (count: int) : int = Unchecked.defaultof<int>

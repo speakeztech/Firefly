@@ -15,7 +15,7 @@ When using SRTP in F# code like:
 ```fsharp
 type WritableString =
     | WritableString
-    static member inline ($) (WritableString, s: NativeStr) = writeNativeStr s
+    static member inline ($) (WritableString, s: string) = writeString s
 
 let inline Write s = WritableString $ s
 ```
@@ -84,7 +84,7 @@ When using `GetSymbolUseAtLocation` or iterating `FSharpCheckFileResults.GetSymb
 ```fsharp
 type WritableString =
     | WritableString
-    static member inline ($) (WritableString, s: NativeStr) = writeNativeStr s
+    static member inline ($) (WritableString, s: string) = writeString s
                         ^^^--- Definition NOT included in symbol uses
 ```
 

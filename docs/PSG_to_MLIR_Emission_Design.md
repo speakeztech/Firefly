@@ -369,9 +369,9 @@ let emitStringConstant (zipper: PSGZipper) : MLIR<Val> = mlir {
         // Get pointer to string data
         let! ptr = llvm.addressof globalName (Ptr (Int I8))
 
-        // Build NativeStr struct {ptr, length}
-        let! nstr = buildNativeStr ptr (String.length s)
-        return nstr
+        // Build string struct {ptr, length} - native string semantics
+        let! str = buildStringStruct ptr (String.length s)
+        return str
 
     | _ -> return! fail "Expected string constant"
 }

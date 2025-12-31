@@ -183,8 +183,8 @@ Frontend (Fable-compiled) and backend (Firefly-compiled) use the same types and 
 ```fsharp
 module Alloy.Encoding.Base64
 
-let encode (bytes: NativeSpan<byte>) : NativeStr = ...
-let decode (str: NativeStr) : NativeArray<byte> = ...
+let encode (bytes: Span<byte>) : string = ...
+let decode (str: string) : byte array = ...
 ```
 
 **JavaScript side:**
@@ -386,11 +386,11 @@ This pattern avoids blocking the GUI thread during computation.
 
 ### String Lifetimes
 
-Webview expects null-terminated C strings. In Fidelity with NativeStr:
+Webview expects null-terminated C strings. With string (native semantics):
 
 ```fsharp
 let setTitle w title =
-    // NativeStr is already null-terminated
+    // string is null-terminated (UTF-8 fat pointer)
     // Pass pointer directly, valid for duration of call
     setWebviewTitle w (NativePtr.toNativeInt title.Pointer)
 ```
@@ -399,7 +399,7 @@ For callback responses:
 ```fsharp
 let respondToCallback w id result =
     // Result string must remain valid until webview_return completes
-    use resultStr = NativeStr.fromString result
+    use resultStr = String.withNullTerminator result
     returnWebview w id 0 (NativePtr.toNativeInt resultStr.Pointer)
     // resultStr deallocated after call completes
 ```

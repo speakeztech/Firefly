@@ -80,7 +80,8 @@ module Platform.Bindings =
     let sleep milliseconds : unit = ()
 
 // Console.fs - Real F# that decomposes to platform bindings
-let inline write (s: NativeStr) =
+// Note: string has native semantics (Pointer, Length members) via FNCS
+let inline write (s: string) =
     Platform.Bindings.writeBytes STDOUT s.Pointer s.Length |> ignore
 ```
 
@@ -299,7 +300,7 @@ The typed tree zipper captures this resolution INTO the PSG. Downstream passes d
 These samples must compile WITHOUT modification:
 - `01_HelloWorldDirect` - Console.Write, Console.WriteLine
 - `02_HelloWorldSaturated` - Console.ReadLine, interpolated strings
-- `03_HelloWorldHalfCurried` - Pipe operators, NativeStr
+- `03_HelloWorldHalfCurried` - Pipe operators, string formatting
 
 The samples use Alloy's BCL-sympathetic API. Firefly compiles them via the nanopass PSG pipeline:
 1. Phase 1-4: Build PSG with full type/SRTP resolution

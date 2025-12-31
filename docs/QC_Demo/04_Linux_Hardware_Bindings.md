@@ -152,7 +152,7 @@ module GPIO =
     open Platform.Constants.GPIO
 
     /// Open GPIO chip and return file descriptor
-    let openChip (chipPath: NativeStr) : int =
+    let openChip (chipPath: string) : int =
         openDevice chipPath.Pointer O_RDWR
 
     /// Request a GPIO line as output
@@ -242,7 +242,7 @@ module IIO =
 
     /// Read raw ADC value from sysfs
     /// Returns raw value (0-1023 for 10-bit ADC) or -1 on error
-    let readRaw (channelPath: NativeStr) : int =
+    let readRaw (channelPath: string) : int =
         let fd = openDevice channelPath.Pointer O_RDONLY
         if fd < 0 then -1
         else
@@ -258,7 +258,7 @@ module IIO =
                 parseAsciiInt buffer bytesRead
 
     /// Read scale factor
-    let readScale (scalePath: NativeStr) : float32 =
+    let readScale (scalePath: string) : float32 =
         let fd = openDevice scalePath.Pointer O_RDONLY
         if fd < 0 then 0.0f
         else
@@ -294,9 +294,9 @@ module IIO.Buffered =
     open Platform.Bindings
 
     /// Configure IIO buffer for continuous sampling
-    let configureBuffer (devicePath: NativeStr) (length: int) : int =
+    let configureBuffer (devicePath: string) (length: int) : int =
         // Enable channel
-        let scanEnablePath = NativeStr.concat [devicePath; "/scan_elements/in_voltage0_en"n]
+        let scanEnablePath = String.concat [devicePath; "/scan_elements/in_voltage0_en"n]
         let enableFd = openDevice scanEnablePath.Pointer O_WRONLY
         if enableFd >= 0 then
             let one = "1"n
@@ -304,7 +304,7 @@ module IIO.Buffered =
             closeDevice enableFd |> ignore
 
         // Set buffer length
-        let bufLenPath = NativeStr.concat [devicePath; "/buffer/length"n]
+        let bufLenPath = String.concat [devicePath; "/buffer/length"n]
         let lenFd = openDevice bufLenPath.Pointer O_WRONLY
         if lenFd >= 0 then
             let lenStr = intToAscii length
@@ -314,8 +314,8 @@ module IIO.Buffered =
         0  // Success
 
     /// Enable buffered capture
-    let enableBuffer (devicePath: NativeStr) : int =
-        let enablePath = NativeStr.concat [devicePath; "/buffer/enable"n]
+    let enableBuffer (devicePath: string) : int =
+        let enablePath = String.concat [devicePath; "/buffer/enable"n]
         let fd = openDevice enablePath.Pointer O_WRONLY
         if fd < 0 then -1
         else

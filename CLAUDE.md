@@ -330,9 +330,11 @@ let inline WriteLine (s: string) : unit =
 **The fix**: Real implementation that decomposes to primitives:
 ```fsharp
 // RIGHT - Real implementation using lower-level functions
-let inline WriteLine (s: NativeStr) : unit =
+let inline WriteLine (s: string) : unit =
     writeln s  // Calls writeStrOut -> writeBytes (the actual syscall primitive)
 ```
+
+Note: `string` has native semantics (UTF-8 fat pointer with Pointer/Length members) via FNCS. There is no separate "NativeStr" type - users write `string` and FNCS provides native semantics transparently.
 
 ### Mistake 3: Putting nanopass logic in MLIR generation
 

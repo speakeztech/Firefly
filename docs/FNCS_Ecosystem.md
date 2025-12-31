@@ -48,7 +48,7 @@ The Fidelity framework compiles F# to native binaries through a coordinated ecos
 
 | Repository | Purpose | Primary Artifacts |
 |------------|---------|-------------------|
-| **Alloy** | Native F# standard library | NativeStr, Collections, Platform bindings |
+| **Alloy** | Native F# standard library | String/Array ops, Collections, Platform bindings |
 | **BAREWire** | Memory-efficient serialization | Zero-copy IPC schemas |
 | **Farscape** | C/C++ binding generator | Peripheral descriptors, FFI |
 | **XParsec** | Parser combinator library | Used in Alex pattern matching |
@@ -116,14 +116,14 @@ F# Syntax: let s = "Hello"
                 ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  FNCS (fsnative)                                             │
-│  Type: NativeStr                                             │
-│  (Alloy fat pointer to UTF-8)                               │
+│  Type: string (with native semantics)                        │
+│  (UTF-8 fat pointer: {Pointer, Length})                     │
 └─────────────────────────────────────────────────────────────┘
                 │
                 ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  Firefly PSG                                                 │
-│  Node: Const:String with NativeStr type annotation          │
+│  Node: Const:String with native string semantics            │
 │  + memory region: Stack                                      │
 │  + access kind: ReadOnly                                     │
 └─────────────────────────────────────────────────────────────┘
@@ -216,8 +216,8 @@ FNCS resolves types against Alloy definitions:
 // When seeing: let s = "Hello"
 
 // 1. Standard FCS would resolve to System.String
-// 2. FNCS intercepts in TcGlobals.nativestr_ty
-// 3. Returns Alloy.NativeStr instead
+// 2. FNCS provides native semantics for string
+// 3. string has UTF-8 fat pointer representation {Pointer, Length}
 
 // When seeing SRTP: a + b where a, b : int
 // 1. Standard FCS searches System.Int32.op_Addition

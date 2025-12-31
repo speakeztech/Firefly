@@ -6,11 +6,13 @@ FNCS (F# Native Compiler Services) is a minimal, surgical fork of F# Compiler Se
 
 FNCS is **not** a full rewrite of FCS. It is a targeted modification that:
 
-1. Defines native primitive types (`NativeStr`, `NativePtr`, etc.) as first-class citizens
-2. Types string literals as `NativeStr` instead of `System.String`
+1. Provides native semantics for standard F# types (`string`, `option`, `array`, etc.)
+2. Types string literals with UTF-8 fat pointer semantics instead of `System.String`
 3. Resolves SRTP against a native witness hierarchy
 4. Enforces null-free semantics where BCL would allow nulls
 5. Maintains the same API surface as FCS for seamless Firefly integration
+
+**Key Principle**: Users write standard F# type names. FNCS provides native semantics transparently. No "NativeStr" or other internal naming - `string` is `string` everywhere.
 
 ## The Problem: FCS's BCL-Centric Type Universe
 
@@ -30,14 +32,14 @@ When you write `"Hello"` in F# code, FCS **always** types it as `Microsoft.FShar
 Alloy attempted to shadow BCL types:
 
 ```fsharp
-// In Alloy - this was the attempted solution
+// In Alloy - this was the attempted solution (now removed)
 type string = NativeStr
 ```
 
 But type shadows only affect **type annotations**, not **literal inference**:
 
 ```fsharp
-let x: string = value  // Shadow works here: x is NativeStr
+let x: string = value  // Shadow works here
 let y = "Hello"        // Shadow IGNORED: y is System.String from FCS
 ```
 
@@ -53,17 +55,17 @@ Because FCS outputs BCL types, every downstream component must either:
 
 None of these options are acceptable. The fix must happen at the source: the type system.
 
-## The Solution: Native Type Universe in FNCS
+## The Solution: Native Semantics for Standard F# Types
 
-FNCS modifies FCS to use a **native type universe** where Fidelity's primitives are first-class:
+FNCS modifies FCS to provide **native semantics** for standard F# types:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │  FCS Type Universe (BCL-centric)                                    │
 │                                                                     │
-│  g.string_ty    → System.String                                     │
-│  g.int32_ty     → System.Int32                                      │
-│  g.option_ty    → Microsoft.FSharp.Core.option<T>  (nullable!)      │
+│  string         → System.String (UTF-16, heap-allocated, nullable)  │
+│  option<'T>     → FSharp.Core.option<T> (reference type, nullable)  │
+│  array<'T>      → System.Array (runtime-managed)                    │
 │  String literal → System.String (hardcoded)                         │
 │  SRTP           → Searches BCL method tables                        │
 └─────────────────────────────────────────────────────────────────────┘
@@ -71,15 +73,17 @@ FNCS modifies FCS to use a **native type universe** where Fidelity's primitives 
                               ↓ FNCS Fork ↓
 
 ┌─────────────────────────────────────────────────────────────────────┐
-│  FNCS Type Universe (Native-centric)                                │
+│  FNCS Type Universe (Native semantics)                              │
 │                                                                     │
-│  g.string_ty    → NativeStr                                         │
-│  g.int32_ty     → int32  (same, but with native semantics)          │
-│  g.option_ty    → voption<T>  (never null, stack-allocated)         │
-│  String literal → NativeStr (fat pointer: ptr + length)             │
+│  string         → UTF-8 fat pointer {Pointer, Length}               │
+│  option<'T>     → Value-type, stack-allocated, never null           │
+│  array<'T>      → Fat pointer {Pointer, Length}                     │
+│  String literal → UTF-8 fat pointer (native semantics)              │
 │  SRTP           → Searches native witness hierarchy                 │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+**Note**: The type NAME stays `string` - only the SEMANTICS change. No cognitive overhead for maintainers.
 
 ## Architectural Layering with FNCS
 
@@ -104,11 +108,11 @@ ERROR: BCL types in native compilation
 ```
 User Code: Console.Write "Hello"
     ↓
-FNCS: Types "Hello" as NativeStr (native primitive)
+FNCS: Types "Hello" as string with native semantics (UTF-8 fat pointer)
 FNCS: SRTP searches native witness hierarchy
     ↓
 Firefly/Baker: Receives native-typed tree
-Firefly: ValidateNativeTypes PASSES (only native types)
+Firefly: ValidateNativeTypes PASSES (native semantics)
     ↓
 Alex: Generates MLIR directly
     ↓
@@ -119,28 +123,25 @@ Native binary
 
 FNCS is a focused modification. It contains:
 
-### 1. Native Primitive Type Definitions
+### 1. Native Semantics for Primitive Types
 
-The core type universe redefinitions:
+The core type semantics redefinitions:
 
 ```fsharp
 // Conceptual - actual implementation in TcGlobals.fs
-type FNCSGlobals = {
-    // String is NativeStr, not System.String
-    string_ty: NativeStr  // {Pointer: nativeptr<byte>, Length: int}
+// Type NAMES remain standard F#; SEMANTICS are native
+type FNCSSemantics = {
+    // string has UTF-8 fat pointer semantics
+    string_semantics: {| Pointer: nativeptr<byte>; Length: int |}
 
-    // Option is voption, not heap-allocated option
-    option_tcr: voption<'T>  // struct, never null
+    // option has value semantics (stack-allocated, never null)
+    option_semantics: voption<'T>
 
-    // Native pointers are first-class
-    nativeptr_tcr: nativeptr<'T>
-    nativeint_tcr: nativeint
+    // array has fat pointer semantics
+    array_semantics: {| Pointer: nativeptr<'T>; Length: int |}
 
-    // Spans for memory views
-    span_tcr: NativeSpan<'T>
-
-    // Arrays are native
-    array_tcr: NativeArray<'T>
+    // Span for memory views
+    span_semantics: {| Pointer: nativeptr<'T>; Length: int |}
 }
 ```
 
@@ -149,10 +150,10 @@ type FNCSGlobals = {
 The key modification in `CheckExpressions.fs`:
 
 ```fsharp
-// FNCS modification - string literals type as NativeStr
+// FNCS modification - string literals have native semantics
 | false, LiteralArgumentType.Inline ->
-    TcPropagatingExprLeafThenConvert cenv overallTy g.nativestr_ty env m (fun () ->
-        mkNativeString g m s, tpenv)  // Creates NativeStr, not System.String
+    TcPropagatingExprLeafThenConvert cenv overallTy g.string_ty env m (fun () ->
+        mkString g m s, tpenv)  // Same API as FCS, but creates string with native semantics
 ```
 
 ### 3. Native SRTP Witness Resolution
@@ -178,8 +179,8 @@ FNCS enforces null-free semantics where BCL would allow nulls:
 // FNCS null handling
 let checkNullAssignment targetType sourceExpr =
     match targetType with
-    | NativeStr | NativeArray _ | voption _ ->
-        // These types are NEVER null - error if null assigned
+    | t when hasNativeSemantics t ->
+        // Native types are NEVER null - error if null assigned
         if isNullLiteral sourceExpr then
             error "Native types cannot be null"
     | _ -> ()
@@ -192,7 +193,7 @@ Despite native semantics, the API surface remains familiar:
 ```fsharp
 // User code looks exactly like BCL F#
 module Console =
-    let Write (s: string) = ...      // string = NativeStr in FNCS
+    let Write (s: string) = ...      // string has native semantics in FNCS
     let WriteLine (s: string) = ...
     let ReadLine () : string = ...
 
@@ -216,7 +217,7 @@ module Platform.Bindings =
     let readBytes fd buffer maxCount : int = ...
 ```
 
-FNCS defines types; Firefly implements operations on those types.
+FNCS defines type semantics; Firefly implements operations on those types.
 
 ### Runtime Implementations
 
@@ -224,7 +225,7 @@ FNCS provides type resolution, not runtime code:
 
 ```fsharp
 // NOT in FNCS - runtime implementation in Alloy
-let inline concat2 (dest: nativeptr<byte>) (s1: NativeStr) (s2: NativeStr) : NativeStr =
+let inline concat2 (dest: nativeptr<byte>) (s1: string) (s2: string) : string =
     // Actual byte-copying implementation
     ...
 ```
@@ -235,7 +236,7 @@ FNCS produces typed trees. Code generation is Firefly/Alex's domain:
 
 ```fsharp
 // NOT in FNCS - stays in Alex
-let emitNativeStr (ctx: EmissionContext) (str: NativeStr) : MLIR =
+let emitString (ctx: EmissionContext) (str: string) : MLIR =
     // Place bytes in data section, emit struct construction
     ...
 ```
@@ -289,10 +290,10 @@ open FSharp.Native.Compiler.Symbols
 
 let checker = FSharpChecker.Create()
 let results = checker.ParseAndCheckFileInProject(...)
-let typedTree = results.TypedTree  // Contains NativeStr instead of System.String
+let typedTree = results.TypedTree  // Contains string with native semantics
 ```
 
-The API shape is the same; the namespace and output types differ.
+The API shape is the same; the namespace and type semantics differ.
 
 ## The Resulting Layer Separation
 
@@ -300,8 +301,8 @@ With FNCS, the Fidelity stack has clean layer separation:
 
 | Layer | Responsibility |
 |-------|---------------|
-| **FNCS** | Type universe, literal typing, SRTP resolution, null-free semantics |
-| **Alloy** | Library implementations using FNCS types (Console, String, etc.) |
+| **FNCS** | Type semantics, literal typing, SRTP resolution, null-free semantics |
+| **Alloy** | Library implementations using standard F# types (Console, String, etc.) |
 | **Firefly/PSG** | Semantic graph construction from FNCS output |
 | **Firefly/Baker** | Type overlay, SRTP extraction (now trivial - FNCS already resolved) |
 | **Firefly/Alex** | Platform-aware MLIR generation |
@@ -317,9 +318,9 @@ With FNCS, `ValidateNativeTypes` becomes simpler:
 
 ```fsharp
 // Before: Complex classification, many edge cases
-// After: Simple - FNCS guarantees native types
+// After: Simple - FNCS guarantees native semantics
 let validateNode (node: PSGNode) =
-    // FNCS already ensured all types are native
+    // FNCS already ensured all types have native semantics
     // This pass becomes a sanity check, not a gatekeeper
     ()
 ```
@@ -330,23 +331,23 @@ Baker's job becomes easier:
 
 ```fsharp
 // Before: Extract types, handle BCL/native mismatches
-// After: Types are already correct from FNCS
+// After: Types already have native semantics from FNCS
 let overlayTypes (node: PSGNode) (fsharpExpr: FSharpExpr) =
-    // Types from fsharpExpr are already native
+    // Types from fsharpExpr already have native semantics
     // No translation needed
     node.Type <- fsharpExpr.Type
 ```
 
 ### Alloy Type Shadows
 
-Type shadows become unnecessary:
+Type shadows are no longer needed:
 
 ```fsharp
 // Before: Attempted shadowing (didn't work for literals)
-type string = NativeStr
+type string = NativeStr  // This was wrong and is now removed
 
-// After: Not needed - FNCS string_ty IS NativeStr
-// Alloy just uses the types FNCS provides
+// After: Not needed - FNCS provides native semantics for string
+// Alloy is a pure library with no type system workarounds
 ```
 
 ### Console.Write and SRTP
@@ -359,8 +360,8 @@ SRTP resolution becomes straightforward:
 
 type WritableString =
     | WritableString
-    static member inline ($) (WritableString, s: NativeStr) = writeNativeStr s
-    // No BCL string overload needed - FNCS never produces BCL string
+    static member inline ($) (WritableString, s: string) = writeString s
+    // FNCS ensures string has native semantics
 ```
 
 ## Implementation Roadmap
@@ -379,18 +380,18 @@ type WritableString =
 3. Verify build produces correctly named DLL
 4. Create test harness for validating type resolution
 
-### Phase 2: Native Type Definitions
+### Phase 2: Native Semantics for Primitive Types
 
-1. Define `NativeStr` type in FNCS type system
-2. Define `voption<'T>` as the default option type
-3. Define `NativeArray<'T>`, `NativeSpan<'T>`, `NativePtr<'T>`
+1. Define native semantics for `string` (UTF-8 fat pointer)
+2. Define native semantics for `option<'T>` (value type, never null)
+3. Define native semantics for `array<'T>`, `Span<'T>`
 4. Wire these into `TcGlobals.fs`
 
 ### Phase 3: Literal Type Resolution
 
-1. Modify `TcConstStringExpr` to produce `NativeStr`
+1. Modify `TcConstStringExpr` to produce string with native semantics
 2. Update string literal handling throughout checker
-3. Ensure string operations type-check against `NativeStr`
+3. Ensure string operations type-check correctly
 
 ### Phase 4: SRTP Native Witnesses
 
@@ -402,7 +403,7 @@ type WritableString =
 
 1. Add null checks where BCL would allow null
 2. Emit errors for null assignments to native types
-3. Ensure `voption` is used instead of nullable `option`
+3. Ensure `option` has value semantics (never null)
 
 ### Phase 6: Integration and Testing
 
@@ -417,11 +418,11 @@ Based on the "From Bridged to Self Hosted" analysis and FCS structure:
 
 | File | Modification |
 |------|-------------|
-| `src/Compiler/Checking/TcGlobals.fs` | Native type definitions |
+| `src/Compiler/Checking/TcGlobals.fs` | Native semantics definitions |
 | `src/Compiler/Checking/CheckExpressions.fs` | String literal typing (~line 7342) |
 | `src/Compiler/Checking/ConstraintSolver.fs` | SRTP native witness resolution |
 | `src/Compiler/TypedTree/TypedTree.fs` | Native type representations |
-| `src/Compiler/TypedTree/TypedTreeBasics.fs` | `mkNativeString` helper |
+| `src/Compiler/TypedTree/TypedTreeOps.fs` | `mkString` produces native semantics |
 
 The modification surface is intentionally small - surgical changes to type resolution, not a rewrite.
 
@@ -446,7 +447,7 @@ FNCS provides immediate relief from BCL contamination while maintaining .NET too
 FNCS is successful when:
 
 1. `Console.Write "Hello"` compiles without BCL type errors
-2. String literals in the typed tree are `NativeStr`, not `System.String`
+2. String literals in the typed tree have native semantics, not `System.String`
 3. SRTP resolves against native witnesses
 4. `ValidateNativeTypes` passes without special cases
 5. HelloWorld samples execute correctly
@@ -455,12 +456,12 @@ FNCS is successful when:
 
 ## Conclusion
 
-FNCS represents a pragmatic middle ground between fighting FCS's assumptions downstream and undertaking a full compiler extraction. By making targeted modifications to FCS's type universe, we get:
+FNCS represents a pragmatic middle ground between fighting FCS's assumptions downstream and undertaking a full compiler extraction. By making targeted modifications to FCS's type semantics, we get:
 
-- **Correctness**: Types are right from the start
-- **Simplicity**: No downstream workarounds
+- **Correctness**: Types have native semantics from the start
+- **Simplicity**: No downstream workarounds, no internal naming differences
 - **Compatibility**: Same FCS API, same Firefly integration
 - **Progress**: Immediate unblocking of current development
 - **Foundation**: Clear path to full self-hosting
 
-The key insight is that the problem was never in Firefly, Baker, or Alloy - it was in FCS's fundamental assumption that all F# code targets .NET. FNCS corrects that assumption at the source.
+The key insight is that the problem was never in Firefly, Baker, or Alloy - it was in FCS's fundamental assumption that all F# code targets .NET. FNCS corrects that assumption at the source while maintaining standard F# type names for zero cognitive overhead.

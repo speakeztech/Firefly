@@ -145,11 +145,11 @@ The YoshiPi carrier provides 4x 10-bit analog inputs. The avalanche circuit conn
 ```fsharp
 module Platform.Bindings =
     /// Read raw ADC value from IIO device
-    let readADC (devicePath: NativeStr) : uint16 =
+    let readADC (devicePath: string) : uint16 =
         Unchecked.defaultof<uint16>
 
     /// Configure ADC sampling rate
-    let setADCSampleRate (devicePath: NativeStr) (hz: int) : int =
+    let setADCSampleRate (devicePath: string) (hz: int) : int =
         Unchecked.defaultof<int>
 ```
 
@@ -169,7 +169,7 @@ Via `ioctl` calls (or libgpiod):
 ```fsharp
 module Platform.Bindings =
     /// Open GPIO chip device
-    let openGPIOChip (chipPath: NativeStr) : int =
+    let openGPIOChip (chipPath: string) : int =
         Unchecked.defaultof<int>
 
     /// Set GPIO line value

@@ -4,7 +4,7 @@
 
 If you've developed in F# with Visual Studio Code, you've used Ionide. You hover over a symbol and see its type. You press Ctrl+Click and jump to a definition. You see red squiggles under errors before you even save the file. This is the modern developer experience, and it's powered by a sophisticated stack of tooling that most developers never think about.
 
-Fidelity will need its own tooling stack. We cannot simply reuse Ionide because Ionide is built on FSharp.Compiler.Service (FCS), which assumes .NET types and .NET semantics. When you hover over a string in Ionide, it shows `string` (which is `System.String`). In Fidelity, that same code would have type `NativeStr`, a UTF-8 encoded, deterministically managed native string. The tooling must understand this difference.
+Fidelity will need its own tooling stack. We cannot simply reuse Ionide because Ionide is built on FSharp.Compiler.Service (FCS), which assumes .NET types and .NET semantics. When you hover over a `string` in Ionide, you see BCL semantics (UTF-16, heap-allocated, garbage collected). In Fidelity, that same `string` has native semantics: UTF-8 encoded, deterministically managed, fat pointer representation. The type *name* stays `string` - users shouldn't need to learn new type names - but the *semantics* are fundamentally different. The tooling must understand this difference.
 
 This document explains what Fidelity tooling would need to provide, why existing tooling doesn't work directly, and how we plan to build a complete development environment for F# Native. Along the way, we explain the underlying concepts for developers who haven't needed to think about language server protocols or compiler services before.
 
@@ -144,9 +144,9 @@ let greeting = "Hello, World!"
 
 In standard F#, `greeting` has type `string`, which is `System.String`. This type is UTF-16 encoded, garbage collected, a reference type (lives on the heap), and immutable (contents can't change, but new strings can be created).
 
-In Fidelity, `greeting` would have type `NativeStr`. This type would be UTF-8 encoded, deterministically managed (no GC), a fat pointer (pointer + length), and would live wherever the memory model specifies (stack, arena, etc.).
+In Fidelity, `greeting` has type `string` with **native semantics**. This type is UTF-8 encoded, deterministically managed (no GC), a fat pointer (pointer + length), and lives wherever the memory model specifies (stack, arena, etc.). The type NAME is still `string` - we don't burden users with learning internal type names.
 
-If you use Ionide with Fidelity code, it will tell you `greeting: string`. That's wrong. It would be `NativeStr`. This incorrect information would confuse developers and undermine the tooling's usefulness.
+If you use Ionide with Fidelity code, it will tell you `greeting: string` with BCL semantics. Fidelity tooling would show `greeting: string` but understand the native semantics - UTF-8 representation, memory region, deterministic lifetime.
 
 ### The Option Type Example
 
@@ -158,9 +158,9 @@ let maybeValue = Some 42
 
 In standard F#, the type is `int option`. It's a reference type, allocated on the heap. `None` is a singleton object. `Some 42` allocates a heap object.
 
-In Fidelity, the type would be `int voption` (value option). It would be a value type that can live on the stack. `ValueNone` would be a struct with a tag bit. `ValueSome 42` would be a struct with no allocation.
+In Fidelity, the type is still written as `int option` with `Some`/`None` - same F# syntax users expect. But it has **native semantics**: a value type (like `voption`) that lives on the stack. `None` is a struct with a tag bit. `Some 42` is a struct with no allocation.
 
-This isn't just a display difference. It affects how you think about the code. In Fidelity, creating a `Some` wouldn't allocate. Returning `ValueNone` wouldn't create a reference. The memory model is fundamentally different.
+This isn't just a display difference. It affects how you think about the code. In Fidelity, creating a `Some` doesn't allocate. Returning `None` doesn't create a reference. The memory model is fundamentally different, but the syntax and type names remain familiar F#.
 
 ### SRTP Resolution
 
@@ -218,7 +218,9 @@ Ionide.ProjInfo doesn't understand `.fidproj`. It expects MSBuild, SDK resolutio
 
 ### The Bottom Line
 
-We would need tooling that understands Fidelity's native type system, shows correct types (`NativeStr`, `voption`, etc.), resolves SRTP against Alloy witnesses, loads `.fidproj` project files, and reports Fidelity-specific diagnostics (FS8xxx codes).
+We would need tooling that understands Fidelity's native type semantics, shows types with correct semantic understanding (`string` as UTF-8 fat pointer, `option` as value type, etc.), resolves SRTP against Alloy witnesses, loads `.fidproj` project files, and reports Fidelity-specific diagnostics (FS8xxx codes).
+
+The type NAMES stay familiar F# (`string`, `option`, `array`). The SEMANTICS are native. The tooling must understand this distinction.
 
 This means building a new language server that uses fsnative (FNCS) instead of FCS.
 
@@ -268,8 +270,8 @@ Here's what we anticipate building:
 │  │  │  ┌──────────────────┐ ┌──────────────────────────────────────┐ │ │   │
 │  │  │  │ Fidelity.ProjInfo│ │ fsnative (FNCS)                      │ │ │   │
 │  │  │  │                  │ │                                      │ │ │   │
-│  │  │  │ Loads .fidproj   │ │ Native type resolution               │ │ │   │
-│  │  │  │ (TOML parsing)   │ │ NativeStr, voption, etc.            │ │ │   │
+│  │  │  │ Loads .fidproj   │ │ Native type semantics                │ │ │   │
+│  │  │  │ (TOML parsing)   │ │ string/option/array as native       │ │ │   │
 │  │  │  │                  │ │                                      │ │ │   │
 │  │  │  │ No MSBuild       │ │ SRTP against Alloy witnesses         │ │ │   │
 │  │  │  │ No NuGet         │ │                                      │ │ │   │
@@ -531,9 +533,9 @@ FsNativeAutoComplete would be the heart of Fidelity tooling. Here's how we antic
 |--------|------|-------|
 | **Compiler backend** | FSharp.Compiler.Service | fsnative (FNCS) |
 | **Project files** | `.fsproj` (MSBuild) | `.fidproj` (TOML) |
-| **Type display** | BCL types (`string`, `option`) | Native types (`NativeStr`, `voption`) |
-| **String literal type** | `System.String` | `NativeStr` |
-| **Option type** | `'T option` (reference) | `'T voption` (value) |
+| **Type display** | Types with BCL semantics | Same type names, native semantics |
+| **String literal type** | `string` (UTF-16, heap) | `string` (UTF-8, fat pointer) |
+| **Option type** | `'T option` (reference, heap) | `'T option` (value, stack) |
 | **SRTP resolution** | .NET method tables | Alloy witness hierarchy |
 | **Diagnostics** | FS0001-FS9999 | FS0001-FS7999 + FS8xxx (native-specific) |
 | **Memory info** | N/A | Regions, access kinds |
@@ -545,13 +547,14 @@ When you hover over a value, FSNAC would format its type for display. This would
 ```fsharp
 module NativeTypeDisplay =
 
+    /// Format type for hover display - uses standard F# type names
     let formatType (typ: NativeType) : string =
         match typ with
         | NativeType.Int32 -> "int"
         | NativeType.Int64 -> "int64"
         | NativeType.Float64 -> "float"
-        | NativeType.NativeStr -> "NativeStr"
-        | NativeType.ValueOption inner -> sprintf "%s voption" (formatType inner)
+        | NativeType.String -> "string"  // Still shows "string" - native semantics are understood
+        | NativeType.Option inner -> sprintf "%s option" (formatType inner)  // Same name, value semantics
         | NativeType.Array (elem, region) ->
             sprintf "%s[] <%s>" (formatType elem) (formatRegion region)
         | NativeType.Ptr (pointee, region, access) ->
@@ -592,8 +595,8 @@ FSNAC could provide additional information about memory layout:
 
 ```
 type Person = {
-    Name: NativeStr  // offset 0, size 16 (fat pointer)
-    Age: int         // offset 16, size 4
+    Name: string  // offset 0, size 16 (UTF-8 fat pointer: ptr + len)
+    Age: int      // offset 16, size 4
 }
 // Total size: 24 bytes (with padding)
 // Alignment: 8 bytes
@@ -749,7 +752,7 @@ Neovim's built-in LSP client handles the protocol; we would just configure it to
 **Validation**:
 - Use VS Code's generic LSP extension to connect to FSNAC
 - Open a Fidelity project
-- Hover over `let x = "hello"` and see `val x: NativeStr`
+- Hover over `let x = "hello"` and see `val x: string` (with native semantics understood by tooling)
 - Ctrl+Click on a function call, jump to its definition
 
 **Estimated effort**: This would be the largest phase because it establishes the foundation.
@@ -856,12 +859,12 @@ To summarize what we expect to reuse versus what we would build:
 
 ## Conclusion
 
-Fidelity tooling would require a new stack because Fidelity has different semantics than .NET F#. We can't show `string` when the type is `NativeStr`. We can't load `.fsproj` files when projects use `.fidproj`.
+Fidelity tooling would require a new stack because Fidelity has different semantics than .NET F#. While type *names* stay the same (`string`, `option`, `array`), the *semantics* are fundamentally different (UTF-8 fat pointers, value-type options, deterministic memory). The tooling must understand these semantics. And we can't load `.fsproj` files when projects use `.fidproj`.
 
 But the problem appears tractable. We would reuse generic infrastructure (LSP protocol, syntax grammar). We would build on FNCS (which already understands native types). We would start .NET-hosted (avoiding the bootstrap problem). And we would simplify where possible (TOML projects, no MSBuild).
 
-The result we envision is a complete development environment for F# Native: type information, navigation, refactoring, diagnostics, all aware of native types, memory regions, and Fidelity's unique capabilities.
+The result we envision is a complete development environment for F# Native: type information, navigation, refactoring, diagnostics, all aware of native semantics, memory regions, and Fidelity's unique capabilities.
 
-When you hover over a string and see `NativeStr`, you would know you're writing native code. When you see a pointer annotated with its memory region and access kind, you would understand the hardware you're targeting. The tooling would make Fidelity's power accessible.
+When you hover over a `string` and the tooling understands it's a UTF-8 fat pointer, you know you're writing native code. When you see a pointer annotated with its memory region and access kind, you understand the hardware you're targeting. The tooling would make Fidelity's power accessible - without burdening users with unfamiliar type names.
 
 The implementation work lies ahead.

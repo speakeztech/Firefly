@@ -333,7 +333,7 @@ Later, when you reference `x`, the symbol table would tell us where to find the 
 
 **Type Registry:**
 
-When you define `type Person = { Name: NativeStr; Age: int }`, the type would be recorded in the registry. This would allow later code to reference `Person`:
+When you define `type Person = { Name: string; Age: int }`, the type would be recorded in the registry. This would allow later code to reference `Person`:
 
 ```fsharp
 type TypeDefinition =
@@ -484,7 +484,7 @@ module ValueDisplay =
             let value = NativePtr.read<float> (NativePtr.ofNativeInt address)
             sprintf "%g" value
 
-        | NativeType.NativeStr ->
+        | NativeType.String ->  // string with native semantics (UTF-8 fat pointer)
             let strPtr = NativePtr.read<nativeint> (NativePtr.ofNativeInt address)
             let len = NativePtr.read<int> (NativePtr.ofNativeInt (strPtr + 8n))
             let chars = readUtf8Bytes strPtr len
@@ -690,10 +690,10 @@ val x: string = "hello"
 
 FSNI:
 > let x = "hello"
-val x: NativeStr = "hello"
+val x: string = "hello"
 ```
 
-In FSI, strings are `System.String`. In FSNI, they would be `NativeStr`, UTF-8 encoded with deterministic memory.
+In FSI, strings are `System.String` (UTF-16, heap-allocated). In FSNI, they would still be displayed as `string`, but with native semantics: UTF-8 encoded, fat pointer representation, deterministic memory.
 
 ### Option Types
 
@@ -792,7 +792,7 @@ fsni> 3.14159 * 2.0
 val it: float = 6.28318
 
 fsni> "Hello"
-val it: NativeStr = "Hello"
+val it: string = "Hello"
 ```
 
 ### Phase 2: Binding Persistence
@@ -1007,11 +1007,11 @@ Here's a direct comparison of FSI and FSNI:
 | Aspect | FSI | FSNI |
 |--------|-----|------|
 | Compilation | .NET JIT (IL → machine code) | LLVM ORC JIT (MLIR → LLVM IR → machine code) |
-| Type system | .NET types (`System.String`, etc.) | Native types (`NativeStr`, etc.) |
+| Type system | .NET types (BCL semantics) | Same type names, native semantics |
 | Memory model | Garbage collected | Arena/Stack with deterministic lifetimes |
 | Startup time | ~1 second | ~100ms (warm), longer cold |
-| String type | `System.String` (UTF-16) | `NativeStr` (UTF-8) |
-| Option types | `option<T>` (reference type) | `voption<T>` (value type) |
+| String type | `string` (UTF-16, heap) | `string` (UTF-8, fat pointer) |
+| Option types | `option<T>` (reference, heap) | `option<T>` (value, stack) |
 | Library access | .NET BCL, NuGet packages | Alloy, Fidelity-compatible libraries |
 | Reflection | Full runtime reflection | None (types erased after compilation) |
 | Script files | `.fsx` | `.fsnx` (planned) |

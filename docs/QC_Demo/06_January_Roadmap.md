@@ -59,7 +59,7 @@ This document provides a comprehensive assessment of the Fidelity ecosystem and 
 | Memory.fs | ✅ Structured | Memory operations defined |
 | Math.fs | ✅ Structured | Mathematical functions |
 | Time.fs | ✅ Structured | DateTime, TimeSpan types |
-| NativeTypes/ | ✅ Structured | NativeInt, NativePtr, NativeString, NativeArray, NativeSpan |
+| Bits.fs, Pointer.fs | ✅ Structured | Bit operations, pointer utilities |
 | Result.fs | ✅ Structured | Result type and combinators |
 | String.fs | ✅ Structured | String operations |
 | Text.fs | ✅ Structured | Text encoding/decoding |

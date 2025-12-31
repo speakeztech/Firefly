@@ -134,7 +134,7 @@ The STM32L5 bare-metal path remains documented in the Phase2_STM32L5 subdirector
 | Component | Capability Validated |
 |-----------|---------------------|
 | **Firefly** | ARM64 cross-compilation, build orchestration |
-| **Alloy** | NativeStr, NativeArray, Platform.Bindings pattern |
+| **Alloy** | String/Array with native semantics, Platform.Bindings pattern |
 | **Alex** | Linux syscall emission, WebKitGTK library bindings, scf.parallel code generation |
 | **BAREWire** | Credential serialization, memory-mapped descriptors |
 | **fsnative** | Quotation attachment, constraint validation nanopasses |
