@@ -1,5 +1,13 @@
 # Architecture Principles
 
+## The "Fidelity" Principle
+
+> **CORE PRINCIPLE**: The entire point of Fidelity is that **the F# compiler controls memory layout - not MLIR, not LLVM**.
+
+Types (memory regions, access kinds, etc.) carry semantic meaning through the ENTIRE compilation pipeline, guiding every decision. They ARE erased - but at the **LAST possible lowering stage**, after Fidelity has made all decisions. **Fidelity dictates; LLVM implements.**
+
+---
+
 ## CRITICAL: Silent Failures Are Architectural Violations
 
 > **A compiler's PRIMARY job is to surface errors. Silent failures are the most severe architectural violations.**
@@ -184,6 +192,8 @@ See `fncs_architecture` memory, `fncs_ecosystem` memory, and:
 - **fsil** patterns become intrinsic: inline-by-default, implicit SRTP, collection protocols
 - **UMX** patterns become intrinsic: non-numeric measures, memory regions, access kinds
 - See `fsil_inline_semantics` and `umx_phantom_types` memories for details
+
+> **Note on UMX**: Memory region types are NOT "phantom types" that vanish early. They carry semantic meaning through the ENTIRE pipeline, guiding code generation. Erasure happens at the LAST possible lowering stage. See the Fidelity principle above.
 
 **Alloy Evolution** (clarified December 2025):
 - As FNCS absorbs primitives and native types, Alloy transforms from "everything bundled" into focused BCL replacement

@@ -6,10 +6,17 @@ Firefly is an ahead-of-time (AOT) compiler for F# targeting native binary output
 **Primary Goal**: Compile F# code to efficient, standalone native binaries that can run without any runtime dependencies (freestanding mode) or with minimal libc dependency (console mode).
 
 ## The "Fidelity" Mission
-The framework is named "Fidelity" because it **preserves memory and type safety** through the entire compilation pipeline to native code:
-- **Preserves type fidelity**: F# types map to precise native representations, never erased
-- **Preserves memory fidelity**: Compiler-verified lifetimes, deterministic allocation (stack/arena)
+
+> **CORE PRINCIPLE**: The entire point of Fidelity is that **the F# compiler controls memory layout - not MLIR, not LLVM**.
+
+The framework is named "Fidelity" because it **preserves type fidelity** through the entire compilation pipeline:
+
+- **Types guide every decision**: Memory regions, access kinds, and other semantic types carry meaning through the ENTIRE pipeline
+- **Fidelity makes ALL memory layout decisions**: MLIR/LLVM never determine layout - they implement what Fidelity dictates
+- **Erasure at last lowering**: Types ARE erased, but at the LAST possible stage - after Fidelity has made all decisions
 - **No runtime**: The generated binary has the same safety properties as the source, enforced at compile time
+
+**Fidelity dictates; LLVM implements.**
 
 ## Tech Stack
 - **Language**: F# (.NET 9.0)
