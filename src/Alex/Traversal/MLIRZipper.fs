@@ -59,10 +59,11 @@ type MLIRFunc = {
     Attributes: string list
 }
 
-/// Global declarations (string literals, extern funcs)
+/// Global declarations (string literals, extern funcs, buffers)
 type MLIRGlobal =
     | StringLiteral of name: string * content: string * length: int
     | ExternFunc of name: string * signature: string
+    | StaticBuffer of name: string * size: int
 
 /// A complete MLIR module
 type MLIRModule = {
@@ -269,6 +270,18 @@ module MLIRZipper =
             else extGlobal :: zipper.Globals
         { zipper with State = newState; Globals = newGlobals }
 
+    /// Observe a static buffer requirement (coeffect - for ReadLine etc.)
+    let observeStaticBuffer (name: string) (size: int) (zipper: MLIRZipper) : MLIRZipper =
+        let bufGlobal = StaticBuffer (name, size)
+        let newGlobals =
+            if List.exists (fun g ->
+                match g with
+                | StaticBuffer (n, _) -> n = name
+                | _ -> false) zipper.Globals
+            then zipper.Globals
+            else bufGlobal :: zipper.Globals
+        { zipper with Globals = newGlobals }
+
     // ─────────────────────────────────────────────────────────────────
     // Navigation - Enter/Exit structures
     // ─────────────────────────────────────────────────────────────────
@@ -473,7 +486,7 @@ module MLIRZipper =
 
         sb.AppendLine("module {") |> ignore
 
-        // Emit globals (string literals first, then externs)
+        // Emit globals (string literals first, then externs, then buffers)
         for glb in List.rev zipper.Globals do
             match glb with
             | StringLiteral (name, content, len) ->
@@ -483,6 +496,10 @@ module MLIRZipper =
             | ExternFunc (name, signature) ->
                 sb.AppendLine(sprintf "  llvm.func @%s%s attributes {sym_visibility = \"private\"}"
                     name signature) |> ignore
+            | StaticBuffer (name, size) ->
+                // Zero-initialized buffer - no initializer needed
+                sb.AppendLine(sprintf "  llvm.mlir.global internal @%s() : !llvm.array<%d x i8>"
+                    name size) |> ignore
 
         // Emit current operations (if any)
         for op in List.rev zipper.CurrentOps do

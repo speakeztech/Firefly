@@ -114,6 +114,12 @@ let isBinding (node: FNCSNode) : bool =
     | SemanticKind.Binding _ -> true
     | _ -> false
 
+/// Get binding info (name, isMutable, isRecursive) if present
+let bindingInfo (node: FNCSNode) : (string * bool * bool) option =
+    match node.Kind with
+    | SemanticKind.Binding (name, isMutable, isRec) -> Some (name, isMutable, isRec)
+    | _ -> None
+
 /// Check if a node is a literal
 let isLiteral (node: FNCSNode) : bool =
     match node.Kind with
@@ -132,6 +138,24 @@ let isLambda (node: FNCSNode) : bool =
     | SemanticKind.Lambda _ -> true
     | _ -> false
 
+/// Check if a node is a variable reference
+let isVarRef (node: FNCSNode) : bool =
+    match node.Kind with
+    | SemanticKind.VarRef _ -> true
+    | _ -> false
+
+/// Get variable reference name if present
+let varRefName (node: FNCSNode) : string option =
+    match node.Kind with
+    | SemanticKind.VarRef (name, _) -> Some name
+    | _ -> None
+
+/// Get variable reference definition node ID if present
+let varRefDefinition (node: FNCSNode) : FNCSNodeId option =
+    match node.Kind with
+    | SemanticKind.VarRef (_, defId) -> defId
+    | _ -> None
+
 /// Check if type is a function type
 let isFunType (ty: FNCSType) : bool =
     isFunctionType ty
@@ -139,3 +163,64 @@ let isFunType (ty: FNCSType) : bool =
 /// Check if type is a type variable
 let isTypeVariable (ty: FNCSType) : bool =
     isTypeVar ty
+
+/// Check if a node is an interpolated string
+let isInterpolatedString (node: FNCSNode) : bool =
+    match node.Kind with
+    | SemanticKind.InterpolatedString _ -> true
+    | _ -> false
+
+/// Get interpolated string parts if present
+let interpolatedStringParts (node: FNCSNode) : InterpolatedPart list option =
+    match node.Kind with
+    | SemanticKind.InterpolatedString parts -> Some parts
+    | _ -> None
+
+/// Re-export InterpolatedPart type for use in Firefly
+type FNCSInterpolatedPart = InterpolatedPart
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Parsing API - Exposed for ProjectLoader
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Parse options for source files
+type FNCSParseOptions = ParseOptions
+
+/// Parse result
+type FNCSParseResult = ParseResult
+
+/// Combined parse and check result
+type FNCSParseAndCheckResult = ParseAndCheckResult
+
+/// Default parse options (from NativeService module)
+let defaultFNCSParseOptions : FNCSParseOptions = FSharp.Native.Compiler.NativeService.defaultParseOptions
+
+/// Parse a source string with default options
+let parseSource (source: string) (fileName: string) : FNCSParseResult =
+    parseStringWithDefaults source fileName
+
+/// Parse a source string with custom options
+let parseSourceWithOptions (source: string) (fileName: string) (options: FNCSParseOptions) : FNCSParseResult =
+    parseString source fileName options
+
+/// Parse and type-check a source string in one step
+let parseAndCheckSource (source: string) (fileName: string) : FNCSParseAndCheckResult =
+    parseAndCheck source fileName
+
+/// Check if parse result succeeded
+let parseSucceeded (result: FNCSParseResult) : bool =
+    match result with
+    | ParseSuccess _ -> true
+    | ParseError _ -> false
+
+/// Get parsed input from successful parse
+let parsedInput (result: FNCSParseResult) : FSharp.Native.Compiler.Syntax.ParsedInput option =
+    match result with
+    | ParseSuccess input -> Some input
+    | ParseError _ -> None
+
+/// Get parse errors
+let parseErrors (result: FNCSParseResult) : string list =
+    match result with
+    | ParseSuccess _ -> []
+    | ParseError errs -> errs
