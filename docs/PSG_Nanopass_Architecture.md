@@ -1,10 +1,15 @@
 # PSG Nanopass Architecture v2: True Nanopass Pipeline
 
+> **ARCHITECTURE UPDATE (January 2026)**: PSG construction has been moved to FNCS (F# Native Compiler Services).
+> FNCS now builds the PSG with native types attached and SRTP resolved during type checking.
+> Firefly consumes the PSG as "correct by construction" and focuses on lowering passes and code generation.
+> This document describes the nanopass principles that FNCS uses for PSG construction.
+
 ## Executive Summary
 
-This document defines a fundamental architectural shift in Firefly's PSG (Program Semantic Graph) construction. Drawing directly from the nanopass framework principles (Sarkar, Waddell, Dybvig, Keep - Indiana University), we recognize that **PSG construction itself must be a true nanopass pipeline**, not just downstream enrichment.
+This document defines the nanopass principles for PSG (Program Semantic Graph) construction. Drawing directly from the nanopass framework principles (Sarkar, Waddell, Dybvig, Keep - Indiana University), PSG construction is a **true nanopass pipeline**.
 
-**The Critical Insight**: The current architecture has a blind spot at the foundation. We were applying nanopass principles to enrichment (def-use edges, operation classification) while the initial PSG construction remained a monolithic operation. This document corrects that oversight.
+**Key Change**: PSG construction now happens in FNCS, not Firefly. Firefly receives the completed PSG and applies lowering nanopasses before code generation.
 
 ## Reference
 

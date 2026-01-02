@@ -301,12 +301,12 @@ With FNCS, the Fidelity stack has clean layer separation:
 
 | Layer | Responsibility |
 |-------|---------------|
-| **FNCS** | Type semantics, literal typing, SRTP resolution, null-free semantics |
+| **FNCS** | Type universe, literal typing, type inference, SRTP resolution, **PSG construction**, editor services |
 | **Alloy** | Library implementations using standard F# types (Console, String, etc.) |
-| **Firefly/PSG** | Semantic graph construction from FNCS output |
-| **Firefly/Baker** | Type overlay, SRTP extraction (now trivial - FNCS already resolved) |
-| **Firefly/Alex** | Platform-aware MLIR generation |
+| **Firefly/Alex** | **Consumes PSG from FNCS**, platform-aware MLIR generation |
 | **Platform Bindings** | Syscall implementations per platform |
+
+**Key Architecture Change**: FNCS now builds the PSG (Program Semantic Graph). Firefly consumes the PSG as "correct by construction" and focuses purely on code generation.
 
 Each layer has a single responsibility. No layer needs to "work around" another layer's assumptions.
 

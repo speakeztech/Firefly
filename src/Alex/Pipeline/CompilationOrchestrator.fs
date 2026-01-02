@@ -1,8 +1,8 @@
 /// CompilationOrchestrator - THE single orchestrator for Firefly compilation
 ///
-/// FNCS-based pipeline (December 2025 rewrite):
-///   1. Load project (.fidproj)
-///   2. Parse and type-check with FNCS
+/// FNCS-based pipeline (January 2026 - unified project loading):
+///   1. Load project (.fidproj) via FNCS ProjectChecker
+///   2. Parse and type-check with FNCS (done by ProjectChecker)
 ///   3. Generate MLIR via witness-based emission
 ///   4. Lower MLIR → LLVM (Toolchain)
 ///   5. Link LLVM → Native (Toolchain)
@@ -15,10 +15,14 @@ open Core.Toolchain
 open Alex.Traversal.MLIRZipper
 open Alex.Bindings.BindingTypes
 open Core.FNCS.Integration
-open Core.FNCS.ProjectLoader
-open Alex.Generation.FNCSEmitter
-// Import only the specific type we need, avoid shadowing Result.Error
-type FNCSDiagnosticSeverity = FSharp.Native.Compiler.Checking.Native.SemanticGraph.DiagnosticSeverity
+open Alex.Traversal.FNCSTransfer
+
+// FNCS Project module - unified project loading
+open FSharp.Native.Compiler.Project
+
+// Import specific types to avoid shadowing Result.Error
+type FNCSDiagnosticSeverity = FSharp.Native.Compiler.Checking.Native.SemanticGraph.NativeDiagnosticSeverity
+module FNCSSemanticGraph = FSharp.Native.Compiler.Checking.Native.SemanticGraph
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -45,108 +49,19 @@ type MLIRGenerationResult = {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Minimal TOML Parser for .fidproj
+// Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Parse a minimal .fidproj file
-type FidprojConfig = {
-    Name: string
-    Sources: string list
-    AlloyPath: string option
-    OutputKind: Core.Types.MLIRTypes.OutputKind
-    OutputName: string
-    BuildDir: string
-}
-
-/// Parse .fidproj file (minimal TOML parser)
-let parseFidproj (path: string) : Result<FidprojConfig, string> =
-    try
-        let lines = File.ReadAllLines(path)
-        let _projectDir = Path.GetDirectoryName(path)
-
-        let mutable name = Path.GetFileNameWithoutExtension(path)
-        let mutable sources = []
-        let mutable alloyPath: string option = None
-        let mutable outputKind = Core.Types.MLIRTypes.OutputKind.Freestanding
-        let mutable outputName = name
-        let mutable buildDir = "target"
-        let mutable inSourcesArray = false
-        let mutable sourcesAccum = ""
-
-        for line in lines do
-            let line = line.Trim()
-            // Skip comments and empty lines
-            if line.StartsWith("#") || line = "" then
-                ()
-            // Handle multi-line arrays for sources
-            elif inSourcesArray then
-                sourcesAccum <- sourcesAccum + " " + line
-                if line.Contains("]") then
-                    inSourcesArray <- false
-                    // Parse accumulated sources
-                    let sourceStr = sourcesAccum.Trim('[', ']', ' ')
-                    sources <- sourceStr.Split(',')
-                              |> Array.map (fun s -> s.Trim().Trim('"'))
-                              |> Array.filter (fun s -> s <> "")
-                              |> Array.toList
-            elif line.StartsWith("name") then
-                let parts = line.Split('=')
-                if parts.Length > 1 then
-                    name <- parts.[1].Trim().Trim('"')
-            elif line.StartsWith("output_kind") then
-                let parts = line.Split('=')
-                if parts.Length > 1 then
-                    outputKind <- Core.Types.MLIRTypes.OutputKind.parse (parts.[1].Trim().Trim('"'))
-            elif line.StartsWith("output") && not (line.StartsWith("output_kind")) then
-                let parts = line.Split('=')
-                if parts.Length > 1 then
-                    outputName <- parts.[1].Trim().Trim('"')
-            elif line.StartsWith("sources") then
-                let parts = line.Split('=')
-                if parts.Length > 1 then
-                    let sourceStr = parts.[1].Trim()
-                    if sourceStr.Contains("[") && sourceStr.Contains("]") then
-                        // Single-line array
-                        let sourceInner = sourceStr.Trim('[', ']', ' ')
-                        sources <- sourceInner.Split(',')
-                                  |> Array.map (fun s -> s.Trim().Trim('"'))
-                                  |> Array.filter (fun s -> s <> "")
-                                  |> Array.toList
-                    elif sourceStr.Contains("[") then
-                        // Start of multi-line array
-                        inSourcesArray <- true
-                        sourcesAccum <- sourceStr
-            elif line.StartsWith("alloy") then
-                let parts = line.Split('=')
-                if parts.Length > 1 then
-                    let pathStr = parts.[1].Trim()
-                    if pathStr.Contains("path") then
-                        let innerParts = pathStr.Split('"')
-                        if innerParts.Length > 1 then
-                            alloyPath <- Some innerParts.[1]
-            elif line.StartsWith("build_dir") then
-                let parts = line.Split('=')
-                if parts.Length > 1 then
-                    buildDir <- parts.[1].Trim().Trim('"')
-
-        Ok {
-            Name = name
-            Sources = sources
-            AlloyPath = alloyPath
-            OutputKind = outputKind
-            OutputName = outputName
-            BuildDir = buildDir
-        }
-    with ex ->
-        Error (sprintf "Failed to parse fidproj: %s" ex.Message)
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Placeholder MLIR Generation
-// ═══════════════════════════════════════════════════════════════════════════
+/// Convert FNCS OutputKind to Firefly OutputKind
+let private toFireflyOutputKind (kind: OutputKind) : Core.Types.MLIRTypes.OutputKind =
+    match kind with
+    | OutputKind.Freestanding -> Core.Types.MLIRTypes.OutputKind.Freestanding
+    | OutputKind.Console -> Core.Types.MLIRTypes.OutputKind.Console
+    | OutputKind.Library -> Core.Types.MLIRTypes.OutputKind.Console // Map to console for now
+    | OutputKind.Embedded -> Core.Types.MLIRTypes.OutputKind.Freestanding // Map to freestanding
 
 /// Determine target platform from triple
 let parsePlatform (triple: string) : TargetPlatform =
-    // Use parseTriple for proper parsing, fall back to defaults
     match TargetPlatform.parseTriple triple with
     | Some platform -> platform
     | None ->
@@ -164,43 +79,24 @@ let parsePlatform (triple: string) : TargetPlatform =
         elif triple.Contains("windows") then
             TargetPlatform.windows_x86_64
         else
-            TargetPlatform.linux_x86_64 // Default to Linux
+            TargetPlatform.linux_x86_64
 
-/// Generate MLIR from a project using FNCS SemanticGraph
-let generateMLIRFromFNCS (config: FidprojConfig) (projectDir: string) (targetTriple: string) : MLIRGenerationResult =
-    // Resolve source paths
-    let sourcePaths =
-        config.Sources
-        |> List.map (fun src ->
-            if Path.IsPathRooted(src) then src
-            else Path.Combine(projectDir, src))
+// ═══════════════════════════════════════════════════════════════════════════
+// MLIR Generation via FNCS ProjectChecker
+// ═══════════════════════════════════════════════════════════════════════════
 
-    printfn "[FNCS] Loading %d source file(s)..." sourcePaths.Length
-
-    // Create project config for FNCS
-    let projectConfig : ProjectConfig = {
-        Name = config.Name
-        Sources = sourcePaths
-        AlloyPath = config.AlloyPath
-        OutputKind = match config.OutputKind with
-                     | Core.Types.MLIRTypes.OutputKind.Freestanding -> "freestanding"
-                     | Core.Types.MLIRTypes.OutputKind.Console -> "console"
-        TargetTriple = Some targetTriple
-    }
-
-    // Parse and check with FNCS
-    let projectResult = loadAndCheck projectConfig
-
-    // Check for errors
-    let errors =
-        projectResult.CheckResult.Diagnostics
-        |> List.filter (fun d -> d.Severity = FNCSDiagnosticSeverity.Error)
-        |> List.map (fun d -> d.Message)
-
-    if not (List.isEmpty errors) then
-        printfn "[FNCS] Type checking found %d error(s)" errors.Length
+/// Generate MLIR from a project using FNCS ProjectChecker
+let generateMLIRFromFNCS (projectResult: ProjectCheckResult) (targetTriple: string) : MLIRGenerationResult =
+    // Check for parse errors first
+    if not (Map.isEmpty projectResult.ParseErrors) then
+        let errors =
+            projectResult.ParseErrors
+            |> Map.toList
+            |> List.collect (fun (file, errs) ->
+                errs |> List.map (fun e -> sprintf "%s: %s" file e))
+        printfn "[FNCS] Parse errors found:"
         for err in errors do
-            printfn "[FNCS] ERROR: %s" err
+            printfn "[FNCS]   %s" err
         {
             Content = ""
             HasErrors = true
@@ -208,67 +104,80 @@ let generateMLIRFromFNCS (config: FidprojConfig) (projectDir: string) (targetTri
             CollectedFunctions = []
         }
     else
-        let graph = projectResult.CheckResult.Graph
-        let nodeCount = Map.count graph.Nodes
-        let entryCount = List.length graph.EntryPoints
+        // Check for type checking errors
+        let checkErrors =
+            projectResult.CheckResult.Diagnostics
+            |> List.filter (fun d -> d.Severity = FNCSDiagnosticSeverity.Error)
+            |> List.map (fun d -> d.Message)
 
-        printfn "[FNCS] SemanticGraph: %d nodes, %d entry points" nodeCount entryCount
+        if not (List.isEmpty checkErrors) then
+            printfn "[FNCS] Type checking found %d error(s)" checkErrors.Length
+            for err in checkErrors do
+                printfn "[FNCS] ERROR: %s" err
+            {
+                Content = ""
+                HasErrors = true
+                Errors = checkErrors
+                CollectedFunctions = []
+            }
+        else
+            let graph = projectResult.CheckResult.Graph
+            let nodeCount = Map.count graph.Nodes
+            let entryCount = List.length graph.EntryPoints
 
-        // Debug: Print node details
-        if nodeCount <= 30 then
-            printfn "[FNCS] Node details:"
-            for kvp in graph.Nodes do
-                let id = nodeIdToInt kvp.Key
-                let node = kvp.Value
-                let kindStr =
-                    match node.Kind with
-                    | FSharp.Native.Compiler.Checking.Native.SemanticGraph.SemanticKind.ModuleDef(name, children) ->
-                        sprintf "ModuleDef(%s, children=%d)" name (List.length children)
-                    | FSharp.Native.Compiler.Checking.Native.SemanticGraph.SemanticKind.Binding(name, isMut, isRec) ->
-                        sprintf "Binding(%s, mutable=%b, rec=%b)" name isMut isRec
-                    | FSharp.Native.Compiler.Checking.Native.SemanticGraph.SemanticKind.Literal v ->
-                        sprintf "Literal(%A)" v
-                    | FSharp.Native.Compiler.Checking.Native.SemanticGraph.SemanticKind.Application(func, args) ->
-                        sprintf "Application(func=%d, args=%d)" (nodeIdToInt func) (List.length args)
-                    | FSharp.Native.Compiler.Checking.Native.SemanticGraph.SemanticKind.VarRef(name, _) ->
-                        sprintf "VarRef(%s)" name
-                    | FSharp.Native.Compiler.Checking.Native.SemanticGraph.SemanticKind.Lambda(params', _) ->
-                        sprintf "Lambda(params=%d)" (List.length params')
-                    | FSharp.Native.Compiler.Checking.Native.SemanticGraph.SemanticKind.Sequential nodes ->
-                        sprintf "Sequential(count=%d)" (List.length nodes)
-                    | k -> sprintf "%A" k
-                let childIds = node.Children |> List.map nodeIdToInt
-                printfn "  [%d] %s (children: %A)" id kindStr childIds
+            printfn "[FNCS] SemanticGraph: %d nodes, %d entry points" nodeCount entryCount
 
-        // Determine target platform
-        let platform = parsePlatform targetTriple
+            // Debug: Print node details for small graphs
+            if nodeCount <= 30 then
+                printfn "[FNCS] Node details:"
+                for kvp in graph.Nodes do
+                    let id = nodeIdToInt kvp.Key
+                    let node = kvp.Value
+                    let kindStr =
+                        match node.Kind with
+                        | FNCSSemanticGraph.SemanticKind.ModuleDef(name, children) ->
+                            sprintf "ModuleDef(%s, children=%d)" name (List.length children)
+                        | FNCSSemanticGraph.SemanticKind.Binding(name, isMut, isRec) ->
+                            sprintf "Binding(%s, mutable=%b, rec=%b)" name isMut isRec
+                        | FNCSSemanticGraph.SemanticKind.Literal v ->
+                            sprintf "Literal(%A)" v
+                        | FNCSSemanticGraph.SemanticKind.Application(func, args) ->
+                            sprintf "Application(func=%d, args=%d)" (nodeIdToInt func) (List.length args)
+                        | FNCSSemanticGraph.SemanticKind.VarRef(name, _) ->
+                            sprintf "VarRef(%s)" name
+                        | FNCSSemanticGraph.SemanticKind.Lambda(params', _) ->
+                            sprintf "Lambda(params=%d)" (List.length params')
+                        | FNCSSemanticGraph.SemanticKind.Sequential nodes ->
+                            sprintf "Sequential(count=%d)" (List.length nodes)
+                        | k -> sprintf "%A" k
+                    let childIds = node.Children |> List.map nodeIdToInt
+                    printfn "  [%d] %s (children: %A)" id kindStr childIds
 
-        // Generate MLIR using FNCSEmitter
-        let emissionResult = generateMLIRWithMain graph platform "main"
+            // Generate MLIR via witness-based transfer (codata architecture)
+            let mlirContent, transferErrors = transferGraphWithDiagnostics graph
 
-        printfn "[FNCS] Generated MLIR with %d function(s)" emissionResult.EmittedFunctions.Length
+            printfn "[FNCS] Transfer complete"
 
-        if not (List.isEmpty emissionResult.Errors) then
-            printfn "[FNCS] Emission warnings:"
-            for err in emissionResult.Errors do
-                printfn "[FNCS]   %s" err
+            if not (List.isEmpty transferErrors) then
+                printfn "[FNCS] Transfer warnings:"
+                for err in transferErrors do
+                    printfn "[FNCS]   %s" err
 
-        {
-            Content = emissionResult.MLIRContent
-            HasErrors = false  // Emission warnings are not fatal for now
-            Errors = emissionResult.Errors
-            CollectedFunctions = emissionResult.EmittedFunctions
-        }
+            {
+                Content = mlirContent
+                HasErrors = not (List.isEmpty transferErrors)
+                Errors = transferErrors
+                CollectedFunctions = []
+            }
 
 /// Generate MLIR from a project - fallback to placeholder if FNCS fails
-let generateMLIR (config: FidprojConfig) (projectDir: string) (targetTriple: string) : MLIRGenerationResult =
+let generateMLIR (projectResult: ProjectCheckResult) (targetTriple: string) : MLIRGenerationResult =
     try
-        generateMLIRFromFNCS config projectDir targetTriple
+        generateMLIRFromFNCS projectResult targetTriple
     with ex ->
         printfn "[FNCS] Exception during FNCS processing: %s" ex.Message
         printfn "[FNCS] Falling back to placeholder..."
 
-        // Fallback to minimal placeholder
         let mainContent = """module {
   // Fallback - FNCS processing failed
   llvm.func @main() -> i32 attributes {sym_visibility = "public"} {
@@ -303,31 +212,37 @@ let compileProject (options: CompilationOptions) : int =
     printfn "=============================="
     printfn ""
 
-    // Step 1: Load project
-    let configResult = parseFidproj options.ProjectPath
+    // Step 1: Load and check project via FNCS ProjectChecker
+    let projectResult =
+        Core.Timing.timePhase "FNCS" "Project Loading & Type Checking" (fun () ->
+            ProjectChecker.checkProject options.ProjectPath)
 
-    match configResult with
+    match projectResult with
     | Error msg ->
         printfn "Error: %s" msg
         1
 
-    | Ok config ->
-        let projectDir = Path.GetDirectoryName(options.ProjectPath)
+    | Ok result ->
+        let config = result.Options
+        let projectDir = config.ProjectDirectory
 
         let targetTriple =
             options.TargetTriple
             |> Option.defaultValue (getDefaultTarget())
 
-        // Build directory
-        let buildDir = Path.Combine(projectDir, config.BuildDir)
+        // Build directory (default to "target" if not specified)
+        let buildDir = Path.Combine(projectDir, "target")
         Directory.CreateDirectory(buildDir) |> ignore
 
+        let outputName = config.OutputName |> Option.defaultValue config.Name
         let outputPath =
             options.OutputPath
-            |> Option.defaultValue (Path.Combine(buildDir, config.OutputName))
+            |> Option.defaultValue (Path.Combine(buildDir, outputName))
+
+        let outputKind = toFireflyOutputKind config.OutputKind
 
         printfn "Project: %s" config.Name
-        printfn "Sources: %d files" config.Sources.Length
+        printfn "Sources: %d files" (List.length result.SourceFiles)
         printfn "Target:  %s" targetTriple
         printfn "Output:  %s" outputPath
         printfn ""
@@ -344,7 +259,7 @@ let compileProject (options: CompilationOptions) : int =
         // Step 2: Generate MLIR via FNCS
         let mlirResult =
             Core.Timing.timePhase "MLIR" "MLIR Generation" (fun () ->
-                generateMLIR config projectDir targetTriple)
+                generateMLIR result targetTriple)
 
         printfn "[MLIR] Collected %d functions:" mlirResult.CollectedFunctions.Length
         for funcInfo in mlirResult.CollectedFunctions do
@@ -402,7 +317,7 @@ let compileProject (options: CompilationOptions) : int =
                         // Step 4: Link LLVM → Native (via Toolchain)
                         let linkResult =
                             Core.Timing.timePhase "LINK" "Compiling to native binary" (fun () ->
-                                compileLLVMToNative llPath outputPath targetTriple config.OutputKind)
+                                compileLLVMToNative llPath outputPath targetTriple outputKind)
 
                         match linkResult with
                         | Error msg ->
@@ -446,7 +361,7 @@ let compileProject (options: CompilationOptions) : int =
                 | Ok () ->
                     let linkResult =
                         Core.Timing.timePhase "LINK" "Compiling to native binary" (fun () ->
-                            compileLLVMToNative llPath outputPath targetTriple config.OutputKind)
+                            compileLLVMToNative llPath outputPath targetTriple outputKind)
 
                     try Directory.Delete(tempDir, true) with _ -> ()
 

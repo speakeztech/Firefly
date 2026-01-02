@@ -53,7 +53,7 @@ let rec nativeTypeToMLIR (ty: NativeType) : string =
         "i32"
 
     // Anonymous record types
-    | NativeType.TAnon fields ->
+    | NativeType.TAnon(fields, _isStruct) ->
         let fieldTypes =
             fields
             |> List.map (fun (_, ty) -> nativeTypeToMLIR ty)

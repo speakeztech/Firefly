@@ -8,6 +8,7 @@ open FSharp.Native.Compiler.Syntax
 open FSharp.Native.Compiler.NativeService
 open FSharp.Native.Compiler.Checking.Native.SemanticGraph
 open FSharp.Native.Compiler.Checking.Native.NativeTypes
+open FSharp.Native.Compiler.Project
 
 /// Project configuration loaded from .fidproj
 type ProjectConfig = {
@@ -100,41 +101,77 @@ let parseAndCheckFile (filePath: string) : ParseAndCheckResult =
 let checkFile (parsed: ParsedInput) : CheckResult =
     checkParsedInput parsed
 
-/// Load project sources and check them using FNCS parseAndCheck
+/// Collect all F# source files from a directory (fallback only - prefer fidproj ordering)
+let collectSourceFilesFallback (dirPath: string) : string list =
+    if Directory.Exists dirPath then
+        Directory.GetFiles(dirPath, "*.fs", SearchOption.AllDirectories)
+        |> Array.filter (fun f ->
+            let name = Path.GetFileName(f)
+            // Skip signature files and hidden files
+            not (name.EndsWith(".fsi")) &&
+            not (name.StartsWith(".")))
+        |> Array.toList
+        |> List.sort
+    else
+        []
+
+/// Load project sources and check them using FNCS with shared type environment.
+/// This follows the FCS pattern: parse all files first, then check together.
+/// Environment is threaded through files so earlier files' types/bindings are
+/// visible to later files.
 let loadAndCheck (config: ProjectConfig) : ProjectResult =
     printfn "[FNCS] Loading project: %s" config.Name
     printfn "[FNCS] Sources: %A" config.Sources
 
-    // Parse and check all source files
-    let results =
-        config.Sources
-        |> List.map parseAndCheckFile
+    // Collect Alloy sources using FNCS SourceResolver - respects Alloy.fidproj ordering
+    // This is the PRINCIPLED approach: dependencies declare their own source ordering
+    let alloySources =
+        match config.AlloyPath with
+        | Some path ->
+            // Use SourceResolver to get sources in the order defined by Alloy.fidproj
+            let sources = SourceResolver.getAlloySources path
+            if List.isEmpty sources then
+                // Fallback if no fidproj found (shouldn't happen with proper setup)
+                printfn "[FNCS] Warning: No Alloy.fidproj found, using directory scan as fallback"
+                collectSourceFilesFallback path
+            else
+                printfn "[FNCS] Loaded %d Alloy sources from: %s (ordered by Alloy.fidproj)" (List.length sources) path
+                sources
+        | None ->
+            []
 
-    // Collect successful results and errors
-    let successes, failures =
-        results
-        |> List.fold (fun (succ, fail) result ->
-            match result with
-            | Success r -> (r :: succ, fail)
-            | ParseFailure errs -> (succ, errs @ fail)
-            | CheckFailure r ->
-                let errs = r.Diagnostics |> List.map (fun d -> d.Message)
-                (succ, errs @ fail)
+    // All sources: Alloy first (for type definitions), then project sources
+    let allSources = alloySources @ config.Sources
+    printfn "[FNCS] Total sources to check: %d" (List.length allSources)
+
+    // STEP 1: Parse all files first (collect ParsedInputs)
+    let parsedInputs, parseErrors =
+        allSources
+        |> List.fold (fun (parsed, errors) filePath ->
+            match parseSourceFile filePath with
+            | Some input -> (input :: parsed, errors)
+            | None -> (parsed, sprintf "Failed to parse: %s" filePath :: errors)
         ) ([], [])
 
-    if List.isEmpty successes then
-        let errorMsgs = if List.isEmpty failures then ["No files were parsed"] else failures
-        printfn "[FNCS] Warning: No files were checked successfully"
-        for err in errorMsgs do
-            printfn "[FNCS] Error: %s" err
+    // Parsed inputs need to be in order (Alloy first, then project)
+    let parsedInputs = List.rev parsedInputs
+    let parseErrors = List.rev parseErrors
+
+    if not (List.isEmpty parseErrors) then
+        printfn "[FNCS] Parse errors:"
+        for err in parseErrors do
+            printfn "[FNCS]   %s" err
+
+    if List.isEmpty parsedInputs then
+        printfn "[FNCS] No files were parsed successfully"
         {
             Config = config
             CheckResult = {
                 Graph = SemanticGraph.empty
                 Diagnostics =
-                    errorMsgs
+                    parseErrors
                     |> List.map (fun msg -> {
-                        Severity = DiagnosticSeverity.Error
+                        Severity = NativeDiagnosticSeverity.Error
                         Code = "FF0001"
                         Message = msg
                         Range = dummyRange
@@ -143,15 +180,30 @@ let loadAndCheck (config: ProjectConfig) : ProjectResult =
             }
         }
     else
-        // For now, use the first successful result (multi-file merging TODO)
-        let firstResult = List.head successes
-        printfn "[FNCS] Successfully checked %d file(s)" (List.length successes)
-        printfn "[FNCS] Graph has %d nodes, %d entry points"
-            (Map.count firstResult.Graph.Nodes)
-            (List.length firstResult.Graph.EntryPoints)
+        printfn "[FNCS] Parsed %d file(s), checking with shared environment..." (List.length parsedInputs)
+
+        // STEP 2: Check all files together with shared type environment
+        // This is the FCS pattern - checkParsedInputs threads environment through files
+        let checkResult = Core.FNCS.Integration.checkMultipleInputs parsedInputs
+
+        printfn "[FNCS] Check complete: %d nodes, %d entry points"
+            (Map.count checkResult.Graph.Nodes)
+            (List.length checkResult.Graph.EntryPoints)
+
+        let errorCount =
+            checkResult.Diagnostics
+            |> List.filter (fun d -> d.Severity = NativeDiagnosticSeverity.Error)
+            |> List.length
+
+        if errorCount > 0 then
+            printfn "[FNCS] Type checking found %d error(s)" errorCount
+            for diag in checkResult.Diagnostics do
+                if diag.Severity = NativeDiagnosticSeverity.Error then
+                    printfn "[FNCS]   ERROR: %s" diag.Message
+
         {
             Config = config
-            CheckResult = firstResult
+            CheckResult = checkResult
         }
 
 /// Get entry points from the semantic graph
@@ -167,8 +219,8 @@ let summarize (result: ProjectResult) : string =
     let graph = result.CheckResult.Graph
     let nodeCount = Map.count graph.Nodes
     let entryCount = List.length graph.EntryPoints
-    let errorCount = result.CheckResult.Diagnostics |> List.filter (fun d -> d.Severity = DiagnosticSeverity.Error) |> List.length
-    let warnCount = result.CheckResult.Diagnostics |> List.filter (fun d -> d.Severity = DiagnosticSeverity.Warning) |> List.length
+    let errorCount = result.CheckResult.Diagnostics |> List.filter (fun d -> d.Severity = NativeDiagnosticSeverity.Error) |> List.length
+    let warnCount = result.CheckResult.Diagnostics |> List.filter (fun d -> d.Severity = NativeDiagnosticSeverity.Warning) |> List.length
 
     sprintf "[FNCS] %s: %d nodes, %d entry points, %d errors, %d warnings"
         result.Config.Name nodeCount entryCount errorCount warnCount

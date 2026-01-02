@@ -8,6 +8,8 @@
 
 ## The Pipeline Model
 
+**ARCHITECTURE UPDATE (January 2026)**: FNCS now builds the PSG. Firefly consumes it.
+
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  Alloy (Platform-Agnostic Library)                      │
@@ -17,46 +19,50 @@
 │  - ZERO platform knowledge, ZERO BCL dependencies       │
 └─────────────────────────────────────────────────────────┘
                           │
-                          │ FCS parses & type-checks
+                          │ Compiled by FNCS
                           ▼
 ┌─────────────────────────────────────────────────────────┐
-│  PSG Construction: Phases 1-3                           │
-│  - Phase 1: Structural (full library)                   │
-│  - Phase 2: Symbol correlation (full library)           │
-│  - Phase 3: Reachability (NARROWS to application scope) │
+│  FNCS (F# Native Compiler Services)                     │
+│  - Parses F# source (SynExpr, SynModule)                │
+│  - Type checking with native types (no BCL)             │
+│  - SRTP resolution during type checking                 │
+│  - PSG CONSTRUCTION (moved from Firefly)                │
+│  - Editor services preserved for design-time tooling    │
+│                                                         │
+│  OUTPUT: PSG with native types, SRTP resolved           │
+│          Full symbol info for navigation                │
 └─────────────────────────────────────────────────────────┘
                           │
-                          │ Narrowed compute graph
+                          │ PSG (correct by construction)
                           ▼
 ┌─────────────────────────────────────────────────────────┐
-│  Baker (Type Resolution Layer) [Phase 4]                │
-│  - Operates on NARROWED graph (post-reachability)       │
-│  - Correlates typed tree with PSG structure             │
-│  - Extracts SRTP resolutions (TraitCall → member)       │
-│  - Maps static member bodies for inlining               │
-│  - Overlays resolved types onto PSG nodes               │
+│  FIREFLY (Consumes PSG from FNCS)                       │
+├─────────────────────────────────────────────────────────┤
+│  Lowering Nanopasses (if needed)                        │
+│  - FlattenApplications, ReducePipeOperators             │
+│  - DetectPlatformBindings                               │
 └─────────────────────────────────────────────────────────┘
                           │
-                          │ Enriched PSG (narrowed scope)
                           ▼
 ┌─────────────────────────────────────────────────────────┐
 │  Alex (Compiler Targeting Layer)                        │
-│  - Consumes NARROWED, ENRICHED PSG                      │
-│  - Same scope as Baker - zipper coherence               │
-│  - Dispatches externs by (entry_point, platform)        │
-│  - Platform differences are DATA, not separate files    │
+│  - Consumes PSG as "correct by construction"            │
+│  - NO type checking needed - trusts FNCS                │
+│  - Zipper traversal + XParsec pattern matching          │
+│  - Platform-specific MLIR via Bindings                  │
 │  - Generates platform-optimized MLIR                    │
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Symmetric Component Libraries:** Baker and Alex are consolidation component libraries on opposite sides of the enriched PSG:
-- **Baker**: Consolidates type-level transforms, focuses IN on narrowed application graph
-- **Alex**: Consolidates code-level transforms, fans OUT to platform targets
+**FNCS-First Architecture:** With PSG construction moved to FNCS, Firefly's role simplifies:
+- **FNCS**: Builds PSG with types attached, SRTP resolved, symbol info preserved
+- **Alex**: Traverses PSG → generates MLIR → LLVM → native binary
+- **Baker absorbed into FNCS**: Baker's work (type correlation, SRTP resolution) happens DURING PSG construction in FNCS, not as a post-hoc phase in Firefly
 
-**Zipper Coherence:** Both Baker and Alex use zippers to traverse the same narrowed graph:
-- Baker's TypedTreeZipper correlates FSharpExpr with PSG nodes
-- Alex's PSGZipper traverses enriched PSG to emit MLIR
-- Same narrowed scope ensures no mismatch between type resolution and code generation
+**Zipper Coherence:** Alex uses PSGZipper to traverse the PSG from FNCS:
+- PSG comes from FNCS with all type information attached
+- Alex's PSGZipper traverses PSG to emit MLIR
+- No typed tree correlation needed in Firefly - FNCS does it during construction
 
 ## Alloy: What It Is
 
@@ -183,13 +189,20 @@ Alloy/src/
 ├── Time.fs            # Decomposes to Platform.Bindings
 └── ...                # NO platform directories, NO BCL dependencies
 
-Firefly/src/Baker/
-├── Baker.fs               # Main entry point, orchestration
-├── Types.fs               # Baker-specific types (SRTPResolution, etc.)
-├── TypedTreeZipper.fs     # Two-tree zipper (FSharpExpr ↔ PSGNode)
-├── SRTPResolver.fs        # TraitCall → resolved member extraction
-├── MemberBodyMapper.fs    # Static member → body mapping
-└── TypeOverlay.fs         # Resolved types → PSG nodes
+fsnative/src/Compiler/Checking.Native/  # PSG CONSTRUCTION NOW HERE
+├── NativeService.fs        # Public API for FNCS
+├── NativeTypes.fs          # Native type representation
+├── NativeGlobals.fs        # Built-in types (string=UTF-8, etc.)
+├── CheckExpressions.fs     # Type checking with PSG construction
+├── SemanticGraph.fs        # PSG data structures
+├── SRTPResolution.fs       # SRTP resolution during type checking
+└── NameResolution.fs       # Compositional name resolution
+
+Firefly/src/Core/PSG/Nanopass/  # LOWERING PASSES (post-FNCS)
+├── FlattenApplications.fs
+├── ReducePipeOperators.fs
+├── DetectPlatformBindings.fs
+└── ...
 
 Firefly/src/Alex/
 ├── Traversal/
@@ -199,17 +212,15 @@ Firefly/src/Alex/
 │   ├── BindingTypes.fs    # ExternDispatch registry, platform types
 │   ├── Console/ConsoleBindings.fs  # Console extern bindings (data)
 │   ├── Time/TimeBindings.fs        # Time extern bindings (data)
-│   ├── Process/ProcessBindings.fs  # Process extern bindings (data)
-│   └── Webview/WebviewBindings.fs  # Webview extern bindings (library calls)
+│   └── ...
 ├── CodeGeneration/
 │   ├── MLIRBuilder.fs     # MLIR accumulation (correct centralization)
 │   └── TypeMapping.fs     # F# → MLIR type mapping
-├── Patterns/
-│   └── PSGPatterns.fs     # Predicates and extractors
 └── Pipeline/
     └── CompilationOrchestrator.fs  # Entry point
 ```
 
+**Note:** Baker functionality is ABSORBED into FNCS - type correlation happens during PSG construction, not post-hoc.
 **Note:** PSGEmitter.fs and PSGScribe.fs were removed - they were antipatterns.
 
 ## Anti-Patterns (DO NOT DO)
@@ -255,45 +266,31 @@ module PSGEmitter =
 - Bindings looked up by module structure, not by attributes
 - MLIR Builder accumulates (correct centralization point)
 
-## PSG Construction: True Nanopass Pipeline
+## PSG Construction: Handled by FNCS
 
-**See: `docs/PSG_Nanopass_Architecture.md` for complete details.**
-**See: `docs/Baker_Architecture.md` for Phase 4 details.**
+**ARCHITECTURE UPDATE**: PSG construction has moved to FNCS.
 
-PSG construction is a **nanopass pipeline**, not a monolithic operation. Each phase does ONE thing:
+See: `docs/PSG_Nanopass_Architecture.md` for nanopass principles.
+See: `docs/FNCS_Architecture.md` for how FNCS builds the PSG.
 
-```
-Phase 1: Structural Construction    SynExpr → PSG with nodes + ChildOf edges
-Phase 2: Symbol Correlation         + FSharpSymbol attachments (via FCS)
-Phase 3: Soft-Delete Reachability   + IsReachable marks (structure preserved!)
-Phase 4: Typed Tree Overlay [BAKER] + Type, Constraints, SRTP resolution, member bodies
-Phase 5+: Enrichment Nanopasses     + def-use edges, operation classification, etc.
-```
+FNCS builds the PSG with:
+- Native types attached during type checking
+- SRTP resolved during type checking (not post-hoc)
+- Full symbol information preserved for design-time tooling
 
-**Critical Principles:**
+Firefly receives the completed PSG and applies **lowering nanopasses** if needed:
+- FlattenApplications
+- ReducePipeOperators  
+- DetectPlatformBindings
+- etc.
 
-1. **Soft-delete reachability** - Mark unreachable nodes but preserve structure. The typed tree zipper needs full structure for navigation.
+### Why FNCS Builds PSG
 
-2. **Typed tree overlay via zipper** - A zipper correlates `FSharpExpr` (typed tree) with PSG nodes by range, capturing:
-   - Resolved types (after inference)
-   - Resolved constraints (after solving)
-   - **SRTP resolution** (TraitCall → resolved member)
-
-3. **Each phase is inspectable** - Intermediate PSGs can be examined independently.
-
-### Why This Matters
-
-Without the typed tree overlay, we miss SRTP resolution. For example:
-
-```fsharp
-// Alloy/Console.fs
-let inline Write s = WritableString $ s  // $ is SRTP-dispatched!
-```
-
-- Syntax sees: `App [op_Dollar, WritableString, s]`
-- Typed tree knows: `TraitCall` resolving `$` to `WritableString.op_Dollar` → `writeSystemString`
-
-The typed tree zipper captures this resolution INTO the PSG. Downstream passes don't have to re-resolve.
+With FNCS handling PSG construction:
+- SRTP is resolved during type checking, not in a separate pass
+- Types are attached to nodes during construction, not overlaid later
+- No separate typed tree correlation needed
+- Symbol information flows directly from type checker to PSG
 
 ## Validation Samples
 
@@ -302,11 +299,11 @@ These samples must compile WITHOUT modification:
 - `02_HelloWorldSaturated` - Console.ReadLine, interpolated strings
 - `03_HelloWorldHalfCurried` - Pipe operators, string formatting
 
-The samples use Alloy's BCL-sympathetic API. Firefly compiles them via the nanopass PSG pipeline:
-1. Phase 1-4: Build PSG with full type/SRTP resolution
-2. Phase 5+: Enrich with def-use edges, classify operations
-3. Reachability prunes dead code
-4. Alex/Zipper traverses enriched PSG → MLIR
+The samples use Alloy's BCL-sympathetic API. Compilation flow:
+1. FNCS: Parse, type check with native types, build PSG with SRTP resolved
+2. Firefly: Receive PSG from FNCS ("correct by construction")
+3. Firefly: Apply lowering nanopasses (flatten apps, reduce pipes, etc.)
+4. Alex/Zipper: Traverse PSG → generate MLIR
 5. MLIR → LLVM → native binary
 
 ---
@@ -314,9 +311,10 @@ The samples use Alloy's BCL-sympathetic API. Firefly compiles them via the nanop
 ## Cross-References
 
 ### Core Architecture
-- [PSG_Nanopass_Architecture.md](./PSG_Nanopass_Architecture.md) - PSG construction phases
-- [Baker_Architecture.md](./Baker_Architecture.md) - Type resolution layer (Phase 4)
+- [FNCS_Architecture.md](./FNCS_Architecture.md) - FNCS and PSG construction (PRIMARY)
+- [PSG_Nanopass_Architecture.md](./PSG_Nanopass_Architecture.md) - Nanopass principles
 - [Quotation_Based_Memory_Architecture.md](./Quotation_Based_Memory_Architecture.md) - Memory model for embedded targets
+- Note: Baker_Architecture.md is deprecated - FNCS now handles type correlation
 
 ### Desktop UI Stack
 - [WebView_Desktop_Architecture.md](./WebView_Desktop_Architecture.md) - Partas.Solid + webview architecture

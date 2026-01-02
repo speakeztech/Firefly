@@ -1,0 +1,5 @@
+{
+  "FSharp.fsac.netCoreDllPath": "/home/hhh/repos/FsNativeAutoComplete/src/FsNativeAutoComplete/bin/Debug/net10.0/fsautocomplete.dll",
+  "FSharp.verboseLogging": true,
+  "FSharp.trace.server": "verbose"
+}

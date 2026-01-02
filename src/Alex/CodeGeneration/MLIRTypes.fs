@@ -73,8 +73,24 @@ module Serialize =
         | Function (parameterTypes, returnType) ->
             let parameterString = parameterTypes |> List.map mlirType |> String.concat ", "
             sprintf "(%s) -> %s" parameterString (mlirType returnType)
-        | Unit -> "()"
+        | Unit -> "i32"  // Unit maps to i32 for compatibility (returns 0)
         | Index -> "index"
+
+    /// Deserialize an MLIR type string back to MLIRType
+    /// This is the inverse of mlirType
+    let deserializeType (s: string) : MLIRType =
+        match s.Trim() with
+        | "i1" -> Integer I1
+        | "i8" -> Integer I8
+        | "i16" -> Integer I16
+        | "i32" -> Integer I32
+        | "i64" -> Integer I64
+        | "f32" -> Float F32
+        | "f64" -> Float F64
+        | "!llvm.ptr" -> Pointer
+        | "index" -> Index
+        | _ when s.StartsWith("!llvm.ptr") -> Pointer  // Handle opaque pointer variations
+        | _ -> Pointer  // Default to pointer for unknown types (conservative)
 
     let ssa (s: SSA) = s.Name
 

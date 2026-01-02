@@ -3,7 +3,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>firefly</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
@@ -38,7 +38,8 @@
 
       <!-- FNCS Integration (thin layer receiving SemanticGraph) -->
       <Compile Include="Core/FNCS/Integration.fs" />
-      <Compile Include="Core/FNCS/ProjectLoader.fs" />
+      <!-- ProjectLoader removed - replaced by FNCS ProjectChecker module -->
+      <!-- TomlParser removed - replaced by Fidelity.Toml via FNCS -->
 
       <!-- Lowering Nanopasses - TODO: Port to FNCS types -->
       <!-- NOTE: Nanopasses temporarily excluded pending FNCS integration -->
@@ -73,8 +74,8 @@
       <!-- Alex CodeGeneration - TypeMapping uses FNCS types -->
       <Compile Include="Alex/CodeGeneration/TypeMapping.fs" />
 
-      <!-- Alex Generation - FNCS-based MLIR emission -->
-      <Compile Include="Alex/Generation/FNCSEmitter.fs" />
+      <!-- Alex Traversal - FNCS SemanticGraph → MLIRZipper (witnessing fold) -->
+      <Compile Include="Alex/Traversal/FNCSTransfer.fs" />
 
       <!-- Alex Pipeline Types -->
       <Compile Include="Alex/Pipeline/CompilationTypes.fs" />
@@ -93,10 +94,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Update="FSharp.Core" Version="[9.0.300]" />
+    <PackageReference Include="FSharp.Core" Version="10.0.101" />
     <!-- FNCS: F# Native Compiler Services (native type universe) -->
     <ProjectReference Include="../../fsnative/src/Compiler/FSharp.Native.Compiler.Service.fsproj" />
-    <PackageReference Include="XParsec" Version="0.1.0" />
+    <PackageReference Include="XParsec" Version="0.3.0" />
     <PackageReference Include="Argu" Version="6.1.1" />
     <PackageReference Include="FSharp.SystemTextJson" Version="1.2.42" />
   </ItemGroup>

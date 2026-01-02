@@ -207,6 +207,12 @@ let parseSourceWithOptions (source: string) (fileName: string) (options: FNCSPar
 let parseAndCheckSource (source: string) (fileName: string) : FNCSParseAndCheckResult =
     parseAndCheck source fileName
 
+/// Check multiple parsed inputs together with shared type environment
+/// This is the correct way to compile multi-file projects - type abbreviations,
+/// bindings, etc. from earlier files are visible when checking later files.
+let checkMultipleInputs (inputs: FSharp.Native.Compiler.Syntax.ParsedInput list) : FNCSCheckResult =
+    checkParsedInputs inputs
+
 /// Check if parse result succeeded
 let parseSucceeded (result: FNCSParseResult) : bool =
     match result with
