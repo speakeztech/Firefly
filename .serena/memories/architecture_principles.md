@@ -215,18 +215,33 @@ See `fncs_architecture` memory, `fncs_ecosystem` memory, and:
 - With FNCS: Standard F# types have native semantics; Alloy provides BCL-sympathetic API + Platform.Bindings
 - BCL Sympathy means API idioms (not runtime semantics) - null-free, `option` with value semantics, Result-based errors
 
-## The Extern Primitive Surface
+## Platform Operations: Three-Layer Architecture
 
-Extern primitives use the BCL-free `Platform.Bindings` module convention:
+Platform operations follow the **three-layer binding architecture**:
 
+| Layer | What | Examples |
+|-------|------|----------|
+| **Layer 1** | FNCS Intrinsics | `Sys.write`, `Sys.read`, `Sys.exit`, `NativePtr.set` |
+| **Layer 2** | Binding Libraries | Farscape-generated (GTK, CMSIS, etc.) |
+| **Layer 3** | User Code | Alloy, applications |
+
+**Layer 1 - FNCS Intrinsics** (core syscalls):
 ```fsharp
-// In Alloy Platform.fs - BCL-free platform bindings
-module Platform.Bindings =
-    let writeBytes fd buffer count : int = Unchecked.defaultof<int>
-    let readBytes fd buffer maxCount : int = Unchecked.defaultof<int>
+// FNCS intrinsics - recognized by module pattern, no declaration needed
+Sys.write : int -> nativeptr<byte> -> int -> int
+Sys.read  : int -> nativeptr<byte> -> int -> int
+Sys.exit  : int -> 'T
 ```
 
-Alex recognizes calls to `Platform.Bindings.*` and generates platform-specific MLIR. NO DllImport (that's BCL!).
+**Layer 3 - Alloy uses intrinsics** (no stubs!):
+```fsharp
+// Correct - Alloy uses FNCS intrinsics
+module Console =
+    let Write (s: string) =
+        Sys.write 1 s.Pointer s.Length |> ignore
+```
+
+**DEPRECATED** - The old `Platform.Bindings` with `Unchecked.defaultof` stubs is deprecated. See `binding_architecture_unified` memory for the canonical architecture.
 
 ## Coeffects and Codata
 

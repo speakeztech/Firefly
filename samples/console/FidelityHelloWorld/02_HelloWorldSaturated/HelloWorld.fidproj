@@ -17,7 +17,7 @@ alloy = { path = "/home/hhh/repos/Alloy/src" }
 
 [build]
 sources = [
-    "02_HelloWorldSaturated.fs"
+    "HelloWorld.fs"
 ]
-output = "hello_saturated"
+output = "helloworld"
 output_kind = "freestanding"

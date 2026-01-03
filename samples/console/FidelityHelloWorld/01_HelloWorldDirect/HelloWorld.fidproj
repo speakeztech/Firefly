@@ -13,6 +13,6 @@ target = "native"
 alloy = { path = "/home/hhh/repos/Alloy/src" }
 
 [build]
-sources = ["01_HelloWorldDirect.fs"]
-output = "hello_direct"
+sources = ["HelloWorld.fs"]
+output = "helloworld"
 output_kind = "freestanding"
