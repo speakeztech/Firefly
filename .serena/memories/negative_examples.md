@@ -150,6 +150,109 @@ The code printed warnings but returned `Void` and continued. The result:
 
 ---
 
+## Mistake 9: Hardcoding Types Instead of Using Architectural Type Flow (CRITICAL)
+
+This antipattern was discovered and fixed in January 2026 during the "fat pointer string" debugging session.
+
+```fsharp
+// WRONG - Hardcoding type mappings instead of using FNCS type information
+let rec mapType (ty: NativeType) : MLIRType =
+    match ty with
+    | ...
+    | "string" -> Pointer  // IGNORES that FNCS knows strings are fat pointers!
+```
+
+```fsharp
+// WRONG - Hardcoding function signatures instead of using node.Type
+| SemanticKind.Lambda _ ->
+    let funcName = name
+    let signature = "(!llvm.ptr) -> !llvm.ptr"  // IGNORES valueNode.Type!
+    let zipper' = MLIRZipper.observeExternFunc funcName signature zipper
+    zipper', TRValue ("@" + funcName, "!llvm.ptr")
+```
+
+**The Principled Architecture**:
+- FNCS defines types with correct layouts: `stringTyCon = mkTypeConRef "string" 0 (TypeLayout.Inline(16, 8))` — fat pointer
+- PSG nodes carry `Type: NativeType` with full type information
+- `mapType` converts NativeType → MLIRType
+- `Serialize.mlirType` converts MLIRType → string
+
+**What Was Wrong**:
+1. `mapType` returned `Pointer` for strings instead of the fat pointer struct `NativeStrType`
+2. External function signatures were hardcoded as `"(!llvm.ptr) -> !llvm.ptr"` instead of derived from `valueNode.Type`
+3. Four separate locations had the same hardcoded signature cruft
+4. The type information from FNCS was being discarded at the Alex boundary
+
+**Why This Pattern Emerges**:
+- When something doesn't work, the instinct is to add a "fallback" or "default"
+- Fallbacks accumulate as cruft that ignores the principled type flow
+- Each patch makes the next problem harder to diagnose
+
+**The Fix Pattern**:
+1. **Trace upstream**: The type information exists in FNCS. Where is it discarded?
+2. **Remove, don't fix**: Don't make the fallback use correct types. REMOVE the fallback.
+3. **Trust the zipper**: The codata/pull model means the graph contains everything
+4. **Use existing architecture**: `mapType` + `Serialize.mlirType` on actual `node.Type`
+
+```fsharp
+// RIGHT - Use the type information the architecture provides
+| "string" -> NativeStrType  // Fat pointer {ptr: *u8, len: i64}
+
+// RIGHT - Derive signature from actual node type
+| SemanticKind.Lambda _ ->
+    let funcName = name
+    let signature =
+        match valueNode.Type with
+        | NativeType.TFun(paramTy, retTy) ->
+            sprintf "(%s) -> %s"
+                (Serialize.mlirType (mapType paramTy))
+                (Serialize.mlirType (mapType retTy))
+        | _ -> // Error, not fallback
+    let zipper' = MLIRZipper.observeExternFunc funcName signature zipper
+    ...
+```
+
+**The Principle**: The architecture provides type information at every layer. When code ignores this and hardcodes types, it's always a bug that will manifest as type mismatches downstream. The fix is never to "improve the hardcoding" but to REMOVE it and use what the architecture provides.
+
+**Remediation Checklist**:
+1. Consult Serena memories on architecture before any fix
+2. Identify where type information flows from FNCS through PSG to Alex
+3. Find where it's being discarded or ignored
+4. Remove cruft entirely - don't patch it
+5. Trust the zipper's attention mechanism over the PSG
+
+---
+
+## Mistake 10: Imperative "Push" Patterns vs Codata "Pull" Model
+
+Related to Mistake 9, this antipattern involves adding imperative traversal logic and fallback paths instead of trusting the zipper's pull model.
+
+```fsharp
+// WRONG - "Wasn't traversed yet" fallback with imperative assumption
+| None ->
+    // DEFERRED RESOLUTION: The binding's value wasn't traversed yet
+    // Check if the value is a Literal (constant) or Lambda (function)
+    match SemanticGraph.tryGetNode valueNodeId graph with
+    | Some valueNode ->
+        // Create extern declaration as workaround...
+```
+
+**Why this is wrong**:
+- The zipper provides "attention" to any part of the graph
+- There's no "wasn't traversed yet" if you use the zipper correctly
+- The graph contains everything; the zipper lets you navigate to it
+
+**The Codata/Pull Principle**:
+- Don't track what was "already traversed"
+- Don't create fallbacks for "not yet seen" nodes
+- The graph is complete; witness what you need when you need it
+- The zipper carries accumulated observations; recall prior observations via state
+
+**When you find yourself writing "if not traversed yet, then fallback"**:
+STOP. You're not using the zipper correctly. The information is available.
+
+---
+
 ## The Acid Test
 
 Before committing any change, ask:

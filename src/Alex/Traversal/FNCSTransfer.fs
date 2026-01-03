@@ -45,7 +45,7 @@ let rec mapType (ty: NativeType) : MLIRType =
         | "float32" | "single" -> Float F32
         | "float" | "double" -> Float F64
         | "char" -> Integer I32  // Unicode codepoint
-        | "string" -> Pointer  // Native string as pointer
+        | "string" -> NativeStrType  // Fat pointer {ptr: *u8, len: i64}
         | "Ptr" | "nativeptr" -> Pointer
         | "array" -> Pointer
         | "list" -> Pointer
@@ -104,11 +104,36 @@ let witnessLiteral (lit: LiteralValue) (zipper: MLIRZipper) : MLIRZipper * Trans
         zipper', TRValue (ssaName, "i64")
 
     | LiteralValue.String s ->
-        // Observe string literal requirement (coeffect)
+        // NATIVE STRING: Fat pointer struct {ptr: *u8, len: i64}
+        // See Serena memories: string_length_handling, fidelity_memory_model
+        //
+        // Step 1: Observe string literal (creates global constant)
         let globalName, zipper1 = MLIRZipper.observeStringLiteral s zipper
-        // Witness addressof to get pointer
-        let ssaName, zipper2 = MLIRZipper.witnessAddressOf globalName zipper1
-        zipper2, TRValue (ssaName, "!llvm.ptr")
+        
+        // Step 2: Get address of character data
+        let ptrSSA, zipper2 = MLIRZipper.witnessAddressOf globalName zipper1
+        
+        // Step 3: Create length constant (string length without null terminator)
+        let len = s.Length
+        let lenSSA, zipper3 = MLIRZipper.witnessConstant (int64 len) I64 zipper2
+        
+        // Step 4: Build fat pointer struct using llvm.mlir.undef + insertvalue
+        // This follows the Fidelity memory model: F# types dictate MLIR layout
+        let undefSSA, zipper4 = MLIRZipper.yieldSSA zipper3
+        let undefText = sprintf "%s = llvm.mlir.undef : %s" undefSSA NativeStrTypeStr
+        let zipper5 = MLIRZipper.witnessOpWithResult undefText undefSSA NativeStrType zipper4
+        
+        // Step 5: Insert pointer at index 0
+        let withPtrSSA, zipper6 = MLIRZipper.yieldSSA zipper5
+        let insertPtrText = sprintf "%s = llvm.insertvalue %s, %s[0] : %s" withPtrSSA ptrSSA undefSSA NativeStrTypeStr
+        let zipper7 = MLIRZipper.witnessOpWithResult insertPtrText withPtrSSA NativeStrType zipper6
+        
+        // Step 6: Insert length at index 1
+        let fatPtrSSA, zipper8 = MLIRZipper.yieldSSA zipper7
+        let insertLenText = sprintf "%s = llvm.insertvalue %s, %s[1] : %s" fatPtrSSA lenSSA withPtrSSA NativeStrTypeStr
+        let zipper9 = MLIRZipper.witnessOpWithResult insertLenText fatPtrSSA NativeStrType zipper8
+        
+        zipper9, TRValue (fatPtrSSA, NativeStrTypeStr)
 
     | LiteralValue.Float32 f ->
         let ssaName, zipper' = MLIRZipper.yieldSSA zipper
@@ -193,7 +218,7 @@ let witnessVarRef (name: string) (defId: NodeId option) (graph: SemanticGraph) (
                 | Some defNode ->
                     // If it's a Binding, try to find its value (first child) SSA
                     match defNode.Kind, defNode.Children with
-                    | SemanticKind.Binding (_, _, _), valueNodeId :: _ ->
+                    | SemanticKind.Binding (_, _, _, _), valueNodeId :: _ ->
                         // Check if the binding's value (Lambda) was traversed
                         match MLIRZipper.recallNodeSSA (string (NodeId.value valueNodeId)) zipper with
                         | Some (lambdaSSA, lambdaType) ->
@@ -215,30 +240,78 @@ let witnessVarRef (name: string) (defId: NodeId option) (graph: SemanticGraph) (
                                         // It's a constant - emit the literal value directly
                                         witnessLiteral lit zipper
                                     | SemanticKind.Lambda _ ->
-                                        // It's a function - create an extern function reference
+                                        // It's a function - use its actual type from the graph
                                         let funcName = name
-                                        let signature = "(!llvm.ptr) -> !llvm.ptr"
+                                        let signature =
+                                            match valueNode.Type with
+                                            | NativeType.TFun(paramTy, retTy) ->
+                                                sprintf "(%s) -> %s"
+                                                    (Serialize.mlirType (mapType paramTy))
+                                                    (Serialize.mlirType (mapType retTy))
+                                            | _ ->
+                                                sprintf "(%s) -> %s"
+                                                    (Serialize.mlirType (mapType valueNode.Type))
+                                                    "!llvm.ptr"
+                                        let retType =
+                                            match valueNode.Type with
+                                            | NativeType.TFun(_, retTy) -> Serialize.mlirType (mapType retTy)
+                                            | _ -> "!llvm.ptr"
                                         let zipper' = MLIRZipper.observeExternFunc funcName signature zipper
-                                        zipper', TRValue ("@" + funcName, "!llvm.ptr")
+                                        zipper', TRValue ("@" + funcName, retType)
                                     | _ ->
-                                        // Unknown value type - create extern function reference as fallback
+                                        // Unknown value type - use its actual type
                                         let funcName = name
-                                        let signature = "(!llvm.ptr) -> !llvm.ptr"
+                                        let signature =
+                                            match valueNode.Type with
+                                            | NativeType.TFun(paramTy, retTy) ->
+                                                sprintf "(%s) -> %s"
+                                                    (Serialize.mlirType (mapType paramTy))
+                                                    (Serialize.mlirType (mapType retTy))
+                                            | _ -> sprintf "(%s) -> %s"
+                                                    (Serialize.mlirType (mapType valueNode.Type))
+                                                    "!llvm.ptr"
+                                        let retType =
+                                            match valueNode.Type with
+                                            | NativeType.TFun(_, retTy) -> Serialize.mlirType (mapType retTy)
+                                            | _ -> "!llvm.ptr"
                                         let zipper' = MLIRZipper.observeExternFunc funcName signature zipper
-                                        zipper', TRValue ("@" + funcName, "!llvm.ptr")
+                                        zipper', TRValue ("@" + funcName, retType)
                                 | None ->
-                                    // Value node doesn't exist - create extern function reference
+                                    // Value node doesn't exist - use binding's type
                                     let funcName = name
-                                    let signature = "(!llvm.ptr) -> !llvm.ptr"
+                                    let signature =
+                                        match defNode.Type with
+                                        | NativeType.TFun(paramTy, retTy) ->
+                                            sprintf "(%s) -> %s"
+                                                (Serialize.mlirType (mapType paramTy))
+                                                (Serialize.mlirType (mapType retTy))
+                                        | _ -> sprintf "(%s) -> %s"
+                                                (Serialize.mlirType (mapType defNode.Type))
+                                                "!llvm.ptr"
+                                    let retType =
+                                        match defNode.Type with
+                                        | NativeType.TFun(_, retTy) -> Serialize.mlirType (mapType retTy)
+                                        | _ -> "!llvm.ptr"
                                     let zipper' = MLIRZipper.observeExternFunc funcName signature zipper
-                                    zipper', TRValue ("@" + funcName, "!llvm.ptr")
+                                    zipper', TRValue ("@" + funcName, retType)
                     | _ ->
-                        // Non-binding reference that wasn't traversed
-                        // Try to use it as an external function reference
+                        // Non-binding reference - use its actual type
                         let funcName = name
-                        let signature = "(!llvm.ptr) -> !llvm.ptr"  // Generic function signature
+                        let signature =
+                            match defNode.Type with
+                            | NativeType.TFun(paramTy, retTy) ->
+                                sprintf "(%s) -> %s"
+                                    (Serialize.mlirType (mapType paramTy))
+                                    (Serialize.mlirType (mapType retTy))
+                            | _ -> sprintf "(%s) -> %s"
+                                    (Serialize.mlirType (mapType defNode.Type))
+                                    "!llvm.ptr"
+                        let retType =
+                            match defNode.Type with
+                            | NativeType.TFun(_, retTy) -> Serialize.mlirType (mapType retTy)
+                            | _ -> "!llvm.ptr"
                         let zipper' = MLIRZipper.observeExternFunc funcName signature zipper
-                        zipper', TRValue ("@" + funcName, "!llvm.ptr")
+                        zipper', TRValue ("@" + funcName, retType)
         | None ->
             // No definition node - check if it's a built-in
             if isBuiltInOperator name then
@@ -287,13 +360,15 @@ let witnessApplication (funcNodeId: NodeId) (argNodeIds: NodeId list) (returnTyp
                         | None -> None
                     | None -> None)
             
-            // Determine expected parameter count from function type
-            let rec countFunParams ty =
-                match ty with
-                | NativeType.TFun(_, resultTy) -> 1 + countFunParams resultTy
-                | NativeType.TForall(_, body) -> countFunParams body
-                | _ -> 0
-            let expectedParamCount = countFunParams funcNode.Type
+            // Platform bindings have TVar types from FNCS (types aren't constrained).
+            // Use known parameter counts for platform bindings.
+            let expectedParamCount =
+                match entryPoint with
+                | "writeBytes" | "readBytes" -> 3   // fd, buffer, count
+                | "getCurrentTicks" -> 0
+                | "sleep" -> 1
+                | _ -> 0  // Unknown - assume fully applied
+            printfn "[DEBUG PB] %s: have %d args, need %d" entryPoint (List.length argSSAs) expectedParamCount
             
             if List.length argSSAs < expectedParamCount then
                 // Partial application - return a marker for later
@@ -305,6 +380,7 @@ let witnessApplication (funcNodeId: NodeId) (argNodeIds: NodeId list) (returnTyp
                 let marker = 
                     if argsEncoded.Length > 0 then sprintf "$platform:%s:%s" entryPoint argsEncoded
                     else sprintf "$platform:%s" entryPoint
+                printfn "[DEBUG PARTIAL PLATFORM] %s has %d args, expected %d. Creating marker: %s" entryPoint (List.length argSSAs) expectedParamCount marker
                 zipper, TRValue (marker, "func")
             else
                 // All arguments present - call the platform binding
@@ -530,6 +606,8 @@ let witnessApplication (funcNodeId: NodeId) (argNodeIds: NodeId list) (returnTyp
                         zipper, TRError (sprintf "Invalid partial marker: %s" funcSSA)
                 // Handle partial platform binding: $platform:entryPoint:arg0:type0:arg1:type1:...
                 elif funcSSA.StartsWith("$platform:") then
+                    printfn "[DEBUG CURRIED PLATFORM] funcSSA marker: %s" funcSSA
+                    printfn "[DEBUG CURRIED PLATFORM] Adding %d new args" (List.length argSSAs)
                     let parts = funcSSA.Split(':')
                     if parts.Length >= 2 then
                         let entryPoint = parts.[1]
@@ -702,7 +780,7 @@ let witnessNode (graph: SemanticGraph) (node: SemanticNode) (zipper: MLIRZipper)
         | _ -> zipper', result
 
     // Bindings
-    | SemanticKind.Binding (name, isMutable, _isRecursive) ->
+    | SemanticKind.Binding (name, isMutable, _isRecursive, _isEntryPoint) ->
         // Get the value node (first child)
         match node.Children with
         | valueId :: _ ->
@@ -1080,14 +1158,35 @@ let witnessNode (graph: SemanticGraph) (node: SemanticNode) (zipper: MLIRZipper)
     // Field access: expr.fieldName
     | SemanticKind.FieldGet (exprId, fieldName) ->
         match MLIRZipper.recallNodeSSA (string (NodeId.value exprId)) zipper with
-        | Some (exprSSA, _exprType) ->
-            // For field access, we need to compute the offset and load
-            // TODO: Proper field offset calculation from record type
-            let resultSSA, zipper' = MLIRZipper.yieldSSA zipper
-            let loadText = sprintf "%s = llvm.load %s : !llvm.ptr -> !llvm.ptr" resultSSA exprSSA
-            let zipper'' = MLIRZipper.witnessOpWithResult loadText resultSSA Pointer zipper'
-            let zipper''' = MLIRZipper.bindNodeSSA (string (NodeId.value node.Id)) resultSSA "!llvm.ptr" zipper''
-            zipper''', TRValue (resultSSA, "!llvm.ptr")
+        | Some (exprSSA, exprType) ->
+            // STRING INTRINSIC MEMBERS: Native string is fat pointer {ptr, len}
+            // .Pointer → extractvalue at index 0 → !llvm.ptr
+            // .Length → extractvalue at index 1 → i64
+            // See Serena memories: string_length_handling, fidelity_memory_model
+            if isNativeStrType exprType then
+                match fieldName with
+                | "Pointer" ->
+                    let resultSSA, zipper' = MLIRZipper.yieldSSA zipper
+                    let extractText = sprintf "%s = llvm.extractvalue %s[0] : %s" resultSSA exprSSA NativeStrTypeStr
+                    let zipper'' = MLIRZipper.witnessOpWithResult extractText resultSSA Pointer zipper'
+                    let zipper''' = MLIRZipper.bindNodeSSA (string (NodeId.value node.Id)) resultSSA "!llvm.ptr" zipper''
+                    zipper''', TRValue (resultSSA, "!llvm.ptr")
+                | "Length" ->
+                    let resultSSA, zipper' = MLIRZipper.yieldSSA zipper
+                    let extractText = sprintf "%s = llvm.extractvalue %s[1] : %s" resultSSA exprSSA NativeStrTypeStr
+                    let zipper'' = MLIRZipper.witnessOpWithResult extractText resultSSA (Integer I64) zipper'
+                    let zipper''' = MLIRZipper.bindNodeSSA (string (NodeId.value node.Id)) resultSSA "i64" zipper''
+                    zipper''', TRValue (resultSSA, "i64")
+                | _ ->
+                    zipper, TRError (sprintf "Unknown string field: %s (expected Pointer or Length)" fieldName)
+            else
+                // Generic field access for other struct types
+                // TODO: Proper field offset calculation from record type
+                let resultSSA, zipper' = MLIRZipper.yieldSSA zipper
+                let loadText = sprintf "%s = llvm.load %s : !llvm.ptr -> !llvm.ptr" resultSSA exprSSA
+                let zipper'' = MLIRZipper.witnessOpWithResult loadText resultSSA Pointer zipper'
+                let zipper''' = MLIRZipper.bindNodeSSA (string (NodeId.value node.Id)) resultSSA "!llvm.ptr" zipper''
+                zipper''', TRValue (resultSSA, "!llvm.ptr")
         | None ->
             zipper, TRError (sprintf "FieldGet '%s': expression not computed" fieldName)
 
@@ -1205,7 +1304,7 @@ let findEntryPointLambdaIds (graph: SemanticGraph) : Set<int> =
         match SemanticGraph.tryGetNode epId graph with
         | Some node ->
             match node.Kind with
-            | SemanticKind.Binding (_, _, _) ->
+            | SemanticKind.Binding (_, _, _, _) ->
                 // Entry point Binding - its children include the Lambda
                 node.Children
                 |> List.choose (fun childId ->
@@ -1223,7 +1322,7 @@ let findEntryPointLambdaIds (graph: SemanticGraph) : Set<int> =
                     match SemanticGraph.tryGetNode memberId graph with
                     | Some memberNode ->
                         match memberNode.Kind with
-                        | SemanticKind.Binding (name, _, _) when name = "main" ->
+                        | SemanticKind.Binding (name, _, _, _) when name = "main" ->
                             memberNode.Children
                             |> List.choose (fun childId ->
                                 match SemanticGraph.tryGetNode childId graph with

@@ -89,7 +89,13 @@ module Serialize =
         | "f64" -> Float F64
         | "!llvm.ptr" -> Pointer
         | "index" -> Index
+        // Native string type: fat pointer {ptr, len}
+        | "!llvm.struct<(!llvm.ptr, i64)>" -> Struct [Pointer; Integer I64]
         | _ when s.StartsWith("!llvm.ptr") -> Pointer  // Handle opaque pointer variations
+        | _ when s.StartsWith("!llvm.struct") -> 
+            // Generic struct - parse inner types
+            // For now, default to NativeStr if it looks like a struct
+            Struct [Pointer; Integer I64]
         | _ -> Pointer  // Default to pointer for unknown types (conservative)
 
     let ssa (s: SSA) = s.Name
@@ -111,3 +117,19 @@ module Serialize =
          .Replace("\n", "\\0A")
          .Replace("\r", "\\0D")
          .Replace("\t", "\\09")
+
+// ═══════════════════════════════════════════════════════════════════
+// Native Type Constants
+// ═══════════════════════════════════════════════════════════════════
+
+/// Native string type: fat pointer = {ptr: *u8, len: i64}
+/// This is the canonical MLIR representation for F# string in native compilation.
+/// See Serena memory: string_length_handling, fidelity_memory_model
+let NativeStrType = Struct [Pointer; Integer I64]
+
+/// Serialized form of native string type for pattern matching
+let NativeStrTypeStr = "!llvm.struct<(!llvm.ptr, i64)>"
+
+/// Check if a type string represents a native string (fat pointer)
+let isNativeStrType (typeStr: string) =
+    typeStr = NativeStrTypeStr || typeStr = "!llvm.struct<(!llvm.ptr, i64)>"

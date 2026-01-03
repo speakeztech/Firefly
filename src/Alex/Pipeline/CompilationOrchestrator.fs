@@ -137,7 +137,7 @@ let generateMLIRFromFNCS (projectResult: ProjectCheckResult) (targetTriple: stri
                         match node.Kind with
                         | FNCSSemanticGraph.SemanticKind.ModuleDef(name, children) ->
                             sprintf "ModuleDef(%s, children=%d)" name (List.length children)
-                        | FNCSSemanticGraph.SemanticKind.Binding(name, isMut, isRec) ->
+                        | FNCSSemanticGraph.SemanticKind.Binding(name, isMut, isRec, _isEntryPoint) ->
                             sprintf "Binding(%s, mutable=%b, rec=%b)" name isMut isRec
                         | FNCSSemanticGraph.SemanticKind.Literal v ->
                             sprintf "Literal(%A)" v

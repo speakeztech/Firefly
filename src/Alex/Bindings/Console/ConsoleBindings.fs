@@ -63,7 +63,7 @@ let witnessTruncI (ssaName: string) (fromType: MLIRType) (toWidth: IntegerBitWid
 // ===================================================================
 
 /// Witness write syscall for Unix-like systems (Linux, macOS)
-let witnessUnixWriteSyscall (syscallNum: int64) (fd: string) (fdType: MLIRType) (buf: string) (count: string) (countType: MLIRType) (zipper: MLIRZipper) : string * MLIRZipper =
+let witnessUnixWriteSyscall (syscallNum: int64) (fd: string) (fdType: MLIRType) (buf: string) (bufType: MLIRType) (count: string) (countType: MLIRType) (zipper: MLIRZipper) : string * MLIRZipper =
     // Extend fd to i64 if needed
     let fdExt, zipper1 = witnessExtSIIfNeeded fd fdType I64 zipper
 
@@ -75,15 +75,17 @@ let witnessUnixWriteSyscall (syscallNum: int64) (fd: string) (fdType: MLIRType) 
 
     // Witness syscall: write(fd, buf, count)
     // rax = syscall number, rdi = fd, rsi = buf, rdx = count
+    // Buffer type can be !llvm.ptr or i64 (after ptrtoint conversion)
+    let bufTypeStr = Serialize.mlirType bufType
     let args = [
         (fdExt, "i64")
-        (buf, "!llvm.ptr")  // Buffer is always a pointer
+        (buf, bufTypeStr)
         (countExt, "i64")
     ]
     MLIRZipper.witnessSyscall sysNumSSA args (Integer I64) zipper3
 
 /// Witness read syscall for Unix-like systems (Linux, macOS)
-let witnessUnixReadSyscall (syscallNum: int64) (fd: string) (fdType: MLIRType) (buf: string) (maxCount: string) (countType: MLIRType) (zipper: MLIRZipper) : string * MLIRZipper =
+let witnessUnixReadSyscall (syscallNum: int64) (fd: string) (fdType: MLIRType) (buf: string) (bufType: MLIRType) (maxCount: string) (countType: MLIRType) (zipper: MLIRZipper) : string * MLIRZipper =
     // Extend fd to i64 if needed
     let fdExt, zipper1 = witnessExtSIIfNeeded fd fdType I64 zipper
 
@@ -94,9 +96,11 @@ let witnessUnixReadSyscall (syscallNum: int64) (fd: string) (fdType: MLIRType) (
     let sysNumSSA, zipper3 = MLIRZipper.witnessConstant syscallNum I64 zipper2
 
     // Witness syscall: read(fd, buf, count)
+    // Buffer type can be !llvm.ptr or i64 (after ptrtoint conversion)
+    let bufTypeStr = Serialize.mlirType bufType
     let args = [
         (fdExt, "i64")
-        (buf, "!llvm.ptr")  // Buffer is always a pointer
+        (buf, bufTypeStr)
         (countExt, "i64")
     ]
     MLIRZipper.witnessSyscall sysNumSSA args (Integer I64) zipper3
@@ -109,14 +113,14 @@ let witnessUnixReadSyscall (syscallNum: int64) (fd: string) (fdType: MLIRType) (
 /// Witness binding from Alloy.Platform.Bindings.writeBytes
 let witnessWriteBytes (platform: TargetPlatform) (prim: PlatformPrimitive) (zipper: MLIRZipper) : MLIRZipper * EmissionResult =
     match prim.Args with
-    | [(fd, fdType); (buf, _bufType); (count, countType)] ->
+    | [(fd, fdType); (buf, bufType); (count, countType)] ->
         match platform.OS with
         | Linux ->
-            let resultSSA, zipper1 = witnessUnixWriteSyscall 1L fd fdType buf count countType zipper
+            let resultSSA, zipper1 = witnessUnixWriteSyscall 1L fd fdType buf bufType count countType zipper
             let truncSSA, zipper2 = witnessTruncI resultSSA (Integer I64) I32 zipper1
             zipper2, WitnessedValue (truncSSA, Integer I32)
         | MacOS ->
-            let resultSSA, zipper1 = witnessUnixWriteSyscall 0x2000004L fd fdType buf count countType zipper
+            let resultSSA, zipper1 = witnessUnixWriteSyscall 0x2000004L fd fdType buf bufType count countType zipper
             let truncSSA, zipper2 = witnessTruncI resultSSA (Integer I64) I32 zipper1
             zipper2, WitnessedValue (truncSSA, Integer I32)
         | Windows ->
@@ -130,14 +134,14 @@ let witnessWriteBytes (platform: TargetPlatform) (prim: PlatformPrimitive) (zipp
 /// Witness binding from Alloy.Platform.Bindings.readBytes
 let witnessReadBytes (platform: TargetPlatform) (prim: PlatformPrimitive) (zipper: MLIRZipper) : MLIRZipper * EmissionResult =
     match prim.Args with
-    | [(fd, fdType); (buf, _bufType); (maxCount, countType)] ->
+    | [(fd, fdType); (buf, bufType); (maxCount, countType)] ->
         match platform.OS with
         | Linux ->
-            let resultSSA, zipper1 = witnessUnixReadSyscall 0L fd fdType buf maxCount countType zipper
+            let resultSSA, zipper1 = witnessUnixReadSyscall 0L fd fdType buf bufType maxCount countType zipper
             let truncSSA, zipper2 = witnessTruncI resultSSA (Integer I64) I32 zipper1
             zipper2, WitnessedValue (truncSSA, Integer I32)
         | MacOS ->
-            let resultSSA, zipper1 = witnessUnixReadSyscall 0x2000003L fd fdType buf maxCount countType zipper
+            let resultSSA, zipper1 = witnessUnixReadSyscall 0x2000003L fd fdType buf bufType maxCount countType zipper
             let truncSSA, zipper2 = witnessTruncI resultSSA (Integer I64) I32 zipper1
             zipper2, WitnessedValue (truncSSA, Integer I32)
         | Windows ->
