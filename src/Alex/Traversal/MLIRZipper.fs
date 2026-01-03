@@ -92,9 +92,10 @@ type MLIRFocus =
 /// Path back through MLIR structure (breadcrumbs for navigation)
 type MLIRPath =
     | Top
-    /// EnteredFunction preserves parent function's ops, var bindings, and node SSAs for proper scoping
+    /// EnteredFunction preserves parent function's ops, var bindings, node SSAs, and SSA counter for proper scoping
     /// Each function has its own SSA namespace - values from outer scopes are NOT valid in nested functions
-    | EnteredFunction of parent: MLIRPath * funcName: string * funcParams: (string * MLIRType) list * funcReturnType: MLIRType * isInternal: bool * completedFuncs: MLIRFunc list * parentOps: MLIROp list * parentVarBindings: Map<string, string * string> * parentNodeSSAs: Map<string, string * string>
+    /// parentSSACounter is CRITICAL: allows parent function to continue numbering from where it left off
+    | EnteredFunction of parent: MLIRPath * funcName: string * funcParams: (string * MLIRType) list * funcReturnType: MLIRType * isInternal: bool * completedFuncs: MLIRFunc list * parentOps: MLIROp list * parentVarBindings: Map<string, string * string> * parentNodeSSAs: Map<string, string * string> * parentSSACounter: int
     | EnteredBlock of parent: MLIRPath * funcName: string * blockLabel: string * completedBlocks: MLIRBlock list * currentParams: (string * MLIRType) list * currentReturnType: MLIRType * isInternal: bool
 
 // ═══════════════════════════════════════════════════════════════════
@@ -462,11 +463,11 @@ module MLIRZipper =
         match zipper.Focus with
         | AtModule ->
             // Enter from module level - preserve NodeSSA (module-level bindings should remain visible)
-            // Save NodeSSA in path so it's restored when we exit back to module level
+            // Save NodeSSA and SSACounter in path so they're restored when we exit back to module level
             // Reset SSA counter for function-local numbering
             { zipper with
                 Focus = InFunction name
-                Path = EnteredFunction (zipper.Path, name, parameters, returnType, isInternal, [], [], Map.empty, stateWithParamTypes.NodeSSA)
+                Path = EnteredFunction (zipper.Path, name, parameters, returnType, isInternal, [], [], Map.empty, stateWithParamTypes.NodeSSA, stateWithParamTypes.SSACounter)
                 CurrentOps = []
                 State = { stateWithParamTypes with
                             VarBindings = Map.empty
@@ -474,7 +475,7 @@ module MLIRZipper =
                             SSACounter = 0 } }  // Reset SSA counter for function-local numbering
         | InFunction _ ->
             // Already in a function - nested lambda
-            // CRITICAL: Save current ops, var bindings, AND node SSAs in path so they're restored when we exit
+            // CRITICAL: Save current ops, var bindings, node SSAs, AND SSA counter in path so they're restored when we exit
             // Filter NodeSSA to only keep function references (@xxx) and pipe markers ($pipe:) - value SSAs are function-local
             // Also reset SSA counter so nested functions have their own %v0, %v1, etc.
             let globalOnlyNodeSSA =
@@ -482,7 +483,7 @@ module MLIRZipper =
                 |> Map.filter (fun _ (ssa, _) -> ssa.StartsWith("@") || ssa.StartsWith("$pipe:"))
             { zipper with
                 Focus = InFunction name
-                Path = EnteredFunction (zipper.Path, name, parameters, returnType, isInternal, [], zipper.CurrentOps, stateWithParamTypes.VarBindings, stateWithParamTypes.NodeSSA)
+                Path = EnteredFunction (zipper.Path, name, parameters, returnType, isInternal, [], zipper.CurrentOps, stateWithParamTypes.VarBindings, stateWithParamTypes.NodeSSA, stateWithParamTypes.SSACounter)
                 CurrentOps = []
                 State = { stateWithParamTypes with
                             VarBindings = Map.empty
@@ -500,7 +501,7 @@ module MLIRZipper =
     /// Enter a basic block within current function
     let enterBlock (label: string) (arguments: (string * MLIRType) list) (zipper: MLIRZipper) : MLIRZipper =
         match zipper.Focus, zipper.Path with
-        | InFunction funcName, EnteredFunction (parentPath, _, funcParams, retTy, isInternal, completedFuncs, _parentOps, _parentVarBindings, _parentNodeSSAs) ->
+        | InFunction funcName, EnteredFunction (parentPath, _, funcParams, retTy, isInternal, completedFuncs, _parentOps, _parentVarBindings, _parentNodeSSAs, _parentSSACounter) ->
             // Save current ops as we enter a new block
             { zipper with
                 Focus = InBlock (funcName, label)
@@ -541,7 +542,7 @@ module MLIRZipper =
     /// Exit current function, returning to module level or parent function
     and exitFunction (zipper: MLIRZipper) : MLIRZipper * MLIRFunc =
         match zipper.Focus, zipper.Path with
-        | InFunction funcName, EnteredFunction (parentPath, name, funcParams, funcReturnType, isInternal, completedFuncs, parentOps, parentVarBindings, parentNodeSSAs) ->
+        | InFunction funcName, EnteredFunction (parentPath, name, funcParams, funcReturnType, isInternal, completedFuncs, parentOps, parentVarBindings, parentNodeSSAs, parentSSACounter) ->
             // Create function with accumulated ops as single entry block
             let entryBlock = {
                 Label = "entry"
@@ -577,20 +578,20 @@ module MLIRZipper =
                 Map.fold (fun acc k v -> Map.add k v acc) parentNodeSSAs newFuncRefs
             // Determine new focus based on parentPath
             // If parentPath is Top, we return to AtModule
-            // If parentPath is EnteredFunction, we return to InFunction (and restore CurrentFunction)
+            // If parentPath is EnteredFunction, we return to InFunction (and restore CurrentFunction AND SSACounter!)
             let newFocus, newState =
                 match parentPath with
                 | Top ->
-                    AtModule, { MLIRState.setCurrentFunction None zipper.State with VarBindings = parentVarBindings; NodeSSA = mergedNodeSSAs }
-                | EnteredFunction (_, parentFuncName, _, _, _, _, _, _, _) ->
-                    InFunction parentFuncName, { MLIRState.setCurrentFunction (Some parentFuncName) zipper.State with VarBindings = parentVarBindings; NodeSSA = mergedNodeSSAs }
+                    AtModule, { MLIRState.setCurrentFunction None zipper.State with VarBindings = parentVarBindings; NodeSSA = mergedNodeSSAs; SSACounter = parentSSACounter }
+                | EnteredFunction (_, parentFuncName, _, _, _, _, _, _, _, _) ->
+                    InFunction parentFuncName, { MLIRState.setCurrentFunction (Some parentFuncName) zipper.State with VarBindings = parentVarBindings; NodeSSA = mergedNodeSSAs; SSACounter = parentSSACounter }
                 | EnteredBlock (_, parentFuncName, _, _, _, _, _) ->
-                    InFunction parentFuncName, { MLIRState.setCurrentFunction (Some parentFuncName) zipper.State with VarBindings = parentVarBindings; NodeSSA = mergedNodeSSAs }
+                    InFunction parentFuncName, { MLIRState.setCurrentFunction (Some parentFuncName) zipper.State with VarBindings = parentVarBindings; NodeSSA = mergedNodeSSAs; SSACounter = parentSSACounter }
             { zipper with
                 Focus = newFocus
                 Path = parentPath
                 CurrentOps = parentOps  // CRITICAL: Restore parent function's ops
-                State = newState },      // CRITICAL: State now includes restored VarBindings and merged NodeSSAs
+                State = newState },      // CRITICAL: State now includes restored VarBindings, merged NodeSSAs, AND SSACounter
             func
         | InBlock (funcName, label), _ ->
             // Exit block first, then function

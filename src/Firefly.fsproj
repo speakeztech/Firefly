@@ -74,6 +74,9 @@
       <!-- Alex CodeGeneration - TypeMapping uses FNCS types -->
       <Compile Include="Alex/CodeGeneration/TypeMapping.fs" />
 
+      <!-- Alex Preprocessing - SSA assignment before emission -->
+      <Compile Include="Alex/Preprocessing/SSAAssignment.fs" />
+
       <!-- Alex Traversal - FNCS SemanticGraph → MLIRZipper (witnessing fold) -->
       <Compile Include="Alex/Traversal/FNCSTransfer.fs" />
 

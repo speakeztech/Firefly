@@ -449,6 +449,23 @@ let witnessApplication (funcNodeId: NodeId) (argNodeIds: NodeId list) (returnTyp
                 let allocaText = sprintf "%s = llvm.alloca %s x %s : (i64) -> !llvm.ptr" ssaName countSSA64 elemType
                 let zipper4 = MLIRZipper.witnessOpWithResult allocaText ssaName Pointer zipper'''
                 zipper4, TRValue (ssaName, "!llvm.ptr")
+            | "NativePtr.copy", [(destSSA, _); (srcSSA, _); (countSSA, _)] ->
+                // dest:nativeptr<'T> -> src:nativeptr<'T> -> count:int -> unit
+                // Maps to llvm.memcpy intrinsic
+                // Convert count from i32 to i64 for llvm.intr.memcpy
+                let countSSA64, zipper' = MLIRZipper.yieldSSA zipper
+                let extText = sprintf "%s = arith.extsi %s : i32 to i64" countSSA64 countSSA
+                let zipper'' = MLIRZipper.witnessOpWithResult extText countSSA64 (Integer I64) zipper'
+                // Emit llvm.intr.memcpy: dest, src, len, isVolatile
+                let memcpyText = sprintf "\"llvm.intr.memcpy\"(%s, %s, %s) <{isVolatile = false}> : (!llvm.ptr, !llvm.ptr, i64) -> ()" destSSA srcSSA countSSA64
+                let zipper''' = MLIRZipper.witnessVoidOp memcpyText zipper''
+                zipper''', TRVoid
+            | "NativePtr.add", [(ptrSSA, _); (offsetSSA, _)] ->
+                // nativeptr<'T> -> int -> nativeptr<'T> (pointer arithmetic)
+                let resultSSA, zipper' = MLIRZipper.yieldSSA zipper
+                let gepText = sprintf "%s = llvm.getelementptr %s[%s] : (!llvm.ptr, i32) -> !llvm.ptr, i8" resultSSA ptrSSA offsetSSA
+                let zipper'' = MLIRZipper.witnessOpWithResult gepText resultSSA Pointer zipper'
+                zipper'', TRValue (resultSSA, "!llvm.ptr")
 
             // ═══════════════════════════════════════════════════════════════════════════
             // Sys intrinsics - Dispatch to platform bindings layer
@@ -1138,19 +1155,6 @@ let witnessNode (graph: SemanticGraph) (node: SemanticNode) (zipper: MLIRZipper)
             zipper', TRValue (exprSSA, "!llvm.ptr")
         | None ->
             zipper, TRError "AddressOf: expression not computed"
-
-    // For loop
-    | SemanticKind.ForLoop (varName, startId, endId, isUp, bodyId) ->
-        // TODO: Implement proper for loop with blocks
-        // For now, emit a placeholder that at least doesn't crash
-        match MLIRZipper.recallNodeSSA (string (NodeId.value startId)) zipper,
-              MLIRZipper.recallNodeSSA (string (NodeId.value endId)) zipper with
-        | Some (startSSA, startType), Some (endSSA, _) ->
-            // Bind loop variable to start value for body processing
-            let zipper' = MLIRZipper.bindVar varName startSSA startType zipper
-            zipper', TRVoid
-        | _ ->
-            zipper, TRError "ForLoop: start or end not computed"
 
     // Tuple expressions - construct a tuple value
     | SemanticKind.TupleExpr elementIds ->
