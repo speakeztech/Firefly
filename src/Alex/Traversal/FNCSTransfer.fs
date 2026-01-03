@@ -462,6 +462,59 @@ let witnessApplication (funcNodeId: NodeId) (argNodeIds: NodeId list) (returnTyp
                 // Dispatch to platform bindings - all platform-specific logic is there
                 witnessPlatformBinding intrinsicName argSSAsWithTypes returnType zipper
 
+            // ═══════════════════════════════════════════════════════════════════════════
+            // NativeStr intrinsics - Native string (fat pointer) construction
+            // ═══════════════════════════════════════════════════════════════════════════
+            | "NativeStr.fromPointer", [(ptrSSA, _); (lenSSA, _)] ->
+                // Construct fat pointer struct from pointer and length
+                // Same pattern as string literal emission: undef + insertvalue
+                let undefSSA, zipper1 = MLIRZipper.yieldSSA zipper
+                let undefText = sprintf "%s = llvm.mlir.undef : %s" undefSSA NativeStrTypeStr
+                let zipper2 = MLIRZipper.witnessOpWithResult undefText undefSSA NativeStrType zipper1
+
+                // Insert pointer at index 0
+                let withPtrSSA, zipper3 = MLIRZipper.yieldSSA zipper2
+                let insertPtrText = sprintf "%s = llvm.insertvalue %s, %s[0] : %s" withPtrSSA ptrSSA undefSSA NativeStrTypeStr
+                let zipper4 = MLIRZipper.witnessOpWithResult insertPtrText withPtrSSA NativeStrType zipper3
+
+                // Insert length at index 1 (need to extend to i64 if it's i32)
+                let lenSSA64, zipper5 = MLIRZipper.yieldSSA zipper4
+                let extText = sprintf "%s = arith.extsi %s : i32 to i64" lenSSA64 lenSSA
+                let zipper6 = MLIRZipper.witnessOpWithResult extText lenSSA64 (Integer I64) zipper5
+
+                let fatPtrSSA, zipper7 = MLIRZipper.yieldSSA zipper6
+                let insertLenText = sprintf "%s = llvm.insertvalue %s, %s[1] : %s" fatPtrSSA lenSSA64 withPtrSSA NativeStrTypeStr
+                let zipper8 = MLIRZipper.witnessOpWithResult insertLenText fatPtrSSA NativeStrType zipper7
+
+                zipper8, TRValue (fatPtrSSA, NativeStrTypeStr)
+
+            // ═══════════════════════════════════════════════════════════════════════════
+            // NativeDefault intrinsics - Zero-initialized values
+            // ═══════════════════════════════════════════════════════════════════════════
+            | "NativeDefault.zeroed", [] ->
+                // Zero value for the return type
+                // The return type tells us what kind of zero to emit
+                let zeroSSA, zipper' = MLIRZipper.yieldSSA zipper
+                let mlirRetType = mapType returnType
+                let mlirTypeStr = Serialize.mlirType mlirRetType
+                let zeroText =
+                    match mlirRetType with
+                    | Integer _ -> sprintf "%s = arith.constant 0 : %s" zeroSSA mlirTypeStr
+                    | Float F32 -> sprintf "%s = arith.constant 0.0 : f32" zeroSSA
+                    | Float F64 -> sprintf "%s = arith.constant 0.0 : f64" zeroSSA
+                    | Pointer -> sprintf "%s = llvm.mlir.zero : !llvm.ptr" zeroSSA
+                    | Struct _ when mlirTypeStr = NativeStrTypeStr ->
+                        // Zero string: undef (ptr=null, len=0 effectively)
+                        sprintf "%s = llvm.mlir.undef : %s" zeroSSA NativeStrTypeStr
+                    | Struct _ ->
+                        // For other structs, use undef (zero-initialized)
+                        sprintf "%s = llvm.mlir.undef : %s" zeroSSA mlirTypeStr
+                    | _ ->
+                        // Default: use undef
+                        sprintf "%s = llvm.mlir.undef : %s" zeroSSA mlirTypeStr
+                let zipper'' = MLIRZipper.witnessOpWithResult zeroText zeroSSA mlirRetType zipper'
+                zipper'', TRValue (zeroSSA, mlirTypeStr)
+
             | intrinsicName, [] ->
                 // TypeApp or partial application - return marker for subsequent application
                 // This handles polymorphic intrinsics (e.g., stackalloc<byte>) before value args are applied
