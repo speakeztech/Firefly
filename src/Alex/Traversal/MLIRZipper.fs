@@ -556,22 +556,41 @@ module MLIRZipper =
                 Attributes = []
                 IsInternal = isInternal  // Use observed visibility
             }
+            // CRITICAL FIX: Merge new function references from nested scope back to parent
+            // This preserves bindings like "@lambda_X" and "_lambdaName" markers that were
+            // created during nested function processing (e.g., writeStrOut defined inside
+            // Console.WriteLine). Without this, function references are lost and appear as
+            // undefined extern symbols.
+            let mergedNodeSSAs =
+                let newFuncRefs =
+                    zipper.State.NodeSSA
+                    |> Map.filter (fun key (ssa, _) ->
+                        // Keep function references (@xxx), pipe markers ($pipe:),
+                        // partial apps ($partial:), platform markers ($platform:),
+                        // and lambda name markers (xxx_lambdaName)
+                        ssa.StartsWith("@") ||
+                        ssa.StartsWith("$pipe:") ||
+                        ssa.StartsWith("$partial:") ||
+                        ssa.StartsWith("$platform:") ||
+                        key.EndsWith("_lambdaName"))
+                // Merge new refs into parent's NodeSSA (new refs take precedence)
+                Map.fold (fun acc k v -> Map.add k v acc) parentNodeSSAs newFuncRefs
             // Determine new focus based on parentPath
             // If parentPath is Top, we return to AtModule
             // If parentPath is EnteredFunction, we return to InFunction (and restore CurrentFunction)
             let newFocus, newState =
                 match parentPath with
                 | Top ->
-                    AtModule, { MLIRState.setCurrentFunction None zipper.State with VarBindings = parentVarBindings; NodeSSA = parentNodeSSAs }
+                    AtModule, { MLIRState.setCurrentFunction None zipper.State with VarBindings = parentVarBindings; NodeSSA = mergedNodeSSAs }
                 | EnteredFunction (_, parentFuncName, _, _, _, _, _, _, _) ->
-                    InFunction parentFuncName, { MLIRState.setCurrentFunction (Some parentFuncName) zipper.State with VarBindings = parentVarBindings; NodeSSA = parentNodeSSAs }
+                    InFunction parentFuncName, { MLIRState.setCurrentFunction (Some parentFuncName) zipper.State with VarBindings = parentVarBindings; NodeSSA = mergedNodeSSAs }
                 | EnteredBlock (_, parentFuncName, _, _, _, _, _) ->
-                    InFunction parentFuncName, { MLIRState.setCurrentFunction (Some parentFuncName) zipper.State with VarBindings = parentVarBindings; NodeSSA = parentNodeSSAs }
+                    InFunction parentFuncName, { MLIRState.setCurrentFunction (Some parentFuncName) zipper.State with VarBindings = parentVarBindings; NodeSSA = mergedNodeSSAs }
             { zipper with
                 Focus = newFocus
                 Path = parentPath
                 CurrentOps = parentOps  // CRITICAL: Restore parent function's ops
-                State = newState },      // CRITICAL: State now includes restored VarBindings and NodeSSAs
+                State = newState },      // CRITICAL: State now includes restored VarBindings and merged NodeSSAs
             func
         | InBlock (funcName, label), _ ->
             // Exit block first, then function
@@ -823,6 +842,59 @@ module MLIRZipper =
         let zipper4 = witnessOpWithResult text ptrSSA Pointer zipper3
         
         ptrSSA, zipper4
+
+    // ─────────────────────────────────────────────────────────────────
+    // Freestanding Entry Point Wrapper
+    // For freestanding binaries, we need a _start function that calls main
+    // and then calls the exit syscall (since there's no libc to do this)
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Add a _start wrapper for freestanding binaries
+    /// _start calls main(argc, argv) and then calls exit(result)
+    /// This is necessary because freestanding binaries can't return from main
+    let addFreestandingEntryPoint (zipper: MLIRZipper) : MLIRZipper =
+        // Generate _start function that:
+        // 1. Calls main(argc, argv)
+        // 2. Calls exit syscall with main's return value
+        //
+        // For Linux x86_64:
+        //   At _start entry, the stack contains: argc, argv[0], argv[1], ..., NULL, envp...
+        //   We load argc from (%rsp) and compute argv as %rsp+8
+        let startOps = [
+            // Load argc from stack: argc is at (%rsp)
+            { Text = "%sp = llvm.inline_asm \"mov %rsp, $0\", \"=r,~{memory}\" : () -> i64"; Results = ["%sp", Pointer] }
+            { Text = "%argc_ptr = llvm.inttoptr %sp : i64 to !llvm.ptr"; Results = ["%argc_ptr", Pointer] }
+            { Text = "%argc_64 = llvm.load %argc_ptr : !llvm.ptr -> i64"; Results = ["%argc_64", Integer I64] }
+            { Text = "%argc = arith.trunci %argc_64 : i64 to i32"; Results = ["%argc", Integer I32] }
+            // Compute argv = %rsp + 8
+            { Text = "%eight = arith.constant 8 : i64"; Results = ["%eight", Integer I64] }
+            { Text = "%argv_addr = arith.addi %sp, %eight : i64"; Results = ["%argv_addr", Integer I64] }
+            { Text = "%argv = llvm.inttoptr %argv_addr : i64 to !llvm.ptr"; Results = ["%argv", Pointer] }
+            // Call main(argc, argv)
+            { Text = "%result = llvm.call @main(%argc, %argv) : (i32, !llvm.ptr) -> i32"; Results = ["%result", Integer I32] }
+            // Extend result to i64 for syscall
+            { Text = "%result_64 = arith.extsi %result : i32 to i64"; Results = ["%result_64", Integer I64] }
+            // Call exit syscall (60 on Linux x86_64)
+            { Text = "%syscall_num = arith.constant 60 : i64"; Results = ["%syscall_num", Integer I64] }
+            { Text = "%ignored = llvm.inline_asm has_side_effects \"syscall\", \"={rax},{rax},{rdi},~{rcx},~{r11},~{memory}\" %syscall_num, %result_64 : (i64, i64) -> i64"; Results = ["%ignored", Integer I64] }
+            // Unreachable - exit never returns
+            { Text = "llvm.unreachable"; Results = [] }
+        ]
+
+        let startFunc: MLIRFunc = {
+            Name = "_start"
+            Parameters = []  // _start takes no arguments (reads from stack)
+            ReturnType = Unit  // _start never returns (calls exit syscall)
+            Blocks = [{
+                Label = "entry"
+                Arguments = []
+                Operations = startOps
+            }]
+            Attributes = []
+            IsInternal = false  // _start must be exported as the entry point
+        }
+
+        { zipper with CompletedFunctions = startFunc :: zipper.CompletedFunctions }
 
     // ─────────────────────────────────────────────────────────────────
     // Extraction - Comonad extract: collapse accumulated context to final value

@@ -253,6 +253,50 @@ STOP. You're not using the zipper correctly. The information is available.
 
 ---
 
+## Mistake 11: Wrong Binding Layer (BCL Stubs for Platform Operations)
+
+This antipattern was identified in January 2026 during the unified binding architecture analysis.
+
+```fsharp
+// WRONG - Platform.Bindings with BCL stubs
+module Platform.Bindings =
+    let writeBytes fd buffer count : int = Unchecked.defaultof<int>  // BCL!
+    let readBytes fd buffer maxCount : int = Unchecked.defaultof<int>
+```
+
+**Why this is wrong**:
+1. `Unchecked.defaultof` is a BCL function - violates BCL-free principle
+2. These are FNCS intrinsics (`Sys.write`, `Sys.read`) - Alloy shouldn't re-declare them
+3. Creates semantic vacuum - PSG shows stub body, not meaningful operation
+4. Forces Alex to do name-based dispatch ("if Platform.Bindings.writeBytes then...")
+
+**The Three-Layer Architecture**:
+
+| Layer | What | Mechanism |
+|-------|------|-----------|
+| Layer 1 | FNCS Intrinsics | FNCS emits directly - `Sys.write`, `NativePtr.set` |
+| Layer 2 | Binding Libraries | Quotation semantic carriers - Farscape-generated |
+| Layer 3 | User Code | Uses Layer 1 & 2 - Alloy, applications |
+
+**The Fix**:
+```fsharp
+// RIGHT - Alloy uses FNCS intrinsics
+module Console =
+    let Write (s: string) =
+        let ptr = String.asPtr s
+        let len = String.length s
+        Sys.write 1 ptr len |> ignore  // FNCS intrinsic, not stub
+```
+
+**When to use each layer**:
+- **Layer 1 (Intrinsics)**: Operations native to the type universe - `Sys.*`, `NativePtr.*`
+- **Layer 2 (Binding Libraries)**: External bindings with rich metadata - GTK, CMSIS
+- **Layer 3 (User Code)**: Everything else - uses Layer 1 & 2
+
+**See**: Firefly `binding_architecture_unified` memory for complete architecture.
+
+---
+
 ## The Acid Test
 
 Before committing any change, ask:

@@ -20,6 +20,9 @@ open Alex.Traversal.FNCSTransfer
 // FNCS Project module - unified project loading
 open FSharp.Native.Compiler.Project
 
+// FNCS Phase emission configuration
+module FNCSPhaseConfig = FSharp.Native.Compiler.Checking.Native.Infrastructure.PhaseConfig
+
 // Import specific types to avoid shadowing Result.Error
 type FNCSDiagnosticSeverity = FSharp.Native.Compiler.Checking.Native.SemanticGraph.NativeDiagnosticSeverity
 module FNCSSemanticGraph = FSharp.Native.Compiler.Checking.Native.SemanticGraph
@@ -86,7 +89,7 @@ let parsePlatform (triple: string) : TargetPlatform =
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Generate MLIR from a project using FNCS ProjectChecker
-let generateMLIRFromFNCS (projectResult: ProjectCheckResult) (targetTriple: string) : MLIRGenerationResult =
+let generateMLIRFromFNCS (projectResult: ProjectCheckResult) (targetTriple: string) (isFreestanding: bool) : MLIRGenerationResult =
     // Check for parse errors first
     if not (Map.isEmpty projectResult.ParseErrors) then
         let errors =
@@ -154,7 +157,7 @@ let generateMLIRFromFNCS (projectResult: ProjectCheckResult) (targetTriple: stri
                     printfn "  [%d] %s (children: %A)" id kindStr childIds
 
             // Generate MLIR via witness-based transfer (codata architecture)
-            let mlirContent, transferErrors = transferGraphWithDiagnostics graph
+            let mlirContent, transferErrors = transferGraphWithDiagnostics graph isFreestanding
 
             printfn "[FNCS] Transfer complete"
 
@@ -171,9 +174,9 @@ let generateMLIRFromFNCS (projectResult: ProjectCheckResult) (targetTriple: stri
             }
 
 /// Generate MLIR from a project - fallback to placeholder if FNCS fails
-let generateMLIR (projectResult: ProjectCheckResult) (targetTriple: string) : MLIRGenerationResult =
+let generateMLIR (projectResult: ProjectCheckResult) (targetTriple: string) (isFreestanding: bool) : MLIRGenerationResult =
     try
-        generateMLIRFromFNCS projectResult targetTriple
+        generateMLIRFromFNCS projectResult targetTriple isFreestanding
     with ex ->
         printfn "[FNCS] Exception during FNCS processing: %s" ex.Message
         printfn "[FNCS] Falling back to placeholder..."
@@ -211,6 +214,17 @@ let compileProject (options: CompilationOptions) : int =
     printfn "Firefly Compiler v0.5.0 (FNCS)"
     printfn "=============================="
     printfn ""
+
+    // Enable FNCS phase emission if keeping intermediates
+    // Must be done BEFORE type checking to capture phases
+    if options.KeepIntermediates || options.EmitMLIROnly || options.EmitLLVMOnly then
+        let projectDir = Path.GetDirectoryName(options.ProjectPath)
+        let buildDir = Path.Combine(projectDir, "target")
+        let intermediatesDir = Path.Combine(buildDir, "intermediates")
+        Directory.CreateDirectory(intermediatesDir) |> ignore
+        FNCSPhaseConfig.enableAllPhases intermediatesDir
+        printfn "[FNCS] Phase emission enabled → %s" intermediatesDir
+        printfn ""
 
     // Step 1: Load and check project via FNCS ProjectChecker
     let projectResult =
@@ -257,9 +271,10 @@ let compileProject (options: CompilationOptions) : int =
                 None
 
         // Step 2: Generate MLIR via FNCS
+        let isFreestanding = (outputKind = Core.Types.MLIRTypes.OutputKind.Freestanding)
         let mlirResult =
             Core.Timing.timePhase "MLIR" "MLIR Generation" (fun () ->
-                generateMLIR result targetTriple)
+                generateMLIR result targetTriple isFreestanding)
 
         printfn "[MLIR] Collected %d functions:" mlirResult.CollectedFunctions.Length
         for funcInfo in mlirResult.CollectedFunctions do

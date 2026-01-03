@@ -96,16 +96,29 @@ let witnessExit (platform: TargetPlatform) (prim: PlatformPrimitive) (zipper: ML
 // ===================================================================
 
 /// Register all process bindings for all platforms
-/// Entry points match Platform.Bindings function names
+/// Entry points match Platform.Bindings function names AND FNCS Sys intrinsics
 let registerBindings () =
-    // Register for Linux
+    // Register for Linux x86_64
     PlatformDispatch.register Linux X86_64 "exit"
         (fun prim zipper -> witnessExit TargetPlatform.linux_x86_64 prim zipper)
+    // FNCS Sys intrinsic - same implementation as exit
+    PlatformDispatch.register Linux X86_64 "Sys.exit"
+        (fun prim zipper -> witnessExit TargetPlatform.linux_x86_64 prim zipper)
+
+    // Register for Linux ARM64
     PlatformDispatch.register Linux ARM64 "exit"
         (fun prim zipper -> witnessExit { TargetPlatform.linux_x86_64 with Arch = ARM64 } prim zipper)
+    PlatformDispatch.register Linux ARM64 "Sys.exit"
+        (fun prim zipper -> witnessExit { TargetPlatform.linux_x86_64 with Arch = ARM64 } prim zipper)
 
-    // Register for macOS
+    // Register for macOS x86_64
     PlatformDispatch.register MacOS X86_64 "exit"
         (fun prim zipper -> witnessExit TargetPlatform.macos_x86_64 prim zipper)
+    PlatformDispatch.register MacOS X86_64 "Sys.exit"
+        (fun prim zipper -> witnessExit TargetPlatform.macos_x86_64 prim zipper)
+
+    // Register for macOS ARM64
     PlatformDispatch.register MacOS ARM64 "exit"
+        (fun prim zipper -> witnessExit TargetPlatform.macos_arm64 prim zipper)
+    PlatformDispatch.register MacOS ARM64 "Sys.exit"
         (fun prim zipper -> witnessExit TargetPlatform.macos_arm64 prim zipper)

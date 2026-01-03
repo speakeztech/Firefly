@@ -156,24 +156,45 @@ let witnessReadBytes (platform: TargetPlatform) (prim: PlatformPrimitive) (zippe
 // ===================================================================
 
 /// Register all console bindings for all platforms
-/// Entry points match Platform.Bindings function names
+/// Entry points match Platform.Bindings function names AND FNCS Sys intrinsics
 let registerBindings () =
-    // Register for Linux
+    // Register for Linux x86_64
     PlatformDispatch.register Linux X86_64 "writeBytes"
         (fun prim zipper -> witnessWriteBytes TargetPlatform.linux_x86_64 prim zipper)
     PlatformDispatch.register Linux X86_64 "readBytes"
         (fun prim zipper -> witnessReadBytes TargetPlatform.linux_x86_64 prim zipper)
+    // FNCS Sys intrinsics - same implementation as writeBytes/readBytes
+    PlatformDispatch.register Linux X86_64 "Sys.write"
+        (fun prim zipper -> witnessWriteBytes TargetPlatform.linux_x86_64 prim zipper)
+    PlatformDispatch.register Linux X86_64 "Sys.read"
+        (fun prim zipper -> witnessReadBytes TargetPlatform.linux_x86_64 prim zipper)
+
+    // Register for Linux ARM64
     PlatformDispatch.register Linux ARM64 "writeBytes"
         (fun prim zipper -> witnessWriteBytes { TargetPlatform.linux_x86_64 with Arch = ARM64 } prim zipper)
     PlatformDispatch.register Linux ARM64 "readBytes"
         (fun prim zipper -> witnessReadBytes { TargetPlatform.linux_x86_64 with Arch = ARM64 } prim zipper)
+    PlatformDispatch.register Linux ARM64 "Sys.write"
+        (fun prim zipper -> witnessWriteBytes { TargetPlatform.linux_x86_64 with Arch = ARM64 } prim zipper)
+    PlatformDispatch.register Linux ARM64 "Sys.read"
+        (fun prim zipper -> witnessReadBytes { TargetPlatform.linux_x86_64 with Arch = ARM64 } prim zipper)
 
-    // Register for macOS
+    // Register for macOS x86_64
     PlatformDispatch.register MacOS X86_64 "writeBytes"
         (fun prim zipper -> witnessWriteBytes TargetPlatform.macos_x86_64 prim zipper)
     PlatformDispatch.register MacOS X86_64 "readBytes"
         (fun prim zipper -> witnessReadBytes TargetPlatform.macos_x86_64 prim zipper)
+    PlatformDispatch.register MacOS X86_64 "Sys.write"
+        (fun prim zipper -> witnessWriteBytes TargetPlatform.macos_x86_64 prim zipper)
+    PlatformDispatch.register MacOS X86_64 "Sys.read"
+        (fun prim zipper -> witnessReadBytes TargetPlatform.macos_x86_64 prim zipper)
+
+    // Register for macOS ARM64
     PlatformDispatch.register MacOS ARM64 "writeBytes"
         (fun prim zipper -> witnessWriteBytes TargetPlatform.macos_arm64 prim zipper)
     PlatformDispatch.register MacOS ARM64 "readBytes"
+        (fun prim zipper -> witnessReadBytes TargetPlatform.macos_arm64 prim zipper)
+    PlatformDispatch.register MacOS ARM64 "Sys.write"
+        (fun prim zipper -> witnessWriteBytes TargetPlatform.macos_arm64 prim zipper)
+    PlatformDispatch.register MacOS ARM64 "Sys.read"
         (fun prim zipper -> witnessReadBytes TargetPlatform.macos_arm64 prim zipper)

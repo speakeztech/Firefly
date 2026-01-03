@@ -183,6 +183,7 @@ let witnessLiteral (lit: LiteralValue) (zipper: MLIRZipper) : MLIRZipper * Trans
 let isBuiltInOperator (name: string) =
     name.StartsWith("op_") ||
     name.StartsWith("NativePtr.") ||
+    name.StartsWith("Sys.") ||
     name.StartsWith("Unchecked.") ||
     List.contains name ["not"; "int"; "int8"; "int16"; "int32"; "int64";
                         "byte"; "uint8"; "uint16"; "uint32"; "uint64";
@@ -368,7 +369,7 @@ let witnessApplication (funcNodeId: NodeId) (argNodeIds: NodeId list) (returnTyp
                 | "getCurrentTicks" -> 0
                 | "sleep" -> 1
                 | _ -> 0  // Unknown - assume fully applied
-            printfn "[DEBUG PB] %s: have %d args, need %d" entryPoint (List.length argSSAs) expectedParamCount
+            // Debug: %s has %d/%d args - use intermediates for inspection
             
             if List.length argSSAs < expectedParamCount then
                 // Partial application - return a marker for later
@@ -380,7 +381,7 @@ let witnessApplication (funcNodeId: NodeId) (argNodeIds: NodeId list) (returnTyp
                 let marker = 
                     if argsEncoded.Length > 0 then sprintf "$platform:%s:%s" entryPoint argsEncoded
                     else sprintf "$platform:%s" entryPoint
-                printfn "[DEBUG PARTIAL PLATFORM] %s has %d args, expected %d. Creating marker: %s" entryPoint (List.length argSSAs) expectedParamCount marker
+                ()
                 zipper, TRValue (marker, "func")
             else
                 // All arguments present - call the platform binding
@@ -431,8 +432,42 @@ let witnessApplication (funcNodeId: NodeId) (argNodeIds: NodeId list) (returnTyp
                 let storeText = sprintf "llvm.store %s, %s : i8, !llvm.ptr" valSSA gepSSA
                 let zipper''' = MLIRZipper.witnessVoidOp storeText zipper''
                 zipper''', TRVoid
+            | "NativePtr.stackalloc", [(countSSA, _)] ->
+                // int -> nativeptr<'T> (stack allocation)
+                // Allocate 'count' elements of the element type on the stack
+                // The return type tells us the element type: nativeptr<'T> -> T
+                let elemType =
+                    match returnType with
+                    | NativeType.TNativePtr elemTy -> Serialize.mlirType (mapType elemTy)
+                    | _ -> "i8"  // Default to byte if type unknown
+                let ssaName, zipper' = MLIRZipper.yieldSSA zipper
+                // Convert count from i32 to i64 for llvm.alloca
+                let countSSA64, zipper'' = MLIRZipper.yieldSSA zipper'
+                let extText = sprintf "%s = arith.extsi %s : i32 to i64" countSSA64 countSSA
+                let zipper''' = MLIRZipper.witnessOpWithResult extText countSSA64 (Integer I64) zipper''
+                // Emit llvm.alloca
+                let allocaText = sprintf "%s = llvm.alloca %s x %s : (i64) -> !llvm.ptr" ssaName countSSA64 elemType
+                let zipper4 = MLIRZipper.witnessOpWithResult allocaText ssaName Pointer zipper'''
+                zipper4, TRValue (ssaName, "!llvm.ptr")
+
+            // ═══════════════════════════════════════════════════════════════════════════
+            // Sys intrinsics - Dispatch to platform bindings layer
+            // Platform-specific MLIR (syscall numbers, ABIs) is DATA in Bindings
+            // ═══════════════════════════════════════════════════════════════════════════
+            | intrinsicName, argSSAs when intrinsicName.StartsWith("Sys.") ->
+                // Extract the entry point (e.g., "Sys.write" -> "Sys.write")
+                // Map argument SSAs to (ssa, type) pairs for PlatformPrimitive
+                let argSSAsWithTypes =
+                    argSSAs |> List.map (fun (ssa, tyStr) -> (ssa, Serialize.deserializeType tyStr))
+                // Dispatch to platform bindings - all platform-specific logic is there
+                witnessPlatformBinding intrinsicName argSSAsWithTypes returnType zipper
+
+            | intrinsicName, [] ->
+                // TypeApp or partial application - return marker for subsequent application
+                // This handles polymorphic intrinsics (e.g., stackalloc<byte>) before value args are applied
+                zipper, TRValue ("$intrinsic:" + intrinsicName, "func")
             | _ ->
-                // Unknown intrinsic - report error
+                // Unknown intrinsic with args - report error
                 zipper, TRError (sprintf "Unknown intrinsic: %s with %d args" intrinsicName (List.length argSSAs))
 
         | SemanticKind.VarRef (name, defId) ->
@@ -606,8 +641,7 @@ let witnessApplication (funcNodeId: NodeId) (argNodeIds: NodeId list) (returnTyp
                         zipper, TRError (sprintf "Invalid partial marker: %s" funcSSA)
                 // Handle partial platform binding: $platform:entryPoint:arg0:type0:arg1:type1:...
                 elif funcSSA.StartsWith("$platform:") then
-                    printfn "[DEBUG CURRIED PLATFORM] funcSSA marker: %s" funcSSA
-                    printfn "[DEBUG CURRIED PLATFORM] Adding %d new args" (List.length argSSAs)
+                    ()
                     let parts = funcSSA.Split(':')
                     if parts.Length >= 2 then
                         let entryPoint = parts.[1]
@@ -758,7 +792,7 @@ let witnessNode (graph: SemanticGraph) (node: SemanticNode) (zipper: MLIRZipper)
     // Function applications
     | SemanticKind.Application (funcId, argIds) ->
         // DEBUG: Trace Application processing  
-        printfn "[DEBUG APP] Node %d, focus: %A" (NodeId.value node.Id) zipper.Focus
+        ()
         let zipper', result = witnessApplication funcId argIds node.Type graph zipper
         match result with
         | TRValue (ssa, ty) ->
@@ -770,7 +804,7 @@ let witnessNode (graph: SemanticGraph) (node: SemanticNode) (zipper: MLIRZipper)
     | SemanticKind.Sequential nodeIds ->
         // DEBUG: Trace Sequential processing
         let nodeIdStrs = nodeIds |> List.map (fun nid -> string (NodeId.value nid)) |> String.concat ", "
-        printfn "[DEBUG SEQ] Node %d has %d children: [%s], focus: %A" (NodeId.value node.Id) (List.length nodeIds) nodeIdStrs zipper.Focus
+        ()
         let zipper', result = witnessSequential nodeIds zipper
         // Bind result to this node for TypeAnnotation to recall
         match result with
@@ -942,7 +976,7 @@ let witnessNode (graph: SemanticGraph) (node: SemanticNode) (zipper: MLIRZipper)
     // Type annotations - pass through the inner expression's value
     | SemanticKind.TypeAnnotation (exprId, _annotatedType) ->
         // DEBUG: Trace TypeAnnotation processing
-        printfn "[DEBUG TYANN] Node %d, expr: %d, focus: %A" (NodeId.value node.Id) (NodeId.value exprId) zipper.Focus
+        ()
         // Type annotation doesn't generate code - just forward the inner expression's value
         match MLIRZipper.recallNodeSSA (string (NodeId.value exprId)) zipper with
         | Some (ssa, ty) ->
@@ -1340,7 +1374,8 @@ let findEntryPointLambdaIds (graph: SemanticGraph) : Set<int> =
 /// Transfer an entire SemanticGraph to MLIR
 /// Uses post-order traversal so children are witnessed before parents
 /// Lambda parameters are pre-bound before their bodies are processed
-let transferGraph (graph: SemanticGraph) : string =
+/// isFreestanding: if true, adds a _start wrapper that calls main and then exit
+let transferGraph (graph: SemanticGraph) (isFreestanding: bool) : string =
     // Initialize platform bindings
     Alex.Bindings.Console.ConsoleBindings.registerBindings()
     Alex.Bindings.Process.ProcessBindings.registerBindings()
@@ -1353,7 +1388,7 @@ let transferGraph (graph: SemanticGraph) : string =
     let initialZipper = MLIRZipper.createWithEntryPoints entryPointLambdaIds
 
     // Use foldWithLambdaPreBind to bind params before body processing
-    let finalZipper =
+    let traversedZipper =
         Traversal.foldWithLambdaPreBind
             preBindLambdaParams
             (fun zipper node ->
@@ -1362,11 +1397,20 @@ let transferGraph (graph: SemanticGraph) : string =
             initialZipper
             graph
 
+    // For freestanding binaries, add a _start wrapper that calls main and exit syscall
+    // This is necessary because freestanding binaries can't return from main
+    let finalZipper =
+        if isFreestanding then
+            MLIRZipper.addFreestandingEntryPoint traversedZipper
+        else
+            traversedZipper
+
     // Extract final MLIR - entry point Lambda is named main
     MLIRZipper.extract finalZipper
 
 /// Transfer a graph and return both MLIR text and any errors
-let transferGraphWithDiagnostics (graph: SemanticGraph) : string * string list =
+/// isFreestanding: if true, adds a _start wrapper that calls main and then exit
+let transferGraphWithDiagnostics (graph: SemanticGraph) (isFreestanding: bool) : string * string list =
     // Initialize platform bindings
     Alex.Bindings.Console.ConsoleBindings.registerBindings()
     Alex.Bindings.Process.ProcessBindings.registerBindings()
@@ -1382,7 +1426,7 @@ let transferGraphWithDiagnostics (graph: SemanticGraph) : string * string list =
     let mutable errors = []
 
     // Use foldWithLambdaPreBind to bind params before body processing
-    let finalZipper =
+    let traversedZipper =
         Traversal.foldWithLambdaPreBind
             preBindLambdaParams
             (fun zipper node ->
@@ -1395,6 +1439,13 @@ let transferGraphWithDiagnostics (graph: SemanticGraph) : string * string list =
                     zipper')
             initialZipper
             graph
+
+    // For freestanding binaries, add a _start wrapper that calls main and exit syscall
+    let finalZipper =
+        if isFreestanding then
+            MLIRZipper.addFreestandingEntryPoint traversedZipper
+        else
+            traversedZipper
 
     // Extract final MLIR - entry point Lambda is named main
     MLIRZipper.extract finalZipper, List.rev errors
