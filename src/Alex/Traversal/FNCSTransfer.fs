@@ -194,6 +194,100 @@ let isBuiltInOperator (name: string) =
                         "Array.zeroCreate"; "Array.length"; "Array.get"; "Array.set";
                         "ignore"; "raise"; "reraise"; "typeof"; "sizeof"; "nameof"]
 
+
+/// Emit a primitive binary operator as arith operation
+/// Returns Some (resultSSA, resultType, zipper') if the operator is recognized
+/// Returns None if this is not a primitive binary operator
+let tryEmitPrimitiveBinaryOp (opName: string) (arg1SSA: string) (arg1Type: string) (arg2SSA: string) (arg2Type: string) (zipper: MLIRZipper) : (string * string * MLIRZipper) option =
+    // Only handle integer operands for now
+    let isIntType t = t = "i8" || t = "i16" || t = "i32" || t = "i64"
+    let isFloatType t = t = "f32" || t = "f64"
+    
+    // Both arguments must be same type for arith ops
+    if arg1Type <> arg2Type then None
+    elif not (isIntType arg1Type || isFloatType arg1Type) then None
+    else
+        let resultSSA, zipper' = MLIRZipper.yieldSSA zipper
+        
+        // Map operator name to arith operation
+        let arithOp, resultType =
+            match opName, isIntType arg1Type with
+            // Integer arithmetic
+            | "op_Addition", true -> Some (sprintf "%s = arith.addi %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            | "op_Subtraction", true -> Some (sprintf "%s = arith.subi %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            | "op_Multiply", true -> Some (sprintf "%s = arith.muli %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            | "op_Division", true -> Some (sprintf "%s = arith.divsi %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            | "op_Modulus", true -> Some (sprintf "%s = arith.remsi %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            // Integer comparison (result is i1 = bool)
+            | "op_LessThan", true -> Some (sprintf "%s = arith.cmpi slt, %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), "i1"
+            | "op_LessThanOrEqual", true -> Some (sprintf "%s = arith.cmpi sle, %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), "i1"
+            | "op_GreaterThan", true -> Some (sprintf "%s = arith.cmpi sgt, %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), "i1"
+            | "op_GreaterThanOrEqual", true -> Some (sprintf "%s = arith.cmpi sge, %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), "i1"
+            | "op_Equality", true -> Some (sprintf "%s = arith.cmpi eq, %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), "i1"
+            | "op_Inequality", true -> Some (sprintf "%s = arith.cmpi ne, %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), "i1"
+            // Bitwise operations
+            | "op_BitwiseAnd", true -> Some (sprintf "%s = arith.andi %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            | "op_BitwiseOr", true -> Some (sprintf "%s = arith.ori %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            | "op_ExclusiveOr", true -> Some (sprintf "%s = arith.xori %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            | "op_LeftShift", true -> Some (sprintf "%s = arith.shli %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            | "op_RightShift", true -> Some (sprintf "%s = arith.shrsi %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            // Float arithmetic  
+            | "op_Addition", false -> Some (sprintf "%s = arith.addf %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            | "op_Subtraction", false -> Some (sprintf "%s = arith.subf %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            | "op_Multiply", false -> Some (sprintf "%s = arith.mulf %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            | "op_Division", false -> Some (sprintf "%s = arith.divf %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), arg1Type
+            // Float comparison
+            | "op_LessThan", false -> Some (sprintf "%s = arith.cmpf olt, %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), "i1"
+            | "op_LessThanOrEqual", false -> Some (sprintf "%s = arith.cmpf ole, %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), "i1"
+            | "op_GreaterThan", false -> Some (sprintf "%s = arith.cmpf ogt, %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), "i1"
+            | "op_GreaterThanOrEqual", false -> Some (sprintf "%s = arith.cmpf oge, %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), "i1"
+            | "op_Equality", false -> Some (sprintf "%s = arith.cmpf oeq, %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), "i1"
+            | "op_Inequality", false -> Some (sprintf "%s = arith.cmpf one, %s, %s : %s" resultSSA arg1SSA arg2SSA arg1Type), "i1"
+            | _ -> None, ""
+        
+        match arithOp with
+        | Some op ->
+            let zipper'' = MLIRZipper.witnessOpWithResult op resultSSA (Serialize.deserializeType resultType) zipper'
+            Some (resultSSA, resultType, zipper'')
+        | None -> None
+
+/// Emit a primitive unary operator as arith operation
+let tryEmitPrimitiveUnaryOp (opName: string) (argSSA: string) (argType: string) (zipper: MLIRZipper) : (string * string * MLIRZipper) option =
+    let isIntType t = t = "i8" || t = "i16" || t = "i32" || t = "i64"
+    let isBoolType t = t = "i1"
+    
+    let resultSSA, zipper' = MLIRZipper.yieldSSA zipper
+    
+    match opName, isIntType argType, isBoolType argType with
+    // Boolean not
+    | "not", _, true -> 
+        // XOR with true (1) to flip the bit
+        let trueSSA, zipper'' = MLIRZipper.yieldSSA zipper'
+        let trueOp = sprintf "%s = arith.constant true" trueSSA
+        let zipper''' = MLIRZipper.witnessOpWithResult trueOp trueSSA (Integer I1) zipper''
+        let notOp = sprintf "%s = arith.xori %s, %s : i1" resultSSA argSSA trueSSA
+        let zipper4 = MLIRZipper.witnessOpWithResult notOp resultSSA (Integer I1) zipper'''
+        Some (resultSSA, "i1", zipper4)
+    // Integer negation
+    | "op_UnaryNegation", true, _ ->
+        // Subtract from 0
+        let zeroSSA, zipper'' = MLIRZipper.yieldSSA zipper'
+        let zeroOp = sprintf "%s = arith.constant 0 : %s" zeroSSA argType
+        let zipper''' = MLIRZipper.witnessOpWithResult zeroOp zeroSSA (Serialize.deserializeType argType) zipper''
+        let negOp = sprintf "%s = arith.subi %s, %s : %s" resultSSA zeroSSA argSSA argType
+        let zipper4 = MLIRZipper.witnessOpWithResult negOp resultSSA (Serialize.deserializeType argType) zipper'''
+        Some (resultSSA, argType, zipper4)
+    // Bitwise not
+    | "op_OnesComplement", true, _ ->
+        // XOR with all 1s (-1 in two's complement)
+        let onesSSA, zipper'' = MLIRZipper.yieldSSA zipper'
+        let onesOp = sprintf "%s = arith.constant -1 : %s" onesSSA argType
+        let zipper''' = MLIRZipper.witnessOpWithResult onesOp onesSSA (Serialize.deserializeType argType) zipper''
+        let notOp = sprintf "%s = arith.xori %s, %s : %s" resultSSA argSSA onesSSA argType
+        let zipper4 = MLIRZipper.witnessOpWithResult notOp resultSSA (Serialize.deserializeType argType) zipper'''
+        Some (resultSSA, argType, zipper4)
+    | _ -> None
+
 /// Witness a variable reference (recall its SSA from prior observation)
 /// INVARIANT: FNCS guarantees definitions are traversed before uses
 /// If this fails, it's an FNCS graph construction bug - hard stop with diagnostic
@@ -643,9 +737,33 @@ let witnessApplication (funcNodeId: NodeId) (argNodeIds: NodeId list) (returnTyp
                     let ssaName, zipper' = MLIRZipper.witnessCall name argSSAs argTypes (mapType returnType) zipper
                     zipper', TRValue (ssaName, Serialize.mlirType (mapType returnType))
             | None ->
-                // No definition ID - use the name directly (may be external)
-                let ssaName, zipper' = MLIRZipper.witnessCall name argSSAs argTypes (mapType returnType) zipper
-                zipper', TRValue (ssaName, Serialize.mlirType (mapType returnType))
+                // No definition ID - check if this is a primitive operator
+                // Primitive operators like +, -, *, / on integers/floats compile to arith ops
+                let argSSAsWithTypes = List.zip argSSAs (argTypes |> List.map Serialize.mlirType)
+                
+                // Try binary operator first (most common case)
+                match argSSAsWithTypes with
+                | [(arg1SSA, arg1Type); (arg2SSA, arg2Type)] ->
+                    match tryEmitPrimitiveBinaryOp name arg1SSA arg1Type arg2SSA arg2Type zipper with
+                    | Some (resultSSA, resultType, zipper') ->
+                        zipper', TRValue (resultSSA, resultType)
+                    | None ->
+                        // Not a recognized primitive binary op - fall back to external call
+                        let ssaName, zipper' = MLIRZipper.witnessCall name argSSAs argTypes (mapType returnType) zipper
+                        zipper', TRValue (ssaName, Serialize.mlirType (mapType returnType))
+                | [(argSSA, argType)] ->
+                    // Try unary operator
+                    match tryEmitPrimitiveUnaryOp name argSSA argType zipper with
+                    | Some (resultSSA, resultType, zipper') ->
+                        zipper', TRValue (resultSSA, resultType)
+                    | None ->
+                        // Not a recognized primitive unary op - fall back to external call
+                        let ssaName, zipper' = MLIRZipper.witnessCall name argSSAs argTypes (mapType returnType) zipper
+                        zipper', TRValue (ssaName, Serialize.mlirType (mapType returnType))
+                | _ ->
+                    // Not a binary or unary operator pattern - fall back to external call
+                    let ssaName, zipper' = MLIRZipper.witnessCall name argSSAs argTypes (mapType returnType) zipper
+                    zipper', TRValue (ssaName, Serialize.mlirType (mapType returnType))
 
         | SemanticKind.Lambda _ ->
             // Lambda application - for now, treat as error (needs closure support)
@@ -1147,8 +1265,22 @@ let witnessNode (graph: SemanticGraph) (node: SemanticNode) (zipper: MLIRZipper)
                     | NativeType.TApp(tycon, _) when tycon.Name = "unit" -> None
                     | ty -> Some (mapType ty)
                 
-                // Witness the SCF if operation
-                let resultSSAOpt, zipper' = MLIRZipper.witnessSCFIf condSSA thenOps elseOps resultType zipper
+                // Get the result SSA values from the then/else branch expressions
+                // These are the values to yield from each branch
+                let thenResultSSA =
+                    match MLIRZipper.recallNodeSSA (string (NodeId.value thenId)) zipper with
+                    | Some (ssa, _) -> Some ssa
+                    | None -> None
+                let elseResultSSA =
+                    match elseIdOpt with
+                    | Some elseId ->
+                        match MLIRZipper.recallNodeSSA (string (NodeId.value elseId)) zipper with
+                        | Some (ssa, _) -> Some ssa
+                        | None -> None
+                    | None -> None
+                
+                // Witness the SCF if operation with yield values
+                let resultSSAOpt, zipper' = MLIRZipper.witnessSCFIf condSSA thenOps thenResultSSA elseOps elseResultSSA resultType zipper
                 
                 // Clear pending regions
                 let zipper'' = MLIRZipper.clearPendingRegions nodeIdStr zipper'

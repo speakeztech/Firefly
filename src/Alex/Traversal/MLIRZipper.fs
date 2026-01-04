@@ -976,46 +976,62 @@ module MLIRZipper =
 
     /// Witness an scf.if operation with optional else branch
     /// Returns the result SSA (if resultType is Some) and updated zipper
+    /// thenResultSSA/elseResultSSA are the SSA values to yield from each branch
     let witnessSCFIf
             (condSSA: string)
             (thenOps: string list)
+            (thenResultSSA: string option)
             (elseOps: string list option)
+            (elseResultSSA: string option)
             (resultType: MLIRType option)
             (zipper: MLIRZipper) : string option * MLIRZipper =
         match resultType with
         | None ->
-            // Statement form - no result
+            // Statement form - no result, just scf.yield at end of each branch
             let indent = "      "
             let thenRegion =
-                thenOps
-                |> List.map (fun op -> indent + op)
-                |> String.concat "\n"
+                let bodyOps = thenOps |> List.map (fun op -> indent + op) |> String.concat "\n"
+                if bodyOps = "" then
+                    sprintf "%sscf.yield" indent
+                else
+                    sprintf "%s\n%sscf.yield" bodyOps indent
             let elseRegion =
                 match elseOps with
                 | Some ops when not (List.isEmpty ops) ->
                     let elseContent = ops |> List.map (fun op -> indent + op) |> String.concat "\n"
-                    sprintf " else {\n%s\n    }" elseContent
-                | _ -> ""
+                    sprintf " else {\n%s\n%sscf.yield\n    }" elseContent indent
+                | Some _ ->
+                    sprintf " else {\n%sscf.yield\n    }" indent
+                | None -> ""
             let text = sprintf "scf.if %s {\n%s\n    }%s" condSSA thenRegion elseRegion
             None, witnessVoidOp text zipper
 
         | Some ty ->
-            // Expression form - yields a value
+            // Expression form - yields a value from each branch
             let ssaName, zipper' = yieldSSA zipper
             let tyStr = Serialize.mlirType ty
             let indent = "      "
+            
+            // Get the yield values - use provided SSAs or generate a default
+            let thenYieldVal = thenResultSSA |> Option.defaultValue "%undef_then"
+            let elseYieldVal = elseResultSSA |> Option.defaultValue "%undef_else"
+            
             let thenRegion =
                 let bodyOps = thenOps |> List.map (fun op -> indent + op) |> String.concat "\n"
-                // Last op should provide the yield value - we need to extract it
-                // For now, assume the ops end with a yield or we use the last SSA
-                sprintf "%s\n%sscf.yield %%TODO_then_val : %s" bodyOps indent tyStr
+                if bodyOps = "" then
+                    sprintf "%sscf.yield %s : %s" indent thenYieldVal tyStr
+                else
+                    sprintf "%s\n%sscf.yield %s : %s" bodyOps indent thenYieldVal tyStr
             let elseRegion =
                 match elseOps with
                 | Some ops when not (List.isEmpty ops) ->
                     let bodyOps = ops |> List.map (fun op -> indent + op) |> String.concat "\n"
-                    sprintf " else {\n%s\n%sscf.yield %%TODO_else_val : %s\n    }" bodyOps indent tyStr
-                | _ ->
-                    sprintf " else {\n%sscf.yield %%TODO_else_val : %s\n    }" indent tyStr
+                    sprintf " else {\n%s\n%sscf.yield %s : %s\n    }" bodyOps indent elseYieldVal tyStr
+                | Some _ ->
+                    sprintf " else {\n%sscf.yield %s : %s\n    }" indent elseYieldVal tyStr
+                | None ->
+                    // No else branch but expression form - need a default else
+                    sprintf " else {\n%sscf.yield %s : %s\n    }" indent elseYieldVal tyStr
             let text = sprintf "%s = scf.if %s -> (%s) {\n%s\n    }%s" ssaName condSSA tyStr thenRegion elseRegion
             Some ssaName, witnessOpWithResult text ssaName ty zipper'
 
@@ -1079,7 +1095,6 @@ module MLIRZipper =
                     let ssa, z' = yieldSSA z
                     (accSSAs @ [ssa], z')
                 ) ([], zipper)
-            // TODO: Properly bind the result SSAs
             resultSSAs, witnessVoidOp text zipper'
 
     /// Witness an scf.while operation with iter_args support.

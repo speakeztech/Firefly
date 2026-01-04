@@ -297,6 +297,69 @@ module Console =
 
 ---
 
+## Mistake 12: TVar → Pointer Default for Polymorphic Operators
+
+Discovered in January 2026 during SCF dialect work when `concat2` (string concatenation) failed.
+
+```fsharp
+// In mapType:
+| NativeType.TVar _ -> Pointer  // ALL type variables become pointers
+```
+
+```fsharp
+// What happens with op_Addition : 'a -> 'a -> 'a
+let len1 = s1.Length    // Type: int (i64)
+let len2 = s2.Length    // Type: int (i64)
+let total = len1 + len2 // Type: 'a -> 'a -> 'a instantiated to int
+```
+
+**The Problem**:
+1. `op_Addition` has polymorphic type `'a -> 'a -> 'a` in PSG
+2. When curried application creates a Lambda, param types come from `TVar`
+3. `mapType(TVar _) = Pointer` → Lambda gets `(!llvm.ptr, !llvm.ptr) -> !llvm.ptr`
+4. At call site, `i64` values get converted via `inttoptr` to match signature
+5. Result is `!llvm.ptr`, used where `i64` expected → type error
+
+**MLIR Output**:
+```mlir
+// WRONG - Generated lambda for curried (+)
+llvm.func internal @lambda_13(%arg0: !llvm.ptr, %arg1: !llvm.ptr) -> !llvm.ptr {
+    %v0 = llvm.call @op_Addition(%arg0) : (!llvm.ptr) -> !llvm.ptr
+    ...
+}
+
+// Call site converts i64 lengths to pointers
+%v0 = llvm.extractvalue %arg0[1] : !llvm.struct<(!llvm.ptr, i64)>  // i64
+%v1 = llvm.inttoptr %v0 : i64 to !llvm.ptr   // WRONG
+%v2 = llvm.call @lambda_13(%v1, ...) : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr
+```
+
+**Why This Is Wrong**:
+- The SRTP resolution should have resolved `'a` to `int` at this call site
+- Typed tree overlay should carry concrete instantiated types
+- Code generation receives `TVar` instead of resolved concrete type
+
+**The Architectural Fix (NOT YET IMPLEMENTED)**:
+The typed tree (`FSharpExpr`) contains SRTP resolution information. When F# compiler resolves `+` on integers, it knows the concrete instantiation. This information must be captured in the PSG's typed tree overlay and used during code generation.
+
+**Current Workaround** (partial):
+- Added `tryEmitPrimitiveBinaryOp` for when both args are primitive types at a single Application
+- Doesn't help curried applications where Lambda is created with wrong types
+
+**When You See This Pattern**:
+1. Type mismatch involving `!llvm.ptr` and primitive types
+2. `inttoptr`/`ptrtoint` conversions in generated MLIR
+3. Polymorphic operators being treated as external functions
+
+**Investigation Path**:
+1. Check PSG node's `Type` field - is it `TVar` or concrete?
+2. If `TVar`, the typed tree overlay isn't working for this node
+3. Trace to Baker (typed tree zipper) to see where resolution is lost
+
+**See**: `srtp_resolution_findings` memory for typed tree overlay architecture.
+
+---
+
 ## The Acid Test
 
 Before committing any change, ask:
