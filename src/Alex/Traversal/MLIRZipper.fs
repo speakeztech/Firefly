@@ -76,6 +76,25 @@ type MLIRModule = {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// SCF Region Tracking - For structured control flow emission
+// ═══════════════════════════════════════════════════════════════════
+
+/// Kind of SCF region for control flow operations (mirrors fsnative's RegionKind)
+type SCFRegionKind =
+    /// Guard/condition region (while condition, if condition)
+    | GuardRegion
+    /// Body region (while body, for body)
+    | BodyRegion
+    /// Then branch region (if-then)
+    | ThenRegion
+    /// Else branch region (if-then-else)
+    | ElseRegion
+    /// Start expression region (for loop start bound)
+    | StartExprRegion
+    /// End expression region (for loop end bound)
+    | EndExprRegion
+
+// ═══════════════════════════════════════════════════════════════════
 // MLIRZipper Focus - Where we are in the MLIR structure
 // ═══════════════════════════════════════════════════════════════════
 
@@ -134,6 +153,29 @@ type MLIRState = {
     /// Map from function name to its parameter types (MLIR type strings)
     /// Used to generate correct call signatures for both externs and internal functions
     FuncParamTypes: Map<string, string list>
+    /// Stack of operation indices marking the start of SCF regions
+    /// When we enter a control flow node (while, for, if), we push the current ops count
+    /// When we exit, we pop and extract ops since that index as the region content
+    RegionStack: int list
+    /// Pending SCF regions: NodeId -> RegionKind -> accumulated ops text
+    /// Stores captured operations for each region of each control flow node
+    /// Used to build SCF operations after all children are processed
+    PendingRegions: Map<string, Map<SCFRegionKind, string list>>
+    /// Current SCF region being captured: (parentNodeId, regionKind)
+    /// When set, new operations are being accumulated for this region
+    CurrentSCFRegion: (string * SCFRegionKind) option
+    /// Snapshot of VarBindings at SCF loop entry: loopNodeId -> varName -> (ssa, ty)
+    /// Used to determine iter_args by comparing before/after body
+    SCFVarSnapshots: Map<string, Map<string, string * string>>
+    /// Pre-analyzed iter_args for SCF loops: loopNodeId -> list of (varName, initSSA, argSSA, type)
+    /// Set up BEFORE traversing guard/body, so ops use correct iter_arg SSAs from the start
+    SCFIterArgs: Map<string, (string * string * string * string) list>
+    /// Set of NodeIds of mutable bindings whose address is taken
+    /// These need alloca-based memory, not pure SSA
+    AddressedMutables: Set<int>
+    /// Map from mutable binding NodeId to its alloca SSA pointer
+    /// Used by VarRef/Set/AddressOf to access the stack slot
+    MutableAllocas: Map<int, string * string>  // NodeId -> (allocaSSA, elementType)
 }
 
 module MLIRState =
@@ -151,6 +193,13 @@ module MLIRState =
         FuncReturnTypes = Map.empty
         FuncParamCounts = Map.empty
         FuncParamTypes = Map.empty
+        RegionStack = []
+        PendingRegions = Map.empty
+        CurrentSCFRegion = None
+        SCFVarSnapshots = Map.empty
+        SCFIterArgs = Map.empty
+        AddressedMutables = Set.empty
+        MutableAllocas = Map.empty
     }
 
     /// Create state with entry point Lambda IDs
@@ -168,7 +217,73 @@ module MLIRState =
         FuncReturnTypes = Map.empty
         FuncParamCounts = Map.empty
         FuncParamTypes = Map.empty
+        RegionStack = []
+        PendingRegions = Map.empty
+        CurrentSCFRegion = None
+        SCFVarSnapshots = Map.empty
+        SCFIterArgs = Map.empty
+        AddressedMutables = Set.empty
+        MutableAllocas = Map.empty
     }
+
+    /// Create state with entry points and addressed mutables info
+    let createWithAnalysis (entryPointLambdaIds: Set<int>) (addressedMutables: Set<int>) : MLIRState = {
+        SSACounter = 0
+        LabelCounter = 0
+        LambdaCounter = 0
+        EntryPointLambdaIds = entryPointLambdaIds
+        NodeSSA = Map.empty
+        VarBindings = Map.empty
+        StringLiterals = Map.empty
+        ExternalFuncs = Set.empty
+        CurrentFunction = None
+        FuncReturnTypes = Map.empty
+        FuncParamCounts = Map.empty
+        FuncParamTypes = Map.empty
+        RegionStack = []
+        PendingRegions = Map.empty
+        CurrentSCFRegion = None
+        SCFVarSnapshots = Map.empty
+        SCFIterArgs = Map.empty
+        AddressedMutables = addressedMutables
+        MutableAllocas = Map.empty
+    }
+
+    /// Check if a mutable binding needs alloca (its address is taken)
+    let isAddressedMutable (bindingNodeId: int) (state: MLIRState) : bool =
+        Set.contains bindingNodeId state.AddressedMutables
+
+    /// Record an alloca for an addressed mutable binding
+    let recordMutableAlloca (bindingNodeId: int) (allocaSSA: string) (elementType: string) (state: MLIRState) : MLIRState =
+        { state with MutableAllocas = Map.add bindingNodeId (allocaSSA, elementType) state.MutableAllocas }
+
+    /// Look up alloca for an addressed mutable binding
+    let lookupMutableAlloca (bindingNodeId: int) (state: MLIRState) : (string * string) option =
+        Map.tryFind bindingNodeId state.MutableAllocas
+
+    /// Store pre-analyzed iter_args for a loop (called BEFORE guard/body traversal)
+    let storeIterArgs (loopNodeId: string) (iterArgs: (string * string * string * string) list) (state: MLIRState) : MLIRState =
+        { state with SCFIterArgs = Map.add loopNodeId iterArgs state.SCFIterArgs }
+
+    /// Get pre-analyzed iter_args for a loop
+    let getIterArgs (loopNodeId: string) (state: MLIRState) : (string * string * string * string) list option =
+        Map.tryFind loopNodeId state.SCFIterArgs
+
+    /// Clear iter_args for a loop (after SCF op is emitted)
+    let clearIterArgs (loopNodeId: string) (state: MLIRState) : MLIRState =
+        { state with SCFIterArgs = Map.remove loopNodeId state.SCFIterArgs }
+
+    /// Snapshot VarBindings at SCF loop entry
+    let snapshotVarsForLoop (loopNodeId: string) (state: MLIRState) : MLIRState =
+        { state with SCFVarSnapshots = Map.add loopNodeId state.VarBindings state.SCFVarSnapshots }
+
+    /// Get VarBindings snapshot for a loop
+    let getVarSnapshot (loopNodeId: string) (state: MLIRState) : Map<string, string * string> option =
+        Map.tryFind loopNodeId state.SCFVarSnapshots
+
+    /// Clear VarBindings snapshot for a loop
+    let clearVarSnapshot (loopNodeId: string) (state: MLIRState) : MLIRState =
+        { state with SCFVarSnapshots = Map.remove loopNodeId state.SCFVarSnapshots }
     
     /// Record a function's return type
     let recordFuncReturnType (funcName: string) (returnType: string) (state: MLIRState) : MLIRState =
@@ -197,6 +312,54 @@ module MLIRState =
     /// Check if a function is an extern
     let isExtern (funcName: string) (state: MLIRState) : bool =
         Set.contains funcName state.ExternalFuncs
+
+    /// Push a region start marker onto the stack
+    /// The marker is the current ops count (will be used to extract ops since this point)
+    let pushRegion (currentOpsCount: int) (state: MLIRState) : MLIRState =
+        { state with RegionStack = currentOpsCount :: state.RegionStack }
+
+    /// Pop and return the region start marker from the stack
+    let popRegion (state: MLIRState) : int option * MLIRState =
+        match state.RegionStack with
+        | [] -> None, state
+        | startIndex :: rest -> Some startIndex, { state with RegionStack = rest }
+
+    // ─────────────────────────────────────────────────────────────────
+    // SCF Region Tracking - For structured control flow witnessing
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Begin tracking an SCF region - marks the start and sets current region
+    /// Called before processing a region's children (guard, body, then, else)
+    let beginSCFRegionTracking (parentNodeId: string) (regionKind: SCFRegionKind) (currentOpsCount: int) (state: MLIRState) : MLIRState =
+        { state with
+            RegionStack = currentOpsCount :: state.RegionStack
+            CurrentSCFRegion = Some (parentNodeId, regionKind) }
+
+    /// End tracking an SCF region - extracts ops and stores in PendingRegions
+    /// Called after processing a region's children
+    /// Returns the start index (for ops extraction) and updated state
+    let endSCFRegionTracking (parentNodeId: string) (regionKind: SCFRegionKind) (state: MLIRState) : int option * MLIRState =
+        match state.RegionStack with
+        | [] -> None, state
+        | startIndex :: restStack ->
+            Some startIndex,
+            { state with
+                RegionStack = restStack
+                CurrentSCFRegion = None }
+
+    /// Store captured region operations in PendingRegions
+    let storeRegionOps (parentNodeId: string) (regionKind: SCFRegionKind) (ops: string list) (state: MLIRState) : MLIRState =
+        let existingRegions = Map.tryFind parentNodeId state.PendingRegions |> Option.defaultValue Map.empty
+        let updatedRegions = Map.add regionKind ops existingRegions
+        { state with PendingRegions = Map.add parentNodeId updatedRegions state.PendingRegions }
+
+    /// Get pending regions for a control flow node
+    let getPendingRegions (parentNodeId: string) (state: MLIRState) : Map<SCFRegionKind, string list> option =
+        Map.tryFind parentNodeId state.PendingRegions
+
+    /// Clear pending regions for a control flow node (after SCF op is emitted)
+    let clearPendingRegions (parentNodeId: string) (state: MLIRState) : MLIRState =
+        { state with PendingRegions = Map.remove parentNodeId state.PendingRegions }
 
     /// Parse an MLIR signature string and extract param types and return type
     /// e.g., "(i32, i64, i32) -> i32" -> (["i32"; "i64"; "i32"], "i32")
@@ -348,6 +511,16 @@ module MLIRZipper =
         Path = Top
         CurrentOps = []
         State = MLIRState.createWithEntryPoints entryPointLambdaIds
+        Globals = []
+        CompletedFunctions = []
+    }
+
+    /// Create with entry points and addressed mutables analysis
+    let createWithAnalysis (entryPointLambdaIds: Set<int>) (addressedMutables: Set<int>) : MLIRZipper = {
+        Focus = AtModule
+        Path = Top
+        CurrentOps = []
+        State = MLIRState.createWithAnalysis entryPointLambdaIds addressedMutables
         Globals = []
         CompletedFunctions = []
     }
@@ -617,6 +790,383 @@ module MLIRZipper =
     /// Witness a void operation (observation with no yielded value)
     let witnessVoidOp (text: string) (zipper: MLIRZipper) : MLIRZipper =
         witnessOp text [] zipper
+
+    // ─────────────────────────────────────────────────────────────────
+    // SCF Region Tracking - For structured control flow emission
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Begin capturing a region - marks current ops count for later extraction
+    /// Call this BEFORE processing control flow children (in pre-hook)
+    let beginRegion (zipper: MLIRZipper) : MLIRZipper =
+        let opsCount = List.length zipper.CurrentOps
+        { zipper with State = MLIRState.pushRegion opsCount zipper.State }
+
+    /// End region capture and extract operations since the marked point
+    /// Returns the extracted operations (as text list) and updated zipper with those ops removed
+    let endRegion (zipper: MLIRZipper) : string list * MLIRZipper =
+        match MLIRState.popRegion zipper.State with
+        | None, _ ->
+            // No region marker - return empty and unchanged
+            [], zipper
+        | Some startIndex, newState ->
+            // CurrentOps is in reverse order (newest first)
+            // We need ops from startIndex to end (the region content)
+            let totalOps = List.length zipper.CurrentOps
+            let regionOpsCount = totalOps - startIndex
+
+            // Take the region ops (they're at the front of CurrentOps since it's reversed)
+            let regionOps = zipper.CurrentOps |> List.take regionOpsCount |> List.rev
+            let remainingOps = zipper.CurrentOps |> List.skip regionOpsCount
+
+            // Extract operation text
+            let regionText = regionOps |> List.map (fun op -> op.Text)
+
+            regionText, { zipper with CurrentOps = remainingOps; State = newState }
+
+    /// Emit an SCF operation with regions, given pre-extracted region content
+    let witnessSCFOp (header: string) (regions: string list list) (results: (string * MLIRType) list) (zipper: MLIRZipper) : MLIRZipper =
+        // Build the operation text with nested regions
+        let indent = "    "
+        let formatRegion (regionOps: string list) =
+            regionOps |> List.map (fun op -> indent + op) |> String.concat "\n"
+
+        let regionsText =
+            regions
+            |> List.map (fun region -> "{\n" + formatRegion region + "\n  }")
+            |> String.concat " "
+
+        let fullText = sprintf "%s %s" header regionsText
+        witnessOp fullText results zipper
+
+    /// Begin tracking an SCF region - for use with foldWithSCFRegions hook
+    /// Marks current ops count and sets tracking state
+    let beginSCFRegion (parentNodeId: string) (regionKind: SCFRegionKind) (zipper: MLIRZipper) : MLIRZipper =
+        let opsCount = List.length zipper.CurrentOps
+        { zipper with State = MLIRState.beginSCFRegionTracking parentNodeId regionKind opsCount zipper.State }
+
+    /// End tracking an SCF region - extracts ops and stores in PendingRegions
+    /// Called by foldWithSCFRegions hook after each region's children are processed
+    let endSCFRegion (parentNodeId: string) (regionKind: SCFRegionKind) (zipper: MLIRZipper) : MLIRZipper =
+        match MLIRState.endSCFRegionTracking parentNodeId regionKind zipper.State with
+        | None, _ ->
+            // No region marker - return unchanged
+            zipper
+        | Some startIndex, newState ->
+            // CurrentOps is in reverse order (newest first)
+            let totalOps = List.length zipper.CurrentOps
+            let regionOpsCount = totalOps - startIndex
+
+            // Take the region ops (they're at the front of CurrentOps since it's reversed)
+            let regionOps = zipper.CurrentOps |> List.take regionOpsCount |> List.rev
+            let remainingOps = zipper.CurrentOps |> List.skip regionOpsCount
+
+            // Extract operation text
+            let regionText = regionOps |> List.map (fun op -> op.Text)
+
+            // Store in PendingRegions
+            let finalState = MLIRState.storeRegionOps parentNodeId regionKind regionText newState
+
+            { zipper with CurrentOps = remainingOps; State = finalState }
+
+    /// Get pending regions for a control flow node (convenience wrapper)
+    let getPendingRegions (parentNodeId: string) (zipper: MLIRZipper) : Map<SCFRegionKind, string list> option =
+        MLIRState.getPendingRegions parentNodeId zipper.State
+
+    /// Clear pending regions after SCF op is emitted (convenience wrapper)
+    let clearPendingRegions (parentNodeId: string) (zipper: MLIRZipper) : MLIRZipper =
+        { zipper with State = MLIRState.clearPendingRegions parentNodeId zipper.State }
+
+    /// Snapshot VarBindings at loop entry for iter_args detection
+    let snapshotVarsForLoop (loopNodeId: string) (zipper: MLIRZipper) : MLIRZipper =
+        { zipper with State = MLIRState.snapshotVarsForLoop loopNodeId zipper.State }
+
+    /// Get VarBindings snapshot for a loop
+    let getVarSnapshot (loopNodeId: string) (zipper: MLIRZipper) : Map<string, string * string> option =
+        MLIRState.getVarSnapshot loopNodeId zipper.State
+
+    /// Get current VarBindings
+    let getVarBindings (zipper: MLIRZipper) : Map<string, string * string> =
+        zipper.State.VarBindings
+
+    /// Clear VarBindings snapshot for a loop
+    let clearVarSnapshot (loopNodeId: string) (zipper: MLIRZipper) : MLIRZipper =
+        { zipper with State = MLIRState.clearVarSnapshot loopNodeId zipper.State }
+
+    /// Store pre-analyzed iter_args for a loop (called BEFORE guard/body traversal)
+    let storeIterArgs (loopNodeId: string) (iterArgs: (string * string * string * string) list) (zipper: MLIRZipper) : MLIRZipper =
+        { zipper with State = MLIRState.storeIterArgs loopNodeId iterArgs zipper.State }
+
+    /// Get pre-analyzed iter_args for a loop
+    let getIterArgs (loopNodeId: string) (zipper: MLIRZipper) : (string * string * string * string) list option =
+        MLIRState.getIterArgs loopNodeId zipper.State
+
+    /// Clear iter_args for a loop (after SCF op is emitted)
+    let clearIterArgs (loopNodeId: string) (zipper: MLIRZipper) : MLIRZipper =
+        { zipper with State = MLIRState.clearIterArgs loopNodeId zipper.State }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Addressed Mutable Bindings - For variables whose address is taken
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Check if a mutable binding needs alloca (its address is taken)
+    let isAddressedMutable (bindingNodeId: int) (zipper: MLIRZipper) : bool =
+        MLIRState.isAddressedMutable bindingNodeId zipper.State
+
+    /// Record an alloca for an addressed mutable binding
+    let recordMutableAlloca (bindingNodeId: int) (allocaSSA: string) (elementType: string) (zipper: MLIRZipper) : MLIRZipper =
+        { zipper with State = MLIRState.recordMutableAlloca bindingNodeId allocaSSA elementType zipper.State }
+
+    /// Look up alloca for an addressed mutable binding
+    let lookupMutableAlloca (bindingNodeId: int) (zipper: MLIRZipper) : (string * string) option =
+        MLIRState.lookupMutableAlloca bindingNodeId zipper.State
+
+    /// Witness an alloca for a mutable local variable
+    /// Emits: %c1 = arith.constant 1 : i64
+    ///        %ptr = llvm.alloca %c1 x elementType : (i64) -> !llvm.ptr
+    let witnessAlloca (elementType: MLIRType) (zipper: MLIRZipper) : string * MLIRZipper =
+        let typeStr = Serialize.mlirType elementType
+        // First emit constant 1 for the count
+        let countSSA, zipper1 = yieldSSA zipper
+        let countOp = sprintf "%s = arith.constant 1 : i64" countSSA
+        let zipper2 = witnessOpWithResult countOp countSSA (Integer I64) zipper1
+        // Then emit the alloca
+        let allocaSSA, zipper3 = yieldSSA zipper2
+        let allocaOp = sprintf "%s = llvm.alloca %s x %s : (i64) -> !llvm.ptr" allocaSSA countSSA typeStr
+        allocaSSA, witnessOpWithResult allocaOp allocaSSA Pointer zipper3
+
+    /// Witness an alloca with string type (for when type is already serialized)
+    /// Emits: %c1 = arith.constant 1 : i64
+    ///        %ptr = llvm.alloca %c1 x elementType : (i64) -> !llvm.ptr
+    let witnessAllocaStr (elementTypeStr: string) (zipper: MLIRZipper) : string * MLIRZipper =
+        // First emit constant 1 for the count
+        let countSSA, zipper1 = yieldSSA zipper
+        let countOp = sprintf "%s = arith.constant 1 : i64" countSSA
+        let zipper2 = witnessOpWithResult countOp countSSA (Integer I64) zipper1
+        // Then emit the alloca
+        let allocaSSA, zipper3 = yieldSSA zipper2
+        let allocaOp = sprintf "%s = llvm.alloca %s x %s : (i64) -> !llvm.ptr" allocaSSA countSSA elementTypeStr
+        allocaSSA, witnessOpWithResult allocaOp allocaSSA Pointer zipper3
+
+    /// Witness a store to an alloca
+    /// Emits: llvm.store %value, %ptr : type, !llvm.ptr
+    let witnessStore (valueSSA: string) (valueType: string) (ptrSSA: string) (zipper: MLIRZipper) : MLIRZipper =
+        let op = sprintf "llvm.store %s, %s : %s, !llvm.ptr" valueSSA ptrSSA valueType
+        witnessVoidOp op zipper
+
+    /// Witness a load from an alloca
+    /// Emits: %value = llvm.load %ptr : !llvm.ptr -> type
+    let witnessLoad (ptrSSA: string) (resultType: MLIRType) (zipper: MLIRZipper) : string * MLIRZipper =
+        let resultSSA, zipper1 = yieldSSA zipper
+        let typeStr = Serialize.mlirType resultType
+        let op = sprintf "%s = llvm.load %s : !llvm.ptr -> %s" resultSSA ptrSSA typeStr
+        resultSSA, witnessOpWithResult op resultSSA resultType zipper1
+
+    /// Witness a load with string type (for when type is already serialized)
+    /// Emits: %value = llvm.load %ptr : !llvm.ptr -> type
+    let witnessLoadStr (ptrSSA: string) (resultTypeStr: string) (zipper: MLIRZipper) : string * MLIRZipper =
+        let resultSSA, zipper1 = yieldSSA zipper
+        let op = sprintf "%s = llvm.load %s : !llvm.ptr -> %s" resultSSA ptrSSA resultTypeStr
+        // Parse the type string back to MLIRType for witnessOpWithResult
+        let resultType = Serialize.deserializeType resultTypeStr
+        resultSSA, witnessOpWithResult op resultSSA resultType zipper1
+
+    // ─────────────────────────────────────────────────────────────────
+    // SCF Witness Functions - Emit structured control flow operations
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Witness an scf.if operation with optional else branch
+    /// Returns the result SSA (if resultType is Some) and updated zipper
+    let witnessSCFIf
+            (condSSA: string)
+            (thenOps: string list)
+            (elseOps: string list option)
+            (resultType: MLIRType option)
+            (zipper: MLIRZipper) : string option * MLIRZipper =
+        match resultType with
+        | None ->
+            // Statement form - no result
+            let indent = "      "
+            let thenRegion =
+                thenOps
+                |> List.map (fun op -> indent + op)
+                |> String.concat "\n"
+            let elseRegion =
+                match elseOps with
+                | Some ops when not (List.isEmpty ops) ->
+                    let elseContent = ops |> List.map (fun op -> indent + op) |> String.concat "\n"
+                    sprintf " else {\n%s\n    }" elseContent
+                | _ -> ""
+            let text = sprintf "scf.if %s {\n%s\n    }%s" condSSA thenRegion elseRegion
+            None, witnessVoidOp text zipper
+
+        | Some ty ->
+            // Expression form - yields a value
+            let ssaName, zipper' = yieldSSA zipper
+            let tyStr = Serialize.mlirType ty
+            let indent = "      "
+            let thenRegion =
+                let bodyOps = thenOps |> List.map (fun op -> indent + op) |> String.concat "\n"
+                // Last op should provide the yield value - we need to extract it
+                // For now, assume the ops end with a yield or we use the last SSA
+                sprintf "%s\n%sscf.yield %%TODO_then_val : %s" bodyOps indent tyStr
+            let elseRegion =
+                match elseOps with
+                | Some ops when not (List.isEmpty ops) ->
+                    let bodyOps = ops |> List.map (fun op -> indent + op) |> String.concat "\n"
+                    sprintf " else {\n%s\n%sscf.yield %%TODO_else_val : %s\n    }" bodyOps indent tyStr
+                | _ ->
+                    sprintf " else {\n%sscf.yield %%TODO_else_val : %s\n    }" indent tyStr
+            let text = sprintf "%s = scf.if %s -> (%s) {\n%s\n    }%s" ssaName condSSA tyStr thenRegion elseRegion
+            Some ssaName, witnessOpWithResult text ssaName ty zipper'
+
+    /// Witness an scf.for operation with iteration variable and optional iter_args
+    /// Returns the result SSAs (from iter_args) and updated zipper
+    let witnessSCFFor
+            (loopVar: string)
+            (loopVarTy: MLIRType)
+            (startSSA: string)
+            (endSSA: string)
+            (stepSSA: string)
+            (bodyOps: string list)
+            (iterArgs: (string * string * MLIRType) list)  // (argName, initSSA, type)
+            (zipper: MLIRZipper) : string list * MLIRZipper =
+        let loopVarTyStr = Serialize.mlirType loopVarTy
+        let indent = "      "
+
+        // Build iter_args clause if present
+        let iterArgsClause, resultTypes, yieldVals =
+            if List.isEmpty iterArgs then
+                "", "", ""
+            else
+                let argsList =
+                    iterArgs
+                    |> List.map (fun (name, initSSA, ty) -> sprintf "%%%s = %s" name initSSA)
+                    |> String.concat ", "
+                let typesList =
+                    iterArgs
+                    |> List.map (fun (_, _, ty) -> Serialize.mlirType ty)
+                    |> String.concat ", "
+                let yieldList =
+                    iterArgs
+                    |> List.map (fun (name, _, ty) -> sprintf "%%%s_next" name)
+                    |> String.concat ", "
+                sprintf " iter_args(%s) -> (%s)" argsList typesList,
+                sprintf " -> (%s)" typesList,
+                yieldList
+
+        // Build body region
+        let bodyContent =
+            bodyOps
+            |> List.map (fun op -> indent + op)
+            |> String.concat "\n"
+
+        // Add scf.yield if we have iter_args
+        let yieldOp =
+            if List.isEmpty iterArgs then ""
+            else sprintf "\n%sscf.yield %s : %s" indent yieldVals (iterArgs |> List.map (fun (_, _, ty) -> Serialize.mlirType ty) |> String.concat ", ")
+
+        let header = sprintf "scf.for %%%s = %s to %s step %s%s" loopVar startSSA endSSA stepSSA iterArgsClause
+        let text = sprintf "%s {\n%s%s\n    }" header bodyContent yieldOp
+
+        // If we have iter_args, we need result SSAs
+        if List.isEmpty iterArgs then
+            [], witnessVoidOp text zipper
+        else
+            // Generate result SSAs for each iter_arg
+            let resultSSAs, zipper' =
+                iterArgs
+                |> List.fold (fun (accSSAs, z) (name, _, _) ->
+                    let ssa, z' = yieldSSA z
+                    (accSSAs @ [ssa], z')
+                ) ([], zipper)
+            // TODO: Properly bind the result SSAs
+            resultSSAs, witnessVoidOp text zipper'
+
+    /// Witness an scf.while operation with iter_args support.
+    /// iterArgsWithNext: list of (argName, initSSA, nextSSA, type)
+    ///   - argName: the iter_arg name used in guard/body (e.g., "i_arg")
+    ///   - initSSA: the initial value SSA (before loop)
+    ///   - nextSSA: the next iteration value SSA (from body, current VarBinding)
+    ///   - type: MLIR type
+    let witnessSCFWhile
+            (condOps: string list)
+            (condSSA: string)
+            (bodyOps: string list)
+            (iterArgsWithNext: (string * string * string * MLIRType) list)  // (argName, initSSA, nextSSA, type)
+            (zipper: MLIRZipper) : string list * MLIRZipper =
+        let indent = "      "
+
+        // Build iter_args initialization
+        let initList, typesList =
+            if List.isEmpty iterArgsWithNext then
+                "", ""
+            else
+                let inits =
+                    iterArgsWithNext
+                    |> List.map (fun (name, initSSA, _, _) -> sprintf "%%%s = %s" name initSSA)
+                    |> String.concat ", "
+                let types =
+                    iterArgsWithNext
+                    |> List.map (fun (_, _, _, ty) -> Serialize.mlirType ty)
+                    |> String.concat ", "
+                inits, types
+
+        // Build condition region
+        let condContent =
+            condOps
+            |> List.map (fun op -> indent + op)
+            |> String.concat "\n"
+
+        // Condition yields the iter_args values along with the condition
+        let condYield =
+            if List.isEmpty iterArgsWithNext then
+                sprintf "%sscf.condition(%s)" indent condSSA
+            else
+                let yieldArgs =
+                    iterArgsWithNext
+                    |> List.map (fun (name, _, _, _) -> sprintf "%%%s" name)
+                    |> String.concat ", "
+                sprintf "%sscf.condition(%s) %s : %s" indent condSSA yieldArgs typesList
+
+        // Build body region
+        let bodyContent =
+            bodyOps
+            |> List.map (fun op -> indent + op)
+            |> String.concat "\n"
+
+        // Body yields next iteration values (current binding after body ops)
+        // SCF while always requires scf.yield in body, even with no iter_args
+        let bodyYield =
+            if List.isEmpty iterArgsWithNext then
+                sprintf "\n%sscf.yield" indent
+            else
+                let yieldArgs =
+                    iterArgsWithNext
+                    |> List.map (fun (_, _, nextSSA, _) -> nextSSA)
+                    |> String.concat ", "
+                sprintf "\n%sscf.yield %s : %s" indent yieldArgs typesList
+
+        // Build the full operation
+        // SCF while always requires type annotation, even with no iter_args
+        let header =
+            if List.isEmpty iterArgsWithNext then
+                "scf.while : () -> ()"
+            else
+                sprintf "scf.while (%s) : (%s) -> (%s)" initList typesList typesList
+
+        let text = sprintf "%s {\n%s\n%s\n    } do {\n%s%s\n    }" header condContent condYield bodyContent bodyYield
+
+        // Return result SSAs
+        if List.isEmpty iterArgsWithNext then
+            [], witnessVoidOp text zipper
+        else
+            let resultSSAs, zipper' =
+                iterArgsWithNext
+                |> List.fold (fun (accSSAs, z) (name, _, _, _) ->
+                    let ssa, z' = yieldSSA z
+                    (accSSAs @ [ssa], z')
+                ) ([], zipper)
+            resultSSAs, witnessVoidOp text zipper'
 
     /// Witness a constant, yielding an SSA name
     let witnessConstant (value: int64) (ty: IntegerBitWidth) (zipper: MLIRZipper) : string * MLIRZipper =

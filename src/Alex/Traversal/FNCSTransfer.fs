@@ -198,10 +198,33 @@ let isBuiltInOperator (name: string) =
 /// INVARIANT: FNCS guarantees definitions are traversed before uses
 /// If this fails, it's an FNCS graph construction bug - hard stop with diagnostic
 let witnessVarRef (name: string) (defId: NodeId option) (graph: SemanticGraph) (zipper: MLIRZipper) : MLIRZipper * TransferResult =
+    // Check if this references an addressed mutable - if so, we need to load from alloca
+    let isAddressedMut =
+        match defId with
+        | Some nodeId -> MLIRZipper.isAddressedMutable (NodeId.value nodeId) zipper
+        | None -> false
+
     // First try to look up by variable name (for Lambda parameters)
     match MLIRZipper.recallVar name zipper with
     | Some (ssaName, mlirType) ->
-        zipper, TRValue (ssaName, mlirType)
+        if isAddressedMut then
+            // Addressed mutable: ssaName is the alloca pointer, we need to load the value
+            // Look up the element type from the mutable alloca record
+            match defId with
+            | Some nodeId ->
+                match MLIRZipper.lookupMutableAlloca (NodeId.value nodeId) zipper with
+                | Some (_, elementType) ->
+                    // Load the value from the alloca
+                    let loadedSSA, zipper' = MLIRZipper.witnessLoadStr ssaName elementType zipper
+                    zipper', TRValue (loadedSSA, elementType)
+                | None ->
+                    // Fallback: shouldn't happen if analysis is correct
+                    zipper, TRValue (ssaName, mlirType)
+            | None ->
+                zipper, TRValue (ssaName, mlirType)
+        else
+            // Regular var: return as-is
+            zipper, TRValue (ssaName, mlirType)
     | None ->
         // Not a bound variable - try definition node
         match defId with
@@ -459,6 +482,17 @@ let witnessApplication (funcNodeId: NodeId) (argNodeIds: NodeId list) (returnTyp
                 // Emit llvm.intr.memcpy: dest, src, len, isVolatile
                 let memcpyText = sprintf "\"llvm.intr.memcpy\"(%s, %s, %s) <{isVolatile = false}> : (!llvm.ptr, !llvm.ptr, i64) -> ()" destSSA srcSSA countSSA64
                 let zipper''' = MLIRZipper.witnessVoidOp memcpyText zipper''
+                zipper''', TRVoid
+            | "NativePtr.fill", [(destSSA, _); (valueSSA, _); (countSSA, _)] ->
+                // dest:nativeptr<'T> -> value:'T -> count:int -> unit
+                // Maps to llvm.memset intrinsic (when 'T = byte, fills count bytes)
+                // Convert count from i32 to i64 for llvm.intr.memset
+                let countSSA64, zipper' = MLIRZipper.yieldSSA zipper
+                let extText = sprintf "%s = arith.extsi %s : i32 to i64" countSSA64 countSSA
+                let zipper'' = MLIRZipper.witnessOpWithResult extText countSSA64 (Integer I64) zipper'
+                // Emit llvm.intr.memset: dest, value, len, isVolatile
+                let memsetText = sprintf "\"llvm.intr.memset\"(%s, %s, %s) <{isVolatile = false}> : (!llvm.ptr, i8, i64) -> ()" destSSA valueSSA countSSA64
+                let zipper''' = MLIRZipper.witnessVoidOp memsetText zipper''
                 zipper''', TRVoid
             | "NativePtr.add", [(ptrSSA, _); (offsetSSA, _)] ->
                 // nativeptr<'T> -> int -> nativeptr<'T> (pointer arithmetic)
@@ -777,24 +811,27 @@ let witnessBinding (name: string) (isMutable: bool) (valueNodeId: NodeId) (node:
     // The value has already been witnessed (post-order)
     match MLIRZipper.recallNodeSSA (string (NodeId.value valueNodeId)) zipper with
     | Some (ssa, ty) ->
-        if isMutable then
-            // Mutable binding: allocate storage with alloca, store value, bind pointer
-            // First emit a constant for the array size (MLIR requires SSA operand, not literal)
-            let sizeSSA, z1 = MLIRZipper.yieldSSA zipper
-            let sizeText = sprintf "%s = arith.constant 1 : i64" sizeSSA
-            let z2 = MLIRZipper.witnessOpWithResult sizeText sizeSSA (Integer I64) z1
-            let ptrSSA, z3 = MLIRZipper.yieldSSA z2
-            let allocaText = sprintf "%s = llvm.alloca %s x i8 : (i64) -> !llvm.ptr" ptrSSA sizeSSA
-            let z4 = MLIRZipper.witnessOpWithResult allocaText ptrSSA Pointer z3
-            let storeText = sprintf "llvm.store %s, %s : %s, !llvm.ptr" ssa ptrSSA ty
-            let z5 = MLIRZipper.witnessVoidOp storeText z4
-            // Bind the pointer to both the node and the variable name
-            let z6 = MLIRZipper.bindNodeSSA (string (NodeId.value node.Id)) ptrSSA "!llvm.ptr" z5
-            let z7 = MLIRZipper.bindVar name ptrSSA "!llvm.ptr" z6
-            z7, TRValue (ptrSSA, "!llvm.ptr")
+        let nodeIdVal = NodeId.value node.Id
+        
+        // Check if this is an addressed mutable (needs alloca)
+        if isMutable && MLIRZipper.isAddressedMutable nodeIdVal zipper then
+            // Addressed mutable: use alloca + store instead of pure SSA
+            // 1. Emit alloca for the element type (ty is already a string)
+            let allocaSSA, zipper1 = MLIRZipper.witnessAllocaStr ty zipper
+            // 2. Store initial value into alloca
+            let zipper2 = MLIRZipper.witnessStore ssa ty allocaSSA zipper1
+            // 3. Record alloca for this binding (store element type for later loads)
+            let zipper3 = MLIRZipper.recordMutableAlloca nodeIdVal allocaSSA ty zipper2
+            // 4. Bind the *pointer* to the node (so AddressOf can find it)
+            let zipper4 = MLIRZipper.bindNodeSSA (string nodeIdVal) allocaSSA "!llvm.ptr" zipper3
+            // 5. Bind var name to the alloca pointer for VarRef to find
+            let zipper5 = MLIRZipper.bindVar name allocaSSA "!llvm.ptr" zipper4
+            zipper5, TRValue (allocaSSA, "!llvm.ptr")
         else
-            // Immutable binding: just bind the SSA value
-            let zipper' = MLIRZipper.bindNodeSSA (string (NodeId.value node.Id)) ssa ty zipper
+            // Immutable or non-addressed mutable: use pure SSA
+            // For non-addressed mutable vars, Set operations will rebind to new SSA values
+            // This enables SCF iter_args for loops (no alloca/load/store)
+            let zipper' = MLIRZipper.bindNodeSSA (string nodeIdVal) ssa ty zipper
             let zipper'' = MLIRZipper.bindVar name ssa ty zipper'
             zipper'', TRValue (ssa, ty)
     | None ->
@@ -1058,45 +1095,199 @@ let witnessNode (graph: SemanticGraph) (node: SemanticNode) (zipper: MLIRZipper)
 
     // Mutable set
     | SemanticKind.Set (targetId, valueId) ->
-        // Get the target node - for VarRef, use the stored pointer
-        let targetResult =
-            match SemanticGraph.tryGetNode targetId graph with
-            | Some targetNode ->
-                match targetNode.Kind with
-                | SemanticKind.VarRef (name, _) ->
-                    // Look up the mutable variable's pointer
-                    MLIRZipper.recallVar name zipper
+        // Pure SSA rebinding for mutable variables (no store)
+        // This enables SCF iter_args for loops
+        match SemanticGraph.tryGetNode targetId graph with
+        | Some targetNode ->
+            match targetNode.Kind with
+            | SemanticKind.VarRef (name, _) ->
+                // Mutable variable assignment - rebind to new SSA value
+                match MLIRZipper.recallNodeSSA (string (NodeId.value valueId)) zipper with
+                | Some (valueSSA, valueType) ->
+                    // Rebind the variable to the new SSA value
+                    let zipper' = MLIRZipper.bindVar name valueSSA valueType zipper
+                    zipper', TRVoid
+                | None ->
+                    zipper, TRError (sprintf "Set: value for '%s' not computed" name)
+            | _ ->
+                // Non-variable target (field set, array set, etc.) - use store
+                match MLIRZipper.recallNodeSSA (string (NodeId.value targetId)) zipper,
+                      MLIRZipper.recallNodeSSA (string (NodeId.value valueId)) zipper with
+                | Some (targetSSA, _), Some (valueSSA, valueType) ->
+                    let storeText = sprintf "llvm.store %s, %s : %s, !llvm.ptr" valueSSA targetSSA valueType
+                    let zipper' = MLIRZipper.witnessVoidOp storeText zipper
+                    zipper', TRVoid
                 | _ ->
-                    // Other targets - use computed SSA
-                    MLIRZipper.recallNodeSSA (string (NodeId.value targetId)) zipper
-            | None ->
-                MLIRZipper.recallNodeSSA (string (NodeId.value targetId)) zipper
-
-        match targetResult, MLIRZipper.recallNodeSSA (string (NodeId.value valueId)) zipper with
-        | Some (targetSSA, _), Some (valueSSA, valueType) ->
-            // Store value to target location
-            let storeText = sprintf "llvm.store %s, %s : %s, !llvm.ptr" valueSSA targetSSA valueType
-            let zipper' = MLIRZipper.witnessVoidOp storeText zipper
-            zipper', TRVoid
-        | _ ->
-            zipper, TRError "Set: target or value not computed"
-
-    // Control flow
-    | SemanticKind.IfThenElse (guardId, thenId, elseIdOpt) ->
-        // For now, just use the then branch result (simplified)
-        // TODO: Implement proper control flow with blocks
-        match MLIRZipper.recallNodeSSA (string (NodeId.value thenId)) zipper with
-        | Some (thenSSA, thenType) ->
-            let zipper' = MLIRZipper.bindNodeSSA (string (NodeId.value node.Id)) thenSSA thenType zipper
-            zipper', TRValue (thenSSA, thenType)
+                    zipper, TRError "Set: target or value not computed"
         | None ->
-            // Then branch might be void (no result)
-            zipper, TRVoid
+            zipper, TRError "Set: target node not found"
+
+    // Control flow - uses SCF dialect with PendingRegions from region hooks
+    | SemanticKind.IfThenElse (guardId, thenId, elseIdOpt) ->
+        // Recall guard's SSA (boolean condition)
+        let nodeIdStr = string (NodeId.value node.Id)
+        match MLIRZipper.recallNodeSSA (string (NodeId.value guardId)) zipper with
+        | Some (condSSA, _) ->
+            // Check if we have captured regions from the SCF hook
+            match MLIRZipper.getPendingRegions nodeIdStr zipper with
+            | Some regions ->
+                // Get then and optionally else region ops
+                let thenOps = 
+                    match Map.tryFind SCFRegionKind.ThenRegion regions with
+                    | Some ops -> ops
+                    | None -> []
+                let elseOps = 
+                    match Map.tryFind SCFRegionKind.ElseRegion regions with
+                    | Some ops -> Some ops
+                    | None -> None
+                
+                // Determine result type (None for void/unit)
+                let resultType = 
+                    match node.Type with
+                    | NativeType.TApp(tycon, _) when tycon.Name = "unit" -> None
+                    | ty -> Some (mapType ty)
+                
+                // Witness the SCF if operation
+                let resultSSAOpt, zipper' = MLIRZipper.witnessSCFIf condSSA thenOps elseOps resultType zipper
+                
+                // Clear pending regions
+                let zipper'' = MLIRZipper.clearPendingRegions nodeIdStr zipper'
+                
+                match resultSSAOpt with
+                | Some resultSSA ->
+                    let resultTy = Serialize.mlirType (Option.get resultType)
+                    let zipper''' = MLIRZipper.bindNodeSSA nodeIdStr resultSSA resultTy zipper''
+                    zipper''', TRValue (resultSSA, resultTy)
+                | None ->
+                    zipper'', TRVoid
+            | None ->
+                // No captured regions - fallback to simple behavior (shouldn't happen with SCF hook)
+                match MLIRZipper.recallNodeSSA (string (NodeId.value thenId)) zipper with
+                | Some (thenSSA, thenType) ->
+                    let zipper' = MLIRZipper.bindNodeSSA nodeIdStr thenSSA thenType zipper
+                    zipper', TRValue (thenSSA, thenType)
+                | None ->
+                    zipper, TRVoid
+        | None ->
+            zipper, TRError "IfThenElse: guard condition not computed"
 
     | SemanticKind.WhileLoop (guardId, bodyId) ->
-        // TODO: Implement proper loops with blocks
-        // For now, treat as processed (children already executed in post-order)
-        zipper, TRVoid
+        // While loops use SCF with PendingRegions from hooks
+        // ARCHITECTURE: Analyze then Witness - iter_args were set up in BeforeRegion
+        // Guard and body ops already use correct iter_arg SSA names (no substitution needed)
+        let nodeIdStr = string (NodeId.value node.Id)
+        match MLIRZipper.getPendingRegions nodeIdStr zipper with
+        | Some regions ->
+            // Get guard and body region ops (already using correct SSA names)
+            let guardOps =
+                match Map.tryFind SCFRegionKind.GuardRegion regions with
+                | Some ops -> ops
+                | None -> []
+            let bodyOps =
+                match Map.tryFind SCFRegionKind.BodyRegion regions with
+                | Some ops -> ops
+                | None -> []
+
+            // Get the condition SSA (already uses iter_arg names if applicable)
+            let condSSA =
+                match MLIRZipper.recallNodeSSA (string (NodeId.value guardId)) zipper with
+                | Some (ssa, _) -> ssa
+                | None -> "%cond_missing"  // Error case
+
+            // Get pre-analyzed iter_args: (varName, initSSA, argSSA, tyStr)
+            // These were computed and stored in BeforeRegion for GuardRegion
+            let iterArgsInfo = MLIRZipper.getIterArgs nodeIdStr zipper |> Option.defaultValue []
+
+            // Build iter_args with next values by looking up current VarBindings
+            // After body traversal, each var's current binding is its "next" value for scf.yield
+            let currentBindings = MLIRZipper.getVarBindings zipper
+            let iterArgsWithNext =
+                iterArgsInfo
+                |> List.map (fun (varName, initSSA, argSSA, tyStr) ->
+                    // Parse type from string
+                    let mlirTy =
+                        if tyStr = "i32" then Integer I32
+                        elif tyStr = "i64" then Integer I64
+                        elif tyStr = "i1" then Integer I1
+                        elif tyStr = "i8" then Integer I8
+                        elif tyStr = "!llvm.ptr" then Pointer
+                        else Integer I32  // Default fallback
+                    // Get current (next) SSA value from VarBindings
+                    let nextSSA =
+                        match Map.tryFind varName currentBindings with
+                        | Some (ssa, _) -> ssa
+                        | None -> argSSA  // Fallback to arg if not modified (shouldn't happen)
+                    // Use argSSA (without %) for the iter_arg name in scf.while header
+                    let argName = argSSA.TrimStart('%')
+                    (argName, initSSA, nextSSA, mlirTy))
+
+            // Witness the SCF while operation
+            let resultSSAs, zipper' = MLIRZipper.witnessSCFWhile guardOps condSSA bodyOps iterArgsWithNext zipper
+
+            // Clear pending regions and iter_args
+            let zipper'' = MLIRZipper.clearPendingRegions nodeIdStr zipper'
+            let zipper''' = MLIRZipper.clearIterArgs nodeIdStr zipper''
+
+            // Update VarBindings with final loop values (for code after the loop)
+            let zipperFinal =
+                resultSSAs
+                |> List.zip (iterArgsInfo |> List.map (fun (name, _, _, tyStr) ->
+                    let mlirTy =
+                        if tyStr = "i32" then Integer I32
+                        elif tyStr = "i64" then Integer I64
+                        elif tyStr = "i1" then Integer I1
+                        elif tyStr = "i8" then Integer I8
+                        elif tyStr = "!llvm.ptr" then Pointer
+                        else Integer I32
+                    (name, mlirTy)))
+                |> List.fold (fun z ((name, ty), resultSSA) ->
+                    MLIRZipper.bindVar name resultSSA (Serialize.mlirType ty) z) zipper'''
+
+            // While loops typically return unit in F#
+            zipperFinal, TRVoid
+        | None ->
+            // No captured regions - fallback (shouldn't happen with SCF hook)
+            zipper, TRVoid
+
+    | SemanticKind.ForLoop (varName, startId, finishId, isUp, bodyId) ->
+        // For loops use SCF with PendingRegions from hooks
+        let nodeIdStr = string (NodeId.value node.Id)
+        match MLIRZipper.getPendingRegions nodeIdStr zipper with
+        | Some regions ->
+            // Get body region ops
+            let bodyOps = 
+                match Map.tryFind SCFRegionKind.BodyRegion regions with
+                | Some ops -> ops
+                | None -> []
+            
+            // Get start and end SSAs
+            let startSSA, endSSA =
+                match MLIRZipper.recallNodeSSA (string (NodeId.value startId)) zipper,
+                      MLIRZipper.recallNodeSSA (string (NodeId.value finishId)) zipper with
+                | Some (s, _), Some (e, _) -> s, e
+                | _ -> "%start_missing", "%end_missing"  // Error case
+            
+            // Create step constant (1 or -1 based on direction)
+            let stepValue = if isUp then 1L else -1L
+            let stepSSA, zipper1 = MLIRZipper.witnessConstant stepValue I32 zipper
+            
+            // Loop variable type (typically i32 for F# int)
+            let loopVarTy = Integer I32
+            
+            // For now, no iter_args beyond the loop variable itself
+            let iterArgs: (string * string * MLIRType) list = []
+            
+            // Witness the SCF for operation
+            let resultSSAs, zipper2 = MLIRZipper.witnessSCFFor varName loopVarTy startSSA endSSA stepSSA bodyOps iterArgs zipper1
+            
+            // Clear pending regions
+            let zipper3 = MLIRZipper.clearPendingRegions nodeIdStr zipper2
+            
+            // For loops return unit in F#
+            zipper3, TRVoid
+        | None ->
+            // No captured regions - fallback
+            zipper, TRVoid
 
     | SemanticKind.Match (scrutineeId, cases) ->
         // TODO: Implement pattern matching
@@ -1146,15 +1337,39 @@ let witnessNode (graph: SemanticGraph) (node: SemanticNode) (zipper: MLIRZipper)
 
     // Address-of operator
     | SemanticKind.AddressOf (exprId, isMutable) ->
-        // Get the expression's SSA (should be an addressable location)
-        match MLIRZipper.recallNodeSSA (string (NodeId.value exprId)) zipper with
-        | Some (exprSSA, _) ->
-            // For now, just return the pointer as-is
-            // A proper implementation would use llvm.mlir.addressof or alloca
-            let zipper' = MLIRZipper.bindNodeSSA (string (NodeId.value node.Id)) exprSSA "!llvm.ptr" zipper
-            zipper', TRValue (exprSSA, "!llvm.ptr")
+        // Check if the expression is a VarRef to an addressed mutable binding
+        // If so, we return the alloca pointer directly (VarRef already emitted a load)
+        match SemanticGraph.tryGetNode exprId graph with
+        | Some exprNode ->
+            match exprNode.Kind with
+            | SemanticKind.VarRef (_, Some targetBindingId) ->
+                let bindingIdVal = NodeId.value targetBindingId
+                if MLIRZipper.isAddressedMutable bindingIdVal zipper then
+                    // Addressed mutable: get the alloca pointer directly
+                    match MLIRZipper.lookupMutableAlloca bindingIdVal zipper with
+                    | Some (allocaSSA, _) ->
+                        let zipper' = MLIRZipper.bindNodeSSA (string (NodeId.value node.Id)) allocaSSA "!llvm.ptr" zipper
+                        zipper', TRValue (allocaSSA, "!llvm.ptr")
+                    | None ->
+                        zipper, TRError "AddressOf: addressed mutable has no alloca"
+                else
+                    // Non-addressed VarRef - use the VarRef's SSA (may be an existing pointer)
+                    match MLIRZipper.recallNodeSSA (string (NodeId.value exprId)) zipper with
+                    | Some (exprSSA, _) ->
+                        let zipper' = MLIRZipper.bindNodeSSA (string (NodeId.value node.Id)) exprSSA "!llvm.ptr" zipper
+                        zipper', TRValue (exprSSA, "!llvm.ptr")
+                    | None ->
+                        zipper, TRError "AddressOf: VarRef expression not computed"
+            | _ ->
+                // Not a VarRef - use the expression's SSA (may be an existing pointer)
+                match MLIRZipper.recallNodeSSA (string (NodeId.value exprId)) zipper with
+                | Some (exprSSA, _) ->
+                    let zipper' = MLIRZipper.bindNodeSSA (string (NodeId.value node.Id)) exprSSA "!llvm.ptr" zipper
+                    zipper', TRValue (exprSSA, "!llvm.ptr")
+                | None ->
+                    zipper, TRError "AddressOf: expression not computed"
         | None ->
-            zipper, TRError "AddressOf: expression not computed"
+            zipper, TRError "AddressOf: expression node not found in graph"
 
     // Tuple expressions - construct a tuple value
     | SemanticKind.TupleExpr elementIds ->
@@ -1301,6 +1516,62 @@ let witnessNode (graph: SemanticGraph) (node: SemanticNode) (zipper: MLIRZipper)
     | kind ->
         zipper, TRError (sprintf "SemanticKind not yet implemented: %A" kind)
 
+// ═══════════════════════════════════════════════════════════════════
+// PSG Analysis Functions (for SCF iter_args detection)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Analyze a subtree to find all Set nodes and extract their target variable names.
+/// This is used BEFORE traversing a loop body to know which mutable vars need iter_args.
+/// Uses the SemanticGraph structure directly (NOT the main fold) - this is pure analysis.
+let findModifiedVarsInSubtree (graph: SemanticGraph) (rootNodeId: NodeId) : string list =
+    let rec walk (nodeId: NodeId) (acc: Set<string>) : Set<string> =
+        match SemanticGraph.tryGetNode nodeId graph with
+        | None -> acc
+        | Some node ->
+            let acc =
+                match node.Kind with
+                | SemanticKind.Set (targetId, _) ->
+                    // Get target node to extract variable name
+                    match SemanticGraph.tryGetNode targetId graph with
+                    | Some targetNode ->
+                        match targetNode.Kind with
+                        | SemanticKind.VarRef (name, _) -> Set.add name acc
+                        | _ -> acc
+                    | None -> acc
+                | _ -> acc
+            // Walk children
+            node.Children |> List.fold (fun a c -> walk c a) acc
+    walk rootNodeId Set.empty |> Set.toList
+
+/// Find all mutable bindings whose address is taken (&& operator)
+/// These need alloca instead of pure SSA
+/// Returns a set of NodeIds of the mutable Binding nodes
+let findAddressedMutableBindings (graph: SemanticGraph) : Set<int> =
+    let mutableBindingIds = System.Collections.Generic.HashSet<int>()
+    
+    // Find all AddressOf nodes and check if they reference VarRef to mutable bindings
+    for KeyValue(nodeId, node) in graph.Nodes do
+        match node.Kind with
+        | SemanticKind.AddressOf (exprId, _) ->
+            // Check if exprId is a VarRef to a mutable binding
+            match SemanticGraph.tryGetNode exprId graph with
+            | Some exprNode ->
+                match exprNode.Kind with
+                | SemanticKind.VarRef (_, Some targetBindingId) ->
+                    // Check if target is a mutable binding
+                    match SemanticGraph.tryGetNode targetBindingId graph with
+                    | Some bindingNode ->
+                        match bindingNode.Kind with
+                        | SemanticKind.Binding (_, isMutable, _, _) when isMutable ->
+                            mutableBindingIds.Add(NodeId.value targetBindingId) |> ignore
+                        | _ -> ()
+                    | None -> ()
+                | _ -> ()
+            | None -> ()
+        | _ -> ()
+    
+    mutableBindingIds |> Set.ofSeq
+
 /// Pre-bind Lambda parameters to SSA names BEFORE body is processed
 /// This is called in pre-order for Lambda nodes only
 /// CRITICAL: Also enters function scope so body operations are captured
@@ -1428,9 +1699,107 @@ let findEntryPointLambdaIds (graph: SemanticGraph) : Set<int> =
         | None -> [])
     |> Set.ofList
 
+// ═══════════════════════════════════════════════════════════════════
+// SCF Region Hook for Control Flow Tracking
+// ═══════════════════════════════════════════════════════════════════
+
+/// Map from fsnative's RegionKind to MLIRZipper's SCFRegionKind
+let mapRegionKind (rk: RegionKind) : SCFRegionKind =
+    match rk with
+    | RegionKind.GuardRegion -> SCFRegionKind.GuardRegion
+    | RegionKind.BodyRegion -> SCFRegionKind.BodyRegion
+    | RegionKind.ThenRegion -> SCFRegionKind.ThenRegion
+    | RegionKind.ElseRegion -> SCFRegionKind.ElseRegion
+    | RegionKind.StartExprRegion -> SCFRegionKind.StartExprRegion
+    | RegionKind.EndExprRegion -> SCFRegionKind.EndExprRegion
+
+/// Create SCF Region Hook that tracks operations and sets up iter_args bindings.
+/// This is a function (not a value) because it needs access to the SemanticGraph.
+///
+/// KEY ARCHITECTURE: Analyze then Witness (NOT Capture-and-Substitute)
+/// - In BeforeRegion for GuardRegion: analyze body subtree, rebind vars to iter_args
+/// - Both guard and body then use correct SSA names from the start
+/// - No string substitution needed in witnessWhileLoop
+let createSCFRegionHook (graph: SemanticGraph) : SCFRegionHook<MLIRZipper> = {
+    BeforeRegion = fun zipper nodeId regionKind ->
+        let parentIdStr = string (NodeId.value nodeId)
+        let scfKind = mapRegionKind regionKind
+
+        // For GuardRegion of a WhileLoop/ForLoop, analyze body and set up iter_args BEFORE traversal
+        let zipper' =
+            match regionKind with
+            | RegionKind.GuardRegion ->
+                // Get the parent node to check its kind and extract body NodeId
+                match SemanticGraph.tryGetNode nodeId graph with
+                | Some parentNode ->
+                    match parentNode.Kind with
+                    | SemanticKind.WhileLoop (_, bodyId) ->
+                        // Analyze body subtree to find which mutable vars are Set
+                        let modifiedVarNames = findModifiedVarsInSubtree graph bodyId
+
+                        // For each modified var, set up iter_arg bindings
+                        let iterArgsWithZipper =
+                            modifiedVarNames
+                            |> List.fold (fun (accIterArgs, accZipper) varName ->
+                                // Look up current SSA binding for this var
+                                match Map.tryFind varName accZipper.State.VarBindings with
+                                | Some (initSSA, tyStr) ->
+                                    // Generate iter_arg SSA name
+                                    let argSSA = sprintf "%%%s_arg" varName
+                                    // Rebind the var to iter_arg SSA (so guard/body ops use it)
+                                    let reboundZipper = MLIRZipper.bindVar varName argSSA tyStr accZipper
+                                    // Collect iter_arg info: (varName, initSSA, argSSA, type)
+                                    ((varName, initSSA, argSSA, tyStr) :: accIterArgs, reboundZipper)
+                                | None ->
+                                    // Var not found in bindings - skip (might be defined inside loop)
+                                    (accIterArgs, accZipper)
+                            ) ([], zipper)
+
+                        let iterArgs, zipperWithRebindings = iterArgsWithZipper
+
+                        // Store iter_args info for later use in witnessWhileLoop
+                        if not (List.isEmpty iterArgs) then
+                            MLIRZipper.storeIterArgs parentIdStr (List.rev iterArgs) zipperWithRebindings
+                        else
+                            zipperWithRebindings
+
+                    | SemanticKind.ForLoop (_, _, _, _, bodyId) ->
+                        // Similar logic for ForLoop
+                        let modifiedVarNames = findModifiedVarsInSubtree graph bodyId
+                        let iterArgsWithZipper =
+                            modifiedVarNames
+                            |> List.fold (fun (accIterArgs, accZipper) varName ->
+                                match Map.tryFind varName accZipper.State.VarBindings with
+                                | Some (initSSA, tyStr) ->
+                                    let argSSA = sprintf "%%%s_arg" varName
+                                    let reboundZipper = MLIRZipper.bindVar varName argSSA tyStr accZipper
+                                    ((varName, initSSA, argSSA, tyStr) :: accIterArgs, reboundZipper)
+                                | None ->
+                                    (accIterArgs, accZipper)
+                            ) ([], zipper)
+                        let iterArgs, zipperWithRebindings = iterArgsWithZipper
+                        if not (List.isEmpty iterArgs) then
+                            MLIRZipper.storeIterArgs parentIdStr (List.rev iterArgs) zipperWithRebindings
+                        else
+                            zipperWithRebindings
+                    | _ -> zipper
+                | None -> zipper
+            | _ -> zipper
+
+        // Begin region tracking
+        MLIRZipper.beginSCFRegion parentIdStr scfKind zipper'
+
+    AfterRegion = fun zipper nodeId regionKind ->
+        let parentIdStr = string (NodeId.value nodeId)
+        let scfKind = mapRegionKind regionKind
+        // End region tracking (captures ops)
+        MLIRZipper.endSCFRegion parentIdStr scfKind zipper
+}
+
 /// Transfer an entire SemanticGraph to MLIR
 /// Uses post-order traversal so children are witnessed before parents
 /// Lambda parameters are pre-bound before their bodies are processed
+/// SCF region hooks capture operations for control flow constructs
 /// isFreestanding: if true, adds a _start wrapper that calls main and then exit
 let transferGraph (graph: SemanticGraph) (isFreestanding: bool) : string =
     // Initialize platform bindings
@@ -1441,13 +1810,21 @@ let transferGraph (graph: SemanticGraph) (isFreestanding: bool) : string =
     // Find entry point Lambda IDs - these will be named "main"
     let entryPointLambdaIds = findEntryPointLambdaIds graph
 
-    // Create initial zipper with entry point knowledge
-    let initialZipper = MLIRZipper.createWithEntryPoints entryPointLambdaIds
+    // Pre-analyze: find mutable bindings whose address is taken
+    let addressedMutables = findAddressedMutableBindings graph
 
-    // Use foldWithLambdaPreBind to bind params before body processing
+    // Create initial zipper with entry point and addressed mutables knowledge
+    let initialZipper = MLIRZipper.createWithAnalysis entryPointLambdaIds addressedMutables
+
+    // Create SCF region hook with graph access for iter_args analysis
+    let scfHook = createSCFRegionHook graph
+
+    // Use foldWithSCFRegions to bind params before body processing
+    // AND track SCF region boundaries for control flow constructs
     let traversedZipper =
-        Traversal.foldWithLambdaPreBind
+        Traversal.foldWithSCFRegions
             preBindLambdaParams
+            (Some scfHook)
             (fun zipper node ->
                 let zipper', _result = witnessNode graph node zipper
                 zipper')
@@ -1476,16 +1853,24 @@ let transferGraphWithDiagnostics (graph: SemanticGraph) (isFreestanding: bool) :
     // Find entry point Lambda IDs - these will be named "main"
     let entryPointLambdaIds = findEntryPointLambdaIds graph
 
-    // Create initial zipper with entry point knowledge
-    let initialZipper = MLIRZipper.createWithEntryPoints entryPointLambdaIds
+    // Pre-analyze: find mutable bindings whose address is taken
+    let addressedMutables = findAddressedMutableBindings graph
+
+    // Create initial zipper with entry point and addressed mutables knowledge
+    let initialZipper = MLIRZipper.createWithAnalysis entryPointLambdaIds addressedMutables
+
+    // Create SCF region hook with graph access for iter_args analysis
+    let scfHook = createSCFRegionHook graph
 
     // Track errors during traversal
     let mutable errors = []
 
-    // Use foldWithLambdaPreBind to bind params before body processing
+    // Use foldWithSCFRegions to bind params before body processing
+    // AND track SCF region boundaries for control flow constructs
     let traversedZipper =
-        Traversal.foldWithLambdaPreBind
+        Traversal.foldWithSCFRegions
             preBindLambdaParams
+            (Some scfHook)
             (fun zipper node ->
                 let zipper', result = witnessNode graph node zipper
                 match result with
